@@ -14,6 +14,23 @@ Fork policy:
 - Local modifications inside this subtree belong to the CTOX fork state unless explicitly documented otherwise.
 - CTOX must not auto-clone, auto-fetch, or auto-update this subtree from upstream.
 
+## 2026-08 Required Plan and Stable Activity Events
+
+CTOX service-owned queue turns use the upstream-compatible
+`required_initial_tool` gate with `update_plan`. This is a CTOX fork integration
+contract: before the first accepted plan call, no unrelated tool is available.
+The existing `PlanUpdate` event remains the structured source for plan labels
+and statuses; no plan is reconstructed from assistant prose.
+
+The direct-session adapter additionally maps stable runtime boundaries into
+CTOX worker events. A `PlanUpdate` is both `worker.plan_updated` and one tool
+activity. Tool begin events use their call/item identifiers, and reasoning
+section boundaries emit `worker.thinking_started` identifiers without emitting
+reasoning content. CTOX persists and deduplicates these events outside the fork
+in the core LCM tables. Delta fragments, tool completion events, and retries are
+not turns. This preserves upstream response streaming while giving CTOX durable
+progress evidence and restart-safe UI counters.
+
 Attribution rule:
 
 - When a file under this subtree differs from the imported snapshot, describe it as a CTOX fork delta, not as an ambiguous upstream version.

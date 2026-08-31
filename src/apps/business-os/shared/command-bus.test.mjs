@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { webcrypto } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,6 +13,8 @@ import {
   peekCommandRoundtripTiming,
   resetBusinessOsCapabilityTokenCacheForTests,
 } from './command-bus.js';
+
+globalThis.crypto ??= webcrypto;
 
 const source = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'command-bus.js'), 'utf8');
 
@@ -156,7 +159,7 @@ test('command bus revalidates exact command ids without restarting the shared ro
   assert.match(source, /refreshProjectionBridges\(syncPlan\?\.afterCommand\)/);
   assert.match(source, /pullFromRemotePeers/);
   assert.match(source, /COMMAND_TERMINAL_REVALIDATE_DELAYS_MS/);
-  assert.match(source, /Object\.freeze\(\[25, 50, 100, 200\]\)/);
+  assert.match(source, /25, 50, 100, 200, 400, 800, 1600, 3000, 5000/);
   assert.match(source, /masterChange\$\?\.subscribe/);
   assert.match(source, /requireRevision/);
   assert.match(source, /bind\(\{ authoritative: true \}\)[\s\S]*scheduleTerminalRevalidation\(index \+ 1\)/);
@@ -173,6 +176,46 @@ test('command bus revalidates exact command ids without restarting the shared ro
   assert.match(source, /async waitForAccepted\(commandId/);
   assert.match(source, /async waitForTerminal\(commandId/);
   assert.match(source, /subscribe\(commandId, observer\)/);
+});
+
+test('command bus exposes bounded read-only status lookup by record id', async () => {
+  const seenQueries = [];
+  const rows = [
+    { id: 'cmd-1', record_id: 'lead-1', command_type: 'web_stack.person_research' },
+    { id: 'cmd-2', record_id: 'lead-2', command_type: 'web_stack.person_research' },
+  ];
+  const commands = {
+    find(query) {
+      seenQueries.push(query);
+      return {
+        async exec() {
+          return rows.map((row) => ({ toJSON: () => ({ ...row }) }));
+        },
+      };
+    },
+  };
+  const bus = createCommandBus({ db: { raw: { business_commands: commands } } });
+  const result = await bus.getStatusesByRecordIds(['lead-1', 'lead-2', 'lead-1'], {
+    commandType: 'web_stack.person_research',
+  });
+  assert.equal(seenQueries.length, 1);
+  assert.deepEqual(seenQueries[0].selector, {
+    command_type: { $eq: 'web_stack.person_research' },
+  });
+  assert.equal(seenQueries[0].limit, 512);
+  assert.match(seenQueries[0].requireRevision, /^command-record-status:/);
+  assert.deepEqual(result, rows);
+});
+
+test('command wait initializes its progress timer before a synchronous terminal emission can settle', () => {
+  const waitStart = source.indexOf('async function waitForCommandState');
+  const timerDeclaration = source.indexOf('let progressTimer = null;', waitStart);
+  const settleDeclaration = source.indexOf('const settle =', waitStart);
+  const bindCall = source.indexOf('bind();', settleDeclaration);
+  assert.ok(waitStart >= 0);
+  assert.ok(timerDeclaration > waitStart && timerDeclaration < settleDeclaration);
+  assert.ok(bindCall > settleDeclaration);
+  assert.doesNotMatch(source.slice(waitStart, bindCall), /const progressTimer = setInterval/);
 });
 
 test('native master-change consumes an authoritative command payload and retains legacy fallback', async () => {
@@ -261,6 +304,57 @@ test('native master-change consumes an authoritative command payload and retains
     new RegExp(`^command-terminal:${legacyCommandId}:1$`),
   );
   assert.equal(masterChangeListeners.size, 0);
+});
+
+test('finite exact-id retries observe a two-second native command without a master-change hint', async () => {
+  const commandId = 'cmd-delayed-terminal-without-hint';
+  let stored = {
+    id: commandId,
+    command_id: commandId,
+    status: 'pending_sync',
+  };
+  const commands = {
+    findOne(idOrQuery) {
+      const id = typeof idOrQuery === 'string'
+        ? idOrQuery
+        : idOrQuery?.selector?.id;
+      return {
+        $: { subscribe() { return { unsubscribe() {} }; } },
+        async exec() {
+          return stored?.id === id ? { toJSON: () => ({ ...stored }) } : null;
+        },
+      };
+    },
+  };
+  const state = {
+    collection: { name: 'business_commands' },
+    demandStatus: { peerConnected: true },
+    masterChange$: {
+      subscribe() { return { unsubscribe() {} }; },
+    },
+    async pullFromRemotePeers() {},
+  };
+  const bus = createCommandBus({
+    db: { raw: { business_commands: commands } },
+    sync: { async startCollection() { return { state }; } },
+  });
+
+  setTimeout(() => {
+    stored = {
+      ...stored,
+      status: 'completed',
+      execution_phase: 'terminal',
+      terminal_status: 'completed',
+      result: { ok: true },
+    };
+  }, 1100);
+
+  const receipt = await bus.waitForTerminal(commandId, {
+    timeoutMs: 3000,
+    sync_queue_tasks: false,
+  });
+  assert.equal(receipt.status, 'completed');
+  assert.deepEqual(receipt.result, { ok: true });
 });
 
 test('command bus rejects conflicting legacy and canonical command types', async () => {
@@ -618,6 +712,45 @@ test('submit reports the blocked collection and observed peer state precisely', 
   );
 });
 
+test('authorized local-first intake persists before the native peer is ready', async () => {
+  let stored = null;
+  let pushCount = 0;
+  const collection = {
+    async insert(doc) { stored = { ...doc }; },
+    findOne() { return { async exec() { return null; } }; },
+  };
+  const bus = createCommandBus({
+    db: { raw: { business_commands: collection, ctox_queue_tasks: collection } },
+    sync: {
+      async startCollection() {
+        return {
+          state: {
+            getTransportStatus() {
+              return { activePeerCount: 0, connectionCount: 0 };
+            },
+            async pushToRemotePeers() { pushCount += 1; },
+          },
+        };
+      },
+    },
+  });
+
+  const receipt = await bus.submit({
+    id: 'cmd-local-first-report',
+    module: 'ctox',
+    command_type: 'ctox.report.bug',
+    allow_local_intent_without_peer: true,
+    sync_queue_tasks: false,
+  });
+
+  assert.equal(receipt.command_id, 'cmd-local-first-report');
+  assert.equal(receipt.status, 'local');
+  assert.equal(receipt.pushConfirmed, false);
+  assert.equal(stored.id, 'cmd-local-first-report');
+  assert.equal(stored.status, 'pending_sync');
+  assert.equal(pushCount, 0);
+});
+
 test('dispatch returns native command and queue task ids after acceptance', async () => {
   let stored = null;
   const listeners = new Set();
@@ -771,7 +904,7 @@ test('completed control command treats legacy task_id as a target rather than an
   assert.equal(result.target_task_id, 'workspace-branding');
 });
 
-test('terminal tracking falls back to the local store when demand queries are unsupported', async () => {
+test('terminal tracking falls back to the local store when demand queries are overloaded', async () => {
   const commandId = 'cmd-native-completed-query-unsupported';
   const completed = {
     id: commandId,
@@ -794,8 +927,8 @@ test('terminal tracking falls back to the local store when demand queries are un
         $: { subscribe() { return { unsubscribe() {} }; } },
         async exec() {
           demandReads += 1;
-          const error = new Error('SQLITE_QUERY_STREAM_UNSUPPORTED');
-          error.code = 'SQLITE_QUERY_STREAM_UNSUPPORTED';
+          const error = new Error('QUERY_QUEUE_LIMIT: queued demand requests exceed the browser budget');
+          error.code = 'QUERY_QUEUE_LIMIT';
           throw error;
         },
       };

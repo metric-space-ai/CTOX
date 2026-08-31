@@ -220,7 +220,8 @@ test('left column carries the full shell-wired grammar (data-pg-*)', () => {
   assert.match(notesHtml, /class="ctox-filterbar"/);
   assert.match(notesHtml, /data-pg-search/);
   assert.match(notesHtml, /data-pg-view="cards"/);
-  assert.match(notesHtml, /data-pg-view="list"/);
+// Betreiber-Direktive 31.08.2026: EIN Umschalt-Knopf statt Knopfpaar.
+  assert.equal((notesHtml.match(/data-pg-view=/g) || []).length, 1);
   assert.match(notesHtml, /data-pg-tray-toggle/);
   assert.match(notesHtml, /data-pg-tray\b/);
   assert.match(notesHtml, /data-pg-reset/);

@@ -898,13 +898,28 @@ test('Documents UI exposes resizable library and actions columns with a collapse
   assert.match(source, /root\.classList\.toggle\('is-actions-overlay', width < 1616\)/);
   assert.match(css, /\.documents-module\.is-compact \.documents-library-resizer[\s\S]*display:\s*none/);
   assert.match(css, /\.documents-module\.is-compact \.documents-actions-drawer[\s\S]*position:\s*absolute/);
+  assert.match(css, /SuperDoc 1\.32\.0 ships 32px toolbar controls/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.documents-superdoc-toolbar \.superdoc-toolbar[\s\S]*--sd-ui-toolbar-height:\s*44px/);
+  assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.documents-superdoc-toolbar \.toolbar-item[\s\S]*min-width:\s*44px/);
   assert.match(html, /data-documents-actions-drawer[\s\S]*aria-hidden="true"[\s\S]*hidden/);
   assert.match(html, /data-documents-actions-resizer[\s\S]*hidden/);
   assert.match(source, /actionsResizer\.hidden = !state\.actionsOpen/);
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.html'\)/);
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.css'\)/);
   assert.equal(moduleJson.title, 'Dokumente');
+  assert.equal(moduleJson.layout.shell_contract, 'v2');
   assert.equal(deMessages.documentsTitle, 'Dokumente');
+});
+
+test('Documents context menu stays inside the module shell', async () => {
+  const [css, source] = await Promise.all([
+    readFile(new URL('./index.css', import.meta.url), 'utf8'),
+    readFile(new URL('./index.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(source, /const root = state\.ctx\.host\.querySelector\('\[data-documents-module\]'\) \|\| state\.ctx\.host/);
+  assert.match(source, /root\.append\(menu\)/);
+  assert.match(source, /const rootRect = state\.contextMenu\.parentElement\.getBoundingClientRect\(\)/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.documents-context-menu\s*\{[\s\S]*position:\s*absolute/);
 });
 
 test('new document validation requires title, runbook, and prompt', () => {

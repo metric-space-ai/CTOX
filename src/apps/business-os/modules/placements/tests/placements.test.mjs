@@ -39,8 +39,11 @@ test('placements: left column carries the canonical grammar markup pins', () => 
   assert.match(html, /data-pg-search/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+// Ein-Knopf-Umschalter (31.08.2026), modul-verdrahtet: data-placements-view
+  // traegt die aktuelle Ansicht.
+  assert.match(html, /data-placements-view="cards"/);
+// Betreiber-Direktive 31.08.2026: EIN Umschalt-Knopf statt Knopfpaar.
+  assert.equal((html.match(/<button[^>]*data-placements-view-toggle/g) || []).length, 1);
   // Footer target.
   assert.match(html, /data-pg-footer/);
   // Counted view band with >= 2 real views (bands with a single tab are a

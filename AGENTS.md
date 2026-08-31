@@ -175,6 +175,15 @@ as the public installer entry point.
   LocalTransport, killed on drop, never sharing the CTOX daemon's process
   authority. Turns must stay bounded, persisted, and reflected through Business
   OS policy/command status rather than ad hoc background processes.
+- Shell-V2 deploy discipline: `main` is the single source of the Business OS
+  shell. Shell-pack slots (`state/business-os-shell/slots/`) override the
+  served `src/apps/business-os` tree on managed tenants; therefore slots are
+  built and activated **from `main` only** — never from a worktree or agent
+  checkout. Before shell work, sync with `main` (it carries the Shell-V2
+  contract plus its harnesses: `scripts/shell-v2-geometry-lab.mjs` and
+  `scripts/assert-shell-v2-contract.mjs`; run them for shell-affecting
+  changes). A fix that is deployed but not on `main`, or on `main` but not in
+  the active slot, is not landed.
 - There is deliberately **no vendor-CLI wrapper** any more. Installing and
   authenticating external `codex`/`claude`/`agy` binaries from here was removed
   once nothing dispatched to it; provider authentication belongs to the

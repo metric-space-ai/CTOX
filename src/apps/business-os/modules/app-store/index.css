@@ -7,16 +7,22 @@
    card grid, the card internals, the install-progress button, the lifecycle
    status dot, the retail-box shelf, and the sync/loading indicator. */
 
-/* Module-local special: purple "local app" badge accent (light + dark
-   literals; everything else derives from the shell tokens). */
-.app-store-module[data-app-store-root] {
-  --app-store-local-accent: #7c3aed;
-  --app-store-local-ink: #6d28d9;
-}
+/* Shell V2 keeps module title/filter chrome inside the two compact header rows. */
+.shell-window[data-shell-contract="v2"] .app-store-module { position: relative; padding: 0; overflow: hidden; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .app-store-module > .ctox-modal { position: absolute; inset: 0; z-index: 240; box-sizing: border-box; }
+.shell-window[data-shell-contract="v2"] .app-store-module > .ctox-context-menu { max-width: calc(100% - 16px); }
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .app-store-module .store-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
 
-:root[data-theme="dark"] .app-store-module[data-app-store-root] {
-  --app-store-local-accent: #a855f7;
-  --app-store-local-ink: #c4b5fd;
+/* Local-app state stays on the module's Development category accent. */
+.app-store-module[data-app-store-root] {
+  --app-store-local-accent: var(--app-accent);
+  --app-store-local-ink: var(--app-accent-foreground);
 }
 
 /* --- Sidebar layout glue (kit .ctox-pane-body > flex column) --- */
@@ -118,11 +124,19 @@
   margin: 8px 10px 0;
 }
 
-/* Grid/list switcher: kit .ctox-pane-icon buttons grouped in the header. */
+/* ONE view control (Betreiber-Direktive 31.08.2026): a single kit
+   .ctox-pane-icon whose glyph names the view the click switches TO. Only the
+   glyph for that target is rendered; the other stays [hidden]. */
 .store-view-toggle {
+  flex: 0 0 auto;
+}
+
+.store-view-glyph {
   display: inline-flex;
-  align-items: center;
-  gap: 6px;
+}
+
+.store-view-glyph[hidden] {
+  display: none !important;
 }
 
 .store-grid-workspace {
@@ -186,7 +200,10 @@
 }
 
 /* custom: app catalog card (signature view). Selection via .active (JS hook)
-   mirrors the kit list-selection language with tokens. */
+   mirrors the kit list-selection language with tokens.
+   Two shapes share this base (Betreiber-Direktive 31.08.2026):
+     .app-card--shard  bold title + two meta lines + actions, roomy padding
+     .app-card--row    exactly one dense line: title + one short meta right */
 .app-card {
   background: var(--surface);
   border: 1px solid var(--hairline, var(--line));
@@ -198,6 +215,12 @@
   transition: background-color 0.12s ease, border-color 0.12s ease;
   position: relative;
   overflow: hidden;
+}
+
+/* SHARD: the roomy shape. Padding is deliberately larger than the row's. */
+.app-card--shard {
+  padding: 14px;
+  gap: 8px;
 }
 
 .app-card:hover {
@@ -218,7 +241,6 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
 }
 
 .app-card-icon {
@@ -254,38 +276,43 @@
   font-size: 13px;
   font-weight: 700;
   color: var(--text);
-  margin: 0 0 2px 0;
+  margin: 0;
+  min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
-.app-card-category {
-  font-size: 10px;
-  text-transform: uppercase;
-  color: var(--accent);
-  font-weight: 700;
+/* Shard meta line 1: category · the live version, on ONE line. */
+.app-card-metaline {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  font-weight: 620;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.app-card-desc {
-  font-size: 12px;
-  line-height: 1.4;
-  color: var(--muted);
-  margin: 0 0 8px 0;
-  flex: 1;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
+/* Shard meta line 2: the state badges (modification, release, lifecycle,
+   unverified external source) as ONE line — it never wraps into a pile. */
+.app-card-version-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  min-width: 0;
   overflow: hidden;
 }
 
-/* Meta badge row on the card: kit .ctox-badge pills (version, lifecycle,
-   release, modification, external source). */
-.app-card-version-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin: 0 0 2px;
+.app-card-version-row > .ctox-badge {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* custom: lifecycle status dot pinned to the card icon corner. */
@@ -316,32 +343,12 @@
   background: var(--danger);
 }
 
-.app-card-footer {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 8px;
-  padding-top: 8px;
-  border-top: 1px solid var(--hairline, var(--line));
-}
-
-.app-card-source {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
-  font-size: 11px;
-  font-weight: 650;
-}
-
 /* Card action row: kit .ctox-button--sm buttons. */
 .app-card-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 8px;
-  margin-bottom: 8px;
+  margin: 0;
   min-height: 28px;
 }
 
@@ -395,7 +402,7 @@
 /* Per-card operation status line (kind colors via data-kind). */
 .app-card-operation {
   min-height: 18px;
-  margin: -4px 0 10px;
+  margin: 0;
   color: var(--muted);
   font-size: 11px;
   font-weight: 680;
@@ -414,53 +421,72 @@
   color: var(--danger);
 }
 
-/* List-view variant of the signature card grid. */
+/* LIST: maximum density — one row per app, no card chrome, hairline between
+   rows instead of eight separate bordered boxes. Actions and every remaining
+   field live in the detail panel, which a row click opens. */
 .store-card-grid.is-list-view {
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-
-.store-card-grid.is-list-view .app-card {
-  flex-direction: row;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.store-card-grid.is-list-view .app-card-head {
-  margin-bottom: 0;
-  flex: 1.2;
-  min-width: 180px;
-}
-
-.store-card-grid.is-list-view .app-card-desc {
-  margin-bottom: 0;
-  flex: 2;
-  min-width: 250px;
-  white-space: nowrap;
+  gap: 0;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: var(--panel-radius);
   overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.app-card--row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 10px;
+  min-height: 28px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.app-card--row + .app-card--row {
+  border-top: 1px solid var(--hairline, var(--line));
+}
+
+.app-card--row .app-card-title {
+  font-size: 12px;
+  font-weight: 650;
+  line-height: 28px;
+}
+
+.app-card-icon--row {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--control-radius);
+  background: var(--kit-fill);
+  font-size: 9px;
+  font-weight: 800;
+  color: var(--muted);
+  overflow: hidden;
+}
+
+.app-card-icon--row svg {
+  width: 12px;
+  height: 12px;
   display: block;
 }
 
-.store-card-grid.is-list-view .app-card-actions {
-  margin-top: 0;
-  margin-bottom: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: 1.5;
-  justify-content: flex-end;
+/* The ONE short meta on the right of a row. */
+.app-card-rowmeta {
+  justify-self: end;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 620;
+  white-space: nowrap;
 }
 
-.store-card-grid.is-list-view .app-card-footer {
-  border-top: none;
-  padding-top: 0;
-  flex-shrink: 0;
-  gap: 12px;
-  min-width: 130px;
-  justify-content: flex-end;
+/* The list empty state is the only full-height block inside the dense list. */
+.store-card-grid.is-list-view .store-empty-state {
+  border: 0;
 }
 
 /* Detail drawer header/content glue (drawer shell = .ctox-bottom-drawer). */
@@ -534,38 +560,81 @@
   outline-offset: 2px;
 }
 
-/* The kit collapses the workspace frame at 760px; these are the
-   app-store-specific inner adjustments for the stacked layout. */
-@container business-app-window (max-width: 760px) {
+/* Stage 2 (the shell's 768px breakpoint): the kit collapses the workspace
+   frame to one column. Two things then change ownership:
+   1. The window's 80x80 icon and its 74x74 control now sit over the SAME
+      (first) pane head, so that head has to clear both sides, and the frame
+      loses its own padding so nothing but that head is painted under the icon
+      — the accepted Knowledge reference does exactly this.
+   2. The catalog, not the scope list, gets the remaining height: the sidebar
+      row is content-sized, the catalog row takes the rest. Without the
+      explicit rows both panes claimed 100% and the catalog was clipped. */
+@container business-app-window (max-width: 768px) {
+  .app-store-module[data-app-store-root] {
+    padding: 0;
+    row-gap: 6px;
+    grid-template-rows: auto minmax(200px, 1fr);
+  }
+
+  .app-store-module .store-left {
+    grid-row: 1;
+  }
+
+  .app-store-module .store-center {
+    grid-row: 2;
+    min-height: 0;
+  }
+
+  /* Stacked, the scope list is a horizontal strip of shards, not a clipped
+     column: a 150px-tall vertical list showed 2.5 of 6 scopes and cut the
+     third in half. One row, scrolled sideways inside its own box, keeps every
+     scope reachable and gives the catalog the height back. */
+  .store-sidebar,
+  .ctox-pane.store-left > .ctox-pane-body {
+    min-width: 0;
+    overflow: hidden;
+  }
+
   .store-category-list {
     flex: 0 0 auto;
-    max-height: 150px;
-  }
-
-  .store-pane-actions {
-    width: 100%;
-    justify-content: space-between;
-  }
-
-  .store-card-grid {
-    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
-  }
-
-  .store-card-grid.is-list-view .app-card {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .store-card-grid.is-list-view .app-card-head,
-  .store-card-grid.is-list-view .app-card-desc,
-  .store-card-grid.is-list-view .app-card-actions,
-  .store-card-grid.is-list-view .app-card-footer {
+    flex-direction: row;
+    gap: 6px;
     min-width: 0;
-    width: 100%;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 6px 12px;
+    scrollbar-width: thin;
   }
-}
 
-@container business-app-window (max-width: 520px) {
+  .store-category-list .ctox-list-item {
+    flex: 0 0 auto;
+    width: auto;
+  }
+
+  .category-btn .cat-main {
+    flex-direction: row;
+    align-items: baseline;
+    gap: 5px;
+  }
+
+  .category-btn .cat-label {
+    white-space: nowrap;
+  }
+
+  /* The action icons stay a shrink-wrapped block. `width: 100%` made them
+     claim the whole title row, which squeezed the pane title down to a few
+     pixels in the stacked layout. */
+  .store-pane-actions {
+    width: auto;
+    justify-content: flex-end;
+  }
+
+  /* 170px was tuned for the old description card; the shard's title + meta
+     line need ~200px before they start ellipsing after three characters. */
+  .store-card-grid {
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  }
+
   .store-detail-title-row {
     align-items: flex-start;
   }
@@ -705,7 +774,7 @@
   color: var(--muted);
 }
 
-@container business-app-window (max-width: 640px) {
+@container business-app-window (max-width: 768px) {
   .app-release-form,
   .app-release-data-row {
     grid-template-columns: 1fr;
@@ -864,7 +933,7 @@
   gap: 6px;
   margin: 0 0 12px;
 }
-@container business-app-window (max-width: 900px) {
+@container business-app-window (max-width: 1024px) {
   .store-detail { width: 100%; }
 }
 
@@ -872,3 +941,124 @@
    the kit default rows collapse the well and the shelf canvas ends up 1px. */
 .store-center { grid-template-rows: auto auto minmax(0, 1fr) auto; }
 .store-left { grid-template-rows: auto minmax(0, 1fr) auto; }
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, and
+   category rows get a full finger-height hit area. Narrow-window layout is
+   handled by the @container business-app-window rules above, which use the
+   two shell-owned breakpoints and nothing else: 1024px (three columns to two)
+   and 768px (two columns to one). */
+@media (pointer: coarse) {
+  .app-store-module button,
+  .app-store-module input,
+  .app-store-module select,
+  .app-store-module textarea {
+    min-height: 44px;
+  }
+
+  .app-store-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .app-store-module .store-category-list .ctox-list-item {
+    min-height: 44px;
+  }
+}
+
+/* ============================================================================
+   Shell v2 header geometry (same solution as the knowledge reference module).
+   The v2 window paints three zones over the app content, because
+   .shell-window-content is inset: 0 and never indented: the 80x80 app icon
+   top-left, the header band of one header row across the full width, and the
+   74x74 window control top-right. The module keeps those zones free: both
+   heads of the top row are exactly two header rows high (title row + tool
+   row, 2 x 37px = 74px, like knowledge), the first head clears the icon on
+   the left with padding AND covers the full 74px icon height, and the last
+   head clears the window control on the right. The collapsible filter tray
+   drops out of the head as an overlay so the head height stays fixed.
+   ========================================================================== */
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-header {
+  box-sizing: border-box;
+}
+
+.shell-window[data-shell-contract="v2"] .app-store-module .store-left > .ctox-pane-header {
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding: 0 12px 0 calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .app-store-module .store-center > .ctox-pane-header {
+  position: relative;
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-right: 70px;
+}
+
+/* Row 2 of the center head: the filter strip fills the second header row. */
+.shell-window[data-shell-contract="v2"] .app-store-module .store-center > .ctox-pane-header > .store-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  align-items: center;
+  padding: 0 12px;
+}
+
+/* The collapsed tray opens as an overlay below the fixed-height head. */
+.shell-window[data-shell-contract="v2"] .app-store-module .store-center > .ctox-pane-header > .store-filter-advanced {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 6;
+  background: var(--surface);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 12px;
+}
+
+.shell-window[data-shell-contract="v2"] .app-store-module .store-left > .ctox-pane-header > .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .app-store-module .store-center > .ctox-pane-header > .ctox-pane-title-row {
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+}
+
+/* Kicker and title share the single header row; the title truncates instead of
+   collapsing, and the action block never takes space from it. */
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-title-row > .ctox-pane-titles {
+  flex: 1 1 auto;
+  min-width: 0;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-titles > .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .app-store-module .ctox-pane-title-row > .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* Stacked (<=768px): there is only ONE head in the window's top row, so that
+   head alone has to clear both overlays — the 80px icon on the left AND the
+   74x74 window control on the right. The catalog head, now the second row of
+   the stack, gives its reserved control space back. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .app-store-module .store-left > .ctox-pane-header {
+    padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  }
+
+  .shell-window[data-shell-contract="v2"] .app-store-module .store-center > .ctox-pane-header {
+    padding-right: 12px;
+  }
+}

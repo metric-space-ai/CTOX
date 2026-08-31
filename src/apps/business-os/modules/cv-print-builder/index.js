@@ -1,6 +1,6 @@
 import {
   readStoredFileFromDemandChunks,
-} from '../../shared/file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 const BUILD = '20260721-ia-grammar-v30';
 const MODULE_ID = 'cv-print-builder';
@@ -172,7 +172,7 @@ function applyStaticLocale(host) {
     ['Neuer CV', 'New CV'], ['Profile importieren', 'Import profiles'], ['Profile importieren (JSON)', 'Import profiles (JSON)'],
     ['Profile exportieren', 'Export profiles'], ['Profile exportieren (JSON)', 'Export profiles (JSON)'],
     ['Alle reparsen', 'Reparse all'], ['Alle CV-PDFs erneut parsen', 'Reparse all CV PDFs'],
-    ['Filter', 'Filter'], ['Darstellung', 'View'], ['Shard-Ansicht', 'Shard view'], ['Listen-Ansicht', 'List view'],
+    ['Filter', 'Filter'], ['Darstellung', 'View'], ['Kachelansicht', 'Card view'], ['Listenansicht', 'List view'],
     ['Filter zurücksetzen', 'Reset filters'], ['Sortieren', 'Sort'], ['Template filtern', 'Filter by template'],
     ['Status-Ansichten', 'Status views'],
   ]);
@@ -210,6 +210,9 @@ function bindStaticEvents(state) {
   // / band) is SHELL-wired from the data-pg-* markup; the module only listens
   // for the bubbling change event and re-renders the list from data.
   rail?.addEventListener('ctox-pane-grammar-change', () => render(state));
+  // The single view toggle is module-owned (the shell grammar only wires
+  // two-button [data-pg-view] groups); sync its icon/labels to the locale.
+  setViewToggle(state, readGrammar(state).view);
   // One delegated click handler for header actions, the selector list, and the
   // stage controls. Selecting a candidate is an in-place class flip, never a
   // list rebuild, so the operator's scroll offset is preserved.
@@ -234,6 +237,10 @@ function onHostClick(state, event) {
     return openCtoxTask(taskLink.dataset.cvTaskId || '', taskLink.dataset.cvCommandId || '');
   }
   if (target.closest?.('[data-toggle-stage]')) return toggleStage(state);
+  // Must precede the stage-view tabs: the list toggle is a sibling control in
+  // the same delegated handler and carries its own attribute name.
+  const listViewToggle = target.closest?.('[data-cv-view-toggle]');
+  if (listViewToggle && state.host.contains(listViewToggle)) return toggleListView(state, listViewToggle);
   if (target.closest?.('[data-cv-action]')) return runWorkflowAction(state);
   const viewButton = target.closest?.('[data-cv-view]');
   if (viewButton) return changeStageView(state, viewButton.dataset.cvView);
@@ -601,7 +608,9 @@ function readGrammar(state) {
   const rail = state.host.querySelector('[data-cv-rail]');
   return {
     search: (rail?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
-    view: rail?.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards',
+    // One-button view toggle (operator directive 31.08.2026): the control is an
+    // action, so the CURRENT view lives in its data-cv-view, not in aria-pressed.
+    view: rail?.querySelector('[data-cv-view-toggle]')?.dataset.cvListView === 'list' ? 'list' : 'cards',
     band: rail?.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'all',
     sort: rail?.querySelector('[data-pg-filter][data-pg-name="sort"]')?.value || 'updated_desc',
     template: rail?.querySelector('[data-pg-filter][data-pg-name="template"]')?.value || 'all',
@@ -665,6 +674,39 @@ function renderList(state) {
   applyListSelection(state);
   writeCounts(state, bandCounts(state));
   writeFooter(state, `${visible.length} ${visible.length === 1 ? tr('Eintrag', 'entry') : tr('Einträge', 'entries')} · ${bandLabel(grammar.band)}`);
+}
+
+// ---------------------------------------------------------------------------
+// One-button view toggle (operator directive 31.08.2026). The control is an
+// ACTION, never a state: it shows the icon and the label of the view it will
+// switch TO, and it carries no aria-pressed. The currently rendered view lives
+// in data-cv-list-view, which readGrammar() reads.
+// ---------------------------------------------------------------------------
+const VIEW_TOGGLE_ICONS = {
+  // Icon of the TARGET view: three lines = "show as list", stacked cards =
+  // "show as cards".
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+};
+
+function setViewToggle(state, view) {
+  const button = state.host.querySelector('[data-cv-view-toggle]');
+  if (!button) return;
+  const current = view === 'list' ? 'list' : 'cards';
+  const target = current === 'list' ? 'cards' : 'list';
+  const label = target === 'list'
+    ? tr('Als Liste anzeigen', 'Show as list')
+    : tr('Als Karten anzeigen', 'Show as cards');
+  button.dataset.cvListView = current;
+  button.innerHTML = VIEW_TOGGLE_ICONS[target];
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.removeAttribute('aria-pressed');
+}
+
+function toggleListView(state, button) {
+  setViewToggle(state, button.dataset.cvListView === 'list' ? 'cards' : 'list');
+  renderList(state);
 }
 
 // Empty branches of the candidate list: a FILTER empty (source has rows) always
@@ -816,16 +858,33 @@ function normalizeLiveStatus(value) {
   return status;
 }
 
-// A shard is a PURE selector: title + ONE muted meta line. No inline controls,
-// no expansion — the selected CV's workflow lives on the stage.
+// Short day-precision stamp for the shard's second meta line. Day precision is
+// enough for a recruiting pipeline and keeps the line from wrapping.
+function shortStamp(ms) {
+  const value = Number(ms || 0);
+  if (!value) return '';
+  try {
+    return new Date(value).toLocaleDateString(ACTIVE_LOCALE === 'en' ? 'en-US' : 'de-DE', {
+      day: '2-digit', month: '2-digit', year: '2-digit',
+    });
+  } catch { return ''; }
+}
+
+// A shard is a PURE selector: title + muted meta lines. No inline controls, no
+// expansion — the selected CV's workflow lives on the stage.
+//
+// The two views are deliberately different shapes, not two paddings of the same
+// thing (operator directive 31.08.2026):
+//   cards — avatar + bold name + TWO meta lines (workflow status · role, then
+//           template · location · last change), roomy padding. Scanning view.
+//   list  — exactly ONE dense line: name plus one short meta (the workflow
+//           status) flush right. Density view.
 function renderCandidateCard(state, item, view) {
   const model = item.model;
   const candidate = model.candidate || {};
   const phase = workflowPhase(model);
   const selected = item.record.id === state.selectedId;
   const name = displayCandidateName(model);
-  const meta = [phaseLabel(phase), templateLabel(model.print?.template), candidate.currentRole || candidate.location]
-    .filter(Boolean).join(' · ');
   const attrs = `data-cv-select="${escapeAttr(item.record.id)}" data-context-record-id="${escapeAttr(item.record.id)}" data-context-record-type="cv_profile" data-context-label="${escapeAttr(item.record.title || name)}" aria-selected="${selected ? 'true' : 'false'}"`;
   if (view === 'list') {
     return `
@@ -835,12 +894,16 @@ function renderCandidateCard(state, item, view) {
       </button>
     `;
   }
+  const primary = [phaseLabel(phase), candidate.currentRole].filter(Boolean).join(' · ');
+  const secondary = [templateLabel(model.print?.template), candidate.location, shortStamp(item.record.updated_at_ms)]
+    .filter(Boolean).join(' · ');
   return `
     <article class="cv-card${selected ? ' is-selected' : ''}" ${attrs}>
       <span class="ctox-avatar">${escapeHtml(initials(candidate.name || name))}</span>
       <div class="cv-card-info">
         <h3 class="cv-card-name">${escapeHtml(name)}</h3>
-        <div class="cv-card-meta">${escapeHtml(meta || phaseLabel(phase))}</div>
+        <div class="cv-card-meta cv-card-meta--phase">${escapeHtml(primary || phaseLabel(phase))}</div>
+        ${secondary ? `<div class="cv-card-meta cv-card-meta--sub">${escapeHtml(secondary)}</div>` : ''}
       </div>
     </article>
   `;

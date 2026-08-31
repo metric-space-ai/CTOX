@@ -3,33 +3,34 @@
    down in this file or in module CSS — tests/business-os guard enforces this. */
 :root {
   color-scheme: light;
-  --bg: oklch(0.965 0.006 235);
-  --surface: oklch(0.987 0.005 235);
-  --surface-2: oklch(0.94 0.009 238);
-  --line: oklch(0.8 0.014 235);
-  --text: oklch(0.22 0.015 235);
-  --text-strong: oklch(0.14 0.018 235);
-  --muted: oklch(0.435 0.017 235);
-  --accent: oklch(0.48 0.115 215);
-  --accent-foreground: #ffffff;
-  --accent-soft: oklch(0.9 0.04 215);
+  --bg: var(--ctox-host-bg, #fcfcfc);
+  --surface: var(--ctox-host-surface, #ffffff);
+  --surface-2: var(--ctox-host-surface-2, #fcfcfc);
+  --line: var(--ctox-host-line, #e4e4e7);
+  --text: var(--ctox-host-text, #52525b);
+  --text-strong: var(--ctox-host-text-strong, #27272a);
+  --muted: var(--ctox-host-muted, #71717b);
+  --accent: var(--ctox-host-accent, #1b4ed8);
+  --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
+  --accent-soft: var(--ctox-host-accent-soft, #e0e6f7);
   --danger: oklch(0.56 0.13 28);
   --shadow: 0 8px 24px oklch(0.22 0.015 235 / 0.12);
   --shadow-sm: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
   --shadow-md: 0 4px 12px oklch(0.22 0.015 235 / 0.12);
   --shadow-lg: 0 8px 24px oklch(0.22 0.015 235 / 0.18);
-  --hairline: color-mix(in srgb, var(--line) 62%, transparent);
-  --panel-radius: 4px;
-  --control-radius: 3px;
+  --hairline: var(--ctox-host-hairline, #e4e4e7);
+  --panel-radius: 6px;
+  --control-radius: 4px;
   --panel-shadow: 0 1px 2px oklch(0.22 0.015 235 / 0.08);
   /* Kit additions: raised step above --surface-2 (active segments, hovered
      chips in dark surfaces) and the softer content radius for callouts,
      choice rows and code blocks. Consumed by shared/base.css. */
-  --surface-3: oklch(0.996 0.002 235);
+  --surface-3: var(--ctox-host-surface-3, #ffffff);
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
   --shell-topbar-bg: var(--surface);
+  --shell-topbar-height: 48px;
   --shell-app-bg: var(--bg);
   --shell-control-bg: var(--surface-2);
   --shell-topbar-shadow: none;
@@ -45,7 +46,7 @@
   /* CTOX shell-style elevation ladder: desktop sits one tonal step below
      window surfaces so stacked windows read as physical layers. Consumed
      only by the :root[data-shell-style="ctox"] chrome layer at file end. */
-  --shell-desktop-bg: oklch(0.882 0.024 240);
+  --shell-desktop-bg: #fcfcfc;
   --win-radius: 16px;
   --win-border: color-mix(in srgb, var(--line) 92%, transparent);
   --win-border-focus: color-mix(in srgb, var(--accent) 62%, var(--line));
@@ -53,8 +54,8 @@
      loader) and the theme-calibrated inner light edges consumed by the ctox
      chrome layer at file end. Dark edge values live on the dark :root. */
   --brand-whatsapp: #25d366;
-  --startup-gradient-from: #10b981;
-  --startup-gradient-to: #06b6d4;
+  --startup-gradient-from: #1b4ed8;
+  --startup-gradient-to: #346bf1;
   --chrome-edge-header: rgba(255, 255, 255, 0.75);
   --chrome-edge-header-focus: rgba(255, 255, 255, 0.8);
   --chrome-edge-island: rgba(255, 255, 255, 0.55);
@@ -73,35 +74,40 @@
     0 2px 6px oklch(0.22 0.015 235 / 0.14),
     0 26px 60px oklch(0.22 0.015 235 / 0.24),
     0 56px 112px oklch(0.22 0.015 235 / 0.14);
-  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: var(--font-sans);
+  /* No synthesised bold/italic and no subpixel smoothing: the flat design has
+     no shadows to hide a faked weight behind, and the shell must look the same
+     whether it renders in a browser tab or in the desktop's WebContentsView. */
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 :root[data-theme="dark"] {
   color-scheme: dark;
-  --bg: #0f1216;
-  --surface: #151920;
-  --surface-2: #1b2029;
-  --line: #2d343e;
-  --text: #e6e9eb;
-  --text-strong: #ffffff;
-  --muted: #a0a9b1;
-  --accent: #72b8aa;
-  --accent-foreground: #08110f;
-  --accent-soft: rgba(108, 184, 170, 0.16);
+  --bg: var(--ctox-host-bg, #0a0a0a);
+  --surface: var(--ctox-host-surface, #111111);
+  --surface-2: var(--ctox-host-surface-2, #141414);
+  --line: var(--ctox-host-line, #191919);
+  --text: var(--ctox-host-text, #d4d4d8);
+  --text-strong: var(--ctox-host-text-strong, #f5f5f5);
+  --muted: var(--ctox-host-muted, #818181);
+  --accent: var(--ctox-host-accent, #346bf1);
+  --accent-foreground: var(--ctox-host-accent-foreground, #ffffff);
+  --accent-soft: var(--ctox-host-accent-soft, #16264f);
   --danger: #e06b60;
   --shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
   --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.24);
   --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.3);
   --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.42);
-  --hairline: #262d35;
-  --panel-radius: 4px;
-  --control-radius: 3px;
+  --hairline: var(--ctox-host-hairline, #191919);
+  --panel-radius: 6px;
+  --control-radius: 4px;
   --panel-shadow: 0 1px 2px rgba(0, 0, 0, 0.28);
   /* Kit additions: raised step above --surface-2 (active segments) and the
      softer content radius. Consumed by shared/base.css. */
-  --surface-3: #232b36;
+  --surface-3: var(--ctox-host-surface-3, #191919);
   --kit-radius: 6px;
   --glass-bg: var(--surface);
   --glass-blur: none;
@@ -109,10 +115,10 @@
   --shell-app-bg: var(--bg);
   --shell-control-bg: var(--surface-2);
   --shell-topbar-shadow: none;
-  --shell-desktop-bg: #0a0e15;
+  --shell-desktop-bg: #0a0a0a;
   --win-radius: 16px;
-  --win-border: #363d47;
-  --win-border-focus: color-mix(in srgb, var(--accent) 68%, #363d47);
+  --win-border: #343434;
+  --win-border-focus: color-mix(in srgb, var(--accent) 68%, #343434);
   --chrome-edge-header: rgba(255, 255, 255, 0.06);
   --chrome-edge-header-focus: rgba(255, 255, 255, 0.08);
   --chrome-edge-island: rgba(255, 255, 255, 0.07);
@@ -197,7 +203,7 @@ button {
 
 .app-shell {
   display: grid;
-  grid-template-rows: 48px minmax(0, 1fr);
+  grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   width: 100dvw;
   min-width: 360px;
   max-width: none;
@@ -208,7 +214,7 @@ button {
 }
 
 body[data-maintenance-active="true"] .app-shell {
-  grid-template-rows: 48px auto minmax(0, 1fr);
+  grid-template-rows: var(--shell-topbar-height) auto minmax(0, 1fr);
 }
 
 .ctox-maintenance-banner {
@@ -344,7 +350,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   align-items: center;
   gap: var(--space-4);
   min-width: 0;
-  min-height: 48px;
+  min-height: var(--shell-topbar-height);
   padding: var(--space-2) var(--space-3);
   border-bottom: 1px solid var(--hairline, var(--line));
   background: var(--shell-topbar-bg, var(--surface));
@@ -448,6 +454,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 }
 
 .topbar-status-bar {
+  position: relative;
   display: flex;
   flex-direction: column;
   justify-content: center;
@@ -455,14 +462,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 }
 
 .topbar-status-bar .brand-status {
-  color: var(--muted);
-  font-size: var(--fs-meta);
-  line-height: var(--lh-tight);
-  font-weight: 500;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  display: none;
 }
 
 .ctox-version-line {
@@ -470,7 +470,7 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
-  max-width: 220px;
+  max-width: 132px;
   color: color-mix(in srgb, var(--muted) 86%, transparent);
   font-size: var(--fs-micro);
   line-height: 1.2;
@@ -485,6 +485,59 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.shell-release-line {
+  position: relative;
+}
+
+.shell-release-status {
+  width: 28px;
+  min-width: 28px;
+  max-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.shell-release-status[data-state="current"] { color: var(--success); }
+.shell-release-status[data-state="available"],
+.shell-release-status[data-state="ready"] { color: var(--accent); }
+.shell-release-status[data-state="checking"],
+.shell-release-status[data-state="download"],
+.shell-release-status[data-state="verify"] { color: var(--muted); }
+.shell-release-status[data-state="failed"],
+.shell-release-status[data-state="incompatible"],
+.shell-release-status[data-state="recovery"] { color: var(--danger); }
+.shell-release-status[data-state="blocked"],
+.shell-release-status[data-state="restart"],
+.shell-release-status[data-state="rollback"] { color: var(--warning); }
+
+.shell-release-panel {
+  position: absolute;
+  z-index: 120;
+  top: calc(100% + 10px);
+  left: 0;
+  width: min(360px, calc(100vw - 32px));
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: var(--panel-radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--text);
+}
+
+.shell-release-panel[hidden] { display: none; }
+.shell-release-panel strong { font-size: var(--fs-sm); }
+.shell-release-panel dl { display: grid; gap: var(--space-2); margin: var(--space-3) 0 0; }
+.shell-release-panel dl > div { display: flex; justify-content: space-between; gap: var(--space-3); }
+.shell-release-panel dt { color: var(--muted); }
+.shell-release-panel dd {
+  max-width: 230px;
+  margin: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .ctox-update-button {
@@ -536,6 +589,21 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   white-space: nowrap;
   animation: none;
   box-shadow: none;
+}
+
+.shell-release-panel-actions {
+  display: grid;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+}
+
+.shell-release-panel-actions:empty {
+  display: none;
+}
+
+.shell-release-panel-actions .ctox-shell-warning {
+  max-width: 100%;
+  margin: 0;
 }
 
 .topbar-status-bar .ctox-shell-warning--danger {
@@ -699,9 +767,11 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
 }
 
 .module-tabs.is-scrollable {
-  /* Fade the trailing edge so overflow is discoverable without a scrollbar. */
-  -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
-  mask-image: linear-gradient(90deg, #000 calc(100% - 18px), transparent);
+  /* Keep both continuation edges legible. A short one-sided fade looked like
+     a clipped label on phones and did not communicate that the row scrolls. */
+  -webkit-mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 30px), transparent 100%);
+  mask-image: linear-gradient(90deg, transparent 0, #000 22px, #000 calc(100% - 30px), transparent 100%);
+  padding-inline: 12px;
 }
 
 .module-tabs:empty {
@@ -780,6 +850,18 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   font-size: var(--fs-micro);
   font-weight: 820;
   line-height: 1;
+}
+
+/* Raster artwork must remain an icon inside the quick-launch glyph. Without
+   explicit replaced-element dimensions its intrinsic 256px width expands the
+   complete tab into a coloured image strip. */
+.module-tab-icon > .workjet-app-raster-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  pointer-events: none;
 }
 
 .module-tab-label {
@@ -1256,10 +1338,10 @@ body.is-resizing * {
 
 .shell-start-menu-panel {
   position: fixed;
-  top: 52px;
+  top: var(--shell-topbar-height);
   left: 14px;
   width: 360px;
-  max-height: calc(100vh - 80px);
+  max-height: calc(100vh - var(--shell-topbar-height) - var(--space-4));
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1404,6 +1486,14 @@ body.is-resizing * {
 .start-menu-item-icon svg {
   width: 16px;
   height: 16px;
+}
+
+.start-menu-item-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
 }
 
 .start-menu-item-icon span {
@@ -3076,6 +3166,12 @@ body[data-auth-state="locked"] .topbar {
   font-weight: 700;
 }
 
+.account-actions .account-primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
 .settings-drawer {
   display: grid;
   grid-template-rows: auto auto auto minmax(0, 1fr) auto;
@@ -3182,23 +3278,24 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .settings-tabs {
-  display: grid;
-  grid-auto-flow: column;
-  grid-auto-columns: minmax(0, 1fr);
+  display: flex;
   gap: var(--space-1);
   min-width: 0;
+  overflow-x: auto;
+  padding-bottom: 2px;
+  scrollbar-width: thin;
 }
 
 .settings-tabs button {
-  min-width: 0;
+  flex: 1 0 max-content;
+  min-width: max-content;
   min-height: 30px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: var(--surface-2);
   color: var(--muted);
   font-weight: 760;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  padding-inline: var(--space-3);
   white-space: nowrap;
 }
 
@@ -3215,7 +3312,7 @@ body[data-auth-state="locked"] .topbar {
   min-width: 0;
   overflow-x: hidden;
   overflow-y: auto;
-  padding-right: 2px;
+  padding: 0 2px var(--space-4) 0;
 }
 
 .settings-section {
@@ -3235,7 +3332,7 @@ body[data-auth-state="locked"] .topbar {
 
 .settings-section header {
   display: flex;
-  align-items: baseline;
+  align-items: flex-start;
   justify-content: space-between;
   gap: var(--space-2);
   min-width: 0;
@@ -3255,10 +3352,9 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .settings-section header span {
-  overflow: hidden;
+  overflow-wrap: anywhere;
   text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .settings-grid {
@@ -3493,6 +3589,17 @@ body[data-auth-state="locked"] .topbar {
   line-height: 1.15;
 }
 
+.subscription-device-code-value {
+  display: flex !important;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.subscription-copy-button {
+  flex: 0 0 auto;
+}
+
 .subscription-device-code em {
   color: var(--muted);
   font-size: var(--fs-sm);
@@ -3531,10 +3638,255 @@ body[data-auth-state="locked"] .topbar {
   min-width: 0;
 }
 
+.runtime-editor {
+  gap: var(--space-3);
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: var(--space-2) 0 var(--space-4);
+}
+
+.runtime-editor > header {
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.runtime-editor > header > div {
+  display: grid;
+  gap: 2px;
+}
+
+.settings-eyebrow {
+  color: var(--muted);
+  font-size: var(--fs-micro);
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.runtime-healthline {
+  display: grid;
+  grid-template-columns: 8px minmax(0, auto) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.runtime-healthline > span {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.runtime-healthline.is-danger > span {
+  background: var(--danger);
+}
+
+.runtime-healthline strong,
+.runtime-healthline em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-healthline strong {
+  color: var(--text);
+}
+
+.runtime-healthline em {
+  font-style: normal;
+}
+
+.runtime-flow {
+  display: grid;
+  gap: var(--space-3);
+  max-width: 860px;
+}
+
+.runtime-choice-section {
+  display: grid;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.runtime-section-label {
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  font-weight: 800;
+}
+
+.runtime-choice-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.runtime-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font: inherit;
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.runtime-choice:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+  color: var(--text);
+}
+
+.runtime-choice.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 82%, var(--line));
+  background: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  color: var(--text);
+}
+
+.runtime-choice:disabled {
+  cursor: default;
+  opacity: .66;
+}
+
+.runtime-choice .provider-brand-mark {
+  width: 20px;
+  height: 20px;
+}
+
+.runtime-choice .provider-brand-mark img {
+  inset: 3px;
+  width: 14px;
+  height: 14px;
+}
+
+.runtime-manual-model {
+  width: fit-content;
+}
+
+.runtime-manual-model summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.runtime-manual-model input {
+  width: min(420px, 80vw);
+  min-height: 38px;
+  margin-top: var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 var(--space-2);
+}
+
+.runtime-field,
+.runtime-advanced-grid label {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  font-weight: 800;
+}
+
+.runtime-field select,
+.runtime-field input,
+.runtime-advanced-grid select,
+.runtime-advanced-grid input {
+  width: 100%;
+  min-width: 0;
+  min-height: 38px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 var(--space-2);
+}
+
+.runtime-access-detail {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-width: 0;
+  margin-top: calc(-1 * var(--space-2));
+  padding-left: var(--space-3);
+  border-left: 2px solid var(--line);
+}
+
+.runtime-access-detail.is-ok {
+  border-left-color: var(--accent);
+}
+
+.runtime-access-detail > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.runtime-access-detail strong {
+  color: var(--text);
+  font-size: var(--fs-sm);
+}
+
+.runtime-access-detail span {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+
+.runtime-divider {
+  height: 1px;
+  background: var(--line);
+}
+
+.runtime-advanced {
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  padding-top: var(--space-2);
+}
+
+.runtime-advanced summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+}
+
+.runtime-advanced-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 260px);
+  gap: var(--space-2);
+  padding-top: var(--space-3);
+}
+
 @media (max-width: 760px) {
   .settings-grid,
   .runtime-status-strip {
     grid-template-columns: 1fr;
+  }
+
+  .runtime-healthline,
+  .runtime-advanced-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .runtime-healthline > span {
+    display: none;
+  }
+
+  .runtime-access-detail {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 
@@ -3580,6 +3932,104 @@ body[data-auth-state="locked"] .topbar {
   white-space: nowrap;
 }
 
+.settings-kv--wrap dd {
+  overflow: visible;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.workjet-pairing-layout {
+  display: grid;
+  grid-template-columns: minmax(180px, 220px) minmax(0, 1fr);
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+}
+
+.workjet-pairing-placeholder,
+.workjet-pairing-qr {
+  width: min(100%, 220px);
+  aspect-ratio: 1;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.workjet-pairing-placeholder {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  color: var(--muted);
+  text-align: center;
+}
+
+.workjet-pairing-placeholder span {
+  color: var(--text);
+  font-weight: 800;
+}
+
+.workjet-pairing-placeholder small {
+  font-size: var(--fs-micro);
+}
+
+.workjet-pairing-qr {
+  display: block;
+  padding: var(--space-2);
+  object-fit: contain;
+}
+
+.workjet-pairing-copy {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.workjet-pairing-copy p,
+.workjet-pairing-copy small {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.workjet-pairing-copy label {
+  display: grid;
+  gap: var(--space-1);
+  width: 100%;
+  color: var(--muted);
+  font-size: var(--fs-meta);
+  font-weight: 800;
+}
+
+.workjet-pairing-copy input {
+  width: 100%;
+  min-height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0 var(--space-2);
+}
+
+.workjet-pairing-error {
+  color: var(--danger);
+}
+
+@media (max-width: 620px) {
+  .workjet-pairing-layout {
+    grid-template-columns: 1fr;
+    justify-items: center;
+  }
+
+  .workjet-pairing-copy {
+    justify-items: stretch;
+    text-align: center;
+  }
+}
+
 .settings-table {
   width: 100%;
   border-collapse: collapse;
@@ -3613,10 +4063,95 @@ body[data-auth-state="locked"] .topbar {
   color: var(--accent);
 }
 
+.module-admin-table {
+  display: block;
+}
+
+.module-admin-table thead {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+}
+
+.module-admin-table tbody {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.module-admin-table tr {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.65fr) minmax(180px, 0.8fr) minmax(260px, 1.55fr);
+  gap: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.module-admin-table td {
+  display: block;
+  min-width: 0;
+  padding: 0;
+  overflow: visible;
+  white-space: normal;
+}
+
 .module-admin-actions {
   display: flex;
   flex-wrap: wrap;
   gap: var(--space-2);
+}
+
+.module-admin-actions input {
+  flex: 1 1 180px;
+  min-width: 0;
+}
+
+.settings-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 2px var(--space-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: var(--fs-meta);
+  font-weight: 800;
+}
+
+.settings-status-badge[data-state="active"] {
+  border-color: color-mix(in srgb, var(--success) 55%, var(--line));
+  color: var(--success);
+}
+
+.settings-status-badge[data-state="inactive"] {
+  color: var(--muted);
+}
+
+.settings-alert,
+.settings-loading {
+  margin: 0;
+  padding: var(--space-3);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.settings-alert {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--line));
+  color: var(--danger);
+}
+
+.settings-loading {
+  color: var(--muted);
+}
+
+@media (max-width: 680px) {
+  .module-admin-table tr {
+    grid-template-columns: 1fr;
+  }
 }
 
 .module-admin-actions .text-button {
@@ -3739,6 +4274,10 @@ body[data-auth-state="locked"] .topbar {
   justify-self: start;
   color: var(--accent);
   font-weight: 800;
+}
+
+.settings-reset {
+  color: var(--warning);
 }
 
 .settings-footer {
@@ -4347,26 +4886,40 @@ body[data-auth-state="locked"] .topbar {
 
 @media (max-width: 900px) {
   .topbar {
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-rows: 52px 42px;
-    gap: 0 var(--space-2);
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 40px;
+    min-height: var(--shell-topbar-height);
+    gap: var(--space-1);
+    padding: var(--space-1) var(--space-2);
   }
 
   .topbar-actions {
     width: auto;
   }
 
+  .topbar-status-bar {
+    display: none;
+  }
+
   .module-nav {
-    grid-column: 1 / -1;
-    order: 3;
+    display: grid;
+    grid-column: 2;
+    grid-row: 1;
+    align-self: center;
+    justify-self: stretch;
+    order: initial;
+    width: 100%;
+    overflow: hidden;
   }
 
   .module-tabs {
     justify-content: flex-start;
+    min-height: 36px;
+    scroll-padding-inline: var(--space-1);
   }
 
   .app-shell {
-    grid-template-rows: auto minmax(0, 1fr);
+    grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   }
 
   .workspace-frame {
@@ -4379,19 +4932,31 @@ body[data-auth-state="locked"] .topbar {
   }
 }
 
+@media (max-width: 720px) {
+  .account-button {
+    width: 34px;
+    max-width: 34px;
+    padding-inline: 8px;
+  }
+
+  .account-button span {
+    display: none;
+  }
+}
+
 /* Matching-aligned shell finish. The token values for this section
    (--panel-shadow, --shell-topbar-bg, --shell-app-bg, --shell-control-bg,
    --shell-topbar-shadow) are defined once in the :root blocks at the top of
    this file. */
 .topbar {
-  min-height: 52px;
+  min-height: var(--shell-topbar-height);
   border-bottom-color: var(--hairline);
   background: var(--shell-topbar-bg);
   box-shadow: var(--shell-topbar-shadow);
 }
 
 .app-shell {
-  grid-template-rows: 52px minmax(0, 1fr);
+  grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   background: var(--shell-app-bg);
 }
 
@@ -4499,7 +5064,7 @@ body[data-auth-state="locked"] .topbar {
 
 .shell-notifications {
   position: fixed;
-  top: 64px;
+  top: calc(var(--shell-topbar-height) + var(--space-4));
   left: 16px;
   display: flex;
   flex-direction: column;
@@ -4527,7 +5092,7 @@ body[data-auth-state="locked"] .topbar {
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   backdrop-filter: blur(20px);
   -webkit-backdrop-filter: blur(20px);
-  min-height: 50px;
+  min-height: var(--shell-topbar-height);
 }
 :root[data-shell-style="macos"] .brand-copy {
   display: none;
@@ -4543,7 +5108,7 @@ body[data-auth-state="locked"] .topbar {
 }
 :root[data-shell-style="macos"] .module-tabs {
   gap: 2px;
-  justify-content: center;
+  justify-content: safe center;
 }
 :root[data-shell-style="macos"] .module-tab {
   border-radius: 9px;
@@ -4697,12 +5262,71 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .shell-window-content > .shell-window-module-root {
+  --shell-module-left-width: clamp(180px, 24cqw, 280px);
+  --shell-module-right-width: clamp(220px, 30cqw, 340px);
+  --shell-module-left-handle-width: 12px;
+  --shell-module-right-handle-width: 12px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns:
+    var(--shell-module-left-width)
+    var(--shell-module-left-handle-width)
+    minmax(0, 1fr)
+    var(--shell-module-right-handle-width)
+    var(--shell-module-right-width);
   grid-template-rows: minmax(0, 1fr);
   height: 100%;
   min-height: 0;
   overflow: hidden;
+  position: relative;
+}
+
+.shell-module-drawer-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 2300;
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-start;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: rgb(0 0 0 / 0.52);
+}
+
+.shell-module-drawer-panel {
+  width: min(460px, 100%);
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-module-drawer-overlay--left .shell-module-drawer-panel {
+  width: min(460px, calc(100% - var(--shell-v2-icon-frame-span, 74px)));
+  margin-left: var(--shell-v2-icon-frame-span, 74px);
+}
+
+.shell-module-drawer-overlay--right {
+  justify-content: flex-end;
+}
+
+.shell-module-drawer-overlay--right .shell-module-drawer-panel {
+  border-right: 0;
+  border-left: 1px solid var(--line);
+}
+
+.shell-module-drawer-overlay--bottom {
+  align-items: flex-end;
+}
+
+.shell-module-drawer-overlay--bottom .shell-module-drawer-panel {
+  width: 100%;
+  height: min(280px, 55%);
+  border-top: 1px solid var(--line);
+  border-right: 0;
 }
 
 .shell-window-module-pane {
@@ -4720,13 +5344,13 @@ body[data-auth-state="locked"] .topbar {
 
 .shell-window-module-pane--left {
   grid-column: 1;
-  width: clamp(180px, 24cqw, 280px);
+  width: auto;
   border-right: 1px solid var(--line);
 }
 
 .shell-window-module-pane--right {
-  grid-column: 3;
-  width: clamp(220px, 30cqw, 340px);
+  grid-column: 5;
+  width: auto;
   border-left: 1px solid var(--line);
 }
 
@@ -4740,11 +5364,26 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .shell-window-module-root > .module-content {
-  grid-column: 2;
+  grid-column: 3;
   grid-row: 1;
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+.shell-window-module-column-resizer--left { grid-column: 2; grid-row: 1; }
+.shell-window-module-column-resizer--right { grid-column: 4; grid-row: 1; }
+.shell-window-module-root:has(> .shell-window-module-pane--left:empty) {
+  --shell-module-left-width: 0px;
+  --shell-module-left-handle-width: 0px;
+}
+.shell-window-module-root:has(> .shell-window-module-pane--right:empty) {
+  --shell-module-right-width: 0px;
+  --shell-module-right-handle-width: 0px;
+}
+.shell-window-module-pane--left:empty + .shell-window-module-column-resizer--left,
+.shell-window-module-column-resizer--right:has(+ .shell-window-module-pane--right:empty) {
+  display: none;
 }
 
 .shell-app-recovery {
@@ -5058,11 +5697,11 @@ body[data-auth-state="locked"] .topbar {
 .ctox-global-context-menu {
   position: fixed;
   z-index: 1200;
-  width: min(430px, calc(100vw - 16px));
+  width: min(360px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
   max-height: min(560px, calc(100vh - 16px));
   box-sizing: border-box;
-  padding: var(--space-3);
+  padding: 9px;
   border: 1px solid var(--line);
   border-radius: var(--control-radius);
   background: var(--surface);
@@ -5078,7 +5717,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-chat-form {
   display: grid;
-  gap: var(--space-2);
+  gap: 7px;
 }
 
 .ctox-context-header {
@@ -5106,7 +5745,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-heading strong {
   color: var(--text-strong, var(--text));
-  font-size: var(--fs-base);
+  font-size: var(--fs-sm);
   font-weight: 800;
   line-height: var(--lh-tight);
   -webkit-line-clamp: 2;
@@ -5114,7 +5753,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-heading span {
   color: var(--text-muted, var(--muted));
-  font-size: var(--fs-meta);
+  font-size: var(--fs-micro);
   font-weight: 640;
   line-height: var(--lh-tight);
   -webkit-line-clamp: 2;
@@ -5124,14 +5763,14 @@ body[data-auth-state="locked"] .topbar {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: var(--text-muted, var(--muted));
   font: inherit;
-  font-size: 18px;
+  font-size: 16px;
   line-height: 1;
   cursor: pointer;
   transition: background-color var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard), color var(--motion-base) var(--ease-standard);
@@ -5140,22 +5779,22 @@ body[data-auth-state="locked"] .topbar {
 .ctox-context-mode {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: var(--space-2);
+  gap: 5px;
 }
 
 .ctox-context-mode label {
   display: flex;
   align-items: center;
-  gap: var(--space-2);
+  gap: 6px;
   min-width: 0;
-  min-height: 34px;
+  min-height: 30px;
   box-sizing: border-box;
-  padding: var(--space-2) var(--space-2);
+  padding: 5px 7px;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface-2);
   color: var(--muted);
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   font-weight: 720;
   cursor: pointer;
   user-select: none;
@@ -5164,8 +5803,8 @@ body[data-auth-state="locked"] .topbar {
 .ctox-context-mode label::before {
   content: "";
   flex: 0 0 auto;
-  width: 10px;
-  height: 10px;
+  width: 8px;
+  height: 8px;
   border: 1px solid currentColor;
   border-radius: 999px;
   opacity: 0.72;
@@ -5203,7 +5842,7 @@ body[data-auth-state="locked"] .topbar {
 .ctox-context-mode-help {
   margin: -2px 0 0;
   color: var(--text-muted, var(--muted));
-  font-size: var(--fs-sm);
+  font-size: var(--fs-meta);
   font-weight: 650;
   line-height: 1.3;
   overflow-wrap: anywhere;
@@ -5213,7 +5852,7 @@ body[data-auth-state="locked"] .topbar {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface-2) 82%, var(--surface));
-  padding: var(--space-2) var(--space-2);
+  padding: 7px 8px;
 }
 
 .ctox-agent-scope-title {
@@ -5221,7 +5860,7 @@ body[data-auth-state="locked"] .topbar {
   font-size: var(--fs-meta);
   font-weight: 800;
   line-height: var(--lh-tight);
-  margin-bottom: var(--space-2);
+  margin-bottom: 6px;
 }
 
 .ctox-agent-scope--compact > summary {
@@ -5231,7 +5870,7 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .ctox-agent-scope--compact:not([open]) {
-  padding-block: var(--space-2);
+  padding-block: 7px;
 }
 
 .ctox-agent-scope dl {
@@ -5300,10 +5939,10 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .ctox-context-textarea {
-  min-height: 78px;
-  max-height: 150px;
-  padding: var(--space-2);
-  font-size: var(--fs-sm);
+  min-height: 62px;
+  max-height: 124px;
+  padding: 8px;
+  font-size: var(--fs-meta);
   line-height: 1.35;
   resize: vertical;
 }
@@ -5330,7 +5969,7 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-submit-btn {
   flex: 0 0 auto;
-  height: 31px;
+  height: 29px;
   border: 1px solid var(--accent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--accent) 10%, var(--surface));
@@ -5338,7 +5977,7 @@ body[data-auth-state="locked"] .topbar {
   font-size: var(--fs-sm);
   font-weight: 740;
   cursor: pointer;
-  padding: 0 var(--space-4);
+  padding: 0 12px;
   transition: background-color var(--motion-base) var(--ease-standard), color var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard);
 }
 
@@ -5644,6 +6283,10 @@ body[data-shell-chat-dock-compact] .ctox-chat-stage {
 }
 .drawer-right[hidden] {
   transform: translateX(100%) !important;
+}
+
+.drawer-right.settings-drawer-open {
+  width: min(760px, 100vw);
 }
 
 .drawer-right.account-popover {
@@ -6233,9 +6876,15 @@ body[data-shell-chat-dock-compact] .ctox-chat-stage {
   caret-color: var(--accent);
 }
 
-:where(input::placeholder, textarea::placeholder) {
-  color: var(--muted);
-  -webkit-text-fill-color: var(--muted);
+input::placeholder,
+textarea::placeholder {
+  /* WICHTIG: kein :where() um Pseudo-ELEMENTE - :where() nimmt nur
+     Pseudo-KLASSEN; Chrome verwirft sonst die komplette Regel und es gilt der
+     UA-Default (#757575, ~4,0:1). Seit jeher kaputt; entdeckt im UI-Review
+     31.08.2026 (r3-B1/r4). 60%-Mischung: erreicht auch im dunkleren
+     Kopfband-Kontext (~--muted #55) die Leerzustand-Stufe ~#939393 >= 4,5:1. */
+  color: color-mix(in srgb, var(--text) 22%, var(--muted));
+  -webkit-text-fill-color: color-mix(in srgb, var(--text) 22%, var(--muted));
   opacity: 1;
 }
 
@@ -6586,6 +7235,12 @@ body[data-shell-chat-dock-compact] .ctox-chat-stage {
   inset-inline-start: 50%;
   transform: translateX(-50%);
   width: 2px;
+  /* Die generische [data-resizer]::before-Regel weiter oben setzt height 48px
+     und opacity .5 (Pillen-Stummel); ohne explizite Neutralisierung mischt die
+     Kaskade beide Regeln zu einem unsichtbaren 48px-Rest (UI-Review 31.08.,
+     Befund r3-B2). Ruhelinie laeuft vertragsgemaess durch. */
+  height: auto;
+  opacity: 1;
   border-radius: 2px;
   background: var(--line);
   transition: background var(--motion-fast) var(--ease-standard), width var(--motion-fast) var(--ease-standard);
@@ -6658,7 +7313,7 @@ body.is-resizing-horizontal * { cursor: row-resize !important; }
 }
 
 .topbar {
-  min-height: 48px;
+  min-height: var(--shell-topbar-height);
   padding: var(--space-1) var(--space-2);
   background: var(--surface) !important;
   border-bottom: 1px solid var(--line) !important;
@@ -6707,7 +7362,7 @@ body.is-resizing-horizontal * { cursor: row-resize !important; }
   transform: none !important;
 }
 
-.shell-window {
+.shell-window:not([data-shell-contract="v2"]) {
   border: 1px solid var(--hairline, var(--line)) !important;
   border-radius: var(--shell-window-radius) !important;
   background: var(--surface) !important;
@@ -6775,13 +7430,13 @@ body.is-resizing-horizontal * { cursor: row-resize !important; }
   justify-content: center;
   gap: var(--space-1);
   min-width: 0;
-  height: 22px;
+  min-height: 28px;
   padding: 0 var(--space-2);
   border: 1px solid var(--hairline, var(--line));
   border-radius: var(--control-radius);
   background: transparent;
   color: var(--muted);
-  font: 600 10px/1 var(--font-ui, system-ui, sans-serif);
+  font: 650 11px/1 var(--font-ui, system-ui, sans-serif);
   white-space: nowrap;
 }
 
@@ -6907,13 +7562,13 @@ button.shell-window-header-meta:focus-visible,
   }
 
   .app-shell {
-    grid-template-rows: 48px minmax(0, 1fr);
+    grid-template-rows: var(--shell-topbar-height) minmax(0, 1fr);
   }
 
   .topbar {
     grid-template-columns: auto minmax(0, 1fr) auto;
     grid-template-rows: 40px;
-    min-height: 48px;
+    min-height: var(--shell-topbar-height);
     gap: var(--space-1);
     padding: var(--space-1) var(--space-2);
   }
@@ -6933,16 +7588,15 @@ button.shell-window-header-meta:focus-visible,
     height: 40px;
   }
 
-  .topbar-status-bar,
-  .module-nav {
+  .topbar-status-bar {
     display: none;
   }
 
   .shell-start-menu-panel {
-    top: 48px;
+    top: var(--shell-topbar-height);
     left: 0;
     width: 100%;
-    max-height: calc(100dvh - 48px - env(safe-area-inset-bottom, 0px));
+    max-height: calc(100dvh - var(--shell-topbar-height) - env(safe-area-inset-bottom, 0px));
     border-radius: 0;
   }
 
@@ -7032,7 +7686,7 @@ button.shell-window-header-meta:focus-visible,
   .drawer-left,
   .drawer-right,
   .drawer-bottom {
-    inset: 48px 0 0 !important;
+    inset: var(--shell-topbar-height) 0 0 !important;
     width: auto !important;
     max-width: none !important;
     max-height: none !important;
@@ -7471,7 +8125,7 @@ button.shell-window-header-meta:focus-visible,
 
 /* --- Windows: soft 16px sheets with a top-lit header -------------------- */
 
-:root[data-shell-style="ctox"] .shell-window {
+:root[data-shell-style="ctox"] .shell-window:not([data-shell-contract="v2"]) {
   border: 1px solid var(--win-border) !important;
   border-radius: var(--win-radius) !important;
   background: var(--surface) !important;
@@ -7498,11 +8152,11 @@ button.shell-window-header-meta:focus-visible,
   box-shadow: var(--win-elev-dim) !important;
 }
 
-:root[data-shell-style="ctox"] .shell-window.is-maximized,
-:root[data-shell-style="ctox"] .shell-window.is-snapped,
-:root[data-shell-style="ctox"] .shell-window[data-snap-zone],
-:root[data-shell-style="ctox"] .shell-window.is-mobile-sheet {
-  border-radius: 0 !important;
+:root[data-shell-style="ctox"] .shell-window.is-maximized:not([data-shell-contract="v2"]),
+:root[data-shell-style="ctox"] .shell-window.is-snapped:not([data-shell-contract="v2"]),
+:root[data-shell-style="ctox"] .shell-window[data-snap-zone]:not([data-shell-contract="v2"]),
+:root[data-shell-style="ctox"] .shell-window.is-mobile-sheet:not([data-shell-contract="v2"]) {
+  border-radius: 0;
 }
 
 /* Unfocused windows step back one layer: a whisper of desktop tint washes
@@ -7619,6 +8273,449 @@ button.shell-window-header-meta:focus-visible,
   padding-inline: 2px;
 }
 
+/* Shell v2 is the production contract for every windowed app. The tenant
+   shell owns this chrome centrally, so stale or runtime-installed module
+   records cannot downgrade a window to the legacy v1 renderer. */
+.shell-window[data-shell-contract="v2"],
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] {
+  --shell-v2-frame-start: #f0b56f;
+  --shell-v2-frame-middle: #9c7182;
+  --shell-v2-frame-top-joint: #936b63;
+  --shell-v2-frame-left-joint: #715365;
+  --shell-v2-frame-end: #17345c;
+  --shell-v2-surface: #10151c;
+  --shell-v2-surface-alt: #141b24;
+  --shell-v2-accent: var(--shell-v2-frame-top-joint);
+  --shell-v2-content-accent: var(--shell-v2-frame-start);
+  --shell-v2-content-foreground: #071015;
+  --shell-v2-close-size: 44px;
+  --shell-v2-icon-size: 80px;
+  --shell-v2-icon-frame-span: calc(var(--shell-v2-icon-size) - 6px);
+  /* The window glyph is exactly the normal desktop glyph size. Because it
+     replaces the outer top-left frame segment, the two module rows share the
+     74px between the inner frame edge and the glyph's lower edge. */
+  --shell-v2-header-row-size: calc((var(--shell-v2-icon-size) - 6px) / 2);
+  --shell-v2-icon-radius: 0px;
+  box-sizing: border-box;
+  display: block;
+  overflow: visible;
+  border: 6px solid transparent !important;
+  border-radius: 0;
+  background:
+    linear-gradient(var(--shell-v2-surface), var(--shell-v2-surface)) padding-box,
+    linear-gradient(90deg, var(--shell-v2-frame-top-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
+    linear-gradient(180deg, var(--shell-v2-frame-left-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
+    linear-gradient(var(--shell-v2-frame-end), var(--shell-v2-frame-end)) top right / 6px 100% no-repeat border-box,
+    linear-gradient(90deg, var(--shell-v2-frame-left-joint), var(--shell-v2-frame-end)) bottom left / 100% 6px no-repeat border-box !important;
+  box-shadow: 0 24px 72px rgb(0 0 0 / 0.62) !important;
+  color: #eef3f7;
+}
+
+.shell-window[data-shell-contract="v2"]::before {
+  display: none !important;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-content {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: var(--shell-v2-surface) !important;
+  color: #eef3f7;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-header,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] > .shell-window-header {
+  position: absolute;
+  inset: 0 0 auto var(--shell-v2-icon-size);
+  z-index: 30;
+  width: auto;
+  height: var(--shell-v2-header-row-size) !important;
+  min-height: var(--shell-v2-header-row-size);
+  padding: 0 !important;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  pointer-events: none;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-title,
+.shell-window[data-shell-contract="v2"] .shell-window-actions {
+  display: none;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-meta {
+  display: none;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"] {
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  border-radius: 6px;
+  background: #090c11;
+  color: #f4f7f8;
+  font-weight: 760;
+  letter-spacing: 0.01em;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"]:hover,
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"]:focus-visible,
+.shell-window[data-shell-contract="v2"] .shell-window-header-meta[data-state="version"][aria-expanded="true"] {
+  border-color: var(--shell-v2-accent);
+  background: #111820;
+  color: #ffffff;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-controls {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 3;
+  pointer-events: auto;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] .shell-window-control--close {
+  position: relative;
+  width: var(--shell-v2-close-size);
+  height: var(--shell-v2-close-size);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: #030507;
+  color: #ffffff;
+  font-size: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::before,
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 2px;
+  border-radius: 1px;
+  background: currentColor;
+  transform-origin: center;
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::before {
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close::after {
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close:hover,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] .shell-window-control--close:hover {
+  border-color: transparent;
+  background: #030507;
+  color: var(--shell-v2-local-accent, var(--shell-v2-frame-end));
+  transform: scale(1.06);
+  box-shadow: none;
+  text-shadow: 0 0 18px color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-frame-end)) 62%, transparent);
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close:focus-visible,
+:root[data-shell-style] .shell-window[data-shell-contract="v2"] .shell-window-control--close:focus-visible {
+  outline: 2px solid var(--shell-v2-local-accent, var(--shell-v2-frame-end));
+  outline-offset: 2px;
+  color: var(--shell-v2-local-accent, var(--shell-v2-frame-end));
+}
+
+.shell-window[data-shell-contract="v2"] .shell-window-control--close {
+  transition: transform 150ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 150ms ease, border-color 150ms ease, box-shadow 150ms ease;
+}
+
+.shell-window-v2-icon {
+  position: absolute;
+  /* The icon replaces the frame's top-left segment. Negative one-frame
+     offsets align its visible bitmap with the window's outer border box, so
+     the morph can terminate on the desktop glyph without a six-pixel jump. */
+  top: -6px;
+  left: -6px;
+  z-index: 35;
+  width: var(--shell-v2-icon-size);
+  height: var(--shell-v2-icon-size);
+  overflow: hidden;
+  border-radius: var(--shell-v2-icon-radius) 0 var(--shell-v2-icon-radius) 0;
+  background: var(--shell-v2-surface-alt);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.shell-window-v2-icon:active { cursor: grabbing; }
+
+.shell-window-v2-icon:hover {
+  filter: drop-shadow(0 0 14px color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-frame-start)) 46%, transparent));
+}
+
+.shell-window-v2-icon:focus-visible {
+  outline: 3px solid var(--shell-v2-local-accent, var(--shell-v2-frame-start));
+  outline-offset: -3px;
+}
+
+.shell-window[data-shell-contract="v2"] {
+  --accent: var(--shell-v2-content-accent);
+  --app-accent: var(--shell-v2-content-accent);
+  --shell-category-accent: var(--shell-v2-content-accent);
+  --shell-category-foreground: var(--shell-v2-content-foreground);
+  --shell-category-soft: color-mix(in srgb, var(--shell-v2-content-accent) 16%, transparent);
+  --shell-category-border: color-mix(in srgb, var(--shell-v2-content-accent) 42%, transparent);
+}
+
+.shell-window[data-shell-contract="v2"] [data-workjet-category] {
+  --shell-category-accent: var(--shell-v2-content-accent) !important;
+  --shell-category-foreground: var(--shell-v2-content-foreground) !important;
+  --shell-category-soft: color-mix(in srgb, var(--shell-v2-content-accent) 16%, transparent) !important;
+  --shell-category-border: color-mix(in srgb, var(--shell-v2-content-accent) 42%, transparent) !important;
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-pane-icon:hover,
+.shell-window[data-shell-contract="v2"] .ctox-pane-icon:focus-visible,
+.shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):hover,
+.shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):focus-visible,
+.shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger:hover,
+.shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger:focus-visible {
+  color: var(--shell-v2-content-accent);
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-pane-icon:hover,
+.shell-window[data-shell-contract="v2"] .ctox-pane-tab:not(.is-active):hover {
+  background: color-mix(in srgb, var(--shell-v2-content-accent) 12%, transparent);
+}
+
+.shell-v2-module-title-trigger {
+  cursor: pointer;
+  transition: color 150ms ease, text-shadow 150ms ease;
+}
+
+.shell-v2-module-title-trigger:hover {
+  text-shadow: 0 0 14px color-mix(in srgb, var(--shell-v2-local-accent, var(--shell-v2-accent)) 34%, transparent);
+}
+
+.shell-v2-window-title-fallback {
+  position: absolute;
+  inset: 0 auto auto 10px;
+  z-index: 2;
+  max-width: calc(100% - 96px);
+  height: var(--shell-v2-header-row-size);
+  overflow: hidden;
+  border: 0;
+  background: transparent;
+  color: #eef3f7;
+  font: 750 12px/1 var(--font-ui, system-ui, sans-serif);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.shell-window-v2-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.shell-window[data-shell-contract="v2"].is-shell-v2-morphing {
+  pointer-events: none;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  will-change: left, top, width, height, border-radius;
+  contain: layout;
+}
+
+.shell-window[data-shell-contract="v2"][data-shell-v2-morph="close"] {
+  z-index: 10000 !important;
+}
+
+.desktop-icon .desktop-icon-glyph > .workjet-app-raster-icon {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+  pointer-events: none;
+}
+
+.desktop-icon.is-app-open .desktop-icon-glyph,
+.desktop-icon.is-app-open:hover .desktop-icon-glyph {
+  transform: none !important;
+  filter: grayscale(1) saturate(0) brightness(0.7) !important;
+  opacity: 0.62;
+  outline: 0 solid transparent !important;
+  box-shadow: none !important;
+}
+
+.desktop-icon.is-app-open .desktop-icon-label {
+  color: color-mix(in srgb, var(--text, #fff) 58%, transparent) !important;
+}
+
+/* Desktop and window chrome use the same operator-approved 80px artwork. */
+
+.shell-window-v2-icon [data-window-app-label] { display: none; }
+
+.shell-window-v2-icon.is-fallback [data-window-app-label] {
+  display: grid;
+  width: 100%;
+  height: 100%;
+  place-items: center;
+  background: var(--shell-v2-surface-alt);
+  color: var(--shell-v2-local-accent, var(--shell-v2-accent));
+  font: 800 24px/1 var(--font-ui, system-ui, sans-serif);
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize {
+  z-index: 45;
+  width: 32px;
+  height: 32px;
+  opacity: 1;
+  background: none;
+  touch-action: none;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::before,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::after {
+  content: '';
+  position: absolute;
+  background: var(--shell-v2-corner-color);
+  transition: transform var(--motion-fast) var(--ease-standard), filter var(--motion-fast) var(--ease-standard);
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::before { width: 24px; height: 6px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize::after { width: 6px; height: 24px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:hover::before,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:hover::after,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:active::before,
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:active::after { filter: brightness(1.35); }
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize:focus-visible {
+  outline: 2px solid var(--shell-v2-accent);
+  outline-offset: 2px;
+}
+
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--nw {
+  top: -32px; left: -32px; --shell-v2-corner-color: var(--shell-v2-frame-start);
+  transform-origin: bottom right;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--nw::before { left: 0; bottom: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--nw::after { right: 8px; top: 0; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--ne {
+  top: -32px; right: -32px; --shell-v2-corner-color: var(--shell-v2-frame-end);
+  transform-origin: bottom left;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--ne::before { right: 0; bottom: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--ne::after { left: 8px; top: 0; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--sw {
+  bottom: -32px; left: -32px; --shell-v2-corner-color: var(--shell-v2-frame-left-joint);
+  transform-origin: top right;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--sw::before { left: 0; top: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--sw::after { right: 8px; bottom: 0; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--se {
+  bottom: -32px; right: -32px; --shell-v2-corner-color: var(--shell-v2-frame-end);
+  transform-origin: top left;
+}
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--se::before { right: 0; top: 8px; }
+.shell-window[data-shell-contract="v2"] > .shell-window-resize--se::after { left: 8px; bottom: 0; }
+
+.shell-window[data-shell-contract="v2"].is-snapped > .shell-window-resize,
+.shell-window[data-shell-contract="v2"].is-docked-to-app > .shell-window-resize {
+  pointer-events: auto;
+  opacity: 1;
+}
+
+.shell-window-v2-version-menu {
+  position: absolute;
+  z-index: 80;
+  top: var(--shell-v2-header-row-size);
+  left: calc(var(--shell-v2-icon-size) + 14px);
+  width: min(360px, calc(100% - var(--shell-v2-icon-size) - 96px));
+  min-width: 280px;
+  max-height: min(560px, calc(100% - 82px));
+  overflow: auto;
+  border: 1px solid rgb(255 255 255 / 0.14);
+  border-radius: 10px;
+  background: #0b1016;
+  color: #eef3f7;
+  box-shadow: 0 22px 56px rgb(0 0 0 / 0.68);
+}
+
+.shell-v2-version-menu-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px;
+  border-bottom: 1px solid #27313c;
+}
+
+.shell-v2-version-menu-head div { display: grid; gap: 3px; }
+.shell-v2-version-menu-head span,
+.shell-v2-version-menu-head small { color: #9eabb7; font-size: 11px; }
+.shell-v2-version-menu-head strong { font: 750 15px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+.shell-v2-version-menu-actions { display: grid; padding: 8px; border-bottom: 1px solid #27313c; }
+.shell-v2-version-menu-actions button,
+.shell-v2-restore-actions button,
+.shell-v2-restore-confirm button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #e8eef2;
+  padding: 0 10px;
+  text-align: left;
+  font: 650 13px/1.2 var(--font-ui, system-ui, sans-serif);
+  cursor: pointer;
+}
+.shell-v2-version-menu-actions button:hover,
+.shell-v2-version-menu-actions button:focus-visible,
+.shell-v2-restore-actions button:hover,
+.shell-v2-restore-actions button:focus-visible,
+.shell-v2-restore-confirm button:hover,
+.shell-v2-restore-confirm button:focus-visible { background: #18232d; color: #ffffff; }
+
+.shell-v2-version-history { display: grid; gap: 10px; padding: 14px 16px 16px; }
+.shell-v2-version-history p { margin: 0; color: #a8b2bc; font-size: 12px; line-height: 1.45; }
+.shell-v2-version-history .is-error { color: #ff9a9f; }
+.shell-v2-version-select { display: grid; gap: 6px; color: #a8b2bc; font-size: 11px; }
+.shell-v2-version-select select {
+  width: 100%; min-height: 38px; border: 1px solid #33404d; border-radius: 6px;
+  background: #101820; color: #eef3f7; padding: 0 9px;
+}
+.shell-v2-restore-actions { display: flex; }
+.shell-v2-restore-actions > button { background: #17241f; color: var(--shell-v2-accent); }
+.shell-v2-restore-confirm { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.shell-v2-restore-confirm p { grid-column: 1 / -1; color: #eef3f7; }
+.shell-v2-restore-confirm [data-v2-restore-confirm] { background: #26311c; color: #dff3a8; }
+.shell-v2-restore-confirm [data-v2-restore-cancel] { background: #151b22; }
+
+@media (forced-colors: active) {
+  .shell-window[data-shell-contract="v2"] { border-color: CanvasText !important; background: Canvas !important; }
+  .shell-window[data-shell-contract="v2"] > .shell-window-resize::before,
+  .shell-window[data-shell-contract="v2"] > .shell-window-resize::after { background: Highlight; }
+  .shell-window[data-shell-contract="v2"] .shell-window-control--close {
+    forced-color-adjust: auto;
+    border-color: CanvasText;
+    background: Canvas;
+    color: CanvasText;
+  }
+  .shell-window[data-shell-contract="v2"] .shell-window-control--close::before,
+  .shell-window[data-shell-contract="v2"] .shell-window-control--close::after {
+    background: CanvasText;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell-window[data-shell-contract="v2"],
+  .shell-window[data-shell-contract="v2"] * { transition-duration: 0s !important; animation-duration: 0s !important; }
+}
+
 /* --- Topbar: a floating glass island, not a full-width bar --------------
    .app-shell gives this row a fixed 48px track. The island takes 5px of
    air above and spans edge-inset by 12px margins: 5px + 43px = 48px, so
@@ -7637,6 +8734,20 @@ button.shell-window-header-meta:focus-visible,
     inset 0 1px 0 var(--chrome-edge-island),
     0 10px 28px color-mix(in srgb, var(--bg) 22%, transparent),
     0 2px 8px color-mix(in srgb, var(--bg) 10%, transparent) !important;
+}
+
+/* Embedded compact surfaces use the same edge-to-edge header geometry as
+   the other shell styles. The desktop CTOX island remains unchanged. */
+@media (max-width: 900px) {
+  :root[data-shell-style="ctox"] .topbar {
+    margin: 0;
+    padding: var(--space-1) var(--space-2) !important;
+    gap: var(--space-1);
+    border-top: 0 !important;
+    border-inline: 0 !important;
+    border-radius: 0;
+  }
+
 }
 
 :root[data-shell-style="ctox"] .topbar-brand-triad {
@@ -7685,7 +8796,7 @@ button.shell-window-header-meta:focus-visible,
 /* --- Start menu: a floating glass panel under the island ---------------- */
 
 :root[data-shell-style="ctox"] .shell-start-menu-panel {
-  top: 54px;
+  top: var(--shell-topbar-height);
   left: 16px;
   border-radius: 18px !important;
   border: 1px solid color-mix(in srgb, var(--line) 46%, transparent);
@@ -7762,6 +8873,143 @@ button.shell-window-header-meta:focus-visible,
 .ctox-record-approval-copy { display: grid; gap: 1px; min-width: 0; }
 .ctox-record-approval-copy strong { font-size: var(--fs-meta); letter-spacing: 0.09em; text-transform: uppercase; color: var(--accent); }
 .ctox-record-approval-copy span { font-size: var(--fs-sm); overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+
+/* Workjet UI contract integration ----------------------------------------
+   The contract stylesheet owns the palette and category vocabulary. Shell
+   chrome stays on the neutral canvas/surface pair; a category is introduced
+   only by an active/focused target or a live status treatment. */
+.app-shell {
+  background: var(--workjet-surface-canvas, var(--bg));
+}
+
+:root[data-shell-style="ctox"] .app-shell {
+  background: var(--workjet-surface-canvas, var(--bg)) !important;
+}
+
+:root .topbar {
+  background: var(--workjet-surface-chrome, var(--surface)) !important;
+  border-bottom-color: var(--workjet-border-default, var(--line)) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+:root[data-shell-style="ctox"] .topbar {
+  margin: 0;
+  border-radius: 0;
+  background: var(--workjet-surface-chrome, var(--surface)) !important;
+  border-color: var(--workjet-border-default, var(--line)) !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
+[data-workjet-category] {
+  --shell-category-accent: var(--workjet-category-imported-accent);
+  --shell-category-foreground: var(--workjet-category-imported-accent-foreground);
+  --shell-category-soft: var(--workjet-category-imported-accent-soft);
+  --shell-category-border: var(--workjet-category-imported-accent-border);
+}
+
+:root [data-workjet-category].module-tab[aria-current="page"] {
+  background: var(--shell-category-soft) !important;
+  border-color: var(--shell-category-border) !important;
+  box-shadow: inset 0 -2px 0 var(--shell-category-accent) !important;
+  color: var(--shell-category-accent) !important;
+}
+
+:root [data-workjet-category].module-tab[aria-current="page"] .module-tab-icon {
+  border-color: var(--shell-category-border);
+  background: color-mix(in srgb, var(--shell-category-soft) 72%, var(--surface));
+  color: var(--shell-category-accent);
+}
+
+:root [data-workjet-category].shell-window.is-focused {
+  border-color: var(--shell-category-accent) !important;
+  box-shadow:
+    var(--shadow-lg),
+    0 0 0 1px color-mix(in srgb, var(--shell-category-accent) 30%, transparent) !important;
+}
+
+:root [data-workjet-category].shell-window.is-focused .shell-window-header {
+  background: color-mix(in srgb, var(--shell-category-soft) 42%, var(--surface-2)) !important;
+  border-bottom-color: var(--shell-category-border) !important;
+}
+
+/* Shell v2 carries its identity in the one outer frame and local corners.
+   The generic Workjet category focus wash must never color the v2 header or
+   replace its deterministic icon palette. */
+:root [data-workjet-category].shell-window[data-shell-contract="v2"],
+:root [data-workjet-category].shell-window[data-shell-contract="v2"].is-focused {
+  border-color: transparent !important;
+  border-radius: 0;
+  background:
+    linear-gradient(var(--shell-v2-surface), var(--shell-v2-surface)) padding-box,
+    linear-gradient(90deg, var(--shell-v2-frame-top-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-end) 100%) top left / 100% 6px no-repeat border-box,
+    linear-gradient(180deg, var(--shell-v2-frame-left-joint) 0 var(--shell-v2-icon-frame-span), var(--shell-v2-frame-left-joint) 100%) top left / 6px 100% no-repeat border-box,
+    linear-gradient(var(--shell-v2-frame-end), var(--shell-v2-frame-end)) top right / 6px 100% no-repeat border-box,
+    linear-gradient(90deg, var(--shell-v2-frame-left-joint), var(--shell-v2-frame-end)) bottom left / 100% 6px no-repeat border-box !important;
+  box-shadow: 0 24px 72px rgb(0 0 0 / 0.62) !important;
+}
+
+:root [data-workjet-category].shell-window[data-shell-contract="v2"] > .shell-window-header,
+:root [data-workjet-category].shell-window[data-shell-contract="v2"].is-focused > .shell-window-header {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+/* v2 keeps the established focus hierarchy without reintroducing the v1
+   overlay. Only the active app owns visible resize chrome. */
+:root .shell-window[data-shell-contract="v2"]:not(.is-focused) {
+  opacity: 0.86;
+  filter: saturate(0.36) brightness(0.78);
+  box-shadow: 0 14px 38px rgb(0 0 0 / 0.42) !important;
+}
+
+:root .shell-window[data-shell-contract="v2"].is-focused {
+  opacity: 1;
+  filter: none;
+}
+
+:root .shell-window[data-shell-contract="v2"]:not(.is-focused) > .shell-window-resize {
+  opacity: 0;
+  pointer-events: none !important;
+  transform: scale(0.82);
+}
+
+:root .shell-window[data-shell-contract="v2"].is-focused > .shell-window-resize {
+  opacity: 1;
+  pointer-events: auto !important;
+  transform: scale(1);
+}
+
+:root .shell-window[data-shell-contract="v2"].is-shell-v2-morphing[data-shell-v2-morph="close"] {
+  opacity: 1;
+  filter: none;
+}
+
+:root .shell-window[data-shell-contract="v2"].is-shell-v2-morphing[data-shell-v2-morph="close"] > .shell-window-resize {
+  pointer-events: none !important;
+}
+
+:root [data-workjet-category].shell-window.is-focused .shell-window-title {
+  color: var(--shell-category-accent) !important;
+}
+
+:root [data-workjet-category].start-menu-item:focus-within {
+  background: var(--shell-category-soft) !important;
+}
+
+:root [data-workjet-category].start-menu-item:focus-within .start-menu-item-icon {
+  border-color: var(--shell-category-border) !important;
+  background: color-mix(in srgb, var(--shell-category-soft) 74%, var(--surface)) !important;
+  color: var(--shell-category-accent) !important;
+}
+
+:root [data-workjet-category].start-menu-item:focus-within .start-menu-item-label {
+  color: var(--shell-category-accent) !important;
+}
 .ctox-record-approval-actions { display: flex; gap: var(--space-1); flex: 0 0 auto; }
 .ctox-record-approval-actions .is-confirm { color: var(--accent); }
 .ctox-record-approval-actions .is-danger { color: var(--danger); }
@@ -7799,3 +9047,477 @@ button.shell-window-header-meta:focus-visible,
   font-variant-numeric: tabular-nums;
 }
 .module-tab-attention[hidden] { display: none !important; }
+
+/* ============================================================================
+   Phase 1 — Mobile operability (viewport <= 767px, the shell-wide mobile
+   boundary). Everything in this block is scoped to that media query, so
+   desktop viewports (>= 768px, in particular >= 1024px) are untouched.
+   Goals:
+   - Topbar stays in one touch-friendly row (>=44px tap targets); the open-app
+     tab strip scrolls horizontally in the flexible centre track.
+   - Windowed apps (launchesInWindow) become fullscreen sheets: pinned
+     geometry, no resize handles, 44px window controls, stacked module panes.
+   - Chat dock ("Chat-Leiste"), date pill ("Verlauf-Leiste") and chat windows
+     stay inside a 390px viewport; internal strips scroll horizontally.
+   - Drawers become full-width sheets; form controls inside get 44px targets.
+   The chat dock styles are injected at runtime by shared/business-chat.js
+   (after this stylesheet), so those overrides need !important.
+   ========================================================================== */
+@media (max-width: 767px) {
+  /* --- Shell frame: one compact row, workspace takes the rest --- */
+  .app-shell {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  body[data-maintenance-active="true"] .app-shell {
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
+
+  /* One 48px control row plus 2x4px padding. */
+  :root {
+    --ctox-shell-topbar-h: 56px;
+  }
+
+  .topbar {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 48px;
+    gap: 0 var(--space-2);
+    min-height: 0;
+    padding: var(--space-1) var(--space-2);
+  }
+
+  .topbar-left-group {
+    grid-column: 1;
+    grid-row: 1;
+    gap: var(--space-1);
+  }
+
+  /* The status text column yields to the tab row; warnings still surface in
+     the drawers and the maintenance banner. */
+  .topbar-status-bar {
+    display: none;
+  }
+
+  .topbar-actions {
+    grid-column: 3;
+    grid-row: 1;
+    gap: var(--space-1);
+  }
+
+  .topbar-triad-button {
+    width: 44px;
+    height: 44px;
+  }
+
+  .topbar-actions .icon-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .topbar-actions .account-button {
+    min-height: 44px;
+  }
+
+  .account-button span {
+    display: none;
+  }
+
+  /* Open-app tabs stay reachable in the centre track and never wrap. */
+  .module-nav {
+    display: grid;
+    grid-column: 2;
+    grid-row: 1;
+    min-width: 0;
+    width: 100%;
+  }
+
+  .module-tabs {
+    min-height: 44px;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+
+  .module-tab {
+    min-height: 44px;
+  }
+
+  /* The macOS shell style pins the tab row to plain `center`, which clips the
+     scrolled start of an overflowing tab strip; `safe center` keeps centering
+     while it fits and scrolls correctly past the cap. */
+  :root[data-shell-style="macos"] .module-tabs {
+    justify-content: safe center;
+  }
+
+  /* --- Start menu: full-width sheet below the topbar --- */
+  .shell-start-menu-panel {
+    top: var(--ctox-shell-topbar-h, 56px);
+    left: 0;
+    right: 0;
+    width: auto;
+    max-width: none;
+    max-height: calc(100dvh - var(--ctox-shell-topbar-h, 56px) - env(safe-area-inset-bottom, 0px));
+    border-radius: 0;
+  }
+
+  /* --- Windowed apps become fullscreen sheets ---
+     The window layer is anchored below the topbar, so a 100%-sized window is
+     exactly the workspace area. Inline left/top/width/height from the window
+     manager (desktop geometry or its <=600px mobile-sheet bounds) are
+     overridden; drag/resize gestures keep updating inline styles but cannot
+     move the sheet. */
+  .shell-window-layer {
+    inset: var(--ctox-shell-topbar-h, 56px) 0 0 0;
+    width: 100%;
+    height: auto;
+    min-width: 0;
+  }
+
+  .shell-window-layer > .shell-window {
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    min-height: 0 !important;
+    max-width: none !important;
+    max-height: none !important;
+    border-left: 0;
+    border-right: 0;
+    border-radius: 0 !important;
+  }
+
+  .shell-window-layer > .shell-window > .shell-window-resize {
+    display: none !important;
+  }
+
+  .shell-window-layer > .shell-window > .shell-window-header {
+    flex: 0 0 48px;
+    min-height: 48px;
+    gap: var(--space-1);
+    cursor: default;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-control {
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+  }
+
+  /* A phone/tablet app is already a full-screen sheet. Desktop caption
+     actions are misleading there; retain one touch-sized close action while
+     desktop/web continue to expose minimize, maximize/restore and close. */
+  .shell-window-layer > .shell-window .shell-window-control--minimize,
+  .shell-window-layer > .shell-window .shell-window-control--maximize {
+    display: none;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-header-action {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Window content scrolls inside the sheet; optional module side panes
+     stack vertically (same anatomy as the existing <=600px mobile sheet). */
+  .shell-window-layer > .shell-window .shell-window-content {
+    scroll-padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+  }
+
+  .shell-window-layer > .shell-window .shell-window-content > .shell-window-module-root {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(200px, auto) auto;
+    align-content: start;
+    height: 100%;
+    padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
+    box-sizing: border-box;
+    overflow: auto;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-pane,
+  .shell-window-layer > .shell-window .shell-window-module-column-resizer,
+  .shell-window-layer > .shell-window .shell-window-module-root > .module-content {
+    grid-column: 1;
+    width: auto;
+    min-width: 0;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-column-resizer {
+    display: none;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-pane--left {
+    grid-row: 1;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-root > .module-content {
+    grid-row: 2;
+    height: auto;
+    min-height: min(220px, calc(100dvh - var(--ctox-shell-topbar-h, 56px) - 104px));
+    overflow: auto;
+  }
+
+  .shell-window-layer > .shell-window .shell-window-module-pane--right {
+    grid-row: 3;
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  /* --- Drawers: full-width sheets, touch-sized form controls --- */
+  .drawer-left,
+  .drawer-right {
+    inset: 0 !important;
+    width: 100% !important;
+    max-width: none !important;
+    border-radius: 0 !important;
+  }
+
+  .drawer-right.account-popover {
+    inset: calc(var(--ctox-shell-topbar-h, 56px) + 4px) 8px auto 8px !important;
+    width: auto !important;
+    max-width: none !important;
+    max-height: calc(100svh - var(--ctox-shell-topbar-h, 56px) - 16px) !important;
+  }
+
+  .drawer-bottom {
+    inset: var(--ctox-shell-topbar-h, 56px) 0 0 !important;
+    max-height: none !important;
+    border-radius: 0 !important;
+  }
+
+  .drawer :is(button, select, input, textarea) {
+    min-height: 44px;
+  }
+
+  /* --- Chat dock ("Chat-Leiste") + date pill ("Verlauf-Leiste") ---
+     Injected runtime styles outrank linked stylesheets, hence !important.
+     The dock never exceeds the viewport: fab + pill + new stay fixed, the
+     chat strip (and its nav arrows) shrink to a scrollable minmax(0, 1fr). */
+  .ctox-chat-root {
+    left: 8px !important;
+    right: 8px !important;
+    bottom: calc(8px + env(safe-area-inset-bottom, 0px)) !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-root.is-collapsed {
+    right: 8px !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-dock {
+    --ctox-date-pill-width: 118px !important;
+    width: max-content !important;
+    max-width: calc(100vw - 16px) !important;
+    gap: 6px !important;
+    grid-template-columns: 76px var(--ctox-date-pill-width) 44px !important;
+  }
+
+  .ctox-chat-dock.is-collapsed {
+    width: auto !important;
+    grid-template-columns: 76px var(--ctox-date-pill-width) !important;
+  }
+
+  .ctox-chat-dock.has-visible-chats {
+    grid-template-columns: 76px var(--ctox-date-pill-width) minmax(0, 1fr) 44px !important;
+  }
+
+  .ctox-chat-dock.has-nav,
+  .ctox-chat-dock.has-many-chats {
+    grid-template-columns: 76px var(--ctox-date-pill-width) 32px minmax(0, 1fr) 32px 44px !important;
+    width: min(860px, calc(100vw - 16px)) !important;
+  }
+
+  .ctox-chat-dock.has-one-chat .ctox-chat-strip,
+  .ctox-chat-dock.has-few-chats .ctox-chat-strip {
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-fab {
+    width: 76px !important;
+    min-width: 0 !important;
+    height: 44px !important;
+  }
+
+  .ctox-chat-date-pill {
+    height: 44px !important;
+    min-width: 0 !important;
+  }
+
+  .ctox-date-nav-btn {
+    width: 32px !important;
+    height: 32px !important;
+  }
+
+  .ctox-chat-nav {
+    width: 32px !important;
+    height: 44px !important;
+  }
+
+  .ctox-chat-new {
+    width: 44px !important;
+    height: 44px !important;
+  }
+
+  /* Open chat windows pin to the sheet width; only the active chat is shown
+     (switching stays on the dock strip), mirroring the side-dock pattern. */
+  .ctox-chat-stage-inner {
+    overflow: hidden !important;
+  }
+
+  .ctox-chat-window {
+    left: 8px !important;
+    right: 8px !important;
+    width: auto !important;
+    max-width: none !important;
+  }
+
+  .ctox-chat-window:not(.is-active) {
+    display: none !important;
+  }
+
+  .ctox-chat-busy-panel,
+  .ctox-date-workload-panel {
+    left: 0 !important;
+    width: calc(100vw - 32px) !important;
+    max-width: calc(100vw - 32px) !important;
+  }
+}
+
+/* ===========================================================================
+   Shell V2 · Spaltenmodell und Einklappverhalten
+   ---------------------------------------------------------------------------
+   Die Shell besass bisher keine einzige Layoutregel fuer App-Inhalte: ihre
+   Container-Queries (760px/520px) betreffen nur ihre eigenen Werkzeugpanels.
+   Folge waren 20 verschiedene Haltepunkte ueber 33 Module - 767px, 760px und
+   768px stehen nebeneinander fuer dieselbe gemeinte Grenze.
+
+   Schwerer wiegt, dass jedes Modul das Einklappen selbst schreibt und dabei
+   denselben Fehler machen kann: outbound-lead-generation verschiebt seine
+   Detailspalte bei @container 1120px in eine zweite Zeile, setzt aber
+   grid-template-columns nicht zurueck. Die 410px breite Spur bleibt reserviert
+   und leer stehen (live gemessen: 248px 12px 391px 12px 410px bei 1101px
+   Fensterbreite). Das Zuruecksetzen der Spur ist der eigentliche Punkt.
+
+   Vertrag: Die App baut ihr Raster wie bisher als [data-resize-frame] und
+   markiert es mit data-shell-columns="3" bzw. "2". Spaltenbreiten kommen aus
+   --shell-col-left / --shell-col-right, damit der vorhandene Resizer-Vertrag
+   (.ctox-column-resizer[data-resizer-var]) unveraendert weiterarbeitet. Wann
+   eingeklappt wird, entscheidet ab hier die Shell - nicht die App.
+   =========================================================================== */
+
+.shell-window[data-shell-contract="v2"] [data-shell-columns] {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.shell-window[data-shell-contract="v2"] [data-shell-columns="3"] {
+  grid-template-columns:
+    var(--shell-col-left, 260px)
+    var(--shell-col-gutter, 12px)
+    minmax(0, 1fr)
+    var(--shell-col-gutter, 12px)
+    var(--shell-col-right, 360px);
+}
+
+.shell-window[data-shell-contract="v2"] [data-shell-columns="2"] {
+  grid-template-columns:
+    var(--shell-col-left, 260px)
+    var(--shell-col-gutter, 12px)
+    minmax(0, 1fr);
+}
+
+/* Jede Spur eines eingeklappten Rasters muss ueber alle Spalten laufen,
+   sonst entsteht genau die leere Restspur. */
+.shell-window[data-shell-contract="v2"] [data-shell-columns] > [data-shell-column] {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 3 -> 2: die rechte Spalte wird zum Band unter dem Raster, ihre Spur faellt
+   weg, ihr Resizer verschwindet mit ihr. */
+@container business-app-window (max-width: 1024px) {
+  .shell-window[data-shell-contract="v2"] [data-shell-columns="3"] {
+    grid-template-columns:
+      var(--shell-col-left, 260px)
+      var(--shell-col-gutter, 12px)
+      minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns="3"] > [data-shell-column="right"] {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns="3"] > [data-shell-resizer="right"] {
+    display: none;
+  }
+}
+
+/* 2 -> 1: alles stapelt, kein Resizer bleibt bedienbar. Der Wert liegt auf
+   768px, weil 767/760/768 in den Modulen ohnehin dieselbe Grenze meinen. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] [data-shell-columns] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    grid-auto-rows: auto;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns] > [data-shell-column] {
+    grid-column: 1 / -1;
+    grid-row: auto;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns] > [data-shell-resizer] {
+    display: none;
+  }
+}
+
+/* Der Fenstertitel ist zugleich der Ausloeser des Versionsmenues. Wird der
+   Pane-Titel im Kopf zusammengedrueckt, schrumpft die Trefferflaeche mit -
+   im App Store live auf 7px Breite gemessen. Eine Mindestflaeche gehoert der
+   Shell, weil ihr auch der Ausloeser gehoert. */
+.shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger {
+  min-width: 44px;
+  min-height: 24px;
+}
+
+/* Innen-Akzente folgen der Icon-Palette (31.08.): Die Shell leitet die
+   Rahmenfarben pro App aus dem Icon ab, aber das Innere hing bisher am
+   globalen blauen --accent - jede App sah innen gleich aus. Das Fenster
+   remappt --accent auf den Icon-Mittelton; die leichte Beimischung von
+   --text sichert die Lesbarkeit heller Paletten auf dunklen Flaechen.
+   Faellt ohne Palette (z.B. Prueflabor ohne JS) auf den Altwert zurueck. */
+.shell-window[data-shell-contract="v2"] > .shell-window-content {
+  /* Keine hartkodierten Interaktionsfarben im App-Fenster (Betreiber-Direktive
+     31.08.): jeder Akzent leitet sich aus der Icon-Palette des Fensters ab
+     (--shell-v2-frame-middle, vom Fenster-Manager aus dem Icon gesetzt).
+     Einziger Rueckfall ist der Host-Akzent des Desktops - eine Variable,
+     kein Literal; das Literal existiert nur noch in der Desktop-Theme-Basis,
+     die kein Icon besitzt. */
+  --accent: color-mix(in srgb, var(--shell-v2-frame-middle, var(--ctox-host-accent)) 82%, var(--text) 18%);
+  --accent-soft: color-mix(in srgb, var(--shell-v2-frame-middle, var(--ctox-host-accent)) 16%, transparent);
+  --accent-foreground: color-mix(in srgb, var(--text-strong, #ffffff) 94%, var(--shell-v2-frame-middle, var(--ctox-host-accent)) 6%);
+}
+
+
+/* Versionszeile (31.08.): Die Nummer ist das Klickziel des Release-Menues;
+   die Status-Bubble erscheint nur, wenn sie etwas zu melden hat (Update,
+   Fehler, Recovery) - der Dauer-Haken "Aktuell" entfaellt. */
+.shell-release-version {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.shell-release-version:hover { color: var(--text); text-decoration: underline; }
+.shell-release-version:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 4px; }
+.shell-release-status[data-state="current"] { display: none; }

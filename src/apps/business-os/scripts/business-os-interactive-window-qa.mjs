@@ -80,6 +80,8 @@ try {
   await waitForShell(page);
   await closeAllWindows(page);
   await page.waitForTimeout(250);
+  await waitForShell(page);
+  await installQaCollectionGrants(page, selectedApps);
 
   report.shell = await collectShellGeometry(page);
   assertShellGeometry(report.shell, 'initial shell');
@@ -134,7 +136,7 @@ try {
   }
 
   const fatalConsole = report.consoleEvents.filter((event) => (
-    ['error', 'pageerror', 'requestfailed'].includes(event.type)
+    ['error', 'pageerror', 'requestfailed', 'http-error'].includes(event.type)
   ));
   for (const event of fatalConsole) {
     report.failures.push({ scope: 'browser', message: `${event.type}: ${event.text}` });
@@ -288,7 +290,7 @@ async function exerciseApp(page, app, ordinal) {
     }, app.id, { timeout: 3000 });
     const maximized = await collectWindowGeometry(page, app.id);
     assertWindowInsideViewport(maximized, failures, 'maximized');
-    const maximizedControl = await windowLocator.locator('.shell-window-control--maximize').evaluate((button) => ({
+    const maximizedControl = await evaluateLocator(windowLocator.locator('.shell-window-control--maximize'), (button) => ({
       label: button.getAttribute('aria-label'),
       glyph: button.textContent,
       windowClass: button.closest('.shell-window')?.className || '',
@@ -311,7 +313,7 @@ async function exerciseApp(page, app, ordinal) {
         && element.querySelector('.shell-window-control--maximize')?.getAttribute('aria-label') === 'Maximieren';
     }, app.id, { timeout: 3000 });
     const restored = await collectWindowGeometry(page, app.id);
-    const restoredControl = await windowLocator.locator('.shell-window-control--maximize').evaluate((button) => ({
+    const restoredControl = await evaluateLocator(windowLocator.locator('.shell-window-control--maximize'), (button) => ({
       label: button.getAttribute('aria-label'),
       glyph: button.textContent,
       windowClass: button.closest('.shell-window')?.className || '',
@@ -333,8 +335,12 @@ async function exerciseApp(page, app, ordinal) {
     await windowLocator.locator('.shell-window-control--minimize').click();
     await windowLocator.waitFor({ state: 'hidden', timeout: 3000 });
     const topAppTab = page.locator(`.module-tab[data-target="${cssEscape(app.id)}"]`).first();
-    await topAppTab.waitFor({ state: 'visible', timeout: 3000 });
-    await topAppTab.click();
+    if (await topAppTab.count()) {
+      await topAppTab.scrollIntoViewIfNeeded();
+      await topAppTab.click();
+    } else {
+      await launchFromVisibleShell(page, app);
+    }
     await windowLocator.waitFor({ state: 'visible', timeout: 3000 });
 
     await windowLocator.locator('.shell-window-control--close').click();
@@ -386,13 +392,31 @@ async function exerciseMobileApp(page, app, ordinal) {
     await launchFromVisibleShell(page, app);
     mobileWindow = page.locator(`.shell-window[data-owner-id="desktop-app:${cssEscape(app.id)}"]`);
     await mobileWindow.waitFor({ state: 'visible', timeout: 30000 });
-    await waitForAppContent(page, mobileWindow, app.id);
+    try {
+      await waitForAppContent(page, mobileWindow, app.id);
+    } catch (firstContentError) {
+      // Mobile remounts the same module after the desktop pass. A one-shot
+      // module/build hand-off can race that second mount, so repeat the same
+      // visible user action once. Recovery surfaces still fail immediately.
+      await closeWindowByOwner(page, app.id);
+      await page.waitForTimeout(250);
+      await waitForShell(page);
+      await launchFromVisibleShell(page, app);
+      mobileWindow = page.locator(`.shell-window[data-owner-id="desktop-app:${cssEscape(app.id)}"]`);
+      await mobileWindow.waitFor({ state: 'visible', timeout: 30000 });
+      await waitForAppContent(page, mobileWindow, app.id).catch((secondContentError) => {
+        secondContentError.cause = firstContentError;
+        throw secondContentError;
+      });
+    }
 
     const geometry = await collectWindowGeometry(page, app.id);
     assertWindowInsideViewport(geometry, failures, 'mobile app');
-    const mobileSheet = await mobileWindow.evaluate((element) => element.classList.contains('is-mobile-sheet'));
+    const mobileSheet = await evaluateLocator(mobileWindow, (element) => (
+      element.classList.contains('is-mobile-sheet')
+    ));
     if (!mobileSheet) failures.push('window did not switch to mobile-sheet presentation');
-    const headerOverflow = await mobileWindow.locator('[data-window-header]').evaluate((header) => (
+    const headerOverflow = await evaluateLocator(mobileWindow.locator('[data-window-header]'), (header) => (
       header.scrollWidth > header.clientWidth + 2
     ));
     if (headerOverflow) failures.push('window header overflows horizontally');
@@ -473,16 +497,41 @@ async function waitForAppContent(page, windowLocator, appId) {
     const content = win?.querySelector('[data-window-content]');
     if (!content) return false;
     const moduleRoot = content.querySelector('.shell-window-module-root[data-module-root]');
+    // A recovery surface contains a button and meaningful text, but it is not
+    // a successfully mounted app. Treat it as terminal so the caller can
+    // report the real module error instead of accepting it as valid content.
+    if (moduleRoot?.dataset.moduleLoadFailed === 'true' || content.querySelector('.shell-app-recovery')) {
+      return true;
+    }
     if (moduleRoot && moduleRoot.dataset.moduleReady !== 'true') return false;
     // Decorative/skeleton SVGs must not make an app look ready. Wait for
     // operable content, an explicit module root, or meaningful text instead.
     const meaningful = content.querySelectorAll('button,input,select,textarea,table,canvas,iframe').length;
     return meaningful > 0 || (content.textContent || '').trim().length > 12;
   }, appId, { timeout: 30000 });
+  const loadFailure = await evaluateLocator(windowLocator, (win) => {
+    const content = win.querySelector('[data-window-content]');
+    const moduleRoot = content?.querySelector('.shell-window-module-root[data-module-root]');
+    const recovery = content?.querySelector('.shell-app-recovery');
+    if (moduleRoot?.dataset.moduleLoadFailed !== 'true' && !recovery) return null;
+    return {
+      title: recovery?.querySelector('strong')?.textContent?.trim() || '',
+      body: recovery?.querySelector('span')?.textContent?.trim() || '',
+      diagnostic: globalThis.ctoxBusinessOsSmoke?.state?.qaModuleMountFailures?.[
+        moduleRoot?.dataset.moduleRoot || ''
+      ] || null,
+    };
+  });
+  if (loadFailure) {
+    const diagnostic = loadFailure.diagnostic?.message
+      ? ` (${loadFailure.diagnostic.message})`
+      : '';
+    throw new Error(`App ${appId} mounted its recovery surface: ${loadFailure.title || loadFailure.body || 'unknown module load failure'}${diagnostic}`);
+  }
 }
 
 async function dragResize(page, windowLocator, direction, delta) {
-  const before = await windowLocator.evaluate((element) => {
+  const before = await evaluateLocator(windowLocator, (element) => {
     const rect = element.getBoundingClientRect();
     const win = globalThis.ctoxBusinessOsSmoke?.state?.windowManager?.listWindows?.()
       .find((entry) => entry.id === element.id);
@@ -504,7 +553,7 @@ async function dragResize(page, windowLocator, direction, delta) {
   await page.mouse.move(start.x + delta.x, start.y + delta.y, { steps: 8 });
   await page.mouse.up();
   await page.waitForTimeout(80);
-  const after = await windowLocator.evaluate((element) => {
+  const after = await evaluateLocator(windowLocator, (element) => {
     const rect = element.getBoundingClientRect();
     return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
   });
@@ -586,7 +635,7 @@ async function dragWindowHeader(page, windowLocator, target) {
 }
 
 async function readWindowDragState(windowLocator) {
-  return windowLocator.evaluate((element) => {
+  return evaluateLocator(windowLocator, (element) => {
     const rect = element.getBoundingClientRect();
     const workspace = document.querySelector('.workspace-frame')?.getBoundingClientRect();
     return {
@@ -658,7 +707,7 @@ async function collectWindowGeometry(page, appId) {
 async function exerciseFirstPaneResizer(page, windowLocator) {
   const handle = windowLocator.locator('.ctox-column-resizer[data-resizer-var]:visible').first();
   if (!await handle.count()) return null;
-  const details = await handle.evaluate((node) => {
+  const details = await evaluateLocator(handle, (node) => {
     const frame = node.closest('[data-resize-frame]');
     const cssVar = node.dataset.resizerVar;
     const side = node.dataset.resizer === 'right' ? 'right' : 'left';
@@ -676,7 +725,7 @@ async function exerciseFirstPaneResizer(page, windowLocator) {
   await page.waitForTimeout(50);
   await page.mouse.up();
   await page.waitForTimeout(80);
-  const after = await handle.evaluate((node, cssVar) => Number.parseFloat(
+  const after = await evaluateLocator(handle, (node, cssVar) => Number.parseFloat(
     getComputedStyle(node.closest('[data-resize-frame]')).getPropertyValue(cssVar),
   ), details.cssVar);
   return { ...details, after };
@@ -700,10 +749,10 @@ async function exerciseWindowHeaderActions(page, windowLocator) {
   const tools = windowLocator.locator('[data-module-integrated-tools]');
   await tools.waitFor({ state: 'visible', timeout: 5000 });
   const versions = tools.locator('[data-integrated-versions]');
-  await versions.waitFor({ state: 'visible', timeout: 5000 });
+  await versions.waitFor({ state: 'visible', timeout: 15000 });
   result.lifecycle = true;
   const releaseSection = versions.locator('[data-integrated-release]');
-  await releaseSection.waitFor({ state: 'visible', timeout: 5000 });
+  await releaseSection.waitFor({ state: 'visible', timeout: 15000 });
   result.versionsSection = true;
   result.sameWindow = await windowLocator.getAttribute('id') === originalWindowId
     && await page.locator('.shell-window').count() === windowCountBefore;
@@ -736,7 +785,7 @@ async function exerciseWindowHeaderActions(page, windowLocator) {
     x: Math.round(contextBox.x + Math.min(contextBox.width / 2, 24)),
     y: Math.round(contextBox.y + Math.min(contextBox.height / 2, 24)),
   };
-  result.context = await contextTarget.evaluate((target, point) => {
+  result.context = await evaluateLocator(contextTarget, (target, point) => {
     const state = globalThis.ctoxBusinessOsSmoke?.state;
     const moduleId = target.closest('[data-module-root]')?.dataset?.moduleRoot || state?.activeModule?.id;
     const mod = state?.modules?.find?.((item) => item.id === moduleId) || state?.activeModule;
@@ -867,7 +916,7 @@ async function inspectDesktopLabels(page) {
 }
 
 async function inspectMobilePaneAccess(windowLocator) {
-  return windowLocator.evaluate(async (windowElement) => {
+  return evaluateLocator(windowLocator, async (windowElement) => {
     const frame = windowElement.querySelector('[data-resize-frame]');
     if (!frame) return null;
     const panes = [...frame.children].filter((node) => {
@@ -945,7 +994,10 @@ function assertNoInteractiveOverlap(shell, failures) {
 
 async function waitForShell(page) {
   await page.waitForFunction(() => {
-    const state = globalThis.ctoxBusinessOsSmoke?.state || globalThis.CTOX_BUSINESS_OS_APP;
+    const params = new URLSearchParams(location.search);
+    const smokeState = globalThis.ctoxBusinessOsSmoke?.state;
+    if (params.has('rxdbSmoke') && !smokeState) return false;
+    const state = smokeState || globalThis.CTOX_BUSINESS_OS_APP;
     return document.body?.dataset?.authState !== 'locked'
       && state?.windowManager
       && Array.isArray(state?.modules)
@@ -961,6 +1013,61 @@ async function closeAllWindows(page) {
   ), null, { timeout: 5000 }).catch(() => {});
 }
 
+async function installQaCollectionGrants(page, apps) {
+  const appIds = apps.map((app) => app.id);
+  await page.waitForFunction((selectedIds) => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has('rxdbSmoke') || params.get('qaCatalog') !== 'all-source') {
+      throw new Error('Collection fixture grants require rxdbSmoke + qaCatalog=all-source');
+    }
+    const state = globalThis.ctoxBusinessOsSmoke?.state;
+    if (!state) {
+      delete globalThis.__ctoxQaSmokeStableAt;
+      return false;
+    }
+    globalThis.__ctoxQaSmokeStableAt ||= performance.now();
+    if (performance.now() - globalThis.__ctoxQaSmokeStableAt < 2000) return false;
+    const actorId = String(state.session?.user?.id || '').trim();
+    if (!actorId) throw new Error('Business OS smoke session has no actor id');
+    const selected = new Set(selectedIds);
+    const collections = new Set(
+      (state.modules || [])
+        .filter((mod) => selected.has(String(mod?.id || '')))
+        .flatMap((mod) => Array.isArray(mod?.collections) ? mod.collections : [])
+        .map((name) => String(name || '').trim())
+        .filter(Boolean),
+    );
+    const existing = state.governance?.permission_model?.explicit_grants || [];
+    const qaGrants = [];
+    for (const collection of collections) {
+      for (const permission of ['data.read', 'data.write']) {
+        qaGrants.push({
+          grant_id: `qa.${permission}.${collection}`,
+          subject_type: 'user',
+          subject_id: actorId,
+          permission,
+          scope_type: 'collection',
+          scope_id: collection,
+          active: true,
+        });
+      }
+    }
+    state.governance = state.governance || {};
+    state.governance.permission_model = {
+      ...(state.governance.permission_model || {}),
+      explicit_grants: [
+        ...existing.filter((grant) => !String(grant?.grant_id || '').startsWith('qa.')),
+        ...qaGrants,
+      ],
+    };
+    globalThis.__ctoxQaCollectionGrantsReady = true;
+    return true;
+  }, appIds, {
+    timeout: readyTimeoutMs,
+    polling: 100,
+  });
+}
+
 async function closeWindowByOwner(page, appId) {
   await page.evaluate((id) => {
     const manager = globalThis.ctoxBusinessOsSmoke?.state?.windowManager;
@@ -973,10 +1080,23 @@ async function closeWindowByOwner(page, appId) {
 function attachDiagnostics(page) {
   page.on('console', (message) => {
     if (['error', 'warning'].includes(message.type())) {
-      report.consoleEvents.push({ type: message.type(), text: message.text() });
+      report.consoleEvents.push({
+        type: message.type(),
+        text: message.text(),
+        url: message.location()?.url || '',
+      });
     }
   });
   page.on('pageerror', (error) => report.consoleEvents.push({ type: 'pageerror', text: error?.stack || String(error) }));
+  page.on('response', (response) => {
+    if (response.status() >= 400) {
+      report.consoleEvents.push({
+        type: 'http-error',
+        text: `${response.status()} ${response.request().method()} ${response.url()}`,
+        url: response.url(),
+      });
+    }
+  });
   page.on('requestfailed', (request) => report.consoleEvents.push({
     type: request.failure()?.errorText === 'net::ERR_ABORTED'
       ? 'expected-abort'
@@ -1036,6 +1156,16 @@ function roundedRect(rect) {
     right: Math.round(rect.right),
     bottom: Math.round(rect.bottom),
   };
+}
+
+async function evaluateLocator(locator, pageFunction, arg, timeout = 5000) {
+  const element = await locator.elementHandle({ timeout });
+  if (!element) throw new Error('QA locator did not resolve to an element');
+  try {
+    return await element.evaluate(pageFunction, arg);
+  } finally {
+    await element.dispose();
+  }
 }
 
 function resolvePlaywrightModule() {

@@ -13,12 +13,24 @@
           <input type="file" id="shiftImportInput" accept="application/json,.json" hidden />
         </div>
       </div>
+    </header>
+    <!-- Shell V2 (docs/business-os-shell-v2-contract.md §3/§7): der Pane-Kopf
+         ist genau EINE 37px-Zeile und traegt den Titel-Slot der Shell. Suche,
+         Filter-Tray und Ansichts-Tabs sind Kit-Chrome und bilden zusammen die
+         zweite Zeile des Panes — das Pane bleibt vierzeilig
+         (Kopf | Band | Liste | Fuss). -->
+    <div class="shiftflow-list-band">
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search data-t-placeholder="searchShifts" data-t-aria="searchShiftsAria" placeholder="Schicht, Person oder Projekt suchen..." aria-label="Schichten suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" data-t-title="cardsView" data-t-aria="cardsView" title="Shard-Ansicht" aria-label="Shard-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" data-t-title="listView" data-t-aria="listView" title="Listen-Ansicht" aria-label="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- Ein-Knopf-Umschalter (Betreiber-Direktive 31.08.2026): EIN Bedienelement,
+             das die Ansicht umschaltet. Das Icon zeigt die Ansicht, zu der
+             gewechselt wird; `aria-pressed` entfaellt, weil der Knopf eine
+             Aktion ist und kein Zustand. Der Zustand steht auf `data-shift-view`
+             und gehoert dem Modul (nicht der Pane-Grammar). -->
+        <button type="button" class="ctox-pane-icon shiftflow-view-toggle" data-shift-view-toggle data-shift-view="cards" title="Als Liste anzeigen" aria-label="Als Liste anzeigen">
+          <svg data-shift-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>
+          <svg data-shift-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>
+        </button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" data-t-title="filter" data-t-aria="filter" title="Filter" aria-label="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -38,13 +50,13 @@
           <button type="button" class="ctox-sort-dir" data-pg-reset data-t-title="resetFilters" data-t-aria="resetFilters" aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
         </div>
       </div>
-    </header>
-    <nav class="ctox-view-switch" data-shift-list-band aria-label="Schichtansichten">
-      <div class="ctox-pane-tabs" role="tablist">
-        <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="week" aria-selected="true"><span data-t="viewWeek">Woche</span><span class="view-count" data-pg-count="week"> (0)</span></button>
-        <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="drafts" aria-selected="false"><span data-t="viewDrafts">Entwürfe</span><span class="view-count" data-pg-count="drafts"> (0)</span></button>
-      </div>
-    </nav>
+      <nav class="ctox-view-switch" data-shift-list-band aria-label="Schichtansichten">
+        <div class="ctox-pane-tabs" role="tablist">
+          <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="week" aria-selected="true"><span data-t="viewWeek">Woche</span><span class="view-count" data-pg-count="week"> (0)</span></button>
+          <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="drafts" aria-selected="false"><span data-t="viewDrafts">Entwürfe</span><span class="view-count" data-pg-count="drafts"> (0)</span></button>
+        </div>
+      </nav>
+    </div>
     <div class="ctox-pane-body ctox-well">
       <div class="ctox-list shiftflow-shift-list is-cards" role="listbox" data-shift-list></div>
     </div>

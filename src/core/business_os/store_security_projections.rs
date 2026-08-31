@@ -145,7 +145,8 @@ pub(in crate::business_os) fn is_appsec_business_command(command_type: &str) -> 
 pub(crate) fn appsec_business_command_requires_data_write(command_type: &str) -> bool {
     matches!(
         command_type,
-        "ctox.appsec.assessment.create"
+        "ctox.appsec.app.audit"
+            | "ctox.appsec.assessment.create"
             | "ctox.appsec.assessment.run"
             | "ctox.appsec.assessment.archive"
             | "ctox.appsec.audit.run"

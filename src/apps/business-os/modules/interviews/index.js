@@ -2,7 +2,7 @@ import { isMeetingState, isNoShow } from './core/scheduling.js';
 import { scoreScorecard, isScorecardComplete } from './core/scorecard.js';
 import { renderListOrState } from '../../shared/list-state.js';
 
-const MOD_BUILD = '20260721-ia1';
+const MOD_BUILD = '20260831-ia2';
 const MODULE_ID = 'interviews';
 // Interview coordination has two record families, both plain RxDB collection
 // writes (there is no native `ats.interview.*` business command — STT
@@ -28,7 +28,8 @@ const COPY = {
     noShow: 'No-Show', cancel: 'Absagen', criteria: 'Kriterien', score: 'Score',
     interviewer: 'Interviewer', complete: 'vollständig', open: 'offen', generic: 'allgemein',
     listKicker: 'Recruiting', searchPlaceholder: 'Suchen...', newMeeting: 'Neuer Termin',
-    importLabel: 'Importieren', exportLabel: 'Exportieren', viewCards: 'Shard-Ansicht', viewList: 'Listen-Ansicht',
+    importLabel: 'Importieren', exportLabel: 'Exportieren',
+    viewAsList: 'Als Liste anzeigen', viewAsCards: 'Als Karten anzeigen', minutesShort: 'Min',
     filterLabel: 'Filter', statusFilterLabel: 'Status filtern', resetLabel: 'Filter zurücksetzen',
     statusAll: 'Alle Status', stateProposed: 'Vorgeschlagen', stateConfirmed: 'Bestätigt',
     stateRescheduled: 'Verschoben', stateCompleted: 'Stattgefunden', stateNoShow: 'No-Show', stateCancelled: 'Abgesagt',
@@ -50,7 +51,8 @@ const COPY = {
     noShow: 'No-show', cancel: 'Cancel', criteria: 'criteria', score: 'Score',
     interviewer: 'Interviewer', complete: 'complete', open: 'open', generic: 'generic',
     listKicker: 'Recruiting', searchPlaceholder: 'Search...', newMeeting: 'New meeting',
-    importLabel: 'Import', exportLabel: 'Export', viewCards: 'Shard view', viewList: 'List view',
+    importLabel: 'Import', exportLabel: 'Export',
+    viewAsList: 'Show as list', viewAsCards: 'Show as cards', minutesShort: 'min',
     filterLabel: 'Filter', statusFilterLabel: 'Filter status', resetLabel: 'Reset filters',
     statusAll: 'All statuses', stateProposed: 'Proposed', stateConfirmed: 'Confirmed',
     stateRescheduled: 'Rescheduled', stateCompleted: 'Attended', stateNoShow: 'No-show', stateCancelled: 'Cancelled',
@@ -81,6 +83,7 @@ export async function mount(ctx) {
   const gateEl = root?.querySelector('[data-ats-gate]');
   const titleEl = root?.querySelector('[data-ats-title]');
   const toggleWbEl = root?.querySelector('[data-toggle-workbench]');
+  const viewToggleEl = root?.querySelector('[data-ats-view-toggle]');
   const importInput = root?.querySelector('[data-ats-import-input]');
   if (titleEl) titleEl.textContent = ctx.manifest?.title || ctx.module?.title || TITLE;
 
@@ -146,11 +149,13 @@ export async function mount(ctx) {
     });
     writeCounts(counts);
     if (listEl) {
-      listEl.classList.toggle('is-compact', grammar.view === 'list');
+      // The well carries the view; the two row shapes are rendered, not just
+      // re-padded (cards = title + badge + two meta lines, list = one dense line).
+      listEl.dataset.atsView = grammar.view;
       listEl.innerHTML = meetingListBody(visible, {
         sourceEmpty: meetings.length === 0,
         readiness: meetingReadiness,
-        t, locale, nowMs: now, selectedId: ui.selectedId,
+        t, locale, nowMs: now, selectedId: ui.selectedId, view: grammar.view,
       });
     }
     writeFooter(
@@ -286,6 +291,27 @@ export async function mount(ctx) {
     applyReveal();
   }
 
+  // ONE control switches the record view. It is an action, not a state: the
+  // icon and the label name the view it switches TO, and no aria-pressed is
+  // set. A view switch is an intentional reset, so it is announced through the
+  // canonical grammar-change event — that drops the shell's recorded scroll
+  // offset and re-renders the list through `onGrammarChange`.
+  function toggleView() {
+    if (!viewToggleEl) return;
+    const next = viewToggleEl.getAttribute('data-ats-view-toggle') === 'list' ? 'cards' : 'list';
+    viewToggleEl.setAttribute('data-ats-view-toggle', next);
+    const label = t(next === 'list' ? 'viewAsCards' : 'viewAsList');
+    viewToggleEl.title = label;
+    viewToggleEl.setAttribute('aria-label', label);
+    let announced = false;
+    try {
+      announced = Boolean(leftPane?.dispatchEvent(
+        new CustomEvent('ctox-pane-grammar-change', { detail: { view: next }, bubbles: true }),
+      ));
+    } catch { announced = false; }
+    if (!announced) renderList();
+  }
+
   async function render() {
     const [m, s] = await Promise.all([loadRows(PRIMARY), loadRows(SCORECARDS)]);
     meetings = m; scorecards = s;
@@ -402,6 +428,7 @@ export async function mount(ctx) {
       if (action === 'export') return exportVisible();
     }
     if (event.target?.closest?.('[data-toggle-workbench]')) return toggleWorkbench();
+    if (event.target?.closest?.('[data-ats-view-toggle]')) return toggleView();
     const shard = event.target?.closest?.('[data-ats-select]');
     if (shard) return selectRecord(shard.getAttribute('data-ats-select'));
     const mAction = event.target?.closest?.('[data-meeting-action]');
@@ -492,35 +519,73 @@ export function partitionMeetings(rows, { search = '', status = 'all', band = 'a
 // its collection has not finished initial replication (ready === false).
 // Filter/search empties (source holds rows) and missing readiness APIs keep
 // the plain empty copy.
-export function meetingListBody(visible, { sourceEmpty = false, readiness = null, t = (k) => k, locale = 'de', nowMs = 0, selectedId = null } = {}) {
+export function meetingListBody(visible, { sourceEmpty = false, readiness = null, t = (k) => k, locale = 'de', nowMs = 0, selectedId = null, view = 'cards' } = {}) {
   return renderListOrState(visible, sourceEmpty ? readiness : null, {
-    renderRows: (rows) => rows.map((r) => meetingShard(r, { t, locale, nowMs, selectedId })).join(''),
+    renderRows: (rows) => rows.map((r) => meetingShard(r, { t, locale, nowMs, selectedId, view })).join(''),
     empty: t('entriesEmpty'),
     syncing: t('syncingData'),
   });
 }
 
-// A shard is a pure selector: title (candidate → vacancy) + ONE muted meta line.
-export function meetingShard(r, { t = (k) => k, locale = 'de', nowMs = 0, selectedId = null } = {}) {
+// A shard is a pure selector, rendered in one of TWO deliberately different
+// shapes (operator directive 31.08.):
+//   cards — three lines: bold title + state badge, then schedule and setup meta
+//   list  — exactly ONE dense line: title plus a single short trailing meta
+// The outer button (class, selection marker, agent-context trio) is identical
+// in both, so selection and the context menu do not depend on the view.
+export function meetingShard(r, { t = (k) => k, locale = 'de', nowMs = 0, selectedId = null, view = 'cards' } = {}) {
   const state = effectiveState(r, nowMs);
   const badge = isMeetingState(state) ? state : 'proposed';
+  const label = stateLabel(state, t);
   const cand = esc(r.candidate_id || '—');
   const vac = r.vacancy_id ? ' → ' + esc(r.vacancy_id) : '';
-  const partyCount = Array.isArray(r.parties) ? r.parties.length : 0;
-  const when = r.start ? fmtTime(r.start, locale) : t('withoutSchedule');
-  const meta = [
-    esc(t('status')) + ': ' + esc(stateLabel(state, t)),
-    esc(when),
-    esc(r.location_mode || 'video'),
-    partyCount + ' ' + esc(partyCount === 1 ? t('party') : t('parties')),
-  ].join(' · ');
   const selected = selectedId && r.id === selectedId ? ' is-selected' : '';
-  return ''
+  const open = ''
     + '<button type="button" class="ats-shard' + selected + '" data-ats-select="' + esc(r.id || '') + '"'
-    + ' data-context-record-id="' + esc(r.id || '') + '" data-context-record-type="interview_meeting" data-context-label="' + cand + '">'
-    + '<span class="ats-shard-main">' + badgeSpan(badge, stateLabel(state, t)) + ' ' + cand + vac + '</span>'
-    + '<span class="ats-shard-meta">' + meta + '</span>'
+    + ' data-context-record-id="' + esc(r.id || '') + '" data-context-record-type="interview_meeting" data-context-label="' + cand + '">';
+
+  if (view === 'list') {
+    // Maximum density: the state survives as a colour dot that carries the
+    // state word for screen readers, so colour is never the only channel.
+    return open
+      + '<span class="ats-shard-line">'
+      + '<span class="ats-shard-dot" data-status="' + esc(badge) + '"><span class="ats-sr">' + esc(label) + '</span></span>'
+      + '<span class="ats-shard-title">' + cand + vac + '</span>'
+      + '<span class="ats-shard-trail">' + esc(r.start ? fmtTimeShort(r.start, locale) : t('withoutSchedule')) + '</span>'
+      + '</span></button>';
+  }
+
+  const partyCount = Array.isArray(r.parties) ? r.parties.length : 0;
+  const schedule = [esc(r.start ? fmtTime(r.start, locale) : t('withoutSchedule'))];
+  const minutes = durationMinutes(r);
+  if (minutes != null) schedule.push(minutes + ' ' + esc(t('minutesShort')));
+  const setup = [
+    esc(locationLabel(r.location_mode, t)),
+    partyCount + ' ' + esc(partyCount === 1 ? t('party') : t('parties')),
+  ];
+  if (r.video_link) setup.push(esc(t('link')));
+  return open
+    + '<span class="ats-shard-head">'
+    + '<span class="ats-shard-title">' + cand + vac + '</span>'
+    + badgeSpan(badge, label)
+    + '</span>'
+    + '<span class="ats-shard-meta">' + schedule.join(' · ') + '</span>'
+    + '<span class="ats-shard-meta">' + setup.join(' · ') + '</span>'
     + '</button>';
+}
+
+// Scheduled length in whole minutes, or null when start/end do not both exist.
+function durationMinutes(r) {
+  const start = Number(r?.start);
+  const end = Number(r?.end);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+  return Math.round((end - start) / 60_000);
+}
+
+function locationLabel(mode, t) {
+  const map = { video: 'modeVideo', onsite: 'modeOnsite', phone: 'modePhone' };
+  const key = map[String(mode || 'video')];
+  return key ? t(key) : String(mode);
 }
 
 // Auto-reveal: workbench is visible when a record is selected or being created,
@@ -546,7 +611,8 @@ function bandLabel(band, t) {
 function readGrammar(pane) {
   return {
     search: (pane?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
-    view: pane?.querySelector('[data-pg-view][aria-pressed="true"]')?.getAttribute('data-pg-view') || 'cards',
+    // Single-control toggle: the button holds the view it currently shows.
+    view: pane?.querySelector('[data-ats-view-toggle]')?.getAttribute('data-ats-view-toggle') || 'cards',
     band: pane?.querySelector('[data-pg-band][aria-selected="true"]')?.getAttribute('data-pg-band') || 'all',
     status: pane?.querySelector('[data-pg-filter][data-pg-name="status"]')?.value || 'all',
   };
@@ -645,9 +711,21 @@ function toLocalInput(ms) {
 
 function fmtTime(ms, locale) {
   const n = Number(ms);
-  if (!Number.isFinite(n)) return 'ohne Termin';
+  if (!Number.isFinite(n)) return '';
   try { return new Date(n).toLocaleString(locale === 'en' ? 'en-US' : 'de-DE', { dateStyle: 'short', timeStyle: 'short' }); }
   catch { return new Date(n).toISOString(); }
+}
+
+// Dense list trail: day/month + time only — the year and the seconds cost more
+// width than they inform in a one-line row.
+function fmtTimeShort(ms, locale) {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return '';
+  try {
+    return new Date(n).toLocaleString(locale === 'en' ? 'en-US' : 'de-DE', {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit',
+    });
+  } catch { return new Date(n).toISOString().slice(0, 16).replace('T', ' '); }
 }
 
 async function ensureStyles() {

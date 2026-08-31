@@ -31,6 +31,23 @@ struct PersonResearchCommandRequest {
     include_private: Vec<String>,
     #[serde(default)]
     auto_browser_capture: bool,
+    #[serde(default)]
+    source_policy: RuntimeResearchSourcePolicy,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RuntimeResearchSourcePolicy {
+    #[serde(default)]
+    sources: Vec<RuntimeResearchSource>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RuntimeResearchSource {
+    id: String,
+    url: String,
+    target_key: String,
+    #[serde(default)]
+    field_keys: Vec<String>,
 }
 
 pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Value> {
@@ -65,7 +82,7 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
             if failed.is_ok() {
                 log_lead_projection_error(
                     command.id.as_deref().unwrap_or_default(),
-                    project_thesen_outbound_lead_state(
+                    project_outbound_lead_generation_lead_state(
                         root,
                         &command,
                         "failed",
@@ -79,7 +96,7 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
     }
     log_lead_projection_error(
         command.id.as_deref().unwrap_or_default(),
-        project_thesen_outbound_lead_state(root, &command, "running", None, None),
+        project_outbound_lead_generation_lead_state(root, &command, "running", None, None),
     );
     Ok(running)
 }
@@ -107,7 +124,7 @@ pub(crate) fn recover_once(root: &Path) -> anyhow::Result<usize> {
         };
         log_lead_projection_error(
             command_id,
-            project_thesen_outbound_lead_state(
+            project_outbound_lead_generation_lead_state(
                 root,
                 &candidate.command,
                 lead_status,
@@ -222,7 +239,7 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
             } else {
                 log_lead_projection_error(
                     &worker_command_id,
-                    project_thesen_outbound_lead_state(
+                    project_outbound_lead_generation_lead_state(
                         &root,
                         &worker_command,
                         lead_status,
@@ -238,37 +255,42 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
     Ok(true)
 }
 
-fn project_thesen_outbound_lead_state(
+fn project_outbound_lead_generation_lead_state(
     root: &Path,
     command: &BusinessCommand,
     research_status: &str,
     error: Option<&str>,
     result: Option<&Value>,
 ) -> anyhow::Result<()> {
-    let Some(record_id) = thesen_outbound_writeback_record_id(command) else {
+    let Some(record_id) = outbound_lead_generation_writeback_record_id(command) else {
         return Ok(());
     };
     let now = now_ms();
     let command_id = command.id.as_deref().unwrap_or_default();
-    let mut lead_document =
-        thesen_outbound_lead_state_document(record_id, command_id, research_status, error, now);
+    let mut lead_document = outbound_lead_generation_lead_state_document(
+        record_id,
+        command_id,
+        research_status,
+        error,
+        now,
+    );
     if let Some(result) = result {
         let existing =
-            store::load_rxdb_collection_record(root, "thesen_outbound_leads", record_id)?
+            store::load_rxdb_collection_record(root, "outbound_lead_generation_leads", record_id)?
                 .unwrap_or_else(|| serde_json::json!({ "id": record_id }));
-        let outcome_patch = thesen_outbound_research_outcome_patch(&existing, result, now);
+        let outcome_patch = outbound_lead_generation_research_outcome_patch(&existing, result, now);
         merge_json_object_values(&mut lead_document, &outcome_patch);
     }
     store::upsert_rxdb_collection_record(
         root,
-        "thesen_outbound_leads",
+        "outbound_lead_generation_leads",
         record_id,
         now,
         lead_document,
     )
 }
 
-fn thesen_outbound_lead_state_document(
+fn outbound_lead_generation_lead_state_document(
     record_id: &str,
     command_id: &str,
     research_status: &str,
@@ -280,7 +302,7 @@ fn thesen_outbound_lead_state_document(
         "research_status": research_status,
         "command_id": command_id,
         "task_id": "",
-        "payload": thesen_outbound_lead_state_patch(command_id, research_status, error, now),
+        "payload": outbound_lead_generation_lead_state_patch(command_id, research_status, error, now),
     });
     if research_status != "running" {
         document["research_error"] = error
@@ -292,7 +314,7 @@ fn thesen_outbound_lead_state_document(
     document
 }
 
-fn thesen_outbound_research_outcome_patch(
+fn outbound_lead_generation_research_outcome_patch(
     existing: &Value,
     command_result: &Value,
     now: i64,
@@ -683,7 +705,7 @@ fn merge_json_object_values(target: &mut Value, patch: &Value) {
     }
 }
 
-fn thesen_outbound_lead_state_patch(
+fn outbound_lead_generation_lead_state_patch(
     command_id: &str,
     research_status: &str,
     error: Option<&str>,
@@ -709,8 +731,8 @@ fn thesen_outbound_lead_state_patch(
     lead_payload
 }
 
-fn thesen_outbound_writeback_record_id(command: &BusinessCommand) -> Option<&str> {
-    if command.module.trim() != "thesen-outbound" {
+fn outbound_lead_generation_writeback_record_id(command: &BusinessCommand) -> Option<&str> {
+    if command.module.trim() != "outbound-lead-generation" {
         return None;
     }
     let record_id = command.record_id.as_deref()?.trim();
@@ -721,7 +743,7 @@ fn thesen_outbound_writeback_record_id(command: &BusinessCommand) -> Option<&str
     let collection_allowed = contract
         .get("collection")
         .and_then(Value::as_str)
-        .is_some_and(|collection| collection == "thesen_outbound_leads")
+        .is_some_and(|collection| collection == "outbound_lead_generation_leads")
         || contract
             .get("allowed_collections")
             .and_then(Value::as_array)
@@ -729,7 +751,7 @@ fn thesen_outbound_writeback_record_id(command: &BusinessCommand) -> Option<&str
                 collections
                     .iter()
                     .filter_map(Value::as_str)
-                    .any(|collection| collection == "thesen_outbound_leads")
+                    .any(|collection| collection == "outbound_lead_generation_leads")
             });
     if !collection_allowed {
         return None;
@@ -793,6 +815,24 @@ fn active_commands() -> std::sync::MutexGuard<'static, HashSet<ActiveResearchCom
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn parse_requested_fields(fields: &[String]) -> anyhow::Result<Vec<FieldKey>> {
+    fields
+        .iter()
+        .map(|field| {
+            FieldKey::from_str(field)
+                .with_context(|| format!("unsupported person-research field `{field}`"))
+        })
+        .collect()
+}
+
+fn safe_runtime_source_identifier(value: &str, max_len: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= max_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+}
+
 fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
     let request: PersonResearchCommandRequest = serde_json::from_value(payload.clone())
         .context("invalid web_stack.person_research payload")?;
@@ -810,14 +850,10 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
             request.mode
         )
     })?;
-    let fields = request
-        .fields
-        .iter()
-        .map(|field| {
-            FieldKey::from_str(field)
-                .with_context(|| format!("unsupported person-research field `{field}`"))
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    // The app and the native planner share one strict field vocabulary. A
+    // misspelled or not-yet-implemented field must fail visibly instead of
+    // making a partial result look like a complete research run.
+    let fields = parse_requested_fields(&request.fields)?;
     let workspace =
         root.join("runtime")
             .join("research")
@@ -839,6 +875,52 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
         persist_workspace: true,
     };
     let mut result = ctox_web_stack::run_ctox_person_research_tool(root, &research_request)?;
+    let ctox_bin = ctox_web_stack::sources::scrape_bridge::default_ctox_bin();
+    for runtime_source in request.source_policy.sources {
+        let source_id = runtime_source.id.trim();
+        let target_key = runtime_source.target_key.trim();
+        let source_url = runtime_source.url.trim();
+        anyhow::ensure!(
+            safe_runtime_source_identifier(source_id, 160)
+                && safe_runtime_source_identifier(target_key, 128),
+            "invalid runtime research source identifier"
+        );
+        let parsed_url = url::Url::parse(source_url)
+            .with_context(|| format!("invalid runtime source URL for `{source_id}`"))?;
+        anyhow::ensure!(
+            matches!(parsed_url.scheme(), "http" | "https") && parsed_url.host_str().is_some(),
+            "runtime source URL for `{source_id}` must be HTTP(S)"
+        );
+        // Compile-time modules already ran through the normal research plan.
+        // This path exists for truly dynamic/manual/discovered adapters.
+        if ctox_web_stack::sources::find(source_id).is_some() {
+            continue;
+        }
+        let mut target_fields = parse_requested_fields(&runtime_source.field_keys)?;
+        target_fields.retain(|field| {
+            research_request.fields.is_empty() || research_request.fields.contains(field)
+        });
+        if target_fields.is_empty() {
+            continue;
+        }
+        let runtime_result = ctox_web_stack::sources::scrape_bridge::run_via_runtime_target(
+            root,
+            &ctox_bin,
+            source_id,
+            source_url,
+            target_key,
+            &target_fields,
+            company,
+            country,
+        );
+        ctox_web_stack::person_research::merge_runtime_scrape_result(
+            &mut result,
+            source_id,
+            source_url,
+            &target_fields,
+            &runtime_result,
+        )?;
+    }
     if auto_browser_capture {
         let capture_tasks =
             crate::service::business_os::authenticated_person_research_capture_tasks(&result);
@@ -1057,6 +1139,21 @@ mod tests {
     }
 
     #[test]
+    fn outbound_research_contract_accepts_all_32_canonical_fields() -> anyhow::Result<()> {
+        let requested = ctox_web_stack::sources::OUTBOUND_RESEARCH_FIELDS
+            .iter()
+            .map(|field| field.as_str().to_string())
+            .collect::<Vec<_>>();
+
+        let parsed = parse_requested_fields(&requested)?;
+
+        assert_eq!(parsed, ctox_web_stack::sources::OUTBOUND_RESEARCH_FIELDS);
+        assert_eq!(parsed.len(), 32);
+        assert!(parse_requested_fields(&["firma_unbekannt".to_string()]).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn workspace_segment_is_bounded_and_safe() {
         let segment = safe_workspace_segment("cmd /Example Industrial:2026");
         assert_eq!(segment, "cmd--Example-Industrial-2026");
@@ -1066,16 +1163,16 @@ mod tests {
     }
 
     #[test]
-    fn thesen_outbound_lifecycle_projection_requires_bounded_writeback_contract() {
+    fn outbound_lead_generation_lifecycle_projection_requires_bounded_writeback_contract() {
         let command = BusinessCommand {
             id: Some("cmd-research".to_string()),
-            module: "thesen-outbound".to_string(),
+            module: "outbound-lead-generation".to_string(),
             command_type: "web_stack.person_research".to_string(),
             record_id: Some("lead-1".to_string()),
             payload: serde_json::json!({
                 "writeback_contract": {
-                    "collection": "thesen_outbound_leads",
-                    "allowed_collections": ["thesen_outbound_leads"],
+                    "collection": "outbound_lead_generation_leads",
+                    "allowed_collections": ["outbound_lead_generation_leads"],
                     "record_ids": ["lead-1"]
                 }
             }),
@@ -1083,29 +1180,38 @@ mod tests {
             origin: store::CommandOrigin::TrustedLocal,
         };
         assert_eq!(
-            thesen_outbound_writeback_record_id(&command),
+            outbound_lead_generation_writeback_record_id(&command),
             Some("lead-1")
         );
 
         let mut wrong_module = command.clone();
         wrong_module.module = "research".to_string();
-        assert_eq!(thesen_outbound_writeback_record_id(&wrong_module), None);
+        assert_eq!(
+            outbound_lead_generation_writeback_record_id(&wrong_module),
+            None
+        );
 
         let mut wrong_record = command.clone();
         wrong_record.record_id = Some("lead-2".to_string());
-        assert_eq!(thesen_outbound_writeback_record_id(&wrong_record), None);
+        assert_eq!(
+            outbound_lead_generation_writeback_record_id(&wrong_record),
+            None
+        );
 
         let mut wrong_collection = command;
         wrong_collection.payload["writeback_contract"]["collection"] =
             Value::String("sellify_companies".to_string());
         wrong_collection.payload["writeback_contract"]["allowed_collections"] =
             serde_json::json!(["sellify_companies"]);
-        assert_eq!(thesen_outbound_writeback_record_id(&wrong_collection), None);
+        assert_eq!(
+            outbound_lead_generation_writeback_record_id(&wrong_collection),
+            None
+        );
     }
 
     #[test]
-    fn successful_thesen_outbound_retry_clears_stale_research_error() {
-        let failed = thesen_outbound_lead_state_patch(
+    fn successful_outbound_lead_generation_retry_clears_stale_research_error() {
+        let failed = outbound_lead_generation_lead_state_patch(
             "cmd-failed",
             "failed",
             Some("prior attempt failed"),
@@ -1114,12 +1220,12 @@ mod tests {
         assert_eq!(failed["research_error"], "prior attempt failed");
 
         let completed =
-            thesen_outbound_lead_state_patch("cmd-completed", "needs_review", None, 2_000);
+            outbound_lead_generation_lead_state_patch("cmd-completed", "needs_review", None, 2_000);
         assert_eq!(completed["research_error"], Value::Null);
         assert_eq!(completed["native_research_terminal_status"], "needs_review");
         assert_eq!(completed["research_finished_at_ms"], 2_000);
 
-        let document = thesen_outbound_lead_state_document(
+        let document = outbound_lead_generation_lead_state_document(
             "lead-1",
             "cmd-completed",
             "needs_review",
@@ -1167,7 +1273,7 @@ mod tests {
             "browser_assist_tasks": []
         });
 
-        let patch = thesen_outbound_research_outcome_patch(&existing, &outcome, 2_000);
+        let patch = outbound_lead_generation_research_outcome_patch(&existing, &outcome, 2_000);
 
         assert_eq!(patch["data"]["legacy"], "kept");
         assert_eq!(patch["data"]["firma_domain"], "example.test");
@@ -1224,7 +1330,7 @@ mod tests {
             ]
         });
 
-        let patch = thesen_outbound_research_outcome_patch(&existing, &outcome, 3_000);
+        let patch = outbound_lead_generation_research_outcome_patch(&existing, &outcome, 3_000);
 
         assert_eq!(patch["contacts"].as_array().map(Vec::len), Some(3));
         assert_eq!(patch["contacts"][0]["id"], "manual-contact");

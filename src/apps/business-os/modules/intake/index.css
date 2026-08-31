@@ -11,13 +11,100 @@
 .intake-module { --ctox-left-width: 320px; }
 
 /* Explicit column pins so the center pane never slides onto the resizer
-   track when the kit hides resizers on narrow windows. */
-.intake-rail { grid-column: 1; grid-template-rows: auto auto minmax(0, 1fr) auto; }
+   track when the kit hides resizers on narrow windows. Linke Spur
+   (Shell-v2-Zeilen): Titel - Filterleiste - Filterablage - gezaehltes Band -
+   Well (fuellt) - Footer. Die Zeilen sind explizit zugewiesen, weil die
+   Filterablage [hidden] (display:none) ist und die automatische Platzierung
+   sonst alle nachfolgenden Kinder eine Spur nach oben zoege. */
+.intake-rail { grid-column: 1; grid-template-rows: auto auto auto auto minmax(0, 1fr) auto; }
+.intake-rail > .ctox-pane-header { grid-row: 1; }
+.intake-rail > .ctox-filterbar { grid-row: 2; }
+.intake-rail > .ctox-filter-tray { grid-row: 3; }
+.intake-rail > .ctox-view-switch { grid-row: 4; }
+.intake-rail > .ctox-pane-body { grid-row: 5; }
+.intake-rail > .ctox-pane-footer { grid-row: 6; }
 .intake-module > [data-resizer="left"] { grid-column: 2; }
 .intake-main { grid-column: 3; grid-template-rows: auto minmax(0, 1fr); }
 
-/* Main workbench: header subtitle + scroll rhythm. */
-.intake-main .intake-sub { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+/* custom: Shell-v2-Kopfgeometrie (Referenz: modules/knowledge). Die Shell legt
+   drei Zonen UEBER den App-Inhalt, weil `.shell-window-content` `inset: 0`
+   bekommt und NICHT eingerueckt wird: App-Icon 80x80 oben links
+   (--shell-v2-icon-size, z-index 35), Header-Band 37px ueber die volle Breite
+   (--shell-v2-header-row-size = (80 - 6) / 2) und die Fenstersteuerung 74x74
+   oben rechts. Beide Koepfe der obersten Zeile sind exakt eine Header-Zeile
+   hoch. Das Icon deckt genau die zwei 37px-Zeilen (2 x 37 = 74 = 80 - 6px
+   Rahmen), deshalb ruecken im linken Rail sowohl die Titelzeile als auch die
+   Filterleiste ein; die rechte Spalte muss nur die Fenstersteuerung freihalten. */
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-filterbar {
+  align-items: center;
+}
+
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+/* In 37px passt kein gestapelter Kicker + Titel: beide teilen sich eine
+   Grundlinie (identisch zur Knowledge-Referenz). Der Titel traegt das
+   Versionsmenue der Shell (`.ctox-pane-header .ctox-pane-title`) und darf
+   deshalb nicht auf wenige Pixel zusammengedrueckt werden. */
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Der Aktionsblock beansprucht nie die Titelbreite. */
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-actions {
+  flex: 0 0 auto;
+}
+
+/* Linke Spalte: Icon-Zone (80px) freihalten - Titelzeile UND Filterleiste.
+   Rechts nur 10px: der Titel traegt das Versionsmenue der Shell und blieb mit
+   14px in der 320px-Spur um exakt 1px zu schmal fuer "Bewerbungen"
+   (gemessen: scrollWidth 101 / clientWidth 100 -> sichtbare Ellipse). */
+.shell-window[data-shell-contract="v2"] .intake-module .intake-rail > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .intake-module .intake-rail > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: 10px;
+}
+
+/* Die Filterablage oeffnet unterhalb der reservierten Zone und behaelt den
+   kit-eigenen Einzug. */
+.shell-window[data-shell-contract="v2"] .intake-module .intake-rail > .ctox-filter-tray {
+  padding: 6px 12px 8px;
+}
+
+/* Rechte Spalte: Fenstersteuerung (74x74) freihalten. */
+.shell-window[data-shell-contract="v2"] .intake-module .intake-main > .ctox-pane-header {
+  padding-left: 14px;
+  padding-right: 70px;
+}
+
+/* Main workbench: subtitle + scroll rhythm. Die Beschreibung stand frueher im
+   Pane-Kopf; der Kopf ist jetzt exakt eine 37px-Shell-Zeile hoch, also fuehrt
+   sie die Arbeitsflaeche an. */
+.intake-main .intake-sub { margin: 0; color: var(--muted); font-size: 12px; }
 .intake-workbench {
   display: flex;
   flex-direction: column;
@@ -43,16 +130,46 @@
   color: var(--text-strong);
 }
 
-/* Shard / compact selector rows (both are the kit .ctox-list-item button). */
-.intake-row { display: grid; gap: 4px; }
+/* Shard / compact selector rows (both are the kit .ctox-list-item button).
+   Die beiden Ansichten unterscheiden sich in der DICHTE, nicht nur im Detail
+   (Betreiber-Direktive 31.08.):
+     KARTE  drei Zeilen, grosszuegiges Padding, fetter Name.
+     LISTE  genau eine Zeile, enge Zeilenhoehe, ein Kurz-Meta rechts. */
+.intake-row { display: grid; gap: 3px; }
+
+/* --- Karten (Shards) ---------------------------------------------------- */
+.intake-row--cards {
+  padding-top: 11px;
+  padding-bottom: 11px;
+  line-height: 1.45;
+}
+.intake-row--cards .intake-row-title { font-weight: 700; }
+
+/* --- Liste: exakt eine Zeile -------------------------------------------- */
 .intake-row--list {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  padding-top: 6px;
-  padding-bottom: 6px;
+  padding-top: 3px;
+  padding-bottom: 3px;
+  line-height: 1.25;
 }
+.intake-row--list .intake-row-title { font-weight: 500; }
+/* Ein einziges Kurz-Meta rechts; es darf nie umbrechen oder den Namen
+   verdraengen. */
+.intake-row--list .intake-row-side {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  white-space: nowrap;
+}
+.intake-row--list .ctox-badge {
+  padding-block: 0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
 .intake-row-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .intake-row-title {
   min-width: 0;
@@ -61,7 +178,17 @@
   white-space: nowrap;
   font-weight: 600;
 }
-.intake-row-meta { color: var(--muted); font-size: 11px; }
+.intake-row-meta {
+  color: var(--muted);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.intake-row-meta--facts { color: color-mix(in srgb, var(--muted) 80%, transparent); }
+
+/* Ein-Knopf-Umschalter: darf in der Filterleiste nie schrumpfen. */
+.intake-module .intake-view-toggle { flex: 0 0 auto; }
 
 /* Record-IDs render as code. */
 .intake-detail .ats-tag { font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace); }
@@ -85,17 +212,115 @@
 .intake-main .ats-blockers { margin: 6px 0 0; padding-left: 18px; }
 .intake-main .ats-blockers li { margin: 2px 0; }
 
-/* Narrow windows: stack the two panes and drop the resizer. */
-@container business-app-window (max-width: 760px) {
-  .intake-module {
+/* Narrow windows: stack the two panes and drop the resizer. Grenze = die
+   shell-eigene 2-auf-1-Marke (app.css, `[data-shell-columns]`); die
+   3-auf-2-Marke (1024px) beruehrt diese App nicht, sie hat nur zwei Spalten.
+   Andere Grenzen definiert das Modul bewusst nicht (Vertrag §6). */
+@container business-app-window (max-width: 768px) {
+  .ctox-workspace.intake-module {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(200px, 40vh) minmax(320px, 1fr);
+    /* Fensterrelativ, nicht bildschirmrelativ (Vertrag §6): mit 40vh teilte
+       sich die Spur nach der BILDSCHIRMhoehe auf — in einem flachen Fenster
+       ergab das eine Spur, die hoeher als das Fenster selbst ist. Bruchteile
+       messen den Rahmen; die Mindestmasse halten beide Spuren in einem sehr
+       flachen Fenster bedienbar, der Rest scrollt. */
+    grid-template-rows: minmax(200px, 2fr) minmax(320px, 3fr);
     height: auto;
     min-height: 100%;
     overflow-y: auto;
     gap: 8px;
+    /* base.css zieht das Workspace-Polster im schmalen Fenster auf 6px. Damit
+       liegt die linke Pane-Kante exakt unter dem 80x80-App-Icon und die
+       Pane-Flaeche malt in die reservierte Zone. Das 12px-Polster der
+       Breitform haelt sie frei — Bringschuld der App (Vertrag §3). */
+    padding: 12px;
   }
   .intake-module > [data-resizer] { display: none !important; }
-  .intake-rail { grid-column: 1; }
-  .intake-main { grid-column: 1; }
+  /* Explizite Spuren: keine leeren Grid-Reste aus der Breitform. */
+  .intake-rail { grid-column: 1; grid-row: 1; }
+  .intake-main { grid-column: 1; grid-row: 2; }
+  /* Gestapelt ist der Rail-Kopf die oberste Zeile und muss zusaetzlich die
+     74x74-Fenstersteuerung freihalten. */
+  .shell-window[data-shell-contract="v2"] .intake-module .intake-rail > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .intake-module .intake-rail > .ctox-filterbar {
+    padding-right: 70px;
+  }
+}
+
+/* Touch-Bedienung auf groben Zeigern (Telefon/Tablet): jedes interaktive
+   Control erreicht das 44px-Minimum, Icon-Buttons in beiden Dimensionen,
+   Listenzeilen und das Disclosure bekommen fingerhohe Tap-Flaechen. Das
+   Spalten-Stacking steuert die @container-Regel oben (768px). */
+@media (pointer: coarse) {
+  .intake-module button,
+  .intake-module input,
+  .intake-module select,
+  .intake-module textarea {
+    min-height: 44px;
+  }
+
+  .intake-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .intake-module .ctox-pane-tab,
+  .intake-module .ctox-sort-dir {
+    min-height: 44px;
+  }
+
+  .intake-module .ctox-sort-dir {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .intake-module .ctox-list-item,
+  .intake-module .intake-row {
+    min-height: 44px;
+  }
+
+  .intake-main .ats-more > summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+}
+
+/* Shared shell-v2 frame: reserve the desktop glyph corner and keep the local
+   list controls in the compact two-row grammar. */
+.shell-window[data-shell-contract="v2"] .intake-module {
+  padding: 0;
+  background: var(--shell-v2-surface, var(--bg));
+}
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane {
+  border: 0;
+  border-radius: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+  box-shadow: none;
+}
+.shell-window[data-shell-contract="v2"] .intake-rail > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .intake-main > .ctox-pane-header { padding: 0; background: var(--shell-v2-surface-alt, var(--surface)); }
+.shell-window[data-shell-contract="v2"] .intake-rail > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+}
+.shell-window[data-shell-contract="v2"] .intake-main > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 62px 0 8px;
+}
+.shell-window[data-shell-contract="v2"] .intake-module [data-shell-v2-header-row="2"] {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+.shell-window[data-shell-contract="v2"] .intake-rail .ctox-pane-kicker { display: none; }
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-title-row { height: 100%; }
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-title { margin-top: 0; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .intake-module .ctox-pane-icon {
+  width: min(26px, var(--shell-v2-header-row-size, 37px));
+  height: min(26px, var(--shell-v2-header-row-size, 37px));
 }

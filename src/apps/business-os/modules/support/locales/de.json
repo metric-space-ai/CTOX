@@ -17,5 +17,11 @@
   "unassigned": "Unassigned",
   "slaRisk": "SLA-Risiko",
   "entries": "Einträge",
-  "askCtox": "CTOX fragen"
+  "askCtox": "CTOX fragen",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen",
+  "inbox": "Inbox",
+  "assignee": "Zuordnung",
+  "lastActivity": "Letzte Aktivität",
+  "agentDrafts": "CTOX"
 }

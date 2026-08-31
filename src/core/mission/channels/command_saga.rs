@@ -1701,7 +1701,14 @@ pub(crate) fn business_command_projection(root: &Path, command_id: &str) -> Resu
         "execution_task_id".to_string(),
         Value::String(task_id.clone()),
     );
-    object.insert("task_id".to_string(), Value::String(task_id));
+    object.insert("task_id".to_string(), Value::String(task_id.clone()));
+    if !task_id.is_empty() {
+        if let Some(progress) =
+            crate::lcm::run_task_execution_progress_for_task(&db_path, &task_id)?
+        {
+            object.insert("execution_progress".to_string(), progress);
+        }
+    }
     if let Some((saga_id, saga_phase, saga_step, saga_total_steps, compensation_status)) = saga {
         object.insert("saga_id".to_string(), Value::String(saga_id));
         object.insert("saga_phase".to_string(), Value::String(saga_phase));
@@ -2424,6 +2431,36 @@ fn cancelled_queue_command_rows(conn: &Connection) -> Result<Vec<(String, String
     Ok(rows)
 }
 
+fn terminal_failure_queue_command_rows(
+    conn: &Connection,
+) -> Result<Vec<(String, String, String, String, Option<String>)>> {
+    let mut rows = Vec::new();
+    let mut stmt = conn.prepare(
+        "SELECT link.command_id, link.task_id, aggregate_row.execution_phase,
+                route.route_status, route.last_error
+         FROM business_command_task_links link
+         JOIN business_command_aggregates aggregate_row
+           ON aggregate_row.command_id = link.command_id
+         JOIN communication_routing_state route
+           ON route.message_key = link.task_id
+         WHERE aggregate_row.execution_mode = 'queue'
+           AND aggregate_row.execution_phase != 'terminal'
+           AND route.route_status IN ('failed', 'cancelled')",
+    )?;
+    for row in stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get::<_, String>(2)?,
+            row.get::<_, String>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })? {
+        rows.push(row?);
+    }
+    Ok(rows)
+}
+
 fn resolvable_transient_intake_failures(conn: &Connection) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT DISTINCT failure.command_id
@@ -2575,6 +2612,33 @@ pub(crate) fn audit_and_migrate_business_command_storage(
         cancelled_queue_command_drift = cancelled_queue_command_rows(&conn)?;
     }
 
+    let mut terminal_failure_queue_command_drift = terminal_failure_queue_command_rows(&conn)?;
+    let mut repaired_terminal_failure_queue_commands = 0_u64;
+    if apply && !terminal_failure_queue_command_drift.is_empty() {
+        let tx = conn.transaction()?;
+        for (_, task_id, _, route_status, last_error) in &terminal_failure_queue_command_drift {
+            let failure_reason = last_error
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("terminal queue route reconciled with linked business command");
+            if transition_business_command_for_task_in_transaction(
+                &tx,
+                task_id,
+                route_status,
+                None,
+                (route_status == "failed").then_some("queue_terminal_failure_reconciled"),
+                Some(failure_reason),
+                "reconciled terminal queue route with linked business command",
+            )? {
+                repaired_terminal_failure_queue_commands =
+                    repaired_terminal_failure_queue_commands.saturating_add(1);
+            }
+        }
+        tx.commit()?;
+        terminal_failure_queue_command_drift = terminal_failure_queue_command_rows(&conn)?;
+    }
+
     Ok(json!({
         "apply": apply,
         "missing_task_links": missing_links,
@@ -2595,6 +2659,15 @@ pub(crate) fn audit_and_migrate_business_command_storage(
             "applied_now": migration_applied_now,
         },
         "repaired_cancelled_queue_commands": repaired_cancelled_queue_commands,
+        "terminal_failure_queue_command_drift": terminal_failure_queue_command_drift.iter().map(
+            |(command_id, task_id, execution_phase, route_status, _)| json!({
+                "command_id": command_id,
+                "execution_task_id": task_id,
+                "execution_phase": execution_phase,
+                "queue_route_status": route_status,
+            })
+        ).collect::<Vec<_>>(),
+        "repaired_terminal_failure_queue_commands": repaired_terminal_failure_queue_commands,
         "unsafe_repairs_applied": 0,
     }))
 }

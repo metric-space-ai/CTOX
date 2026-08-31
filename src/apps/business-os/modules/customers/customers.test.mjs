@@ -425,8 +425,31 @@ assert.doesNotMatch(html, /customers-right|data-resizer="right"|data-customers-r
 // >= 2 real lifecycle views with zero-capable counters, well and one-line footer.
 assert.match(html, /class="ctox-filterbar"/);
 assert.match(html, /data-pg-search/);
-assert.match(html, /data-pg-view="cards"/);
-assert.match(html, /data-pg-view="list"/);
+// View toggle: ONE button that toggles, not two buttons that select
+// (Betreiber-Direktive 31.08.2026). The icon names the view it switches TO,
+// so it is an action and must carry no aria-pressed state.
+const htmlNoComments = html.replace(/<!--[\s\S]*?-->/g, '');
+const viewToggles = htmlNoComments.match(/<button[^>]*data-customers-view-toggle[^>]*>/g) || [];
+assert.equal(viewToggles.length, 1, 'exactly one view toggle control');
+assert.doesNotMatch(htmlNoComments, /data-pg-view=/, 'no multi-button pg view group');
+assert.doesNotMatch(htmlNoComments, /ctox-view-toggle/, 'no two-button toggle wrapper');
+const toggleTag = viewToggles[0];
+assert.doesNotMatch(toggleTag, /aria-pressed/, 'toggle is an action, not a state');
+assert.match(toggleTag, /aria-label="[^"]+"/);
+assert.match(toggleTag, /title="[^"]+"/);
+// The pane keeps shared/pane-grammar.js's view fallback truthful.
+assert.match(html, /data-pg-default-view="cards"/);
+assert.match(indexSource, /data-customers-view-toggle/);
+assert.match(indexSource, /function syncViewToggle/);
+for (const key of ['showAsList', 'showAsCards']) {
+  assert.match(indexSource, new RegExp(`${key}:`), `${key} label`);
+}
+
+// Cards and list are two densities, not one row with a class: the card view
+// renders meta lines, the list view renders exactly one title + one short tag.
+assert.match(indexSource, /accountShardMarkup\(account, view\)/);
+assert.match(indexSource, /customers-account-tag/);
+assert.match(css, /\.customers-account-shard\.is-compact/);
 assert.match(html, /data-pg-tray-toggle/);
 assert.match(html, /data-pg-tray\b/);
 assert.match(html, /data-pg-reset/);
@@ -500,7 +523,7 @@ assert.match(selectSource, /markSelectedAccountRows\(accountId\)/);
 assert.match(selectSource, /markSelectedRowsInPlace\('contact', contactId\)/);
 assert.doesNotMatch(selectSource, /renderAccountList\(/);
 assert.match(indexSource, /function markSelectedAccountRows[\s\S]*?classList\.toggle\('is-selected', selected\)[\s\S]*?setAttribute\('aria-selected'/);
-assert.match(indexSource, /list\.dataset\.sig !== signature[\s\S]*?list\.innerHTML = accounts\.map\(accountShardMarkup\)/);
+assert.match(indexSource, /list\.dataset\.sig !== signature[\s\S]*?list\.innerHTML = accounts\.map\(\(account\) => accountShardMarkup\(account, view\)\)/);
 const sigA = hooks.accountListSignature(customerFixtures.customer_accounts, 'cards');
 assert.equal(sigA, hooks.accountListSignature(customerFixtures.customer_accounts, 'cards'));
 assert.notEqual(sigA, hooks.accountListSignature(customerFixtures.customer_accounts, 'list'));
@@ -515,5 +538,12 @@ assert.equal(hooks.dataEmptyShowsSyncing(true, undefined), false);
 assert.match(indexSource, /subscribeCollectionReadiness/);
 assert.match(indexSource, /class="ctox-syncing" role="status" aria-live="polite"/);
 assert.match(html, /data-customers-account-syncing/);
+
+// V2 keeps the customer pane title/filter chrome compact and provides a
+// visible action glyph even while shell icon assets are recovering.
+assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.customers-module \{ padding: 0;/);
+assert.match(css, /\.customers-module \.ctox-pane-header \{ box-sizing: border-box;[\s\S]*grid-template-rows:/);
+assert.match(indexSource, /function actionIcon\(name\) \{[\s\S]*const paths = \{/);
+assert.doesNotMatch(indexSource, /return state\.ctx\?\.getActionIcon\?\.\(name\) \|\| ''/);
 
 console.log('customers schema and IA smoke OK');

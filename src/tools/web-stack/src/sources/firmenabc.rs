@@ -60,14 +60,28 @@ impl SourceModule for Firmenabc {
         // plus die Person-Stammdaten (mit Konfidenz-Asterisk in der Excel).
         &[
             FieldKey::FirmaName,
+            FieldKey::FirmaFruehereNamen,
+            FieldKey::FirmaAktivitaetsstatus,
             FieldKey::FirmaAnschrift,
+            FieldKey::FirmaBesucheranschrift,
+            FieldKey::FirmaPostanschrift,
+            FieldKey::FirmaPostfach,
             FieldKey::FirmaPlz,
             FieldKey::FirmaOrt,
+            FieldKey::FirmaLand,
             FieldKey::FirmaEmail,
             FieldKey::FirmaDomain,
+            FieldKey::FirmaTelefon,
+            FieldKey::FirmaFax,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaHomepageFactSheet,
+            FieldKey::FirmaGeschaeftsfuehrung,
+            FieldKey::FirmaProkura,
             FieldKey::PersonTitel,
             FieldKey::PersonVorname,
             FieldKey::PersonNachname,
+            FieldKey::PersonFunktion,
+            FieldKey::PersonPosition,
         ]
     }
 

@@ -95,7 +95,13 @@ test('IA is a canonical shift list plus planning board with conflicts in the mai
 
   assert.match(html, /class="ctox-pane shiftflow-left-pane"[^>]*data-left-content/);
   assert.match(html, /data-pg-search/);
-  assert.match(html, /data-pg-view="cards"[\s\S]*data-pg-view="list"/);
+  // Ein-Knopf-Umschalter (Betreiber-Direktive 31.08.2026): genau EIN
+  // Bedienelement, das die Ansicht togglet - kein Paar aus zwei Knoepfen und
+  // kein aria-pressed, weil der Knopf eine Aktion ist und kein Zustand.
+  assert.equal((html.match(/data-shift-view-toggle/g) || []).length, 1);
+  assert.doesNotMatch(html, /data-pg-view=/);
+  assert.doesNotMatch(html, /data-shift-view-toggle[^>]*aria-pressed/);
+  assert.match(html, /data-shift-view-icon="cards"[\s\S]*data-shift-view-icon="list"/);
   assert.match(html, /data-pg-tray-toggle[\s\S]*data-pg-tray hidden/);
   assert.match(html, /data-pg-reset/);
   assert.equal((html.match(/data-pg-band=/g) || []).length, 2);
@@ -111,6 +117,15 @@ test('IA is a canonical shift list plus planning board with conflicts in the mai
   assert.match(css, /\.shiftflow-center-pane\s*\{[\s\S]*?grid-column:\s*3/);
   assert.match(js, /addEventListener\('ctox-pane-grammar-change'/);
   assert.match(js, /const pg = pane\.__ctoxPaneGrammar/);
+  // Der Umschalter ist modul-eigen verdrahtet; die Pane-Grammar kennt die
+  // Ansicht nicht mehr und darf sie bei Suche/Filter nicht zuruecksetzen.
+  assert.match(js, /els\.viewToggleBtn\?\.addEventListener\('click'/);
+  assert.match(js, /view: shiftListState\.view === 'list' \? 'list' : 'cards'/);
+  assert.match(js, /button\.removeAttribute\('aria-pressed'\)/);
+  // Karten und Liste sind zwei Dichten derselben Daten, nicht dieselbe Zeile.
+  assert.match(js, /data-shift-meta="when"[\s\S]*data-shift-meta="who"[\s\S]*data-shift-meta="brief"/);
+  assert.match(css, /\.shiftflow-shift-list\.is-cards \[data-shift-meta="brief"\]\s*\{[\s\S]*?display:\s*none/);
+  assert.match(css, /\.shiftflow-shift-list\.is-list \[data-shift-meta="when"\],\s*\.shiftflow-shift-list\.is-list \[data-shift-meta="who"\]\s*\{[\s\S]*?display:\s*none/);
   assert.doesNotMatch(js, /window\.dispatchEvent|ctox-business-os-chat-submit/);
   assert.match(js, /const markupVersion = String\(import\.meta\.url\)\.split\('\?v='\)\[1\] \|\| MOD_BUILD/);
   assert.match(js, /const markupHref = new URL\('\.\/index\.html', import\.meta\.url\)\.pathname \+ \(markupVersion \? `\?v=\$\{markupVersion\}` : ''\)/);

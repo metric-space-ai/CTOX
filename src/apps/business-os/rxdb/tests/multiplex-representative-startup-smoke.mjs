@@ -8,13 +8,13 @@ import { replicationWebRtcTestInternals } from '../src/replication-webrtc.mjs';
 const { protocolHandshakeIsMultiplexed } = replicationWebRtcTestInternals;
 
 const browser = {
-  collection: { name: 'thesen_outbound_leads', schemaVersion: 0, schemaHash: 'lead-hash' },
+  collection: { name: 'outbound_lead_generation_leads', schemaVersion: 0, schemaHash: 'lead-hash' },
 };
 const native = {
   collection: { name: 'desktop_files', schemaVersion: 0, schemaHash: 'file-hash' },
   collectionSchemas: {
     desktop_files: { schemaVersion: 0, schemaHash: 'file-hash' },
-    thesen_outbound_leads: { schemaVersion: 0, schemaHash: 'lead-hash' },
+    outbound_lead_generation_leads: { schemaVersion: 0, schemaHash: 'lead-hash' },
   },
 };
 

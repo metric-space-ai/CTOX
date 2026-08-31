@@ -3,7 +3,7 @@ import {
   transcodeApp,
   suggestedModuleId,
   scaffoldModule,
-} from '../../shared/app-transcode.mjs?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/app-transcode.mjs?v=20260816-browser-sync-guards-v141';
 
 // The App Importer is the hand-over moment of the product story: a coding
 // agent conceived the app, the importer raises it. Source (folder or public
@@ -219,7 +219,9 @@ export async function mount(ctx) {
     openLabel: root.querySelector('[data-imp-open-label]'),
   };
 
-  refs.title.textContent = t('title', FALLBACK_LABELS.title);
+  // The shared v2 window header owns the app title. Keep this optional for
+  // older standalone fixtures without introducing a second local titlebar.
+  if (refs.title) refs.title.textContent = t('title', FALLBACK_LABELS.title);
   refs.subtitle.textContent = t('subtitle', FALLBACK_LABELS.subtitle);
   refs.sourceStep.textContent = t('sourceStep', 'Source');
   refs.sourceStepNote.textContent = t('sourceStepNote', 'Choose an app');

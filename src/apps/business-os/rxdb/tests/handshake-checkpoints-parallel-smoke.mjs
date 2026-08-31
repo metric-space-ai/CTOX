@@ -1,9 +1,8 @@
 // REGRESSION: the browser used to read every IndexedDB checkpoint before
 // answering the native peer's symmetric ctoxProtocol request. A production
-// room with 192 collections exceeded the native 60 s handshake, so the native
-// peer never advanced to its token request and Browser/THESEN reconnected
-// forever. The browser is always the fork for a native CTOX peer: it must send
-// every schema hash, but the native side never consumes browser checkpoints.
+// room with 192 collections exceeded the native handshake budget, so the peer
+// never advanced to its token request. The browser must send every schema hash,
+// but the native side never consumes browser checkpoints.
 
 import { replicationWebRtcTestInternals } from '../src/replication-webrtc.mjs';
 

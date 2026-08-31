@@ -386,6 +386,23 @@ export function listActionIcons() {
 }
 
 const registeredIcons = new Map();
+let iconInstanceSequence = 0;
+
+function scopeSvgFragmentIds(svg, moduleKey) {
+  const source = String(svg || '').trim();
+  if (!source.includes('<svg') || !source.includes(' id="')) return source;
+  iconInstanceSequence += 1;
+  const safeKey = String(moduleKey || 'icon').replace(/[^a-z0-9_-]+/gi, '-').slice(0, 48) || 'icon';
+  const prefix = `ctox-${safeKey}-${iconInstanceSequence.toString(36)}-`;
+  const ids = [...source.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1]);
+  return ids.reduce((scoped, id) => {
+    const nextId = `${prefix}${id}`;
+    return scoped
+      .replaceAll(`id="${id}"`, `id="${nextId}"`)
+      .replaceAll(`url(#${id})`, `url(#${nextId})`)
+      .replaceAll(`href="#${id}"`, `href="#${nextId}"`);
+  }, source);
+}
 
 export function registerSvgIcon(moduleId, svgString) {
   if (!moduleId || !svgString) return;
@@ -413,7 +430,7 @@ export function getSvgIcon(moduleId, size = 24, strokeWidth = 2, options = {}) {
   if (registeredIcons.has(key)) {
     const rawSvg = registeredIcons.get(key);
     if (typeof rawSvg === 'function') {
-      return rawSvg(size, strokeWidth).trim();
+      return scopeSvgFragmentIds(rawSvg(size, strokeWidth), key);
     }
     let svg = String(rawSvg).trim();
     if (svg.includes('<svg')) {
@@ -423,19 +440,19 @@ export function getSvgIcon(moduleId, size = 24, strokeWidth = 2, options = {}) {
       // replace stroke-width attributes
       svg = svg.replace(/stroke-width="[^"]*"/g, `stroke-width="${strokeWidth}"`);
     }
-    return svg;
+    return scopeSvgFragmentIds(svg, key);
   }
 
   const generator = iconMap[key];
   if (generator) {
-    return generator(size, strokeWidth).trim();
+    return scopeSvgFragmentIds(generator(size, strokeWidth), key);
   }
 
   // No curated or registered icon: derive a deterministic monogram icon so
   // custom / generated apps look distinct and intentional instead of all
   // sharing one placeholder glyph. The letter prefers the human-facing label
   // (module title) over the internal id, which may carry tooling prefixes.
-  return buildMonogramIcon(key, size, strokeWidth, options.label);
+  return scopeSvgFragmentIds(buildMonogramIcon(key, size, strokeWidth, options.label), key);
 }
 
 // Curated gradient pairs matching the premium module-icon aesthetic. Both

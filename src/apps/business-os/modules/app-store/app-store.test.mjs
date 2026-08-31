@@ -629,9 +629,9 @@ test('presentation layer stays compact and shell-native', () => {
   assert.match(html, /class="ctox-column-resizer"[^>]*data-resizer="left"[^>]*data-resizer-var="--ctox-left-width"/);
   assert.doesNotMatch(source, /CtoxResizer/);
   assert.doesNotMatch(css, /grid-template-columns: var\(--app-store-left-width/);
-  assert.match(css, /@container business-app-window \(max-width: 760px\)/);
-  assert.match(css, /@container business-app-window \(max-width: 520px\)/);
-  assert.match(css, /@container business-app-window \(max-width: 640px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 768px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 768px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 768px\)/);
   assert.match(css, /\.app-version-row[\s\S]*border-radius: var\(--panel-radius\)/);
   assert.match(css, /\.store-loading-overlay[\s\S]*border-radius: var\(--panel-radius\)/);
   assert.match(css, /\.app-release-data-row[\s\S]*border-radius: var\(--panel-radius\)/);
@@ -641,17 +641,27 @@ test('center column carries the canonical grammar and the shelf contract', () =>
   const html = readFileSync(new URL('./index.html', import.meta.url), 'utf8');
   const css = readFileSync(new URL('./index.css', import.meta.url), 'utf8');
   const js = readFileSync(new URL('./index.js', import.meta.url), 'utf8');
-  // Filter section: search + canonical cards/list toggle IN the filterbar +
-  // collapsed tray with reset; active-dot rule present. The canonical pair is
-  // cards|list — the retail-box shelf IS this app's cards rendering.
+  // Filter section: search + ONE view toggle IN the filterbar + collapsed tray
+  // with reset; active-dot rule present. The views are cards|list — the
+  // retail-box shelf IS this app's cards rendering.
   assert.match(html, /store-filterbar/);
   assert.match(html, /data-pg-search/);
   assert.match(html, /data-pg-tray[^>]*hidden/);
   assert.match(html, /data-pg-reset/);
   assert.match(html, /data-pg-filter data-pg-name="category" data-pg-default="all"/);
   assert.match(html, /data-pg-filter data-pg-name="sort" data-pg-default="title"/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // ONE view control, not two (Betreiber-Direktive 31.08.2026): a single
+  // action button, no aria-pressed, no [data-pg-view] radio pair. The glyph
+  // that is shown names the view the click switches TO.
+  assert.equal((html.match(/data-store-view-toggle/g) || []).length, 1);
+  assert.doesNotMatch(html, /data-pg-view=/);
+  const toggleTag = html.slice(html.indexOf('<button type="button" class="ctox-pane-icon store-view-toggle'));
+  assert.doesNotMatch(toggleTag.slice(0, toggleTag.indexOf('>')), /aria-pressed/);
+  assert.match(html, /data-view-glyph="list"/);
+  assert.match(html, /data-view-glyph="cards" hidden/);
+  assert.match(js, /els\.viewToggle\?\.addEventListener\('click'/);
+  assert.match(js, /state\.viewMode = state\.viewMode === 'list' \? 'cards' : 'list'/);
+  assert.match(js, /removeAttribute\('aria-pressed'\)/);
   assert.match(css, /\.store-filter-toggle\.has-active-filters::after/);
   // Counted view band with two real views (zeros included via JS counts).
   assert.match(html, /data-pg-band="catalog"/);
@@ -673,6 +683,28 @@ test('center column carries the canonical grammar and the shelf contract', () =>
   // Detail panel keeps real store actions (shared builder with the cards).
   assert.match(js, /cardActionsHtml\(item, operation, statusForCard\(item, operation\), \{ includeDetails: false \}\)/);
   assert.match(html, /data-detail-capture/);
+
+  // The two views are genuinely different shapes (Betreiber-Direktive
+  // 31.08.2026): a shard carries a bold title, two meta lines and the action
+  // row with roomy padding; a list entry is ONE dense line — title plus a
+  // single short meta on the right, no actions, no description.
+  assert.match(js, /function renderCard\(item, \{ compact = false \} = \{\}\)/);
+  assert.match(js, /function shardMetaFor\(item\)/);
+  assert.match(js, /function rowMetaFor\(item, cardStatus, operation\)/);
+  assert.match(js, /class="app-card-rowmeta"/);
+  assert.match(css, /\.app-card--shard\s*\{[^}]*padding:\s*14px/);
+  assert.match(css, /\.app-card--row\s*\{[^}]*min-height:\s*28px/);
+  const rowBranch = js.slice(js.indexOf('  if (compact) {'), js.indexOf('  const actionsHtml = cardActionsHtml'));
+  assert.ok(rowBranch.length > 0);
+  assert.doesNotMatch(rowBranch, /app-card-actions|app-card-desc|app-card-version-row/);
+
+  // Responsive stages are the shell's two breakpoints and nothing else
+  // (shell-v2 contract §7.5 and §7.6): container queries, never @media
+  // max-width, and only 1024px / 768px as column boundaries.
+  assert.doesNotMatch(css, /@media[^{]*max-width/);
+  const bounds = [...css.matchAll(/@container business-app-window \(max-width: (\d+)px\)/g)].map((m) => m[1]);
+  assert.ok(bounds.length > 0);
+  assert.deepEqual([...new Set(bounds)].sort(), ['1024', '768']);
 });
 
 test('chrome is shell-grammar plus header icons, never module-owned wiring', () => {
@@ -687,7 +719,7 @@ test('chrome is shell-grammar plus header icons, never module-owned wiring', () 
   assert.match(html, /class="ctox-pane-icon" data-action="install-zip"/);
   assert.match(html, /class="ctox-pane-icon" data-export-catalog[^>]*aria-label="[^"]+"[^>]*title="[^"]+"/);
   assert.match(html, /class="ctox-pane-icon" data-refresh-marketplace/);
-  assert.match(js, /getActionIcon\?\.\('export'\)/);
+  assert.match(js, /function actionIcon\(name\)[\s\S]*getActionIcon\?\.\(name\)/);
   assert.match(js, /new Blob\(\[JSON\.stringify\(payload, null, 2\)\]/);
   assert.doesNotMatch(html, /btn-create-scratch|btn-install-github|btn-install-zip/);
   assert.doesNotMatch(html, /store-action-btn|store-refresh-btn/);
@@ -730,4 +762,12 @@ test('chrome is shell-grammar plus header icons, never module-owned wiring', () 
   // established inter-app channel (knowledge uses the same for cross-module
   // focus handoffs) and stays.
   assert.doesNotMatch(js, /localStorage/);
+});
+
+test('v2 overlays stay inside the app window and icons survive shell recovery', () => {
+  assert.match(source, /\(els\.root \|\| state\.ctx\?\.host\)\?\.append\(overlay\)/);
+  assert.doesNotMatch(source, /document\.body\.append\(overlay\)/);
+  assert.match(source, /function actionIcon\(name\)/);
+  assert.match(source, /const paths = \{[\s\S]*close:/);
+  assert.match(css, /\.app-store-module > \.ctox-modal \{ position: absolute; inset: 0;/);
 });

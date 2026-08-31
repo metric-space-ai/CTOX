@@ -120,11 +120,24 @@
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  min-height: 38px;
-  padding: 4px 8px;
+  /* Shell V2 (docs/business-os-shell-v2-contract.md §3/§7): the centre column's
+     strip is a pane head of the top row and is therefore exactly one header
+     row high. */
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px;
   border-bottom: 1px solid var(--line);
   background: var(--surface);
   box-sizing: border-box;
+}
+
+/* The window control is two header rows wide (74px) and sits flush in the top
+   right corner. As long as the actions drawer is closed the strip is the last
+   head of the top row and keeps that corner free; once the drawer is open its
+   own head carries the clearance. Derived from the token, never hard coded —
+   Knowledge gets away with 70px only because it shrinks the control to 64px. */
+.documents-module:not(.is-actions-open) .documents-document-strip {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
 .documents-strip-leading {
@@ -372,6 +385,28 @@
   flex: 0 0 auto;
 }
 
+/* Shell V2 pane heads (docs/business-os-shell-v2-contract.md §3/§7): every head
+   of the top row is exactly one header row high, the first one keeps the 80px
+   app icon free and the last one the 74px window control. Knowledge is the
+   reference implementation. */
+.documents-explorer > .ctox-pane-header,
+.documents-runbooks > .ctox-pane-header {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.documents-explorer > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.documents-runbooks > .ctox-pane-header {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
 /* Extras on top of .ctox-badge: capped width + uppercase document-type text. */
 .documents-runbook-state {
   max-width: 112px;
@@ -403,6 +438,12 @@
   max-width: 100%;
   box-sizing: border-box;
   overflow: hidden;
+  /* Own band below the pane head. The 80px app icon is two header rows tall,
+     so this second row keeps the same left inset as the head above it. */
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 6px 14px 8px calc(var(--shell-v2-icon-size, 80px) + 14px);
+  border-bottom: 1px solid var(--hairline, var(--line));
 }
 
 .documents-filter-bar .ctox-pane-search,
@@ -511,7 +552,7 @@
   outline: 2px solid var(--accent);
 }
 
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 768px) {
   .documents-filter-bar {
     grid-template-columns: minmax(0, 1fr);
     gap: 6px;
@@ -683,7 +724,11 @@
   position: fixed;
   z-index: 2400;
   width: min(560px, calc(100vw - 24px));
+  /* Body-mounted and viewport-positioned: it is capped against the viewport at
+     every size, so this needs no width media query (Shell V2 contract §6). */
+  max-height: calc(100dvh - 24px);
   overflow: hidden;
+  overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--surface);
@@ -1255,14 +1300,15 @@
 
 .documents-superdoc-toolbar .superdoc-toolbar {
   display: flex !important;
-  flex-wrap: wrap !important;
+  flex-wrap: nowrap !important;
   align-content: flex-start;
   align-items: center;
   gap: 2px 6px;
   height: auto !important;
-  max-height: 92px;
+  max-height: 40px;
   min-height: 40px;
-  overflow: hidden;
+  overflow-x: auto;
+  overflow-y: hidden;
   box-sizing: border-box;
   padding: 4px 0 !important;
   border: 0 !important;
@@ -1272,12 +1318,85 @@
 
 .documents-superdoc-toolbar .button-group {
   display: flex !important;
-  flex: 0 1 auto !important;
-  flex-wrap: wrap !important;
+  flex: 0 0 auto !important;
+  flex-wrap: nowrap !important;
   max-width: 100%;
   min-width: 0 !important;
   height: auto !important;
   align-items: center;
+}
+
+/* Shell-v2 frame: the shared window owns app identity and window controls.
+   The library explorer is a real grammar pane so search/filter state remains
+   shell-wired even though it is rendered after the static host markup. */
+.shell-window[data-shell-contract="v2"] .documents-module {
+  background: var(--shell-v2-surface, var(--bg));
+}
+.shell-window[data-shell-contract="v2"] .documents-library-pane,
+.shell-window[data-shell-contract="v2"] .documents-workbench {
+  background: var(--shell-v2-surface-alt, var(--surface));
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer {
+  height: 100%;
+  min-height: 0;
+  border: 0;
+  border-radius: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+  box-shadow: none;
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .documents-runbooks > .ctox-pane-header {
+  padding: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer > .ctox-pane-header > [data-shell-v2-header-row="2"] {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+  overflow-x: auto;
+  overflow-y: auto;
+  white-space: nowrap;
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer > .ctox-pane-header > [data-shell-v2-header-row="2"].documents-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer > .ctox-pane-header > [data-shell-v2-header-row="2"] > .ctox-pane-search {
+  flex: 1 1 auto;
+  width: auto;
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer .ctox-pane-kicker { display: none; }
+.shell-window[data-shell-contract="v2"] .documents-explorer .ctox-pane-title-row { height: 100%; }
+.shell-window[data-shell-contract="v2"] .documents-explorer .ctox-pane-title { margin-top: 0; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .documents-explorer .ctox-pane-icon {
+  width: min(26px, var(--shell-v2-header-row-size, 37px));
+  height: min(26px, var(--shell-v2-header-row-size, 37px));
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer .documents-filter-summary {
+  display: flex;
+  flex: 0 0 auto;
+  min-width: max-content;
+}
+.shell-window[data-shell-contract="v2"] .documents-explorer .documents-filter-panel {
+  flex: 0 0 auto;
+  max-height: min(240px, 40vh);
+  overflow: auto;
+}
+.shell-window[data-shell-contract="v2"] .documents-superdoc-toolbar .superdoc-toolbar,
+.shell-window[data-shell-contract="v2"] .documents-superdoc-toolbar .button-group {
+  flex-wrap: nowrap !important;
+}
+.shell-window[data-shell-contract="v2"] .documents-context-menu {
+  position: absolute;
+  z-index: 90;
+  width: min(560px, calc(100% - 16px));
+  max-width: calc(100% - 16px);
 }
 
 .documents-superdoc-toolbar .toolbar-item-ctn,
@@ -1626,7 +1745,8 @@
 
 .documents-module.is-narrow .documents-document-strip {
   gap: 4px;
-  padding-inline: 5px;
+  /* padding-right stays reserved for the 74px window control. */
+  padding-left: 5px;
 }
 
 .documents-module.is-narrow .documents-series-label strong,
@@ -1658,4 +1778,112 @@
 
 .documents-module.is-phone .documents-recipient-position {
   display: none;
+}
+
+/* ==========================================================================
+   Mobile operability (Phase 2) — phone sheet + coarse pointers.
+   Pane stacking itself is already JS-driven (is-compact / is-narrow /
+   is-phone on the resize frame) plus the documents-workbench container
+   queries above; this block only adds touch ergonomics: 44px tap targets, a
+   wide invisible hit area on the compact drawer resizer, and a
+   viewport-capped scrollable context menu (it is mounted on document.body,
+   so its rules stay unscoped).
+   ========================================================================== */
+@media (pointer: coarse) {
+  .documents-module button,
+  .documents-module input,
+  .documents-module select,
+  .documents-module textarea {
+    min-height: 44px;
+  }
+
+  /* SuperDoc 1.32.0 ships 32px toolbar controls. Keep this vendor override
+     scoped to the Documents-owned toolbar so touch targets reach 44px while
+     vendor/superdoc.css stays byte-identical. Recheck these class names when
+     the bundled SuperDoc version changes. */
+  .documents-superdoc-toolbar .superdoc-toolbar {
+    --sd-ui-toolbar-height: 44px;
+    max-height: 144px;
+  }
+
+  .documents-superdoc-toolbar .toolbar-item {
+    min-width: 44px;
+  }
+
+  .documents-superdoc-toolbar .toolbar-dropdown-option {
+    min-height: 44px;
+  }
+
+  /* Checkboxes/radios (context-mode choices) keep their box size; their
+     label row is the tap target. */
+  .documents-module input[type="checkbox"],
+  .documents-module input[type="radio"] {
+    min-height: 0;
+  }
+
+  .documents-module .ctox-pane-icon,
+  .documents-module .documents-card-manage,
+  .documents-module .documents-active-filters button {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  /* The narrow/phone variants pin the actions toggle to 30px square. */
+  .documents-module .documents-actions-toggle,
+  .documents-module.is-narrow .documents-actions-toggle {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  /* Recipient stepper: the 28px grid tracks become 44px touch tracks. */
+  .documents-module .documents-recipient-navigator,
+  .documents-module.is-narrow .documents-recipient-navigator {
+    grid-template-columns: 44px auto minmax(0, 1fr) 44px;
+  }
+
+  .documents-module.is-phone .documents-recipient-navigator {
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+  }
+
+  .documents-module .documents-recipient-search input {
+    height: 44px;
+  }
+
+  /* 44px drag hit area around the visible 8px drawer resizer grip (the only
+     resizer reachable in the compact phone layout). */
+  .documents-module.is-compact .documents-actions-resizer::after {
+    content: "";
+    position: absolute;
+    inset-block: 0;
+    left: 50%;
+    width: 44px;
+    transform: translateX(-50%);
+  }
+
+  /* Context chat lives in the body-mounted menu — size its controls too. */
+  .documents-context-menu button,
+  .documents-context-menu input,
+  .documents-context-menu textarea {
+    min-height: 44px;
+  }
+
+  .documents-context-menu input[type="checkbox"],
+  .documents-context-menu input[type="radio"] {
+    min-height: 0;
+  }
+
+  .documents-context-menu .documents-context-mode label {
+    min-height: 44px;
+  }
+
+  .documents-context-menu .documents-context-chat [data-documents-context-close] {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  /* Was a 767px width media query; the tighter padding belongs to the touch
+     ergonomics of this block, not to a screen width. */
+  .documents-context-chat {
+    padding: 10px;
+  }
 }

@@ -198,6 +198,14 @@ struct DeleteModuleRequest {
 struct SubscriptionAuthStartRequest {
     #[serde(default)]
     callback_url: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    auth_mode: Option<String>,
+    #[serde(default)]
+    flow: Option<String>,
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow::Result<()> {
@@ -286,6 +294,9 @@ pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow
 }
 
 fn resolve_business_os_app_root(root: &Path) -> PathBuf {
+    if let Ok(Some(active)) = super::shell_update::active_shell_root(root) {
+        return active;
+    }
     [
         root.join("business-os"),
         root.join("src/apps/business-os"),
@@ -487,9 +498,33 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
             } else {
                 let body = read_json(&mut request)?;
                 let options: SubscriptionAuthStartRequest = serde_json::from_value(body)?;
-                respond_json_value(
+                let payload = if options.provider.is_some() {
+                    store::start_subscription_auth_command(
+                        root,
+                        &session,
+                        store::SubscriptionAuthStartCommandRequest {
+                            provider: options.provider,
+                            auth_mode: options.auth_mode,
+                            flow: options.flow,
+                            account_id: options.account_id,
+                        },
+                    )?
+                } else {
+                    subscription_auth_start_payload(root, options.callback_url)?
+                };
+                respond_json_value(request, payload)?;
+            }
+        }
+        (Method::Get, "/api/business-os/ctox/subscription-auth/status") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                respond_json_value_no_store(
                     request,
-                    subscription_auth_start_payload(root, options.callback_url)?,
+                    store::provider_subscription_status_for_control_plane(root),
                 )?;
             }
         }
@@ -535,6 +570,61 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                     Ok(payload) => respond_json_value_no_store(request, payload)?,
                     Err(error) => respond_status(request, 500, &error.to_string())?,
                 }
+            }
+        }
+        (Method::Get, "/api/business-os/shell/update/status") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                respond_json_value_no_store(
+                    request,
+                    super::shell_update::status(root, store::session_can_manage_all(&session))?,
+                )?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/check") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::check(root);
+                respond_shell_update_operation(request, root, &session, "check", result)?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/stage") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::stage(root);
+                respond_shell_update_operation(request, root, &session, "stage", result)?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/activate") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::activate(root);
+                respond_shell_update_operation(request, root, &session, "activate", result)?;
+            }
+        }
+        (Method::Post, "/api/business-os/shell/update/rollback") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else if !store::session_can_manage_all(&session) {
+                respond_status(request, 403, "chef or admin role required")?;
+            } else {
+                let result = super::shell_update::rollback(root);
+                respond_shell_update_operation(request, root, &session, "rollback", result)?;
             }
         }
         (Method::Post, "/api/business-os/ctox/tasks/update") => {
@@ -608,7 +698,7 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 request,
                 &serde_json::json!({
                     "ok": true,
-                    "modules": load_module_manifests(app_root, &installed_app_root)?,
+                    "modules": load_module_manifests(root, app_root, &installed_app_root)?,
                     "governance": store::module_governance_map(root, &session)?
                 }),
             )?;
@@ -757,16 +847,13 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
             let session = request_session(root, &request);
             if !session.authenticated {
                 respond_status(request, 401, "login required")?;
-            } else {
-                let turn_session = session
-                    .user
-                    .as_ref()
-                    .map(|user| user.id.clone())
-                    .unwrap_or_default();
-                respond_json(
+            } else if let Some(turn_session) = authenticated_sync_config_session_id(&session) {
+                respond_sensitive_json(
                     request,
                     &store::sync_config_for_browser(root, &turn_session)?,
                 )?;
+            } else {
+                respond_status(request, 401, "login required")?;
             }
         }
         (Method::Post, "/api/business-os/sync/native-peer/restart") => {
@@ -788,6 +875,145 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 match crate::mission::channels::list_communication_accounts_for_business_os(root) {
                     Ok(value) => respond_json_value(request, value)?,
                     Err(error) => respond_status(request, 500, &error.to_string())?,
+                }
+            }
+        }
+        (Method::Get, "/api/business-os/mail/accounts") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let manage_all = store::session_can_manage_all(&session);
+                let session_user = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                let accounts = crate::communication::email_accounts::load_accounts(root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|account| manage_all || account.owner_user_id == session_user)
+                    .map(|account| {
+                        crate::communication::email_accounts::public_json(root, &account)
+                    })
+                    .collect::<Vec<_>>();
+                respond_json_value(
+                    request,
+                    serde_json::json!({ "ok": true, "accounts": accounts }),
+                )?;
+            }
+        }
+        (Method::Post, "/api/business-os/mail/accounts") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let manage_all = store::session_can_manage_all(&session);
+                let session_user = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                let body = read_json(&mut request)?;
+                let field = |key: &str| -> String {
+                    body.get(key)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned()
+                };
+                let port = |key: &str| -> u16 {
+                    body.get(key)
+                        .and_then(Value::as_u64)
+                        .and_then(|value| u16::try_from(value).ok())
+                        .unwrap_or(0)
+                };
+                let requested_owner = field("owner_user_id");
+                let owner = if manage_all && !requested_owner.is_empty() {
+                    requested_owner
+                } else {
+                    session_user.clone()
+                };
+                let address =
+                    crate::communication::email_accounts::normalize_address(&field("address"));
+                let existing_owner = crate::communication::email_accounts::load_accounts(root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|account| account.address == address)
+                    .map(|account| account.owner_user_id);
+                if let Some(existing_owner) = existing_owner {
+                    if !manage_all && existing_owner != session_user {
+                        respond_status(request, 403, "account belongs to another user")?;
+                        return Ok(());
+                    }
+                }
+                let config = crate::communication::email_accounts::EmailAccountConfig {
+                    address,
+                    display_name: field("display_name"),
+                    provider: field("provider"),
+                    imap_host: field("imap_host"),
+                    imap_port: port("imap_port"),
+                    smtp_host: field("smtp_host"),
+                    smtp_port: port("smtp_port"),
+                    username: field("username"),
+                    owner_user_id: owner,
+                };
+                let password = field("password");
+                let password = if password.is_empty() {
+                    None
+                } else {
+                    Some(password)
+                };
+                match crate::communication::email_accounts::upsert_account(
+                    root,
+                    config,
+                    password.as_deref(),
+                ) {
+                    Ok(saved) => respond_json_value(
+                        request,
+                        serde_json::json!({
+                            "ok": true,
+                            "account": crate::communication::email_accounts::public_json(root, &saved),
+                        }),
+                    )?,
+                    Err(error) => respond_status(request, 400, &error.to_string())?,
+                }
+            }
+        }
+        (Method::Post, "/api/business-os/mail/accounts/delete") => {
+            let session = request_session(root, &request);
+            if !session.authenticated {
+                respond_status(request, 401, "login required")?;
+            } else {
+                let manage_all = store::session_can_manage_all(&session);
+                let session_user = session
+                    .user
+                    .as_ref()
+                    .map(|user| user.id.clone())
+                    .unwrap_or_default();
+                let body = read_json(&mut request)?;
+                let address = crate::communication::email_accounts::normalize_address(
+                    body.get("address").and_then(Value::as_str).unwrap_or(""),
+                );
+                let owner = crate::communication::email_accounts::load_accounts(root)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .find(|account| account.address == address)
+                    .map(|account| account.owner_user_id);
+                match owner {
+                    None => respond_status(request, 404, "unknown mail account")?,
+                    Some(owner) if !manage_all && owner != session_user => {
+                        respond_status(request, 403, "account belongs to another user")?
+                    }
+                    Some(_) => {
+                        match crate::communication::email_accounts::delete_account(root, &address) {
+                            Ok(removed) => respond_json_value(
+                                request,
+                                serde_json::json!({ "ok": true, "removed": removed }),
+                            )?,
+                            Err(error) => respond_status(request, 400, &error.to_string())?,
+                        }
+                    }
                 }
             }
         }
@@ -945,11 +1171,17 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
         // index.html. It carries no Business OS collection records.
         "/api/business-os/launch-context"
             | "/api/business-os/ctox/subscription-auth/start"
+            | "/api/business-os/ctox/subscription-auth/status"
             | "/api/business-os/ctox/subscription-auth/callback"
             // Admin-triggered release control-plane: release metadata check
             // and update subprocess launch. No Business OS records flow here.
             | "/api/business-os/ctox/update/check"
             | "/api/business-os/ctox/update/apply"
+            | "/api/business-os/shell/update/status"
+            | "/api/business-os/shell/update/check"
+            | "/api/business-os/shell/update/stage"
+            | "/api/business-os/shell/update/activate"
+            | "/api/business-os/shell/update/rollback"
             // Instance-scoped upgrade lease only. This endpoint never carries
             // Business OS collection records and is deliberately identical for
             // Owner/Admin and every other authenticated actor.
@@ -970,6 +1202,13 @@ fn is_business_os_control_plane_path(path: &str) -> bool {
             // through workspace.branding.manage and never carry RxDB data.
             | "/api/business-os/design-templates"
             | "/api/business-os/design-templates/delete"
+            // Personal external mail-account configuration (Mail app setting).
+            // Carries connector config only; passwords go straight into the
+            // CTOX secret store and never appear in responses. No Business OS
+            // collection records flow here — message data still syncs
+            // exclusively through RxDB/WebRTC.
+            | "/api/business-os/mail/accounts"
+            | "/api/business-os/mail/accounts/delete"
             // Peer-lifecycle control for the rxdb-soak rollover mode: restarts
             // the in-process native peer. No Business OS records flow here and
             // the route itself answers 403 unless
@@ -1033,6 +1272,13 @@ fn request_session(root: &Path, request: &Request) -> store::BusinessOsSession {
     //    X-CTOX-Business-OS-Session). The reversible cookie credential-replay
     //    path is gone — cookies are opaque tokens only.
     let auth_header = header_value(request, "Authorization");
+    // Managed ctox.dev document/control-plane requests arrive through an SSH
+    // loopback forward. Resolve their native-signed capability before the
+    // optional local-dev session; otherwise loopback could replace the actual
+    // managed user with local-dev/admin on instances without explicit login.
+    if let Some(session) = session_from_capability_bearer(root, auth_header.as_deref()) {
+        return session;
+    }
     let session_header = header_value(request, "X-CTOX-Business-OS-Session");
     let session = store::session_for_request(
         auth_header.as_deref(),
@@ -1046,15 +1292,15 @@ fn request_session(root: &Path, request: &Request) -> store::BusinessOsSession {
             request_allows_local_dev_session(request),
         )
     });
-    if session.authenticated {
-        return session;
-    }
+    session
+}
 
-    // Managed ctox.dev control-plane requests mint a short-lived native
-    // capability token over SSH and replay it as Authorization: Bearer for
-    // localhost-only control-plane fetches. Treat that signed token as an API
-    // session, then let the normal route-level role checks decide access.
-    session_from_capability_bearer(root, auth_header.as_deref()).unwrap_or(session)
+fn authenticated_sync_config_session_id(session: &store::BusinessOsSession) -> Option<String> {
+    session
+        .authenticated
+        .then(|| session.user.as_ref().map(|user| user.id.clone()))
+        .flatten()
+        .filter(|user_id| !user_id.trim().is_empty())
 }
 
 fn session_from_capability_bearer(
@@ -1065,7 +1311,9 @@ fn session_from_capability_bearer(
         .map(str::trim)?
         .strip_prefix("Bearer ")
         .map(str::trim)?;
-    let (id, role) = store::verify_capability_actor(root, token)?;
+    // Bound mobile grants require a fresh WebRTC device proof and must never
+    // degrade into ordinary HTTP bearer credentials.
+    let (id, role) = store::verify_unbound_capability_actor(root, token)?;
     let role = policy::normalize_role(&role);
     let session = store::BusinessOsSession {
         ok: true,
@@ -1081,6 +1329,20 @@ fn session_from_capability_bearer(
         reason: None,
     };
     Some(store::session_with_persisted_user(root, session.clone()).unwrap_or(session))
+}
+
+fn verified_unbound_capability_bearer_token(
+    root: &Path,
+    auth_header: Option<&str>,
+) -> Option<String> {
+    let token = auth_header
+        .map(str::trim)?
+        .strip_prefix("Bearer ")
+        .map(str::trim)?;
+    // Only an unbound managed-web capability may be embedded in the shell.
+    // Device-bound mobile grants still require their independent proof.
+    store::verify_unbound_capability_actor(root, token)?;
+    Some(token.to_owned())
 }
 
 fn request_allows_local_dev_session(request: &Request) -> bool {
@@ -2020,6 +2282,7 @@ fn respond_redirect_with_cookie(
 }
 
 fn load_module_manifests(
+    root: &Path,
     source_app_root: &Path,
     installed_app_root: &Path,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
@@ -2038,7 +2301,14 @@ fn load_module_manifests(
             }
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-            let mut manifest: ModuleManifest = serde_json::from_str(&text)
+            let manifest_value: Value = serde_json::from_str(&text)
+                .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+            if super::customer_apps::authorize_global_module(&entry.path(), &manifest_value)
+                .is_err()
+            {
+                continue;
+            }
+            let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
                 .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
             manifest.manifest_sha256 = hex_sha256(text.as_bytes());
             manifest.local_manifest_path = path.display().to_string();
@@ -2063,13 +2333,13 @@ fn load_module_manifests(
             manifests.push(manifest);
         }
     }
-    for manifest in load_installed_module_manifests(installed_app_root)? {
+    for manifest in load_installed_module_manifests(root, installed_app_root)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
         manifests.push(manifest);
     }
-    for manifest in load_local_module_manifests(installed_app_root)? {
+    for manifest in load_local_module_manifests(root, installed_app_root)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
@@ -2084,7 +2354,10 @@ fn load_module_manifests(
     Ok(manifests)
 }
 
-fn load_installed_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleManifest>> {
+fn load_installed_module_manifests(
+    root: &Path,
+    app_root: &Path,
+) -> anyhow::Result<Vec<ModuleManifest>> {
     let modules_root = app_root.join("installed-modules");
     let mut manifests = Vec::new();
     if !modules_root.is_dir() {
@@ -2101,7 +2374,14 @@ fn load_installed_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Module
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.manifest_sha256 = hex_sha256(text.as_bytes());
         manifest.local_manifest_path = path.display().to_string();
@@ -2123,7 +2403,10 @@ fn load_installed_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Module
     Ok(manifests)
 }
 
-fn load_local_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleManifest>> {
+fn load_local_module_manifests(
+    root: &Path,
+    app_root: &Path,
+) -> anyhow::Result<Vec<ModuleManifest>> {
     let modules_root = app_root.join("local-modules");
     let mut manifests = Vec::new();
     if !modules_root.is_dir() {
@@ -2140,7 +2423,14 @@ fn load_local_module_manifests(app_root: &Path) -> anyhow::Result<Vec<ModuleMani
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.manifest_sha256 = hex_sha256(text.as_bytes());
         manifest.local_manifest_path = path.display().to_string();
@@ -3415,6 +3705,10 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
     {
         return respond_status(request, 403, "forbidden");
     }
+    if !runtime_module_static_authorized(root, rel) {
+        // Do not reveal whether a customer package exists on this instance.
+        return respond_status(request, 404, "not found");
+    }
     let file = resolve_business_os_static_file(root, app_root, rel);
     let target = if file.is_dir() {
         file.join("index.html")
@@ -3443,6 +3737,10 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         // way the shell can start; the document that carries the shell must
         // also be able to carry its context.
         let session = request_session(root, &request);
+        let capability_token = verified_unbound_capability_bearer_token(
+            root,
+            header_value(&request, "Authorization").as_deref(),
+        );
         store::remember_authenticated_session_user(root, &session)?;
         let sync_config = if session.authenticated {
             let turn_session = session
@@ -3457,8 +3755,14 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         };
         let html = String::from_utf8(bytes).context("Business OS index.html is not UTF-8")?;
         let design_templates = load_design_template_manifests(root)?;
-        bytes = inject_launch_context(html, &session, sync_config.as_ref(), &design_templates)?
-            .into_bytes();
+        bytes = inject_launch_context(
+            html,
+            &session,
+            sync_config.as_ref(),
+            &design_templates,
+            capability_token.as_deref(),
+        )?
+        .into_bytes();
     }
     let cache_control = business_os_static_cache_control(is_index, &rel, request.url());
     if is_index {
@@ -3470,16 +3774,67 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
     Ok(())
 }
 
+fn runtime_module_static_authorized(root: &Path, rel: &str) -> bool {
+    let mut parts = rel.split('/');
+    let source = parts.next().unwrap_or_default();
+    if source == "modules" {
+        let module_id = parts.next().unwrap_or_default();
+        if module_id.is_empty() {
+            return false;
+        }
+        let module_dir = match store::resolve_business_os_app_root(root) {
+            Ok(app_root) => app_root.join("modules").join(module_id),
+            Err(_) => return false,
+        };
+        let manifest = fs::read(module_dir.join("module.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        return manifest.is_some_and(|manifest| {
+            super::customer_apps::authorize_global_module(&module_dir, &manifest).is_ok()
+        });
+    }
+    if !matches!(source, "installed-modules" | "local-modules") {
+        return true;
+    }
+    let module_id = parts.next().unwrap_or_default();
+    if module_id.is_empty() {
+        return false;
+    }
+    let source_root = resolve_business_os_installed_app_root(root).join(source);
+    let module_dir = source_root.join(module_id);
+    let contained = fs::canonicalize(&source_root)
+        .ok()
+        .zip(fs::canonicalize(&module_dir).ok())
+        .is_some_and(|(root, module)| module.starts_with(root));
+    if !contained {
+        return false;
+    }
+    let manifest = fs::read(module_dir.join("module.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+    manifest.is_some_and(|manifest| {
+        super::customer_apps::authorize_runtime_module(root, &module_dir, &manifest).is_ok()
+    })
+}
+
 fn inject_launch_context(
     html: String,
     session: &store::BusinessOsSession,
     sync_config: Option<&Value>,
     design_templates: &[DesignTemplateDescriptor],
+    capability_token: Option<&str>,
 ) -> anyhow::Result<String> {
     let html = ensure_shell_stylesheets_in_index(html);
+    let mut session_value = serde_json::to_value(session)?;
+    if let (Some(token), Some(object)) = (capability_token, session_value.as_object_mut()) {
+        object.insert(
+            "capability_token".to_owned(),
+            Value::String(token.to_owned()),
+        );
+    }
     let script = format!(
         "<script>window.CTOX_BUSINESS_OS_SESSION={};window.CTOX_BUSINESS_OS_CONFIG={};window.CTOX_BUSINESS_OS_DESIGN_TEMPLATES={};</script>",
-        script_json(session)?,
+        script_json(&session_value)?,
         sync_config
             .map(script_json)
             .transpose()?
@@ -3646,6 +4001,20 @@ fn respond_json<T: Serialize>(request: Request, value: &T) -> anyhow::Result<()>
     respond_json_value(request, serde_json::to_value(value)?)
 }
 
+fn respond_sensitive_json<T: Serialize>(request: Request, value: &T) -> anyhow::Result<()> {
+    let body = serde_json::to_string_pretty(value)?;
+    let mut response = Response::from_string(body);
+    response.add_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+    response.add_header(Header::from_bytes("Cache-Control", "no-store, max-age=0").unwrap());
+    response.add_header(Header::from_bytes("Pragma", "no-cache").unwrap());
+    response.add_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap());
+    // Deliberately no permissive CORS header: sync credentials are consumed by
+    // the same-origin shell or authenticated native clients only.
+    add_common_response_headers(&mut response);
+    request.respond(response)?;
+    Ok(())
+}
+
 fn respond_json_value(request: Request, value: Value) -> anyhow::Result<()> {
     let body = serde_json::to_string_pretty(&value)?;
     let mut response = Response::from_string(body);
@@ -3654,6 +4023,30 @@ fn respond_json_value(request: Request, value: Value) -> anyhow::Result<()> {
     add_common_response_headers(&mut response);
     request.respond(response)?;
     Ok(())
+}
+
+fn respond_shell_update_operation(
+    request: Request,
+    root: &Path,
+    session: &store::BusinessOsSession,
+    action: &str,
+    result: anyhow::Result<Value>,
+) -> anyhow::Result<()> {
+    let actor_id = session
+        .user
+        .as_ref()
+        .map(|user| user.id.as_str())
+        .unwrap_or("authenticated");
+    match result {
+        Ok(value) => {
+            super::shell_update::record_audit(root, action, "succeeded", actor_id)?;
+            respond_json_value_no_store(request, value)
+        }
+        Err(_) => {
+            super::shell_update::record_audit(root, action, "failed", actor_id)?;
+            respond_status(request, 500, "shell update operation failed")
+        }
+    }
 }
 
 fn respond_json_value_no_store(request: Request, value: Value) -> anyhow::Result<()> {
@@ -3731,23 +4124,7 @@ fn add_cors_headers<R: io::Read>(response: &mut Response<R>) {
 }
 
 fn add_common_response_headers<R: io::Read>(response: &mut Response<R>) {
-    response.add_header(Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap());
-    response.add_header(Header::from_bytes("X-Frame-Options", "DENY").unwrap());
-    response.add_header(Header::from_bytes("Referrer-Policy", "no-referrer").unwrap());
-    response.add_header(
-        Header::from_bytes(
-            "Permissions-Policy",
-            "camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), serial=()",
-        )
-        .unwrap(),
-    );
-    response.add_header(
-        Header::from_bytes(
-            "Content-Security-Policy",
-            "base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'",
-        )
-        .unwrap(),
-    );
+    let _ = response;
     // tiny_http filters hop-by-hop response headers such as Connection here.
     // Static Business OS assets use respond_static_success() so Chromium does
     // not leave the ES-module graph stuck on a kept-alive loopback connection.
@@ -3863,21 +4240,11 @@ fn write_static_not_modified_response<W: Write>(
 ) -> io::Result<()> {
     write!(writer, "HTTP/1.1 304 Not Modified\r\n")?;
     write!(writer, "Cache-Control: {cache_control}\r\n")?;
-    write_static_security_headers(&mut writer)?;
     write!(writer, "ETag: {etag}\r\n")?;
     write!(writer, "Vary: Accept-Encoding\r\n")?;
     write!(writer, "Connection: close\r\n")?;
     write!(writer, "\r\n")?;
     writer.flush()
-}
-
-fn write_static_security_headers<W: Write>(writer: &mut W) -> io::Result<()> {
-    write!(writer, "X-Content-Type-Options: nosniff\r\n")?;
-    write!(writer, "X-Frame-Options: DENY\r\n")?;
-    write!(writer, "Referrer-Policy: no-referrer\r\n")?;
-    write!(writer, "Permissions-Policy: camera=(self), microphone=(self), geolocation=(), payment=(), usb=(), serial=()\r\n")?;
-    write!(writer, "Content-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'\r\n")?;
-    Ok(())
 }
 
 fn write_static_success_response<W: Write>(
@@ -3891,7 +4258,6 @@ fn write_static_success_response<W: Write>(
     write!(writer, "HTTP/1.1 200 OK\r\n")?;
     write!(writer, "Content-Type: {content_type}\r\n")?;
     write!(writer, "Cache-Control: {cache_control}\r\n")?;
-    write_static_security_headers(&mut writer)?;
     if let Some(etag) = etag {
         write!(writer, "ETag: {etag}\r\n")?;
     }
@@ -3926,6 +4292,22 @@ fn mime_for(path: &PathBuf) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subscription_auth_control_request_accepts_only_public_provider_selectors() {
+        let request: SubscriptionAuthStartRequest = serde_json::from_value(serde_json::json!({
+            "provider": "codex",
+            "auth_mode": "subscription",
+            "flow": "device_code",
+            "account_id": "codex-primary"
+        }))
+        .unwrap();
+        assert_eq!(request.provider.as_deref(), Some("codex"));
+        assert_eq!(request.auth_mode.as_deref(), Some("subscription"));
+        assert_eq!(request.flow.as_deref(), Some("device_code"));
+        assert_eq!(request.account_id.as_deref(), Some("codex-primary"));
+        assert!(request.callback_url.is_none());
+    }
 
     #[test]
     fn knowledge_index_reuses_one_ctox_sqlite_connection() -> anyhow::Result<()> {
@@ -3998,6 +4380,7 @@ mod tests {
         for (directory, id, scope) in [
             ("installed-modules", "public-addon", "installed"),
             ("local-modules", "private-addon", "local"),
+            ("installed-modules", "rem-unbound", "installed"),
         ] {
             let dir = runtime_root.join(directory).join(id);
             fs::create_dir_all(&dir)?;
@@ -4011,7 +4394,7 @@ mod tests {
             )?;
         }
 
-        let modules = load_module_manifests(&source_root, &runtime_root)?;
+        let modules = load_module_manifests(temp.path(), &source_root, &runtime_root)?;
         let by_id = modules
             .into_iter()
             .map(|module| (module.id.clone(), module))
@@ -4021,6 +4404,10 @@ mod tests {
                 .get("ctox")
                 .map(|module| module.install_scope.as_str()),
             Some("core")
+        );
+        assert!(
+            !by_id.contains_key("rem-unbound"),
+            "customer apps without an instance-bound signature must not enter the catalog"
         );
         assert_eq!(
             by_id
@@ -4042,6 +4429,56 @@ mod tests {
         );
         assert!(!by_id.contains_key("marketplace-research"));
         assert!(!by_id.contains_key("rogue-system"));
+        Ok(())
+    }
+
+    #[test]
+    fn customer_module_static_assets_fail_closed_without_valid_binding() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        fs::create_dir_all(root.path().join("runtime"))?;
+        fs::write(
+            root.path().join("runtime/business-os-instance-id"),
+            "biz_local\n",
+        )?;
+        let private = root
+            .path()
+            .join("runtime/business-os/installed-modules/rem-private");
+        fs::create_dir_all(&private)?;
+        fs::write(
+            private.join("module.json"),
+            br#"{"id":"rem-private","version":"1.0.0"}"#,
+        )?;
+        fs::write(private.join("index.js"), "private")?;
+        assert!(!runtime_module_static_authorized(
+            root.path(),
+            "installed-modules/rem-private/index.js"
+        ));
+
+        let public = root
+            .path()
+            .join("runtime/business-os/installed-modules/public-app");
+        fs::create_dir_all(&public)?;
+        fs::write(
+            public.join("module.json"),
+            br#"{"id":"public-app","version":"1.0.0"}"#,
+        )?;
+        fs::write(public.join("index.js"), "public")?;
+        assert!(runtime_module_static_authorized(
+            root.path(),
+            "installed-modules/public-app/index.js"
+        ));
+
+        let source_root = root.path().join("src/apps/business-os");
+        fs::create_dir_all(source_root.join("modules/rem-source"))?;
+        fs::write(source_root.join("index.html"), "shell")?;
+        fs::write(
+            source_root.join("modules/rem-source/module.json"),
+            br#"{"id":"rem-source","version":"1.0.0"}"#,
+        )?;
+        assert!(!runtime_module_static_authorized(
+            root.path(),
+            "modules/rem-source/index.js"
+        ));
         Ok(())
     }
 
@@ -4156,6 +4593,37 @@ mod tests {
     }
 
     #[test]
+    fn sync_config_requires_an_authenticated_named_session() {
+        let unauthenticated = store::BusinessOsSession {
+            ok: true,
+            authenticated: false,
+            auth_required: true,
+            user: None,
+            login_url: None,
+            reason: Some("missing".to_owned()),
+        };
+        assert_eq!(authenticated_sync_config_session_id(&unauthenticated), None);
+
+        let authenticated = store::BusinessOsSession {
+            ok: true,
+            authenticated: true,
+            auth_required: true,
+            user: Some(store::BusinessOsSessionUser {
+                id: "user-opaque".to_owned(),
+                display_name: "User".to_owned(),
+                role: "member".to_owned(),
+                is_admin: false,
+            }),
+            login_url: None,
+            reason: None,
+        };
+        assert_eq!(
+            authenticated_sync_config_session_id(&authenticated).as_deref(),
+            Some("user-opaque")
+        );
+    }
+
+    #[test]
     fn static_shell_bytes_are_identical_for_different_sessions() {
         let source = "<html><head></head><body>shell</body></html>";
         let session_a = store::BusinessOsSession {
@@ -4213,10 +4681,72 @@ mod tests {
 
         assert!(session.authenticated);
         assert!(store::session_can_manage_all(&session));
+        assert_eq!(
+            verified_unbound_capability_bearer_token(root.path(), Some(&auth_header)).as_deref(),
+            Some(token.as_str())
+        );
         let user = session.user.expect("session user");
         assert_eq!(user.id, "admin@example.com");
         assert_eq!(user.display_name, "Admin User");
         assert_eq!(user.role, "admin");
+    }
+
+    #[test]
+    fn device_bound_capability_cannot_downgrade_to_http_bearer() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let binding = super::super::mobile_invites::device_binding(
+            Some("pairing-http-test"),
+            Some("device-http-test"),
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
+        )
+        .expect("binding")
+        .expect("bound");
+        let created = super::super::mobile_invites::create(
+            root.path(),
+            300,
+            Some("HTTP downgrade test"),
+            Some(&binding),
+        )
+        .expect("invite");
+        let token = created["invite"]["session"]["capability_token"]
+            .as_str()
+            .expect("token");
+        assert!(store::verify_capability_actor(root.path(), token).is_some());
+        let auth_header = format!("Bearer {token}");
+        assert!(session_from_capability_bearer(root.path(), Some(&auth_header)).is_none());
+        assert!(
+            verified_unbound_capability_bearer_token(root.path(), Some(&auth_header)).is_none()
+        );
+    }
+
+    #[test]
+    fn managed_shell_launch_context_carries_its_verified_capability() {
+        let session = store::BusinessOsSession {
+            ok: true,
+            authenticated: true,
+            auth_required: true,
+            user: Some(store::BusinessOsSessionUser {
+                id: "managed@example.com".to_owned(),
+                display_name: "Managed User".to_owned(),
+                role: "user".to_owned(),
+                is_admin: false,
+            }),
+            login_url: None,
+            reason: None,
+        };
+
+        let html = inject_launch_context(
+            "<html><head></head><body>instance shell</body></html>".to_owned(),
+            &session,
+            None,
+            &[],
+            Some("verified-managed-capability"),
+        )
+        .expect("inject launch context");
+
+        assert!(html.contains("instance shell"));
+        assert!(html.contains(r#""capability_token":"verified-managed-capability""#));
+        assert!(html.contains("window.CTOX_BUSINESS_OS_SESSION"));
     }
 
     #[test]
@@ -4247,10 +4777,6 @@ mod tests {
         assert!(raw.starts_with("HTTP/1.1 200 OK\r\n"));
         assert!(raw.contains("\r\nContent-Type: text/javascript; charset=utf-8\r\n"));
         assert!(raw.contains("\r\nCache-Control: public, max-age=300\r\n"));
-        assert!(raw.contains("\r\nX-Content-Type-Options: nosniff\r\n"));
-        assert!(raw.contains("\r\nX-Frame-Options: DENY\r\n"));
-        assert!(raw.contains("\r\nReferrer-Policy: no-referrer\r\n"));
-        assert!(raw.contains("\r\nContent-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'\r\n"));
         assert!(!raw.contains("\r\nETag:"));
         assert!(raw.contains("\r\nContent-Length: 18\r\n"));
         assert!(raw.contains("\r\nConnection: close\r\n"));
@@ -4290,20 +4816,22 @@ mod tests {
     }
 
     #[test]
-    fn static_not_modified_response_is_bodyless_and_hardened() {
+    fn static_index_revalidates_with_a_bodyless_304() {
         assert_eq!(
             business_os_static_cache_control(true, "index.html", "/"),
-            "no-store"
+            "no-cache, must-revalidate"
         );
         let mut response = Vec::new();
-        write_static_not_modified_response(&mut response, "no-store", "W/\"shell\"")
-            .expect("write 304 response");
+        write_static_not_modified_response(
+            &mut response,
+            "no-cache, must-revalidate",
+            "W/\"shell\"",
+        )
+        .expect("write 304 response");
         let raw = String::from_utf8(response).expect("utf8 response");
         assert!(raw.starts_with("HTTP/1.1 304 Not Modified\r\n"));
-        assert!(raw.contains("\r\nCache-Control: no-store\r\n"));
+        assert!(raw.contains("\r\nCache-Control: no-cache, must-revalidate\r\n"));
         assert!(raw.contains("\r\nETag: W/\"shell\"\r\n"));
-        assert!(raw.contains("\r\nX-Content-Type-Options: nosniff\r\n"));
-        assert!(raw.contains("\r\nContent-Security-Policy: base-uri 'self'; object-src 'none'; frame-ancestors 'none'; form-action 'self'\r\n"));
         assert!(raw.ends_with("\r\n\r\n"));
     }
 
@@ -4498,5 +5026,21 @@ mod tests {
         assert_eq!(mime_for(&PathBuf::from("logo.png")), "image/png");
         assert_eq!(mime_for(&PathBuf::from("photo.jpeg")), "image/jpeg");
         assert_eq!(mime_for(&PathBuf::from("preview.webp")), "image/webp");
+    }
+
+    #[test]
+    fn shell_update_routes_are_control_plane_only() {
+        for path in [
+            "/api/business-os/shell/update/status",
+            "/api/business-os/shell/update/check",
+            "/api/business-os/shell/update/stage",
+            "/api/business-os/shell/update/activate",
+            "/api/business-os/shell/update/rollback",
+        ] {
+            assert!(is_business_os_control_plane_path(path), "{path}");
+        }
+        assert!(!is_business_os_control_plane_path(
+            "/api/business-os/shell/update/business-records"
+        ));
     }
 }

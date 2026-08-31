@@ -1106,6 +1106,9 @@ impl PersistentSession {
             find_codex_home().map_err(|err| anyhow::anyhow!("find_codex_home: {err}"))?;
         let use_chatgpt_subscription_auth =
             use_openai_chatgpt_subscription_auth(settings, selected_api_provider.as_deref());
+        let use_provider_subscription_proxy = selected_api_provider
+            .as_deref()
+            .is_some_and(|provider| provider.eq_ignore_ascii_case("ctox_subscription"));
 
         let selected_api_key_name = selected_api_provider.as_deref().map(|provider| {
             runtime_state::api_key_env_var_for_provider_with_env_map(provider, settings)
@@ -1116,6 +1119,7 @@ impl PersistentSession {
             {
                 None
             }
+            Some(_) if use_provider_subscription_proxy => None,
             Some(key) => settings
                 .get(key)
                 .cloned()
@@ -1188,6 +1192,7 @@ impl PersistentSession {
             && local_provider.is_none()
             && api_key.is_none()
             && !use_chatgpt_subscription_auth
+            && !use_provider_subscription_proxy
         {
             anyhow::bail!(
                 "API runtime requires provider credentials from the CTOX SQLite secret store or runtime settings; auth.json and process env fallbacks are disabled"
@@ -1210,14 +1215,15 @@ impl PersistentSession {
                     .as_ref()
                     .map(|provider| provider.provider_id.to_string())
             });
-        let tracking_api_provider = if use_chatgpt_subscription_auth {
-            None
-        } else {
-            local_provider
-                .is_none()
-                .then(|| selected_api_provider.clone())
-                .flatten()
-        };
+        let tracking_api_provider =
+            if use_chatgpt_subscription_auth || use_provider_subscription_proxy {
+                None
+            } else {
+                local_provider
+                    .is_none()
+                    .then(|| selected_api_provider.clone())
+                    .flatten()
+            };
         let overrides = ConfigOverrides {
             model: Some(model.clone()),
             model_context_window: resolved_runtime
@@ -1663,6 +1669,8 @@ impl PersistentSession {
         let mut last_recorded_cumulative_usage: Option<ApiTokenUsage> = None;
         let mut pending_api_cost_records = Vec::new();
         let mut tool_call_count = 0_u64;
+        let mut activity_turn_count = 0_u64;
+        let mut saw_reasoning_section_break = false;
         let deadline = timeout.map(|d| tokio::time::Instant::now() + d);
 
         loop {
@@ -1783,6 +1791,8 @@ impl PersistentSession {
                                 &turn_id,
                                 turn_started_at.elapsed(),
                                 &mut tool_call_count,
+                                &mut activity_turn_count,
+                                &mut saw_reasoning_section_break,
                             ) {
                                 progress(&event);
                             }
@@ -2806,6 +2816,8 @@ fn direct_session_progress_event(
     turn_id: &str,
     elapsed: Duration,
     tool_call_count: &mut u64,
+    activity_turn_count: &mut u64,
+    saw_reasoning_section_break: &mut bool,
 ) -> Option<JsonValue> {
     let elapsed_seconds = elapsed.as_secs();
     let cumulative_metadata = |extra: JsonValue| {
@@ -2856,6 +2868,88 @@ fn direct_session_progress_event(
         };
 
     match msg {
+        EventMsg::PlanUpdate(plan) => {
+            *tool_call_count = tool_call_count.saturating_add(1);
+            *activity_turn_count = activity_turn_count.saturating_add(1);
+            // PlanUpdate does not expose the originating tool call id. Bind
+            // the activity to the stable turn plus canonical plan payload so
+            // a replayed notification is deduplicated by durable storage.
+            let plan_digest = Sha256::digest(serde_json::to_vec(plan).unwrap_or_default());
+            let plan_event_id = plan_digest[..8]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            Some(serde_json::json!({
+                "event_kind": "worker.plan_updated",
+                "title": "Execution plan updated",
+                "body_text": "",
+                "metadata": {
+                    "turn_id": turn_id,
+                    "activity": {
+                        "id": format!("{turn_id}:plan:{plan_event_id}"),
+                        "kind": "tool",
+                        "tool_name": "update_plan",
+                        "attribute_to_current_step": false,
+                    },
+                    "plan": plan,
+                    "runtime": { "seconds": elapsed_seconds },
+                    "tool_call_count": *tool_call_count,
+                    "metrics_mode": "cumulative",
+                },
+            }))
+        }
+        EventMsg::AgentReasoningSectionBreak(ev) => {
+            *saw_reasoning_section_break = true;
+            *activity_turn_count = activity_turn_count.saturating_add(1);
+            let stable_id = if ev.item_id.trim().is_empty() {
+                format!("{turn_id}:thinking:{}", *activity_turn_count)
+            } else {
+                format!("{turn_id}:thinking:{}:{}", ev.item_id, ev.summary_index)
+            };
+            Some(serde_json::json!({
+                "event_kind": "worker.thinking_started",
+                "title": "Thinking block started",
+                "body_text": "",
+                "metadata": {
+                    "turn_id": turn_id,
+                    "activity": {
+                        "id": stable_id,
+                        "kind": "thinking",
+                        "attribute_to_current_step": true,
+                    },
+                    "runtime": { "seconds": elapsed_seconds },
+                    "tool_call_count": *tool_call_count,
+                    "metrics_mode": "cumulative",
+                },
+            }))
+        }
+        EventMsg::AgentReasoning(ev) if !*saw_reasoning_section_break => {
+            *activity_turn_count = activity_turn_count.saturating_add(1);
+            // Older providers may omit section-break events. Hashing the
+            // completed summary gives replay stability without persisting or
+            // emitting any reasoning text.
+            let reasoning_digest = Sha256::digest(ev.text.as_bytes());
+            let reasoning_event_id = reasoning_digest[..8]
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
+            Some(serde_json::json!({
+                "event_kind": "worker.thinking_started",
+                "title": "Thinking block completed",
+                "body_text": "",
+                "metadata": {
+                    "turn_id": turn_id,
+                    "activity": {
+                        "id": format!("{turn_id}:thinking:{reasoning_event_id}"),
+                        "kind": "thinking",
+                        "attribute_to_current_step": true,
+                    },
+                    "runtime": { "seconds": elapsed_seconds },
+                    "tool_call_count": *tool_call_count,
+                    "metrics_mode": "cumulative",
+                },
+            }))
+        }
         EventMsg::TokenCount(tc) => {
             let info = tc.info.as_ref()?;
             Some(serde_json::json!({
@@ -2927,6 +3021,48 @@ fn direct_session_progress_event(
         EventMsg::ViewImageToolCall(ev) => Some(tool_started(
             "view_image",
             "Image viewer",
+            ev.call_id.to_string(),
+            tool_call_count,
+        )),
+        EventMsg::ImageGenerationBegin(ev) => Some(tool_started(
+            "image_generation",
+            "Image generation",
+            ev.call_id.to_string(),
+            tool_call_count,
+        )),
+        EventMsg::PatchApplyBegin(ev) => Some(tool_started(
+            "apply_patch",
+            "Apply patch",
+            ev.call_id.to_string(),
+            tool_call_count,
+        )),
+        EventMsg::CollabAgentSpawnBegin(ev) => Some(tool_started(
+            "collaboration",
+            "Spawn agent",
+            ev.call_id.to_string(),
+            tool_call_count,
+        )),
+        EventMsg::CollabAgentInteractionBegin(ev) => Some(tool_started(
+            "collaboration",
+            "Agent interaction",
+            ev.call_id.to_string(),
+            tool_call_count,
+        )),
+        EventMsg::CollabWaitingBegin(ev) => Some(tool_started(
+            "collaboration",
+            "Wait for agents",
+            ev.call_id.to_string(),
+            tool_call_count,
+        )),
+        EventMsg::CollabCloseBegin(ev) => Some(tool_started(
+            "collaboration",
+            "Close agent",
+            ev.call_id.to_string(),
+            tool_call_count,
+        )),
+        EventMsg::CollabResumeBegin(ev) => Some(tool_started(
+            "collaboration",
+            "Resume agent",
             ev.call_id.to_string(),
             tool_call_count,
         )),

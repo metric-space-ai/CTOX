@@ -182,8 +182,14 @@ test('data-driven empty is gated on collection readiness (syncing shell vs empty
 test('left column carries the canonical grammar markup pins', async () => {
   const html = await readSource('./index.html');
   assert.match(html, /data-pg-search/, 'grammar search input');
-  assert.match(html, /data-pg-view="cards"/, 'shard view toggle');
-  assert.match(html, /data-pg-view="list"/, 'list view toggle');
+  // ONE view control, not two (Betreiber-Direktive 31.08.2026): a single
+  // action button, no aria-pressed, no [data-pg-view] radio pair. The glyph
+  // that is shown names the view the click switches TO.
+  assert.equal((html.match(/data-cred-view-toggle/g) || []).length, 1, 'exactly one view toggle');
+  assert.doesNotMatch(html, /data-pg-view=/, 'no two-button view radio pair');
+  assert.doesNotMatch(html, /data-cred-view-toggle[^>]*aria-pressed/, 'the toggle is an action, not a state');
+  assert.match(html, /data-view-glyph="list"/, 'glyph for switching to the list view');
+  assert.match(html, /data-view-glyph="cards"/, 'glyph for switching to the cards view');
   assert.match(html, /data-pg-tray-toggle/, 'filter tray toggle');
   assert.match(html, /data-pg-tray\b/, 'collapsed tray');
   assert.match(html, /data-pg-reset/, 'tray reset control');

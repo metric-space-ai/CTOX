@@ -157,6 +157,9 @@ function bindElements(root) {
   els.root = root.querySelector('[data-threads-root]');
   els.leftPane = root.querySelector('.threads-left');
   els.centerPane = root.querySelector('.threads-center');
+  // One-button view switches (queue rail + timeline).
+  els.viewToggle = root.querySelector('.threads-left [data-threads-view-toggle]');
+  els.centerViewToggle = root.querySelector('.threads-center [data-threads-view-toggle]');
   els.refresh = root.querySelector('[data-refresh]');
   els.search = root.querySelector('[data-pg-search]');
   els.list = root.querySelector('[data-thread-list]');
@@ -208,6 +211,8 @@ function applyLabels() {
     els.search.placeholder = state.t('search', 'Threads suchen');
     els.search.setAttribute('aria-label', state.t('search', 'Threads suchen'));
   }
+  syncViewToggle(els.viewToggle);
+  syncViewToggle(els.centerViewToggle);
   // Approval / delegation labels (the static index.html copy ships German;
   // translate the approval-flow strings through the module message catalog).
   const setFilterText = (filter, key, fb) => {
@@ -241,6 +246,22 @@ function wireUi() {
   // — the same contract the ctox module's task column uses.
   els.leftPane?.addEventListener('ctox-pane-grammar-change', onLeftGrammarChange);
   els.centerPane?.addEventListener('ctox-pane-grammar-change', onCenterGrammarChange);
+  // One control, not two (operator directive 31.08.): the card/list switch is
+  // an ACTION. This listener is registered at mount — BEFORE the shell wires
+  // the pane grammar (~120ms later) — so it flips data-pg-view first and the
+  // grammar then reports the NEW view. Before the grammar exists the module
+  // applies the switch itself through the same handler.
+  for (const button of [els.viewToggle, els.centerViewToggle]) {
+    if (!button) continue;
+    button.addEventListener('click', () => {
+      const next = button.dataset.pgView === 'list' ? 'cards' : 'list';
+      button.dataset.pgView = next;
+      syncViewToggle(button);
+      if (button.closest('.ctox-pane')?.dataset.pgWired === 'true') return;
+      if (button === els.centerViewToggle) onCenterGrammarChange({ detail: { view: next } });
+      else onLeftGrammarChange({ detail: { view: next, search: state.search, filters: {} } });
+    });
+  }
   // A band tab click means "primary queue": clear any secondary tray view so
   // the two dimensions never fight (this listener was attached at mount,
   // BEFORE the shell-wired grammar handler, so it runs first).
@@ -546,11 +567,27 @@ function renderMobileState() {
   els.root?.classList.toggle('is-mobile-detail', state.mobileView === 'detail' && Boolean(state.selectedId));
 }
 
+// The glyph and the label name the view the click switches TO, never the one
+// on screen. The button carries no aria-pressed: it is an action, not a state.
+// The shell grammar still sets one on click (a leftover of the two-button
+// era), so every sync strips it again.
+function syncViewToggle(button) {
+  if (!button) return;
+  const next = button.dataset.pgView === 'list' ? 'cards' : 'list';
+  const label = next === 'list'
+    ? state.t('viewShowList', 'Als Liste anzeigen')
+    : state.t('viewShowCards', 'Als Karten anzeigen');
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.removeAttribute('aria-pressed');
+}
+
 function onLeftGrammarChange(event) {
   const detail = event?.detail || {};
   state.search = String(detail.search ?? '');
   state.listView = detail.view === 'list';
   els.root?.classList.toggle('is-list-view', state.listView);
+  syncViewToggle(els.viewToggle);
   // One view dimension, two controls: a secondary tray view wins while set;
   // the neutral tray value hands the view back to the counted band (the
   // module's own band-click listener cleared the tray select first). When
@@ -574,6 +611,7 @@ function onCenterGrammarChange(event) {
   const detail = event?.detail || {};
   state.centerListView = detail.view === 'list';
   els.root?.classList.toggle('is-center-list-view', state.centerListView);
+  syncViewToggle(els.centerViewToggle);
 }
 
 // Export serializes the currently visible (filtered + searched) thread list
@@ -804,6 +842,47 @@ function foreignPreview(thread) {
   return { sender, text: last.body };
 }
 
+// Shard meta: the detail fields an operator needs to triage a thread WITHOUT
+// opening it — status, assignment, origin and the deadline date. All of them
+// are fields the module already loads (user_threads + the roster it fetches
+// for the handoff/note selects); no new query, no new collection.
+const STATUS_LABELS = {
+  open: ['statusOpen', 'Offen'],
+  blocked: ['statusBlocked', 'Blockiert'],
+  escalated: ['statusEscalated', 'Eskaliert'],
+  snoozed: ['statusSnoozed', 'Später'],
+  archived: ['statusArchived', 'Erledigt'],
+};
+
+function statusLabel(status) {
+  const entry = STATUS_LABELS[String(status || 'open')];
+  return entry ? state.t(entry[0], entry[1]) : String(status || '');
+}
+
+// Roster names come from the roster the module loads for its people selects;
+// before it has replicated the raw id is still more use than nothing.
+function rosterName(userId) {
+  const id = String(userId || '').trim();
+  if (!id) return '';
+  return (state.roster || []).find((user) => user.id === id)?.name || id;
+}
+
+function threadMetaLine(thread, why) {
+  const parts = [];
+  const status = statusLabel(thread.status);
+  if (status) parts.push(status);
+  const assignee = rosterName(thread.assigned_user_id);
+  if (assignee) parts.push(assignee);
+  const source = String(thread.source_label || thread.source_module || '').trim();
+  if (source) parts.push(source);
+  const due = Number(thread.due_at_ms || 0);
+  // The attention line already shouts near deadlines; meta then adds nothing.
+  if (due && !/Frist/.test(String(why || ''))) {
+    parts.push(`${state.t('metaDue', 'Frist')} ${new Date(due).toLocaleDateString('de-DE', { day: '2-digit', month: '2-digit' })}`);
+  }
+  return parts.join(' · ');
+}
+
 function threadSenderInitial(preview) {
   const name = String(preview.sender || '').trim();
   if (!name) return '·';
@@ -844,6 +923,7 @@ function renderList(threads, { resetScroll = false } = {}) {
     const pending = approvalsForThread(thread.id).filter((item) => item.status === 'pending').length;
     const unread = unreadNotificationsForThread(thread.id, me).length;
     const why = whyMeLine(thread, pending);
+    const meta = threadMetaLine(thread, why);
     const preview = foreignPreview(thread);
     return `
       <button type="button" class="ctox-list-item threads-list-item ${unread ? 'is-unread' : ''}"
@@ -861,7 +941,7 @@ function renderList(threads, { resetScroll = false } = {}) {
             <span class="threads-list-title" title="${escapeHtml(thread.title || thread.id)}">${escapeHtml(thread.title || thread.id)}</span>
             <time class="threads-item-time">${escapeHtml(relativeTime(thread.last_message_at_ms || thread.updated_at_ms))}</time>
           </span>
-          ${why ? `<span class="threads-attention">${escapeHtml(why)}</span>` : ''}
+          <span class="threads-list-meta">${why ? `<b class="threads-attention">${escapeHtml(why)}</b>` : ''}${meta ? `<span class="threads-meta-facts">${escapeHtml(meta)}</span>` : ''}</span>
           <span class="threads-list-preview">${preview.sender ? `<b>${escapeHtml(preview.sender)}:</b> ` : ''}${escapeHtml(preview.text)}</span>
         </span>
       </button>
@@ -870,6 +950,12 @@ function renderList(threads, { resetScroll = false } = {}) {
   const signature = JSON.stringify(threads.map((thread) => ([
     thread.id,
     thread.title || '',
+    // Meta facts are part of the row now: a status/assignment/deadline change
+    // has to repaint the shard even when nothing else moved.
+    thread.status || '',
+    thread.assigned_user_id || '',
+    thread.due_at_ms || 0,
+    thread.source_label || thread.source_module || '',
     thread.last_message_at_ms || thread.updated_at_ms || 0,
     approvalsForThread(thread.id).filter((item) => item.status === 'pending').length,
     unreadNotificationsForThread(thread.id, me).length,
@@ -1663,7 +1749,10 @@ function updateConnectivity() {
 }
 
 function notifyActionRequired(notifications) {
-  if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+  const canShowWebNotification = typeof Notification !== 'undefined'
+    && Notification.permission === 'granted';
+  const showSystemNotification = state.ctx?.notifications?.showSystem;
+  if (!canShowWebNotification && typeof showSystemNotification !== 'function') return;
   const preferences = personalPreferences();
   if (isQuietTime(preferences)) return;
   const enabledTypes = new Set(arrayField(preferences?.notification_types));
@@ -1679,8 +1768,32 @@ function notifyActionRequired(notifications) {
     .slice(0, 3)
     .forEach((item) => {
       const dedupeKey = `ctox:threads:notified:${currentUserId()}:${item.id}`;
-      if (storageGet(dedupeKey)) return;
+      const decisionHubDedupeKey = item.source_module === 'kundenpipeline' && item.source_record_id
+        ? `ctox:decision-hub:notified:${currentUserId()}:${item.source_record_id}`
+        : '';
+      if (storageGet(dedupeKey) || (decisionHubDedupeKey && storageGet(decisionHubDedupeKey))) return;
+      if (decisionHubDedupeKey && typeof showSystemNotification === 'function') {
+        const delivered = showSystemNotification({
+          kind: 'decision_hub',
+          title: item.title || 'Decision Hub',
+          message: 'Decision Hub wartet auf deine Entscheidung.',
+          tag: `decision-hub:${item.source_record_id}`,
+          recordId: item.source_record_id,
+          urgency: 'normal',
+          action: {
+            callback: () => {
+              location.hash = `kundenpipeline?record=${encodeURIComponent(item.source_record_id)}`;
+            },
+          },
+        });
+        if (!delivered) return;
+        storageSet(dedupeKey, '1');
+        storageSet(decisionHubDedupeKey, '1');
+        return;
+      }
+      if (!canShowWebNotification) return;
       storageSet(dedupeKey, '1');
+      if (decisionHubDedupeKey) storageSet(decisionHubDedupeKey, '1');
       const notice = new Notification(item.title || 'CTOX braucht deine Aufmerksamkeit', {
         body: 'In Threads ist eine Aktion für dich offen.',
         tag: `ctox-thread-${item.thread_id || item.id}`,

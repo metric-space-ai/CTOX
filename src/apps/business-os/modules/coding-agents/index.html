@@ -1,33 +1,45 @@
 <!-- Shell fragment: styles + mount(ctx) come from the Business OS shell. -->
-<p class="ctox-standalone-note">Dieses Modul-Fragment läuft nur innerhalb der CTOX Business-OS-Shell. Öffne die App unter <strong>http://localhost:8765/business-os/#coding-agents</strong>.</p>
+<p class="ctox-standalone-note">Dieses Modul-Fragment läuft nur innerhalb der Workjet Business OS. Öffne die App unter <strong>http://localhost:8765/business-os/#coding-agents</strong>.</p>
 <main class="ctox-workspace coding-agents-module" data-coding-agents-root data-resize-frame>
 
   <!-- Column 1: projects (Business OS apps the pi agent can work on) -->
   <!-- Narrow icon rail by default (Claude-Desktop pattern): app icons only,
        names as hover chips; drag the resizer wider for permanent labels.
        The pane chrome below is the canonical data-pg-* grammar — the SHELL
-       wires search / view toggle / tray / reset / active-dot / footer
-       (autoWirePaneGrammar); the module only renders lists and listens to
-       ctox-pane-grammar-change. Selector-only rail: no counted band. -->
+       wires search / tray / reset / active-dot / footer (autoWirePaneGrammar);
+       the module only renders lists and listens to ctox-pane-grammar-change.
+       The card/list switch is module-owned (one button, see below), because a
+       one-button switch has no aria-pressed state for the shell to track.
+       Selector-only rail: no counted band. -->
   <section class="ctox-pane coding-agents-left" aria-label="Projekte">
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="coding-agents-rail-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 6 3 12 8 18"/><polyline points="16 6 21 12 16 18"/></svg></span>
-          <span class="ctox-pane-kicker" data-ca-left-kicker>pi Coding Agent</span>
-          <h2 class="ctox-pane-title" data-ca-left-title>Projekte</h2>
-        </div>
-        <div class="ctox-pane-actions">
-          <button type="button" class="ctox-pane-icon" id="ca-refresh-apps" aria-label="Aktualisieren" title="Aktualisieren"></button>
+    <header class="coding-agents-head ctox-pane-band">
+      <!-- Row 1 is the shell-v2 header band: one --shell-v2-header-row-size
+           row that carries .ctox-pane-title (the shell hangs its version menu
+           on the first one) and keeps the reserved icon corner clear. -->
+      <div class="ctox-pane-header">
+        <div class="ctox-pane-title-row">
+          <div class="ctox-pane-titles">
+            <span class="coding-agents-rail-mark" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="8 6 3 12 8 18"/><polyline points="16 6 21 12 16 18"/></svg></span>
+            <span class="ctox-pane-kicker" data-ca-left-kicker>pi Coding Agent</span>
+            <h2 class="ctox-pane-title" data-ca-left-title>Projekte</h2>
+          </div>
+          <div class="ctox-pane-actions">
+            <button type="button" class="ctox-pane-icon" id="ca-refresh-apps" aria-label="Aktualisieren" title="Aktualisieren"></button>
+          </div>
         </div>
       </div>
+      <!-- Row 2 (v2 shell only): reserved band row. The 80x80 shell app icon
+           covers the whole rail top; this row completes the 2x37px header so
+           the rail's list starts below the reserved icon square. -->
+      <div class="ctox-pane-header coding-agents-rail-spacer" aria-hidden="true"></div>
       <!-- Row 2 (wide rail only): filter section — search + collapsed tray. -->
       <div class="coding-agents-filterbar" data-rail-wide>
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Apps suchen" aria-label="Apps suchen">
-        <div class="coding-agents-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- ONE control, not two: the button IS the switch. Its icon and label
+             name the view it switches TO, so there is no pressed state to
+             read (Betreiber-Direktive 31.08.2026). data-ca-view carries the
+             view that is currently rendered. -->
+        <button type="button" class="ctox-pane-icon coding-agents-view-toggle" data-ca-view-toggle="apps" data-ca-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         <button type="button" class="ctox-pane-icon coding-agents-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="coding-agents-filter-advanced" data-pg-tray hidden>
@@ -53,26 +65,25 @@
 
   <!-- Column 2: the conversation with the agent -->
   <section class="ctox-pane coding-agents-center" aria-label="Agent-Chat">
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker" id="ca-active-app-kicker">pi Coding Agent</span>
-          <h2 class="ctox-pane-title" id="ca-active-app-title">Kein Projekt gewählt</h2>
-        </div>
-        <div class="ctox-pane-actions">
-          <button type="button" class="ctox-pane-icon" id="ca-export-session" title="Sichtbare Session-Daten exportieren" aria-label="Sichtbare Session-Daten exportieren" disabled></button>
-          <button type="button" class="ctox-pane-icon" id="ca-open-editor" title="Im Source-Editor öffnen" aria-label="Im Source-Editor öffnen" disabled>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M9 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/></svg>
-          </button>
+    <header class="coding-agents-head ctox-pane-band">
+      <div class="ctox-pane-header">
+        <div class="ctox-pane-title-row">
+          <div class="ctox-pane-titles">
+            <span class="ctox-pane-kicker" id="ca-active-app-kicker">pi Coding Agent</span>
+            <h2 class="ctox-pane-title" id="ca-active-app-title">Kein Projekt gewählt</h2>
+          </div>
+          <div class="ctox-pane-actions">
+            <button type="button" class="ctox-pane-icon" id="ca-export-session" title="Sichtbare Session-Daten exportieren" aria-label="Sichtbare Session-Daten exportieren" disabled></button>
+            <button type="button" class="ctox-pane-icon" id="ca-open-editor" title="Im Source-Editor öffnen" aria-label="Im Source-Editor öffnen" disabled>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 5h5v5M19 5l-8 8M9 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-3"/></svg>
+            </button>
+          </div>
         </div>
       </div>
       <!-- Row 2: filter section — transcript search + collapsed tray. -->
       <div class="coding-agents-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Im Verlauf suchen" aria-label="Im Verlauf suchen">
-        <div class="coding-agents-view-toggle" role="group" aria-label="Verlauf-Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <button type="button" class="ctox-pane-icon coding-agents-view-toggle" data-ca-view-toggle="chat" data-ca-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         <button type="button" class="ctox-pane-icon coding-agents-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="coding-agents-filter-advanced" data-pg-tray hidden>
@@ -114,17 +125,19 @@
 
   <!-- Column 3: the agent's live artifact (free HTML the agent maintains) -->
   <aside class="ctox-pane coding-agents-right" aria-label="Task-Artefakt">
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">Artefakt</span>
-          <h2 class="ctox-pane-title" id="ca-artifact-title">Task-Fortschritt</h2>
+    <header class="coding-agents-head ctox-pane-band">
+      <div class="ctox-pane-header">
+        <div class="ctox-pane-title-row">
+          <div class="ctox-pane-titles">
+            <span class="ctox-pane-kicker">Artefakt</span>
+            <h2 class="ctox-pane-title" id="ca-artifact-title">Task-Fortschritt</h2>
+          </div>
+          <div class="ctox-pane-actions"></div>
         </div>
-        <div class="ctox-pane-actions"></div>
       </div>
     </header>
     <div class="ctox-pane-body coding-agents-artifact-host">
-      <iframe id="ca-artifact" class="coding-agents-artifact" sandbox="" title="Task-Artefakt" hidden></iframe>
+      <div id="ca-artifact-host" class="coding-agents-artifact-host-frame"></div>
       <div class="ctox-empty" id="ca-artifact-empty"><strong>Noch kein Artefakt.</strong><br>Der Agent veröffentlicht hier eine Live-Seite zu seinem Task (session.metadata.artifact_html).</div>
     </div>
     <footer class="coding-agents-footer"><span id="ca-artifact-footer"></span></footer>

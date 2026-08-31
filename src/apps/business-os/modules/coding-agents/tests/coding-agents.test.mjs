@@ -30,7 +30,12 @@ test('presentation layer stays compact and shell-native', () => {
   // Three-column contract (Claude-Code pattern): projects | agent chat | live artifact.
   assert.match(html, /class="ctox-workspace coding-agents-module/);
   assert.match(html, /coding-agents-chat/);
-  assert.match(html, /id="ca-artifact"[^>]*sandbox=""/);
+  assert.match(html, /id="ca-artifact-host"/);
+  assert.doesNotMatch(html, /<iframe[^>]*id="ca-artifact"/);
+  assert.match(js, /document\.createElement\('iframe'\)/);
+  assert.match(js, /frame\.setAttribute\('sandbox', ''\)/);
+  assert.match(js, /sanitizeArtifactHtml\(html\)/);
+  assert.match(js, /querySelectorAll\('script, iframe, object, embed, base, meta\[http-equiv\]'\)/);
   assert.match(html, /data-resize-frame/);
   assert.match(html, /class="ctox-column-resizer"[^>]*data-resizer-var="--ctox-left-width"/);
   assert.doesNotMatch(js, /CtoxResizer/);
@@ -60,12 +65,24 @@ test('presentation layer stays compact and shell-native', () => {
   assert.match(html, /data-pg-count="chat"/);
   assert.match(html, /data-pg-count="turns"/);
   assert.match(js, /ctox-pane-grammar-change/);
-  // Shard/list toggle in EVERY element-listing column, canonical icons, and
+  // Shard/list switch in EVERY element-listing column, canonical icons, and
   // sitting in the filterbar next to search (never invented icons top-right).
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // Betreiber-Direktive 31.08.2026: ONE button, not a pair. It is an action
+  // ("show as list"), so it carries no aria-pressed state, and the two-button
+  // data-pg-view radio pair is gone — the module owns the mode itself.
+  const viewToggles = html.match(/<button[^>]*data-ca-view-toggle="[a-z]+"[^>]*>/g) || [];
+  assert.equal(viewToggles.length, 2, 'exactly one view switch per element-listing column');
+  for (const button of viewToggles) {
+    assert.doesNotMatch(button, /aria-pressed/, 'the view switch is an action, not a state');
+    assert.match(button, /data-ca-view="cards"/);
+    assert.match(button, /aria-label="[^"]+"/);
+    assert.match(button, /title="[^"]+"/);
+  }
+  assert.doesNotMatch(html, /data-pg-view=/);
+  assert.match(js, /t\('viewShowList'\)/);
+  assert.match(js, /t\('viewShowCards'\)/);
   const chatFilterbar = html.match(/<div class="coding-agents-filterbar">[\s\S]*?<\/div>\n      <div class="coding-agents-filter-advanced" data-pg-tray/);
-  assert.ok(chatFilterbar && chatFilterbar[0].includes('data-pg-view="cards"'), 'chat view toggle must live in the filterbar row');
+  assert.ok(chatFilterbar && chatFilterbar[0].includes('data-ca-view-toggle="chat"'), 'chat view switch must live in the filterbar row');
   // A view band exists only with >= 2 real views; a single view's count
   // belongs in the footer, never in a lone chip-looking tab.
   assert.doesNotMatch(html, /data-count-apps/);
@@ -74,6 +91,9 @@ test('presentation layer stays compact and shell-native', () => {
   assert.match(html, /class="ctox-pane-icon" id="ca-export-session"/);
   assert.match(html, /id="ca-export-session"[^>]*title="[^"]+"[^>]*aria-label="[^"]+"/);
   assert.match(js, /getActionIcon\?\.\('export'\)/);
+  assert.match(js, /addEventListener\?\.\('ctox-business-os-app-launch', handleDesktopAppLaunch\)/);
+  assert.match(js, /removeEventListener\?\.\('ctox-business-os-app-launch', handleDesktopAppLaunch\)/);
+  assert.match(js, /focusRequestedApp\(moduleId\)/);
   assert.match(js, /new Blob\(\[JSON\.stringify\(payload, null, 2\)\]/);
   assert.match(css, /\.coding-agents-filter-toggle\.has-active-filters::after/);
   assert.match(css, /\.coding-agents-chat-well/);

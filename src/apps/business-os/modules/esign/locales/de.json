@@ -12,5 +12,7 @@
   "viewOpen": "Offen",
   "viewDone": "Abgeschlossen",
   "composerTitle": "Signatur anfordern",
-  "signersHead": "Unterzeichner"
+  "signersHead": "Unterzeichner",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen"
 }

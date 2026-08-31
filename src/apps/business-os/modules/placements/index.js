@@ -1,6 +1,6 @@
 import { renderListOrState } from '../../shared/list-state.js';
 
-const MOD_BUILD = '20260727-readiness';
+const MOD_BUILD = '20260831-shellv2';
 const MODULE_ID = 'placements';
 const PRIMARY = 'placements';
 const CREATE_COMMAND = 'ats.placement.create';
@@ -11,14 +11,16 @@ const TERMINAL_STATUSES = new Set(['early_leave', 'cancelled']);
 
 export const COPY = {
   de: {
-    kicker: 'VERMITTLUNGEN', listTitle: 'Vermittlungen', candidate: 'Kandidat-ID', client: 'Kunden-Account-ID', placementType: 'Vermittlungsart', directHire: 'Festanstellung (Personalvermittlung)', temporary: 'Arbeitnehmerüberlassung (Zeitarbeit)', qualifications: 'Pflicht-Qualifikationen (Komma)', fee: 'Honorar', guarantee: 'Garantie (Tage)', create: 'Anlegen', more: 'Weitere Angaben', entries: 'Einträge', empty: 'Noch keine Einträge.', syncing: 'Daten werden synchronisiert.', earlyLeaveBooked: 'Frühausstieg verbucht.', clawback: 'Clawback', credit: 'Gutschrift', offlineService: 'Offline: Befehlsdienst nicht verfügbar.', offlineSend: 'Offline: Befehl konnte nicht gesendet werden.', candidateRequired: 'Kandidat-ID erforderlich.', blocked: 'Blockiert.', placementCreated: 'Placement angelegt.', placement: 'Placement', feeInvoice: 'Honorar-Rechnung', invoice: 'Rechnung', cancellation: 'Storno', earlyLeave: 'Frühausstieg', status: 'Status',
+    kicker: 'ATS', listTitle: 'Vermittlungen', candidate: 'Kandidat-ID', client: 'Kunden-Account-ID', placementType: 'Vermittlungsart', directHire: 'Festanstellung (Personalvermittlung)', temporary: 'Arbeitnehmerüberlassung (Zeitarbeit)', qualifications: 'Pflicht-Qualifikationen (Komma)', fee: 'Honorar', guarantee: 'Garantie (Tage)', create: 'Anlegen', more: 'Weitere Angaben', entries: 'Einträge', empty: 'Noch keine Einträge.', syncing: 'Daten werden synchronisiert.', earlyLeaveBooked: 'Frühausstieg verbucht.', clawback: 'Clawback', credit: 'Gutschrift', offlineService: 'Offline: Befehlsdienst nicht verfügbar.', offlineSend: 'Offline: Befehl konnte nicht gesendet werden.', candidateRequired: 'Kandidat-ID erforderlich.', blocked: 'Blockiert.', placementCreated: 'Placement angelegt.', placement: 'Placement', feeInvoice: 'Honorar-Rechnung', invoice: 'Rechnung', cancellation: 'Storno', earlyLeave: 'Frühausstieg', status: 'Status',
     allTypes: 'Alle Arten', viewAll: 'Alle', viewActive: 'Aktiv', viewEnded: 'Beendet', composerKicker: 'NEUE VERMITTLUNG', composerTitle: 'Vermittlung anlegen', composerHint: 'Eintrag wählen oder neue Vermittlung anlegen.', recordKicker: 'VERMITTLUNG', importDone: 'Import abgeschlossen.', exportDone: 'Export erstellt.', invalidFile: 'Datei konnte nicht gelesen werden (JSON erwartet).',
     statusConfirmed: 'bestätigt', statusEarlyLeave: 'Frühausstieg', statusCancelled: 'storniert',
+    showAsList: 'Als Liste anzeigen', showAsCards: 'Als Karten anzeigen', localeTag: 'de-DE', start: 'Start',
   },
   en: {
-    kicker: 'PLACEMENTS', listTitle: 'Placements', candidate: 'Candidate ID', client: 'Client account ID', placementType: 'Placement type', directHire: 'Permanent placement', temporary: 'Temporary staffing', qualifications: 'Required qualifications (comma-separated)', fee: 'Fee', guarantee: 'Guarantee (days)', create: 'Create', more: 'More details', entries: 'records', empty: 'No placements yet.', syncing: 'Syncing data.', earlyLeaveBooked: 'Early leave recorded.', clawback: 'Clawback', credit: 'Credit note', offlineService: 'Offline: command service unavailable.', offlineSend: 'Offline: command could not be sent.', candidateRequired: 'Candidate ID is required.', blocked: 'Blocked.', placementCreated: 'Placement created.', placement: 'Placement', feeInvoice: 'Fee invoice', invoice: 'Invoice', cancellation: 'Cancellation', earlyLeave: 'Early leave', status: 'Status',
+    kicker: 'ATS', listTitle: 'Placements', candidate: 'Candidate ID', client: 'Client account ID', placementType: 'Placement type', directHire: 'Permanent placement', temporary: 'Temporary staffing', qualifications: 'Required qualifications (comma-separated)', fee: 'Fee', guarantee: 'Guarantee (days)', create: 'Create', more: 'More details', entries: 'records', empty: 'No placements yet.', syncing: 'Syncing data.', earlyLeaveBooked: 'Early leave recorded.', clawback: 'Clawback', credit: 'Credit note', offlineService: 'Offline: command service unavailable.', offlineSend: 'Offline: command could not be sent.', candidateRequired: 'Candidate ID is required.', blocked: 'Blocked.', placementCreated: 'Placement created.', placement: 'Placement', feeInvoice: 'Fee invoice', invoice: 'Invoice', cancellation: 'Cancellation', earlyLeave: 'Early leave', status: 'Status',
     allTypes: 'All types', viewAll: 'All', viewActive: 'Active', viewEnded: 'Ended', composerKicker: 'NEW PLACEMENT', composerTitle: 'Create placement', composerHint: 'Select a record or start a new placement.', recordKicker: 'PLACEMENT', importDone: 'Import complete.', exportDone: 'Export created.', invalidFile: 'File could not be read (JSON expected).',
     statusConfirmed: 'confirmed', statusEarlyLeave: 'early leave', statusCancelled: 'cancelled',
+    showAsList: 'Show as list', showAsCards: 'Show as cards', localeTag: 'en-GB', start: 'Start',
   },
 };
 let text = COPY.de;
@@ -77,8 +79,14 @@ export async function mount(ctx) {
   function renderListRegion() {
     const counts = bandCounts(state.records);
     state.visible = filterRecords(state.records, state.grammar);
+    const view = state.grammar.view === 'list' ? 'list' : 'cards';
+    // Two load-bearing markers, same convention as customers: `.is-list-view`
+    // on the well is the app-wide view marker, `.is-compact` on the row (set
+    // in renderList) says the row carries the one-line compact markup, so the
+    // dense rules can never land on a card-shaped row.
+    listEl?.classList.toggle('is-list-view', view === 'list');
     if (listEl) listEl.innerHTML = renderList(state.visible, {
-      view: state.grammar.view,
+      view,
       selectedId: state.selectedId,
       sourceEmpty: state.records.length === 0,
       readiness: placementReadiness,
@@ -181,10 +189,27 @@ export async function mount(ctx) {
   }
   listEl?.addEventListener('click', onListClick);
 
+  // ---- View: ONE button, one action (Betreiber-Direktive 31.08.2026) --------
+  // The shell grammar models the view as N aria-pressed buttons, which a
+  // single action button cannot express, so the module owns the flip and
+  // republishes it through the pane's data-pg-default-view.
+  const viewToggleBtn = root?.querySelector('[data-placements-view-toggle]');
+  function onViewToggle() {
+    state.grammar = { ...state.grammar, view: state.grammar.view === 'list' ? 'cards' : 'list' };
+    syncViewToggle(listPane, state.grammar.view, text);
+    renderListRegion();
+  }
+  viewToggleBtn?.addEventListener('click', onViewToggle);
+  syncViewToggle(listPane, state.grammar.view, text);
+
   // Re-render the list on any shell-wired grammar change (search/view/tray/band).
   function onGrammarChange(event) {
     if (!listPane || !listPane.contains(event.target)) return;
-    state.grammar = event.detail || readGrammarState(listPane);
+    const detail = event.detail || readGrammarState(listPane);
+    // The grammar's `view` comes from the pane default we keep in sync above;
+    // never let an absent/stale value reset the operator's chosen view.
+    const view = detail.view === 'list' || detail.view === 'cards' ? detail.view : state.grammar.view;
+    state.grammar = { ...detail, view };
     renderListRegion();
   }
   root?.addEventListener('ctox-pane-grammar-change', onGrammarChange);
@@ -353,6 +378,7 @@ export async function mount(ctx) {
     try { readinessUnsub?.(); } catch {}
     formEl?.removeEventListener('submit', onSubmit);
     listEl?.removeEventListener('click', onListClick);
+    viewToggleBtn?.removeEventListener('click', onViewToggle);
     detailEl?.removeEventListener('click', onDetailClick);
     root?.removeEventListener('ctox-pane-grammar-change', onGrammarChange);
     ctx.host.replaceChildren();
@@ -468,38 +494,59 @@ function statusBadgeClass(status) {
   return '';
 }
 
-// A shard is a pure selector: title + ONE muted meta line.
+// Short day stamp for the shard meta lines; invalid/absent timestamps stay out
+// of the line instead of rendering a placeholder.
+function formatDay(ms, t) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  try { return new Date(value).toLocaleDateString(t.localeTag || 'de-DE', { day: '2-digit', month: '2-digit', year: 'numeric' }); }
+  catch { return ''; }
+}
+
+// KARTEN: the record at a glance — bold title line plus up to two muted meta
+// lines built from the detail fields the module already loads (type, fee,
+// guarantee clock, start day, and the booked invoice/credit note).
 function shardCard(r, selectedId, t) {
   const key = recordKey(r);
   const status = String(r.status || 'confirmed');
-  const meta = [t.kicker, typeLabel(r.placement_type, t), r.fee == null ? null : `${t.fee}: ${r.fee}`]
-    .filter(Boolean).map(esc).join(' · ');
   const badge = ('ctox-badge ' + statusBadgeClass(status)).trim();
-  return rowShell(r, key, selectedId,
+  const primary = [
+    typeLabel(r.placement_type, t),
+    r.fee == null ? null : `${t.fee}: ${r.fee}`,
+  ].filter(Boolean).map(esc).join(' · ');
+  const secondary = [
+    r.guarantee_days == null ? null : `${t.guarantee}: ${r.guarantee_days}`,
+    formatDay(r.start_ms, t) ? `${t.start}: ${formatDay(r.start_ms, t)}` : null,
+    r.fee_invoice_id ? `${t.invoice}: ${r.fee_invoice_id}` : null,
+    r.storno_credit_note_id ? `${t.cancellation}: ${r.storno_credit_note_id}` : null,
+  ].filter(Boolean).map(esc).join(' · ');
+  return rowShell(r, key, selectedId, false,
     '<div class="placements-shard">'
     + '<div class="placements-shard-title">'
     + `<span class="${badge}" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
     + `<strong>${esc(placementTitle(r))}</strong>`
     + '</div>'
-    + `<small class="placements-shard-meta">${meta}</small>`
+    + (primary ? `<small class="placements-shard-meta">${primary}</small>` : '')
+    + (secondary ? `<small class="placements-shard-meta">${secondary}</small>` : '')
     + '</div>');
 }
 
+// LISTE: exactly ONE dense line per record — title plus a single short meta
+// on the right. No badge, no second line; the density is the point.
 function shardCompact(r, selectedId, t) {
   const key = recordKey(r);
   const status = String(r.status || 'confirmed');
-  const badge = ('ctox-badge ' + statusBadgeClass(status)).trim();
-  return rowShell(r, key, selectedId,
+  return rowShell(r, key, selectedId, true,
     '<div class="placements-row-compact">'
     + `<span class="placements-compact-title">${esc(placementTitle(r))}</span>`
-    + `<span class="${badge}" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
+    + `<span class="placements-compact-tag" data-status="${esc(status)}">${esc(statusLabel(status, t))}</span>`
     + '</div>');
 }
 
-function rowShell(r, key, selectedId, inner) {
+function rowShell(r, key, selectedId, compact, inner) {
   const label = placementTitle(r);
   const selected = key && key === selectedId;
-  return '<button type="button" class="ctox-list-item placements-row' + (selected ? ' is-selected' : '') + '"'
+  return '<button type="button" class="ctox-list-item placements-row' + (selected ? ' is-selected' : '') + (compact ? ' is-compact' : '') + '"'
     + ` data-ats-row="${esc(key)}" aria-selected="${selected ? 'true' : 'false'}"`
     + ` data-context-record-id="${esc(key)}" data-context-record-type="placement"`
     + ` data-context-label="${esc(label)}">${inner}</button>`;
@@ -557,12 +604,42 @@ function renderBlocked(result, setGate) {
   return true;
 }
 
+// Ein-Knopf-Umschalter: das Icon zeigt die Ansicht, zu der gewechselt wird.
+// Kein aria-pressed - der Knopf ist eine Aktion, kein Zustand.
+const VIEW_TOGGLE_ICONS = Object.freeze({
+  // Ziel "Liste": drei Zeilen.
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+  // Ziel "Karten": zwei Shards.
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+});
+
+// Publishes the module-owned view back onto the pane so the shell grammar's
+// `data-pg-default-view` fallback keeps reporting the view the operator sees,
+// and repaints the single toggle for the view it switches TO.
+function syncViewToggle(pane, view, t) {
+  if (!pane) return;
+  const current = view === 'list' ? 'list' : 'cards';
+  pane.dataset.pgDefaultView = current;
+  const button = pane.querySelector('[data-placements-view-toggle]');
+  if (!button) return;
+  const next = current === 'list' ? 'cards' : 'list';
+  const label = next === 'list' ? t.showAsList : t.showAsCards;
+  button.dataset.placementsView = current;
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.removeAttribute('aria-pressed');
+  const icon = VIEW_TOGGLE_ICONS[next];
+  if (icon && button.innerHTML !== icon) button.innerHTML = icon;
+}
+
 // Read the current grammar state straight from the DOM so the module never
 // depends on the shell having wired __ctoxPaneGrammar yet.
 function readGrammarState(pane) {
   if (!pane) return { search: '', view: 'cards', band: 'all', filters: {} };
   const search = pane.querySelector('[data-pg-search]');
-  const view = [...pane.querySelectorAll('[data-pg-view]')].find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.pgView || 'cards';
+  // The view belongs to the module's one-button toggle; `data-pg-default-view`
+  // on the pane is the single place both sides read it from.
+  const view = pane.dataset.pgDefaultView === 'list' ? 'list' : 'cards';
   const band = [...pane.querySelectorAll('[data-pg-band]')].find((b) => b.getAttribute('aria-selected') === 'true')?.dataset.pgBand || 'all';
   const filters = {};
   pane.querySelectorAll('[data-pg-filter]').forEach((el) => { filters[el.dataset.pgName || el.name || 'filter'] = el.value; });

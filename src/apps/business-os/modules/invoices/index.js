@@ -47,7 +47,7 @@ const COPY = {
     invoices: 'Rechnungen', kicker: 'CTOX', all: 'Alle', overdue: 'Überfällig', open: 'Offen', paid: 'Bezahlt',
     newInvoice: 'Neue Rechnung', import: 'Importieren', export: 'Exportieren', closeDetail: 'Details schließen',
     unknown: 'unbekannt', newShort: 'NEU', entries: 'Einträge', search: 'Suchen...', view: 'Darstellung',
-    cardsView: 'Shard-Ansicht', listView: 'Listen-Ansicht', filter: 'Filter', allTypes: 'Alle Typen', filterType: 'Typ',
+    cardsView: 'Kachelansicht', listView: 'Listenansicht', filter: 'Filter', allTypes: 'Alle Typen', filterType: 'Typ',
     resetFilters: 'Filter zurücksetzen',
     emptyHint: 'Wähle eine Rechnung aus der Liste oder erstelle einen neuen Entwurf.', invoice: 'Rechnung', draft: 'Entwurf',
     customer: 'Kunde', chooseCustomer: '— bitte Kunde wählen —', invoiceDate: 'Rechnungsdatum', type: 'Typ',
@@ -56,7 +56,7 @@ const COPY = {
     removeLine: 'Position entfernen', invoiceNumber: 'Rechnungsnummer', date: 'Datum', due: 'Fällig', journal: 'Journal',
     payments: 'Zahlungen', dunning: 'Mahnen', noJournal: 'Kein Journal-Eintrag verknüpft.', account: 'Konto', description: 'Beschreibung', debit: 'Soll', credit: 'Haben',
     downloadXml: 'XRechnung-XML herunterladen', xmlFailed: 'XRechnung-Vorschau fehlgeschlagen', amountCents: 'Betrag (Cent)', discountCents: 'Skonto (Cent)',
-    paymentId: 'Zahlungs-ID', allocate: 'Zuordnen', discountHint: 'Skonto wird nur abgezogen, wenn das Zahlungsdatum vor dem Skonto-Deadline liegt. Das berechnet der native Handler.',
+    paymentId: 'Zahlungs-ID', allocate: 'Zuordnen', discountHint: 'Skonto wird nur abgezogen, wenn das Zahlungsdatum vor dem Skonto-Deadline liegt. Das berechnet die lokale Zahlungslogik.',
     dunningOnlyOverdue: 'Dunning ist nur für überfällige Rechnungen verfügbar.', dunningHint: 'Diese Rechnung ist überfällig. Starte einen Mahnlauf, um einen Brief zu erzeugen.',
     dunningRun: 'Mahnlauf für diese Rechnung', address: 'Adresse', email: 'E-Mail', noAddress: 'Keine Adresse hinterlegt.',
     dependencyTitle: 'Rechnungen benötigt weitere Module', dependencyNote: 'Bitte installiere „buchhaltung“ (FIBU/Journal) und „customers“ (Party-Stamm) im App Store, dann lade das Rechnungen-Modul neu.',
@@ -71,7 +71,7 @@ const COPY = {
     invoices: 'Invoices', kicker: 'CTOX', all: 'All', overdue: 'Overdue', open: 'Open', paid: 'Paid',
     newInvoice: 'New invoice', import: 'Import', export: 'Export', closeDetail: 'Close details',
     unknown: 'unknown', newShort: 'NEW', entries: 'entries', search: 'Search...', view: 'View',
-    cardsView: 'Shard view', listView: 'List view', filter: 'Filter', allTypes: 'All types', filterType: 'Type',
+    cardsView: 'Card view', listView: 'List view', filter: 'Filter', allTypes: 'All types', filterType: 'Type',
     resetFilters: 'Reset filters',
     emptyHint: 'Select an invoice from the list or create a new draft.', invoice: 'Invoice', draft: 'Draft',
     customer: 'Customer', chooseCustomer: '— select customer —', invoiceDate: 'Invoice date', type: 'Type',
@@ -80,7 +80,7 @@ const COPY = {
     removeLine: 'Remove line item', invoiceNumber: 'Invoice number', date: 'Date', due: 'Due', journal: 'Journal',
     payments: 'Payments', dunning: 'Dunning', noJournal: 'No journal entry linked.', account: 'Account', description: 'Description', debit: 'Debit', credit: 'Credit',
     downloadXml: 'Download XRechnung XML', xmlFailed: 'XRechnung preview failed', amountCents: 'Amount (cents)', discountCents: 'Discount (cents)',
-    paymentId: 'Payment ID', allocate: 'Allocate', discountHint: 'The native handler applies the discount only when payment occurs before the discount deadline.',
+    paymentId: 'Payment ID', allocate: 'Allocate', discountHint: 'The payment logic applies the discount only when payment occurs before the discount deadline.',
     dunningOnlyOverdue: 'Dunning is available only for overdue invoices.', dunningHint: 'This invoice is overdue. Start a dunning run to generate a letter.',
     dunningRun: 'Run dunning for this invoice', address: 'Address', email: 'Email', noAddress: 'No address recorded.',
     dependencyTitle: 'Invoices requires additional modules', dependencyNote: 'Install “buchhaltung” (ledger/journal) and “customers” (party master data) from the App Store, then reload Invoices.',
@@ -612,7 +612,9 @@ function buildLeftGrammar(leftPane) {
     paneIcon(ICON.export, t('export'), { action: 'export' }));
 
   const header = createEl('header', 'ctox-pane-header ctox-pane-band');
-  add(header, buildTitleRow(t('kicker'), t('invoices'), actions));
+  const titleRow = buildTitleRow(t('kicker'), t('invoices'), actions);
+  titleRow.dataset.shellV2HeaderRow = '1';
+  add(header, titleRow);
 
   const filterbar = createEl('div', 'ctox-filterbar');
   const search = createEl('input', 'ctox-pane-search');
@@ -634,6 +636,7 @@ function buildLeftGrammar(leftPane) {
   filterToggle.setAttribute('data-pg-tray-toggle', '');
   filterToggle.setAttribute('aria-expanded', 'false');
   add(filterbar, search, viewToggle, filterToggle);
+  filterbar.dataset.shellV2HeaderRow = '2';
   add(header, filterbar);
 
   const tray = createEl('div', 'ctox-filter-tray');
@@ -681,6 +684,7 @@ function buildLeftGrammar(leftPane) {
     tabs.appendChild(tab);
     countEls[band] = count;
   }
+  nav.dataset.shellV2HeaderRow = '3';
   add(nav, tabs);
 
   const well = createEl('div', 'ctox-pane-body ctox-well');
@@ -910,7 +914,9 @@ function renderMain() {
     ? `${inv.invoice_number || t('draft')} · ${partyName(inv.party_id)}`
     : t('invoice');
   const header = createEl('header', 'ctox-pane-header ctox-pane-band');
-  add(header, buildTitleRow(kicker, title, actions, 'h1'));
+  const titleRow = buildTitleRow(kicker, title, actions, 'h1');
+  titleRow.dataset.shellV2HeaderRow = '1';
+  add(header, titleRow);
 
   let body;
   if (!inv || !reveal) {

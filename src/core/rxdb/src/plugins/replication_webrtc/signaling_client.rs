@@ -6,8 +6,8 @@
 //! and observes a stream of [`ServerToClient`] frames + a stream of room-mate
 //! peer-id-lists.
 //!
-//! Keepalive: a background task pings every `SIMPLE_PEER_PING_INTERVAL_MS / 2`
-//! so the server never times us out.
+//! Keepalive: the reader supervisor pings frequently enough to detect a raw
+//! signaling-process restart as well as to keep the server-side lease alive.
 //!
 //! **Status:** functional. Sends/receives the protocol byte-correctly against
 //! upstream's `signaling-server.ts`. The downstream WebRTC connection handler
@@ -32,7 +32,7 @@ use tokio_tungstenite::{client_async_tls, MaybeTlsStream, WebSocketStream};
 use url::Url;
 
 use crate::plugins::replication_webrtc::signaling_protocol::{
-    ClientToServer, PeerId, RoomId, ServerToClient, SIMPLE_PEER_PING_INTERVAL_MS,
+    ClientToServer, PeerId, RoomId, ServerToClient,
 };
 use crate::rx_error::{new_rx_error, RxError};
 use crate::rxjs_compat::{RxBehaviorSubject, RxStream, RxSubject};
@@ -53,6 +53,10 @@ const SIGNALING_ADDRESS_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// the room peer list and re-drives the connection handler to rebuild peers.
 const SIGNALING_RECONNECT_BASE_DELAY: Duration = Duration::from_secs(1);
 const SIGNALING_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+/// A browser gives the native peer 30 seconds to answer its offer. Detect a
+/// half-closed signaling socket well inside that window so the reconnect and
+/// room re-join happen before every collection enters recovery.
+const SIGNALING_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
 
 static RUSTLS_CRYPTO_PROVIDER: Once = Once::new();
 
@@ -291,27 +295,6 @@ impl SignalingClient {
             }
         });
         client.background_tasks.lock().push(supervisor);
-
-        // Keepalive: ping every SIMPLE_PEER_PING_INTERVAL_MS / 2. Resilient to the
-        // reconnect window — a failed ping (socket momentarily down) is logged and
-        // the loop continues; it resumes once the supervisor restores the writer.
-        let ping_client = Arc::clone(&client);
-        let ping_task: JoinHandle<()> = tokio::spawn(async move {
-            let interval = Duration::from_millis(SIMPLE_PEER_PING_INTERVAL_MS / 2);
-            loop {
-                tokio::time::sleep(interval).await;
-                if ping_client.closed.load(Ordering::Acquire) {
-                    break;
-                }
-                if let Err(e) = ping_client.send_frame(&ClientToServer::Ping).await {
-                    tracing::debug!(
-                        target: "ctox_rxdb::signaling_client",
-                        "keepalive ping failed: {e} — will retry after reconnect",
-                    );
-                }
-            }
-        });
-        client.background_tasks.lock().push(ping_task);
 
         Ok(client)
     }
@@ -610,7 +593,28 @@ fn prefer_ipv4_addresses(addresses: &mut [SocketAddr]) {
 /// Returns when the socket closes or errors, so the supervisor can reconnect.
 async fn run_reader(client: &Arc<SignalingClient>, read_half: &mut WsRead) -> bool {
     let mut joined_seen = false;
-    while let Some(item) = read_half.next().await {
+    let mut keepalive = tokio::time::interval(SIGNALING_KEEPALIVE_INTERVAL);
+    keepalive.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // `interval()` ticks immediately. The connection has just been opened, so
+    // consume that tick and wait one full interval before probing it.
+    keepalive.tick().await;
+    loop {
+        let item = tokio::select! {
+            item = read_half.next() => item,
+            _ = keepalive.tick() => {
+                if let Err(error) = client.send_frame(&ClientToServer::Ping).await {
+                    tracing::warn!(
+                        target: "ctox_rxdb::signaling_client",
+                        "signaling keepalive failed; reconnecting: {error}",
+                    );
+                    break;
+                }
+                continue;
+            }
+        };
+        let Some(item) = item else {
+            break;
+        };
         match item {
             Ok(Message::Text(text)) => match serde_json::from_str::<ServerToClient>(&text) {
                 Ok(frame) => {

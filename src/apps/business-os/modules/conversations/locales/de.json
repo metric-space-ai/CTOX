@@ -109,5 +109,7 @@
   "trustMedium": "Mittel",
   "trustLow": "Niedrig",
   "trustUnknown": "Unbekannt",
-  "copiedToast": "In Zwischenablage kopiert"
+  "copiedToast": "In Zwischenablage kopiert",
+  "viewShowList": "Als Liste anzeigen",
+  "viewShowCards": "Als Karten anzeigen"
 }

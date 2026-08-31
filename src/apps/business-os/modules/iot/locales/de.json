@@ -109,5 +109,8 @@
   "left.newAssetLabel": "Asset anlegen",
   "center.title": "Dashboards",
   "center.viewLabel": "Ansicht",
-  "ed.title": "Widget bearbeiten"
+  "ed.title": "Widget bearbeiten",
+  "view.showList": "Als Liste anzeigen",
+  "view.showCards": "Als Karten anzeigen",
+  "alarmWord": "Alarm offen"
 }

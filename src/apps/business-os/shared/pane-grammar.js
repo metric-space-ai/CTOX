@@ -6,7 +6,9 @@
 // the canonical data attributes inside ONE pane element:
 //
 //   [data-pg-search]                  search input
-//   [data-pg-view="cards|list"]       view toggle buttons (aria-pressed)
+//   [data-pg-view="cards|list"]       view buttons (aria-pressed); a single
+//                                      button can cycle via
+//                                      data-pg-view-cycle="cards,list"
 //   [data-pg-tray-toggle]             tray toggle (gets .has-active-filters dot)
 //   [data-pg-tray]                    collapsed tray (hidden attribute)
 //   [data-pg-reset]                   reset control inside the tray
@@ -34,7 +36,7 @@ export function wirePaneGrammar(pane, { onChange } = {}) {
   const state = () => ({
     search: (search?.value || '').trim().toLowerCase(),
     view: viewButtons.find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.pgView
-      || viewButtons[0]?.dataset.pgView || 'cards',
+      || viewButtons[0]?.dataset.pgView || pane.dataset.pgDefaultView || 'cards',
     band: bandTabs.find((b) => b.getAttribute('aria-selected') === 'true')?.dataset.pgBand
       || bandTabs[0]?.dataset.pgBand || '',
     filters: Object.fromEntries(filters.map((el) => [el.dataset.pgName || el.name || el.dataset.pgFilter || 'filter', el.value])),
@@ -72,7 +74,25 @@ export function wirePaneGrammar(pane, { onChange } = {}) {
     emit();
   });
   viewButtons.forEach((button) => button.addEventListener('click', () => {
-    viewButtons.forEach((other) => other.setAttribute('aria-pressed', String(other === button)));
+    const cycle = String(button.dataset.pgViewCycle || '')
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (viewButtons.length === 1 && cycle.length > 1) {
+      const currentIndex = Math.max(0, cycle.indexOf(button.dataset.pgView || cycle[0]));
+      const nextView = cycle[(currentIndex + 1) % cycle.length];
+      button.dataset.pgView = nextView;
+      button.setAttribute('aria-pressed', 'true');
+      const nextIsList = nextView === 'list';
+      const label = nextIsList ? 'Zur Kachelansicht wechseln' : 'Zur Listenansicht wechseln';
+      button.setAttribute('aria-label', label);
+      button.setAttribute('title', label);
+      button.innerHTML = nextIsList
+        ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>'
+        : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>';
+    } else {
+      viewButtons.forEach((other) => other.setAttribute('aria-pressed', String(other === button)));
+    }
     emit();
   }));
   bandTabs.forEach((tab) => tab.addEventListener('click', () => {

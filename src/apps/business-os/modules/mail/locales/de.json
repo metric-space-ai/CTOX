@@ -81,5 +81,7 @@
   "mailboxRequired": "Bitte eine gültige E-Mail-Adresse und ein Passwort eingeben.",
   "mailboxCreated": "Postfach wurde angelegt und dem Nutzer zugeordnet.",
   "mailboxDeleted": "Postfach wurde gelöscht.",
-  "mailboxAdminDenied": "Nur Administratoren dürfen Postfächer verwalten."
+  "mailboxAdminDenied": "Nur Administratoren dürfen Postfächer verwalten.",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen"
 }

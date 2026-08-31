@@ -1,6 +1,6 @@
 {
-  "title": "Vermittlungen",
-  "subtitle": "Angebots-/Vermittlungs-Lifecycle mit Garantie-Uhr und Honorar.",
+  "title": "Placements",
+  "subtitle": "Offer and placement lifecycle with a guarantee clock and fee.",
   "add": "Create",
   "empty": "No entries yet.",
   "kicker": "PLACEMENTS",
@@ -12,5 +12,7 @@
   "viewActive": "Active",
   "viewEnded": "Ended",
   "composerTitle": "Create placement",
-  "earlyLeave": "Early leave"
+  "earlyLeave": "Early leave",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

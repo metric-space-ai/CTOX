@@ -1,7 +1,7 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { preserveScrollDuring } from '../../shared/stable-dom.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260811-fremde-collection-mitladen-v106';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const MARKDOWN_MIME = 'text/markdown';
@@ -191,7 +191,7 @@ export async function mount(ctx) {
     filtersOpen: false,
     actionsOpen: false,
     libraryOpen: false,
-    docxToolbarVisible: localStorage.getItem(DOCX_TOOLBAR_VISIBILITY_KEY) !== 'false',
+    docxToolbarVisible: ctx?.storageScope?.get?.(DOCX_TOOLBAR_VISIBILITY_KEY) !== 'false',
     localSubscriptionCleanup: null,
     launchCleanup: null,
     contextMenu: null,
@@ -288,7 +288,7 @@ function documentBySourceSha(records = [], sourceSha = '') {
 }
 
 async function loadDocumentFormatModule() {
-  return import('../../vendor/document-format.mjs?v=20260811-fremde-collection-mitladen-v106');
+  return import('../../vendor/document-format.mjs?v=20260816-browser-sync-guards-v141');
 }
 
 async function ensureDocumentFormatModule(state) {
@@ -311,7 +311,7 @@ async function loadSuperDocModule(state) {
 
 async function loadCtoxDocumentsModule(state) {
   if (!state.ctoxDocumentsModule) {
-    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260811-fremde-collection-mitladen-v106');
+    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260816-browser-sync-guards-v141');
   }
   return state.ctoxDocumentsModule;
 }
@@ -561,6 +561,11 @@ async function dispatchDocumentsContextChat(state, context, message, mode = 'dat
     if (status) status.textContent = state.t('chatNotReady', 'Chat ist noch nicht bereit.');
     return;
   }
+  const openBusinessChat = state.ctx?.openBusinessChat || state.ctx?.businessChat?.open;
+  if (typeof openBusinessChat !== 'function') {
+    if (status) status.textContent = state.t('chatNotReady', 'Chat ist noch nicht bereit.');
+    return;
+  }
   if (status) status.textContent = state.t('chatOpening', 'Chat wird geöffnet...');
   const titlePrefix = safeMode === 'app'
     ? state.t('chatModifyAppTitle', 'Dokumente-App anpassen')
@@ -573,38 +578,43 @@ async function dispatchDocumentsContextChat(state, context, message, mode = 'dat
     : safeMode === 'ask'
       ? `Beantworte die folgende Frage ausschließlich lesend. Nutze nur vorhandene Daten und Kontext; führe keine Änderungen an Daten, Records, Dateien oder der App aus. Antworte knapp und direkt.\n\n${trimmed}`
       : trimmed;
-  window.dispatchEvent(new CustomEvent('ctox-business-os-chat-submit', {
-    detail: {
-      text: trimmed,
-      module: 'documents',
-      source_title: 'Dokumente',
-      command_type: safeMode === 'app' ? 'ctox.business_os.app.modify' : 'business_os.chat.task',
-      record_id: safeMode === 'app' ? 'documents' : (record?.id || context.record_id || 'documents'),
+  openBusinessChat({
+    text: trimmed,
+    draft: trimmed,
+    module: 'documents',
+    source_module: 'documents',
+    source_title: 'Dokumente',
+    action: 'context-chat',
+    reuseActive: false,
+    command_type: safeMode === 'app' ? 'ctox.business_os.app.modify' : 'business_os.chat.task',
+    record_id: safeMode === 'app' ? 'documents' : (record?.id || context.record_id || 'documents'),
+    title,
+    command_title: title,
+    instruction,
+    mode: safeMode,
+    target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
+    payload: {
       title,
       instruction,
-      payload: {
-        title,
-        instruction,
-        prompt: trimmed,
-        user_message: trimmed,
-        mode: safeMode,
-        target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
-        selected_document: record || null,
-        selected_version_id: record?.current_version_id || '',
-        selected_runbook: runbook,
-        context,
-        thread_key: 'business-os/documents',
-      },
-      client_context: {
-        action: 'context-chat',
-        mode: safeMode,
-        column: context.column,
-        record_type: context.record_type,
-        document_id: record?.id || '',
-        filename: record?.filename || context.filename || '',
-      },
+      prompt: trimmed,
+      user_message: trimmed,
+      mode: safeMode,
+      target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
+      selected_document: record || null,
+      selected_version_id: record?.current_version_id || '',
+      selected_runbook: runbook,
+      context,
+      thread_key: 'business-os/documents',
     },
-  }));
+    client_context: {
+      action: 'context-chat',
+      mode: safeMode,
+      column: context.column,
+      record_type: context.record_type,
+      document_id: record?.id || '',
+      filename: record?.filename || context.filename || '',
+    },
+  });
   hideDocumentsContextMenu(state);
 }
 
@@ -1232,7 +1242,10 @@ function renderLeft(state) {
           <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" title="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" data-documents-export ${canExportDocument(state) ? '' : 'disabled aria-disabled="true"'}>${actionIcon(state, 'export')}</button>
         </div>
       </div>
-      <div class="ctox-pane-tools documents-filter-bar">
+    </header>
+    <!-- Shell V2: the pane head is exactly one 37px header row, so the filter
+         tools form their own band below it (see Knowledge as the reference). -->
+    <div class="ctox-pane-tools documents-filter-bar">
         <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Dokument suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Dokumente suchen'))}" data-documents-search value="${escapeHtml(state.searchQuery)}">
         <div class="documents-filter-summary">
           <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sortLabel', 'Dokumente sortieren'))}" data-documents-sort>
@@ -1269,8 +1282,7 @@ function renderLeft(state) {
           </button>
         </div>
         ${renderActiveDocumentFilters(state)}
-      </div>
-    </header>
+    </div>
   `;
   const list = document.createElement('div');
   list.className = 'documents-list';
@@ -3713,7 +3725,7 @@ async function mountSuperDocDocument(state, host, record, version, renderSerial,
   toolbarToggle.setAttribute('aria-label', toolbarToggle.textContent);
   toolbarToggle.addEventListener('click', () => {
     state.docxToolbarVisible = !state.docxToolbarVisible;
-    localStorage.setItem(DOCX_TOOLBAR_VISIBILITY_KEY, String(state.docxToolbarVisible));
+    try { state.ctx?.storageScope?.set?.(DOCX_TOOLBAR_VISIBILITY_KEY, String(state.docxToolbarVisible)); } catch {}
     frame.dataset.toolbarVisible = String(state.docxToolbarVisible);
     toolbarToggle.textContent = state.docxToolbarVisible ? state.t('hideEditorToolbar', 'Editorleiste ausblenden') : state.t('showEditorToolbar', 'Editorleiste einblenden');
     toolbarToggle.setAttribute('aria-pressed', String(state.docxToolbarVisible));

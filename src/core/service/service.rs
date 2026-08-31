@@ -142,6 +142,7 @@ const IDLE_QUEUE_DISPATCH_POLL_SECS: u64 = 8;
 const WORKER_IDLE_QUEUE_KICK_DELAY_MS: u64 = 250;
 const BUSINESS_OS_APP_RECOVERY_IDLE_STALE_SECS: u64 = 180;
 const BUSINESS_OS_APP_RECOVERY_STALE_SECS: u64 = 180;
+const DURABLE_QUEUE_LEASE_ATTEMPT_STALE_SECS: u64 = 30;
 const BUSINESS_OS_APP_RECOVERY_PREFLIGHT_IDLE_SAFETY_SECS: u64 = 60;
 const BUSINESS_OS_APP_RECOVERY_SCAN_LIMIT: usize = 128;
 const BUSINESS_OS_APP_RECOVERY_ARTIFACT_STAMP_MAX_ENTRIES: usize = 256;
@@ -2023,6 +2024,7 @@ fn release_stale_service_communication_leases_on_boot(
     root: &Path,
     state: &Arc<Mutex<SharedState>>,
 ) {
+    recover_person_research_commands_for_service(root, state, "boot");
     match recover_abandoned_business_os_app_queue_tasks(root, state, 16) {
         Ok(updated) if updated > 0 => push_event(
             state,
@@ -2068,8 +2070,7 @@ fn release_stale_service_communication_leases_on_boot(
                     conversation_id: None,
                     severity: "info",
                     reason: "a prior service process left expired or ownerless queue task leases",
-                    action_taken:
-                        "returned stale queue task leases to pending and moved linked commands to retry wait",
+                    action_taken: "returned stale queue task leases to pending and moved linked commands to retry wait",
                     details: serde_json::json!({
                         "released_count": released_count,
                         "released_message_keys": sweep.released,
@@ -2319,14 +2320,17 @@ fn run_appsec_pipeline_worker_tick(root: &Path, state: &Arc<Mutex<SharedState>>)
     if !crate::service::working_hours::accepts_work(root) {
         return Ok(());
     }
-    let Some(_lease_attempt) =
-        begin_durable_queue_lease_attempt(state, DurableQueueDispatchGuard::StrictIdle)
+    let Some(lease_attempt) =
+        begin_durable_queue_lease_attempt(root, state, DurableQueueDispatchGuard::StrictIdle)
     else {
         return Ok(());
     };
     let Some((task, state_dir)) = next_pending_appsec_pipeline_queue_task(root)? else {
         return Ok(());
     };
+    if !lease_attempt.is_current() {
+        return Ok(());
+    }
     let _activity = AppsecPipelineWorkerActivity::start(state, &task);
     let output = crate::handle_appsec_pipeline_work(
         root,
@@ -2455,6 +2459,23 @@ fn normalize_state_token(value: &str) -> String {
 }
 
 pub fn start_background(root: &Path) -> Result<String> {
+    #[cfg(windows)]
+    {
+        let windows_status = crate::service::windows_service::status()?;
+        if windows_status.installed {
+            crate::service::windows_service::start()?;
+            for _ in 0..200 {
+                thread::sleep(Duration::from_millis(300));
+                if service_status_snapshot(root)?.running {
+                    return Ok(format!(
+                        "CTOX service enabled and started via Windows SCM on {}",
+                        service_listen_addr(root)
+                    ));
+                }
+            }
+            anyhow::bail!("CTOX Windows service did not become healthy within 60 seconds");
+        }
+    }
     let _systemd_cache_guard = SystemdCacheInvalidator;
     if let Some(systemd) = systemd_unit_status(root)? {
         if systemd.active {
@@ -2628,6 +2649,23 @@ pub fn stop_background_guarded(root: &Path, force: bool) -> Result<String> {
 }
 
 pub fn stop_background(root: &Path) -> Result<String> {
+    #[cfg(windows)]
+    {
+        let windows_status = crate::service::windows_service::status()?;
+        if windows_status.installed {
+            if !windows_status.running {
+                return Ok("CTOX Windows service is already stopped.".to_string());
+            }
+            crate::service::windows_service::stop()?;
+            for _ in 0..100 {
+                thread::sleep(Duration::from_millis(150));
+                if !crate::service::windows_service::status()?.running {
+                    return Ok("CTOX Windows service stopped.".to_string());
+                }
+            }
+            anyhow::bail!("CTOX Windows service did not stop within 15 seconds");
+        }
+    }
     let _systemd_cache_guard = SystemdCacheInvalidator;
     let preflight_backend_shutdown_error = supervisor::shutdown_persistent_backends(root)
         .err()
@@ -2762,9 +2800,15 @@ pub fn stop_background(root: &Path) -> Result<String> {
         }
     }
     if let Some(pid) = read_pid_file(root) {
+        #[cfg(unix)]
         let status = Command::new("kill")
             .arg("-TERM")
             .arg(pid.to_string())
+            .status()
+            .with_context(|| format!("failed to signal CTOX service pid {pid}"))?;
+        #[cfg(windows)]
+        let status = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T"])
             .status()
             .with_context(|| format!("failed to signal CTOX service pid {pid}"))?;
         if !status.success() {
@@ -2804,6 +2848,16 @@ pub fn stop_background(root: &Path) -> Result<String> {
         "CTOX service stop did not complete cleanly: {}",
         service_shutdown_residue(root)?.join("; ")
     )
+}
+
+#[cfg(windows)]
+pub fn request_windows_service_shutdown(root: &Path) -> Result<()> {
+    let url = format!("{}/ctox/service/stop", service_base_url(root));
+    ureq::post(&url)
+        .set("content-type", "application/json")
+        .send_string("{}")
+        .with_context(|| format!("failed to request CTOX service shutdown via {url}"))?;
+    Ok(())
 }
 
 pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
@@ -5033,7 +5087,12 @@ fn work_outcome_metadata(
     })
 }
 
-fn record_prompt_worker_progress(root: &Path, job: &QueuedPrompt, event: &str) {
+fn record_prompt_worker_progress(
+    root: &Path,
+    job: &QueuedPrompt,
+    attempt_id: &str,
+    event: &str,
+) -> Result<()> {
     let parsed = event
         .strip_prefix("worker-progress ")
         .and_then(|payload| serde_json::from_str::<Value>(payload).ok());
@@ -5043,7 +5102,7 @@ fn record_prompt_worker_progress(root: &Path, job: &QueuedPrompt, event: &str) {
             .and_then(Value::as_str)
             .filter(|value| value.starts_with("worker."))
         else {
-            return;
+            return Ok(());
         };
         (
             event_kind.to_string(),
@@ -5080,7 +5139,7 @@ fn record_prompt_worker_progress(root: &Path, job: &QueuedPrompt, event: &str) {
             "invoke-model" => "Agent is working",
             "persist-assistant-turn" => "Saving agent result",
             "turn-complete" => "Agent turn complete",
-            _ => return,
+            _ => return Ok(()),
         };
         (
             "worker.phase".to_string(),
@@ -5091,6 +5150,102 @@ fn record_prompt_worker_progress(root: &Path, job: &QueuedPrompt, event: &str) {
             }),
         )
     };
+    let work_key = worker_attempt_work_key(job);
+    let task_id = job
+        .leased_message_keys
+        .first()
+        .map(String::as_str)
+        .unwrap_or_default();
+    let command_id =
+        metadata_string(&job.queue_task_metadata, "business_os_command_id").unwrap_or_default();
+    let db_path = crate::paths::core_db(root);
+    let mut authoritative_progress_changed = false;
+    if event_kind == "worker.plan_updated" {
+        let plan = metadata
+            .get("plan")
+            .and_then(Value::as_object)
+            .context("worker.plan_updated is missing plan metadata")?;
+        let steps = plan
+            .get("plan")
+            .and_then(Value::as_array)
+            .context("worker.plan_updated is missing plan steps")?
+            .iter()
+            .map(|step| {
+                Ok(lcm::TaskExecutionPlanStepInput {
+                    label: step
+                        .get("step")
+                        .and_then(Value::as_str)
+                        .context("execution plan step is missing its label")?
+                        .to_string(),
+                    status: step
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .context("execution plan step is missing its status")?
+                        .to_string(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        lcm::run_record_task_execution_plan(
+            &db_path,
+            lcm::TaskExecutionPlanUpdate {
+                work_key: &work_key,
+                task_id,
+                command_id: &command_id,
+                attempt_id,
+                explanation: plan.get("explanation").and_then(Value::as_str),
+                steps: &steps,
+            },
+        )?;
+        authoritative_progress_changed = true;
+    }
+    let activity = metadata.get("activity").and_then(Value::as_object);
+    let activity_kind = activity
+        .and_then(|value| value.get("kind"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            if event_kind == "worker.tool_started" {
+                Some("tool")
+            } else if event_kind == "worker.thinking_started" {
+                Some("thinking")
+            } else {
+                None
+            }
+        });
+    if let Some(kind) = activity_kind {
+        let activity_id = activity
+            .and_then(|value| value.get("id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                metadata
+                    .pointer("/tool/call_id")
+                    .and_then(Value::as_str)
+                    .map(|call_id| format!("{attempt_id}:tool:{call_id}"))
+            })
+            .with_context(|| format!("{event_kind} is missing a durable activity id"))?;
+        let attribute_to_current_step = activity
+            .and_then(|value| value.get("attribute_to_current_step"))
+            .and_then(Value::as_bool)
+            .unwrap_or(event_kind != "worker.plan_updated");
+        authoritative_progress_changed |= lcm::run_record_task_execution_activity(
+            &db_path,
+            lcm::TaskExecutionActivityInput {
+                activity_id: &activity_id,
+                work_key: &work_key,
+                task_id,
+                command_id: &command_id,
+                attempt_id,
+                kind,
+                attribute_to_current_step,
+            },
+        )?;
+    }
+    if authoritative_progress_changed && !task_id.is_empty() {
+        crate::business_os::store::refresh_business_command_queue_task_projection(root, task_id)
+            .with_context(|| {
+                format!("failed to publish execution progress for queue task {task_id}")
+            })?;
+    }
     if let Some(object) = metadata.as_object_mut() {
         object.insert(
             "source_label".to_string(),
@@ -5110,6 +5265,7 @@ fn record_prompt_worker_progress(root: &Path, job: &QueuedPrompt, event: &str) {
             metadata,
         },
     );
+    Ok(())
 }
 
 /// Emit a per-task `work.outcome` forensic flow event stamping the bound skill
@@ -5341,7 +5497,7 @@ fn start_prompt_worker(
             }
             let app_module_job =
                 business_os_app_module_target_from_metadata(&job.queue_task_metadata).is_some();
-            let base_execution_prompt = if is_cv_print_parser_queue_job(&job) {
+            let mut base_execution_prompt = if is_cv_print_parser_queue_job(&job) {
                 business_os_cv_print_execution_prompt(&job)
             } else if is_business_os_chat_queue_job(&root, &job) {
                 business_os_chat_execution_prompt(&job)
@@ -5350,6 +5506,14 @@ fn start_prompt_worker(
             } else {
                 artifact_first_execution_prompt(&job)
             };
+            base_execution_prompt.push_str(
+                "\n\nCTOX EXECUTION PLAN CONTRACT\n\
+                 - Your first tool action must be update_plan, even for a one-step task.\n\
+                 - Use at least one concise step. Keep completed steps first, exactly one current step in_progress, and later steps pending.\n\
+                 - Work strictly in plan order and call update_plan after each completed step.\n\
+                 - Before your final answer, call update_plan with every work step completed. CTOX will reject a completion claim while any step remains open.\n\
+                 - If discoveries change the work, publish the revised plan before continuing. CTOX retains the previous revision as evidence.\n",
+            );
             let execution_prompt = materialize_systematic_research_skill(&root, &job).and_then(
                 |systematic_research_skill_dir| {
                     let staged_research_inputs =
@@ -5467,10 +5631,12 @@ fn start_prompt_worker(
                 },
             );
             let mut session_options = chat_turn_session_options_for_queue_job(&job);
+            let progress_error = Arc::new(Mutex::new(None::<String>));
             session_options.worker_attempt = Some(turn_loop::WorkerAttemptContext {
                 attempt_id: attempt_id.clone(),
                 work_key: attempt_work_key.clone(),
                 source_label: job.source_label.clone(),
+                progress_error: Arc::clone(&progress_error),
             });
             let invoked_result = if let Some(attempt) = recoverable_attempt.as_ref() {
                 push_event(
@@ -5483,6 +5649,11 @@ fn start_prompt_worker(
                 result_from_worker_attempt(attempt)
             } else {
                 execution_prompt.and_then(|execution_prompt| {
+                    configure_business_os_mcp_session_for_queue_job(
+                        &root,
+                        &job,
+                        &mut session_options,
+                    )?;
                     if queue_job_reuses_persistent_session(&session_options) {
                         let session_slot = {
                             let shared = lock_shared_state(&state);
@@ -5506,6 +5677,7 @@ fn start_prompt_worker(
                         if session.is_none() {
                             *session = Some(turn_loop::PersistentSession::start(&root, &settings)?);
                         }
+                        let recorder_error = Arc::clone(&progress_error);
                         let result =
                             turn_loop::run_chat_turn_with_events_extended_guarded_with_options(
                                 &root,
@@ -5522,7 +5694,18 @@ fn start_prompt_worker(
                                         &event_state,
                                         format!("phase {} {}", event_source, event),
                                     );
-                                    record_prompt_worker_progress(&root, &job, event);
+                                    if let Err(error) = record_prompt_worker_progress(
+                                        &root,
+                                        &job,
+                                        &attempt_id,
+                                        event,
+                                    ) {
+                                        if let Ok(mut slot) = recorder_error.lock() {
+                                            if slot.is_none() {
+                                                *slot = Some(error.to_string());
+                                            }
+                                        }
+                                    }
                                 },
                             );
                         if result.is_err() {
@@ -5534,6 +5717,7 @@ fn start_prompt_worker(
                         }
                         result
                     } else {
+                        let recorder_error = Arc::clone(&progress_error);
                         turn_loop::run_chat_turn_with_events_extended_guarded_with_options(
                             &root,
                             &db_path,
@@ -5549,7 +5733,15 @@ fn start_prompt_worker(
                                     &event_state,
                                     format!("phase {} {}", event_source, event),
                                 );
-                                record_prompt_worker_progress(&root, &job, event);
+                                if let Err(error) =
+                                    record_prompt_worker_progress(&root, &job, &attempt_id, event)
+                                {
+                                    if let Ok(mut slot) = recorder_error.lock() {
+                                        if slot.is_none() {
+                                            *slot = Some(error.to_string());
+                                        }
+                                    }
+                                }
                             },
                         )
                     }
@@ -5927,9 +6119,7 @@ fn start_prompt_worker(
                 );
                 CompletionReviewDisposition::None
             } else if let Some(feedback) = research_validation_failure {
-                match systematic_research_validation_feedback_disposition(
-                    &root, &job, &feedback,
-                ) {
+                match systematic_research_validation_feedback_disposition(&root, &job, &feedback) {
                     Ok(disposition) => disposition,
                     Err(error) => CompletionReviewDisposition::Hold {
                         reason: review::HoldReason::MissingReviewEvidence,
@@ -6518,6 +6708,24 @@ fn start_prompt_worker(
                             && founder_send_error.is_none()
                             && !app_validation_rework
                             && !app_validation_terminal_failure;
+                        if lcm::run_task_execution_progress(&db_path, &attempt_work_key)?.is_some()
+                        {
+                            lcm::run_set_task_execution_review_status(
+                                &db_path,
+                                &attempt_work_key,
+                                if accepted_success {
+                                    "completed"
+                                } else {
+                                    "failed"
+                                },
+                            )?;
+                            if let Some(task_id) = job.leased_message_keys.first() {
+                                crate::business_os::store::refresh_business_command_queue_task_projection(
+                                    &root,
+                                    task_id,
+                                )?;
+                            }
+                        }
                         lcm::run_record_worker_attempt_artifact_check(
                             &db_path,
                             &attempt_id,
@@ -6714,17 +6922,17 @@ fn start_prompt_worker(
                                 &approved_completion_hold
                             {
                                 (
-                                        channels::hold_leased_messages_for_attempt(
-                                            &root,
-                                            &attempt_id,
-                                            &job.leased_message_keys,
-                                            reason,
-                                            summary,
-                                        ),
-                                        format!(
-                                            "approved queue lease(s) held after terminalization failure ({reason:?})"
-                                        ),
-                                    )
+                                    channels::hold_leased_messages_for_attempt(
+                                        &root,
+                                        &attempt_id,
+                                        &job.leased_message_keys,
+                                        reason,
+                                        summary,
+                                    ),
+                                    format!(
+                                        "approved queue lease(s) held after terminalization failure ({reason:?})"
+                                    ),
+                                )
                             } else if let CompletionReviewDisposition::Hold { reason, summary } =
                                 &review_disposition
                             {
@@ -6997,13 +7205,15 @@ fn start_prompt_worker(
                             ) {
                                 Ok(updated) if updated > 0 => {
                                     cv_print_parser_recovered_after_worker_error = true;
-                                    if let Err(telemetry_err) = record_cv_print_parser_repair_telemetry(
-                                        &root,
-                                        &attempt_id,
-                                        &job,
-                                        &compact_error,
-                                        updated,
-                                    ) {
+                                    if let Err(telemetry_err) =
+                                        record_cv_print_parser_repair_telemetry(
+                                            &root,
+                                            &attempt_id,
+                                            &job,
+                                            &compact_error,
+                                            updated,
+                                        )
+                                    {
                                         eprintln!(
                                             "failed to persist CV parser repair telemetry for {attempt_id}: {telemetry_err:#}"
                                         );
@@ -8126,7 +8336,33 @@ fn run_completion_review(
         deterministic_evidence,
         review_scope,
     };
-    let mut outcome = review::review_completion_if_needed(root, &review_request, reply_text);
+    let mut outcome = match completion_review_writeback_action_guard_outcome(root, job) {
+        Ok(Some(guard_outcome)) => {
+            push_event(
+                state,
+                format!(
+                    "Writeback action coverage guard blocked premature completion: {}",
+                    clip_text(&guard_outcome.summary, 180)
+                ),
+            );
+            guard_outcome
+        }
+        Ok(None) => review::review_completion_if_needed(root, &review_request, reply_text),
+        Err(err) => {
+            let summary = format!(
+                "CTOX could not verify the action coverage required by the persisted writeback contract: {}",
+                clip_text(&err.to_string(), 240)
+            );
+            push_event(state, summary.clone());
+            writeback_action_coverage_failure_outcome(
+                summary,
+                vec!["Action coverage evidence could not be read from the canonical command store."
+                    .to_string()],
+                vec!["Retry the same durable task after the canonical command store is readable; do not claim that the contracted actions completed."
+                    .to_string()],
+            )
+        }
+    };
     if let Some(guard_outcome) = spreadsheet_attachment_guard_outcome(root, job, &review_request) {
         push_event(
             state,
@@ -9968,12 +10204,11 @@ fn chat_turn_session_options_for_queue_job(
             // their tool loop alive. Managed research must not be cut off by
             // the generic 180-second remote-provider timeout mid-discovery.
             turn_timeout_secs_override: Some(3_600),
-            // Never narrow the model-visible surface to a single forced tool:
-            // deep-research-first / forced-typed-read mechanics collapsed the
-            // agentic discovery loop (benchmark forensics H2). The retry prompt
-            // still names the exact typed reads to perform, and completion
-            // validation of typed receipts remains fail-closed.
-            required_initial_tool: None,
+            // Planning is the only forced first action. The normal research
+            // tool surface is released immediately after the durable plan
+            // exists, so discovery remains iterative instead of being pinned
+            // to a research-specific first read.
+            required_initial_tool: Some("update_plan".to_string()),
             worker_attempt: None,
         };
     }
@@ -9986,7 +10221,7 @@ fn chat_turn_session_options_for_queue_job(
             base_instructions: Some(BUSINESS_OS_APP_AUTHORING_BASE_INSTRUCTIONS.to_string()),
             plain_prompt: true,
             turn_timeout_secs_override: Some(BUSINESS_OS_APP_AUTHORING_TURN_TIMEOUT_SECS),
-            required_initial_tool: None,
+            required_initial_tool: Some("update_plan".to_string()),
             worker_attempt: None,
         };
     }
@@ -9998,8 +10233,74 @@ fn chat_turn_session_options_for_queue_job(
             .thread_key
             .as_deref()
             .is_some_and(|value| !value.trim().is_empty()),
+        required_initial_tool: Some("update_plan".to_string()),
         ..turn_loop::ChatTurnSessionOptions::default()
     }
+}
+
+fn configure_business_os_mcp_session_for_queue_job(
+    root: &Path,
+    job: &QueuedPrompt,
+    options: &mut turn_loop::ChatTurnSessionOptions,
+) -> Result<bool> {
+    let Some(command_id) = metadata_string(&job.queue_task_metadata, "business_os_command_id")
+    else {
+        return Ok(false);
+    };
+    let command = channels::business_command_projection(root, &command_id)?;
+    if command.get("command_type").and_then(Value::as_str) != Some("business_os.chat.task") {
+        return Ok(false);
+    }
+    let Some(writeback_contract) = command
+        .pointer("/payload/writeback_contract")
+        .filter(|contract| {
+            contract
+                .get("allowed_actions")
+                .and_then(Value::as_array)
+                .is_some_and(|actions| !actions.is_empty())
+        })
+        .cloned()
+    else {
+        return Ok(false);
+    };
+    let payload_hash = command
+        .get("payload_hash")
+        .and_then(Value::as_str)
+        .context("Business OS command payload hash is missing at harness lease")?;
+    let authorization =
+        crate::business_os::store::revalidate_business_command_execution_authorization(
+            root,
+            &command_id,
+        )?;
+    let actor_id = authorization
+        .pointer("/actor/id")
+        .and_then(Value::as_str)
+        .context("Business OS command authorized actor is missing at harness lease")?;
+    let actor_role = authorization
+        .pointer("/actor/role")
+        .and_then(Value::as_str)
+        .context("Business OS command authorized actor role is missing at harness lease")?;
+    let workspace = job
+        .workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("business-os-command:{command_id}"));
+    let token = crate::business_os::mcp_channel::issue_internal_command_session_token(
+        root,
+        &command_id,
+        payload_hash,
+        actor_id,
+        actor_role,
+        &workspace,
+        &writeback_contract,
+    )?;
+    options.disable_mcp_servers = false;
+    options.enable_business_os_mcp = true;
+    options.business_os_mcp_command_session = Some(token);
+    options.force_isolated_session = true;
+    Ok(true)
 }
 
 fn queue_job_reuses_persistent_session(options: &turn_loop::ChatTurnSessionOptions) -> bool {
@@ -10077,13 +10378,191 @@ fn completion_review_scope_from_command_context(context: &Value) -> Option<revie
         .pointer("/command/payload/attachments")
         .and_then(Value::as_array)
         .is_none_or(Vec::is_empty);
+    let allowed_actions_empty = context
+        .pointer("/command/payload/writeback_contract/allowed_actions")
+        .and_then(Value::as_array)
+        .is_none_or(Vec::is_empty);
     (command_type == Some("business_os.chat.task")
         && mode == Some("data")
         && dependencies_empty
-        && attachments_empty)
+        && attachments_empty
+        && allowed_actions_empty)
         .then(|| review::ReviewScope::SemanticAnswerOnly {
             policy_id: "business-os.data-chat.semantic-answer.v1".to_string(),
         })
+}
+
+fn completion_review_writeback_action_guard_outcome(
+    root: &Path,
+    job: &QueuedPrompt,
+) -> Result<Option<review::ReviewOutcome>> {
+    let mut expectations = Vec::new();
+    let mut parent_created_at_ms = 0i64;
+    for message_key in &job.leased_message_keys {
+        let Some(context) = channels::inspect_business_command_for_task(root, message_key)? else {
+            continue;
+        };
+        if context
+            .pointer("/command/command_type")
+            .and_then(Value::as_str)
+            != Some("business_os.chat.task")
+        {
+            continue;
+        }
+        parent_created_at_ms = context
+            .pointer("/command/created_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
+        let actions = context
+            .pointer("/command/payload/writeback_contract/allowed_actions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for action in actions {
+            let module_id = action
+                .get("module_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default();
+            let action_id = action
+                .get("action_id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or_default();
+            if module_id.is_empty() || action_id.is_empty() {
+                continue;
+            }
+            for operation_id in action
+                .get("operation_ids")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                expectations.push((
+                    module_id.to_string(),
+                    action_id.to_string(),
+                    operation_id.to_string(),
+                ));
+            }
+        }
+        if !expectations.is_empty() {
+            break;
+        }
+    }
+    if expectations.is_empty() {
+        return Ok(None);
+    }
+
+    let conn = channels::open_channel_db(&crate::paths::core_db(root))?;
+    let mut missing = Vec::new();
+    let mut unresolved = Vec::new();
+    let mut terminal = 0usize;
+    for (module_id, action_id, operation_id) in &expectations {
+        let observed = conn
+            .query_row(
+                r#"
+                SELECT execution_phase, terminal_status
+                FROM business_command_aggregates
+                WHERE module = ?1
+                  AND command_type = ?2
+                  AND record_id = ?3
+                  AND created_at_ms >= ?4
+                ORDER BY CASE WHEN execution_phase = 'terminal' THEN 0 ELSE 1 END,
+                         updated_at_ms DESC
+                LIMIT 1
+                "#,
+                params![module_id, action_id, operation_id, parent_created_at_ms],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()?;
+        match observed {
+            None => missing.push(format!("{module_id}/{action_id}:{operation_id}")),
+            Some((phase, status)) if phase == "terminal" && status != "none" => {
+                terminal = terminal.saturating_add(1);
+            }
+            Some((phase, status)) => unresolved.push(format!(
+                "{module_id}/{action_id}:{operation_id} ({phase}/{status})"
+            )),
+        }
+    }
+    if missing.is_empty() && unresolved.is_empty() {
+        return Ok(None);
+    }
+
+    let summary = format!(
+        "The persisted writeback contract requires {} action operation(s), but only {} are terminal; {} have no child command and {} are still non-terminal.",
+        expectations.len(),
+        terminal,
+        missing.len(),
+        unresolved.len(),
+    );
+    let mut evidence = vec![format!(
+        "Writeback action coverage: expected={}, terminal={}, missing={}, unresolved={}",
+        expectations.len(),
+        terminal,
+        missing.len(),
+        unresolved.len(),
+    )];
+    if !missing.is_empty() {
+        evidence.push(format!("Missing child commands: {}", missing.join(", ")));
+    }
+    if !unresolved.is_empty() {
+        evidence.push(format!(
+            "Non-terminal child commands: {}",
+            unresolved.join(", ")
+        ));
+    }
+    Ok(Some(writeback_action_coverage_failure_outcome(
+        summary,
+        evidence,
+        vec![
+            "Execute every missing operation through the allowed Business OS action before drafting another completion response."
+                .to_string(),
+            "Wait for every accepted child command to reach completed, failed, blocked, or cancelled, then verify the canonical records."
+                .to_string(),
+        ],
+    )))
+}
+
+fn writeback_action_coverage_failure_outcome(
+    summary: String,
+    evidence: Vec<String>,
+    open_items: Vec<String>,
+) -> review::ReviewOutcome {
+    review::ReviewOutcome {
+        required: true,
+        verdict: review::ReviewVerdict::Fail,
+        mission_state: "UNCLEAR".to_string(),
+        summary,
+        report: "Deterministic writeback action coverage guard failed before semantic completion review."
+            .to_string(),
+        score: 3,
+        reasons: vec!["writeback_action_coverage".to_string()],
+        failed_gates: vec![
+            "Not every operation in the persisted writeback contract has a terminal child command."
+                .to_string(),
+        ],
+        semantic_findings: vec![
+            "A free-text completion or interim report cannot substitute for missing durable action commands."
+                .to_string(),
+        ],
+        categorized_findings: vec![review::CategorizedFinding {
+            id: "writeback_action_coverage".to_string(),
+            category: review::FindingCategory::Rework,
+            evidence: evidence.join(" | "),
+            corrective_action: open_items.join(" "),
+        }],
+        open_items,
+        evidence,
+        handoff: None,
+        disposition: review::ReviewDisposition::Send,
+        pipeline_resolution: None,
+    }
 }
 
 fn business_os_command_id_from_prompt(prompt: &str) -> Option<String> {
@@ -13443,6 +13922,11 @@ fn start_channel_router(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>
 
 fn start_business_os_app_recovery_loop(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>) {
     thread::spawn(move || loop {
+        recover_person_research_commands_for_service(
+            &root,
+            &state,
+            "dedicated Business OS recovery loop",
+        );
         if !should_skip_idle_business_os_app_recovery(&root) {
             maybe_spawn_business_os_app_recovery(
                 root.clone(),
@@ -13452,6 +13936,27 @@ fn start_business_os_app_recovery_loop(root: std::path::PathBuf, state: Arc<Mute
         }
         thread::sleep(Duration::from_secs(BUSINESS_OS_APP_RECOVERY_POLL_SECS));
     });
+}
+
+fn recover_person_research_commands_for_service(
+    root: &Path,
+    state: &Arc<Mutex<SharedState>>,
+    reason: &'static str,
+) {
+    match crate::business_os::recover_person_research_commands_once(root) {
+        Ok(recovered) if recovered > 0 => push_event(
+            state,
+            format!("Recovered {recovered} person-research command(s) during {reason}"),
+        ),
+        Ok(_) => {}
+        Err(error) => push_event(
+            state,
+            format!(
+                "Person-research command recovery skipped during {reason}: {}",
+                clip_text(&error.to_string(), 180)
+            ),
+        ),
+    }
 }
 
 fn maybe_spawn_business_os_app_recovery(
@@ -13536,17 +14041,19 @@ fn maybe_dispatch_after_business_os_app_recovery(
 }
 
 fn start_channel_syncer(root: std::path::PathBuf) {
-    thread::spawn(move || loop {
-        let settings = live_service_settings(&root);
-        sync_configured_channels(&root, &settings);
-        // Decision Hub: eingehende Mails in Vorgänge projizieren. Idempotent
-        // und billig ohne neue Nachrichten; unabhängig davon, ob ein
-        // Mail-Konto konfiguriert ist (Nachrichten können auch aus anderen
-        // Quellen in communication_messages landen).
-        if let Err(error) = crate::business_os::decision_hub::project_inbound_messages(&root) {
-            eprintln!("[decision-hub] inbound projection failed: {error:#}");
+    thread::spawn(move || {
+        loop {
+            let settings = live_service_settings(&root);
+            sync_configured_channels(&root, &settings);
+            // Decision Hub: eingehende Mails in Vorgänge projizieren. Idempotent
+            // und billig ohne neue Nachrichten; unabhängig davon, ob ein
+            // Mail-Konto konfiguriert ist (Nachrichten können auch aus anderen
+            // Quellen in communication_messages landen).
+            if let Err(error) = crate::business_os::decision_hub::project_inbound_messages(&root) {
+                eprintln!("[decision-hub] inbound projection failed: {error:#}");
+            }
+            thread::sleep(Duration::from_secs(channel_sync_poll_secs(&settings)));
         }
-        thread::sleep(Duration::from_secs(channel_sync_poll_secs(&settings)));
     });
 }
 
@@ -13793,10 +14300,8 @@ fn run_orphaned_queue_lease_sweep(root: &Path, state: &Arc<Mutex<SharedState>>) 
                     mechanism_id: "orphaned_queue_lease_sweep",
                     conversation_id: None,
                     severity: "warning",
-                    reason:
-                        "queue task lease expired without worker heartbeat (orphaned lease)",
-                    action_taken:
-                        "released or settled orphaned queue task leases; linked commands resume via retry_wait with the same command id",
+                    reason: "queue task lease expired without worker heartbeat (orphaned lease)",
+                    action_taken: "released or settled orphaned queue task leases; linked commands resume via retry_wait with the same command id",
                     details: serde_json::json!({
                         "released_message_keys": sweep.released.clone(),
                         "failed_candidates": sweep.failures,
@@ -14951,7 +15456,7 @@ fn maybe_next_idle_dispatch_prompt(
         clear_idle_durable_queue_empty_gate(root);
         return Ok(Some(IdleDispatchPrompt::InMemory(prompt)));
     }
-    if !idle_durable_queue_probe_available(state)
+    if !idle_durable_queue_probe_available(root, state)
         || should_skip_idle_durable_queue_empty_probe(root)
     {
         return Ok(None);
@@ -14975,15 +15480,48 @@ enum DurableQueueDispatchGuard {
 }
 
 struct DurableQueueLeaseAttemptGuard {
+    root: PathBuf,
+    generation: u64,
     state: Arc<Mutex<SharedState>>,
 }
 
 impl Drop for DurableQueueLeaseAttemptGuard {
     fn drop(&mut self) {
+        let gate = DURABLE_QUEUE_LEASE_ATTEMPT_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let mut gate = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let is_current = gate
+            .get(&self.root)
+            .is_some_and(|attempt| attempt.generation == self.generation);
+        if !is_current {
+            return;
+        }
+        gate.remove(&self.root);
         let mut shared = lock_shared_state(&self.state);
         shared.durable_queue_lease_in_progress = false;
     }
 }
+
+impl DurableQueueLeaseAttemptGuard {
+    fn is_current(&self) -> bool {
+        let gate = DURABLE_QUEUE_LEASE_ATTEMPT_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
+        gate.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(&self.root)
+            .is_some_and(|attempt| attempt.generation == self.generation)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct DurableQueueLeaseAttemptState {
+    generation: u64,
+    started_at: Instant,
+}
+
+static DURABLE_QUEUE_LEASE_ATTEMPT_GATE: OnceLock<
+    Mutex<BTreeMap<PathBuf, DurableQueueLeaseAttemptState>>,
+> = OnceLock::new();
+static DURABLE_QUEUE_LEASE_ATTEMPT_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 fn durable_queue_dispatch_blocked_locked(
     shared: &SharedState,
@@ -15020,24 +15558,66 @@ fn reset_stale_app_recovery_guard_for_durable_dispatch_locked(shared: &mut Share
 }
 
 fn begin_durable_queue_lease_attempt(
+    root: &Path,
     state: &Arc<Mutex<SharedState>>,
     guard: DurableQueueDispatchGuard,
 ) -> Option<DurableQueueLeaseAttemptGuard> {
+    let root = root.to_path_buf();
+    let gate = DURABLE_QUEUE_LEASE_ATTEMPT_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut gate = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut shared = lock_shared_state(state);
+    if let Some(previous) = gate.get(&root) {
+        if previous.started_at.elapsed()
+            < Duration::from_secs(DURABLE_QUEUE_LEASE_ATTEMPT_STALE_SECS)
+        {
+            return None;
+        }
+        shared.durable_queue_lease_in_progress = false;
+        push_event_locked(
+            &mut shared,
+            "Reset stale durable queue lease probe before idle dispatch".to_string(),
+        );
+    }
+    let generation = DURABLE_QUEUE_LEASE_ATTEMPT_GENERATION
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .saturating_add(1);
     {
-        let mut shared = lock_shared_state(state);
         reset_stale_app_recovery_guard_for_durable_dispatch_locked(&mut shared);
         if durable_queue_dispatch_blocked_locked(&shared, guard) {
             return None;
         }
         shared.durable_queue_lease_in_progress = true;
     }
+    gate.insert(
+        root.clone(),
+        DurableQueueLeaseAttemptState {
+            generation,
+            started_at: Instant::now(),
+        },
+    );
     Some(DurableQueueLeaseAttemptGuard {
+        root,
+        generation,
         state: state.clone(),
     })
 }
 
-fn idle_durable_queue_probe_available(state: &Arc<Mutex<SharedState>>) -> bool {
-    let shared = lock_shared_state(state);
+fn idle_durable_queue_probe_available(root: &Path, state: &Arc<Mutex<SharedState>>) -> bool {
+    let root = root.to_path_buf();
+    let gate = DURABLE_QUEUE_LEASE_ATTEMPT_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let mut gate = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut shared = lock_shared_state(state);
+    if gate.get(&root).is_some_and(|previous| {
+        previous.started_at.elapsed() >= Duration::from_secs(DURABLE_QUEUE_LEASE_ATTEMPT_STALE_SECS)
+    }) {
+        gate.remove(&root);
+        shared.durable_queue_lease_in_progress = false;
+        push_event_locked(
+            &mut shared,
+            "Reset stale durable queue lease probe before idle availability check".to_string(),
+        );
+    }
+    reset_stale_app_recovery_guard_for_durable_dispatch_locked(&mut shared);
     !durable_queue_dispatch_blocked_locked(&shared, DurableQueueDispatchGuard::StrictIdle)
 }
 
@@ -25068,6 +25648,7 @@ mod tests {
             serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"action"}}}),
             serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"data","dependencies":[{"collection":"customers","record_id":"1"}]}}}),
             serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"data","attachments":[{"file_id":"1"}]}}}),
+            serde_json::json!({"command":{"command_type":"business_os.chat.task","payload":{"mode":"data","writeback_contract":{"allowed_actions":[{"module_id":"outbound-lead-generation","action_id":"web_stack.person_research"}]}}}}),
             serde_json::json!({"command":{"command_type":"business_os.data.modify","payload":{"mode":"data"}}}),
         ] {
             assert_eq!(completion_review_scope_from_command_context(&context), None);
@@ -29294,7 +29875,10 @@ Business OS command:
         assert_eq!(options.turn_timeout_secs_override, Some(3_600));
         assert!(!options.plain_prompt);
         assert!(options.base_instructions.is_none());
-        assert!(options.required_initial_tool.is_none());
+        assert_eq!(
+            options.required_initial_tool.as_deref(),
+            Some("update_plan")
+        );
         assert!(!queue_job_reuses_persistent_session(&options));
     }
 
@@ -29308,10 +29892,12 @@ Business OS command:
 
         let options = chat_turn_session_options_for_queue_job(&job);
 
-        // Receipt retries must not narrow the model to a single forced tool;
-        // the typed-read requirement is enforced fail-closed by completion
-        // validation, not by restricting the discovery surface (H2).
-        assert!(options.required_initial_tool.is_none());
+        // Receipt retries still begin with the durable plan. Once update_plan
+        // succeeds, the complete typed research surface is restored.
+        assert_eq!(
+            options.required_initial_tool.as_deref(),
+            Some("update_plan")
+        );
         assert!(options.force_isolated_session);
     }
 
@@ -29340,7 +29926,10 @@ Business OS command:
         assert!(options.disable_mcp_servers);
         assert!(!options.force_isolated_session);
         assert!(options.plain_prompt);
-        assert!(options.required_initial_tool.is_none());
+        assert_eq!(
+            options.required_initial_tool.as_deref(),
+            Some("update_plan")
+        );
         assert!(!queue_job_reuses_persistent_session(&options));
         let base_instructions = options
             .base_instructions
@@ -29360,7 +29949,10 @@ Business OS command:
         assert!(options.force_isolated_session);
         assert!(!options.plain_prompt);
         assert!(options.base_instructions.is_none());
-        assert!(options.required_initial_tool.is_none());
+        assert_eq!(
+            options.required_initial_tool.as_deref(),
+            Some("update_plan")
+        );
         assert!(!queue_job_reuses_persistent_session(&options));
         assert_eq!(options.turn_timeout_secs_override, None);
 
@@ -29368,6 +29960,229 @@ Business OS command:
         let options = chat_turn_session_options_for_queue_job(&job);
         assert!(!options.force_isolated_session);
         assert!(queue_job_reuses_persistent_session(&options));
+    }
+
+    #[test]
+    fn business_os_writeback_job_gets_a_scoped_mcp_session() -> anyhow::Result<()> {
+        let root = temp_root("business-os-writeback-mcp-session");
+        let command_id = "cmd_writeback_mcp_session";
+        let (capability_token, _) =
+            crate::business_os::store::issue_business_os_capability_token_for_managed_user(
+                &root,
+                "operator",
+                "Operator",
+                "admin",
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+        let accepted = crate::business_os::store::accept_rxdb_business_command_with_origin(
+            &root,
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "module": "outbound-lead-generation",
+                "command_type": "business_os.chat.task",
+                "record_id": "campaign:test",
+                "payload": {
+                    "title": "Research campaign",
+                    "instruction": "Run the bounded action.",
+                    "mode": "data",
+                    "writeback_contract": {
+                        "allowed_collections": ["outbound_lead_generation_leads"],
+                        "allowed_actions": [{
+                            "module_id": "outbound-lead-generation",
+                            "action_id": "web_stack.person_research",
+                            "operation_ids": ["lead_1"]
+                        }]
+                    }
+                },
+                "client_context": {
+                    "actor": { "id": "forged", "role": "chef" },
+                    "capability_token": capability_token
+                }
+            }),
+            crate::business_os::store::CommandOrigin::ReplicatedPeer,
+        )?;
+        assert_eq!(accepted["status"], "accepted");
+        let job = QueuedPrompt {
+            queue_task_metadata: serde_json::json!({
+                "business_os_command_id": command_id,
+                "business_os_command_type": "business_os.chat.task"
+            }),
+            prompt: "Run the campaign".to_string(),
+            goal: "Research campaign".to_string(),
+            preview: "Research campaign".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("outbound-lead-generation-research".to_string()),
+            leased_message_keys: accepted
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .into_iter()
+                .collect(),
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("business-os/outbound-lead-generation/campaign/test".to_string()),
+            workspace_root: Some(root.join("workspace").display().to_string()),
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+        let mut options = chat_turn_session_options_for_queue_job(&job);
+        assert!(configure_business_os_mcp_session_for_queue_job(
+            &root,
+            &job,
+            &mut options,
+        )?);
+        assert!(options.enable_business_os_mcp);
+        assert!(!options.disable_mcp_servers);
+        assert!(options.force_isolated_session);
+        assert!(options
+            .business_os_mcp_command_session
+            .as_deref()
+            .is_some_and(|token| !token.is_empty()));
+        assert!(!queue_job_reuses_persistent_session(&options));
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn writeback_review_requires_every_scoped_action_to_reach_terminal() -> anyhow::Result<()> {
+        let root = temp_root("writeback-action-coverage");
+        let command_id = "cmd_writeback_action_coverage";
+        let (capability_token, _) =
+            crate::business_os::store::issue_business_os_capability_token_for_managed_user(
+                &root,
+                "operator",
+                "Operator",
+                "admin",
+                chrono::Utc::now().timestamp_millis(),
+            )?;
+        let accepted = crate::business_os::store::accept_rxdb_business_command_with_origin(
+            &root,
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "module": "outbound-lead-generation",
+                "command_type": "business_os.chat.task",
+                "record_id": "campaign:test",
+                "payload": {
+                    "title": "Research campaign",
+                    "instruction": "Run every bounded action.",
+                    "mode": "data",
+                    "writeback_contract": {
+                        "allowed_actions": [{
+                            "module_id": "outbound-lead-generation",
+                            "action_id": "web_stack.person_research",
+                            "operation_ids": ["lead_1", "lead_2"]
+                        }]
+                    }
+                },
+                "client_context": { "capability_token": capability_token }
+            }),
+            crate::business_os::store::CommandOrigin::ReplicatedPeer,
+        )?;
+        let task_id = accepted
+            .get("task_id")
+            .and_then(Value::as_str)
+            .context("accepted task id")?
+            .to_string();
+        let parent_created_at_ms = channels::business_command_projection(&root, command_id)?
+            .get("created_at_ms")
+            .and_then(Value::as_i64)
+            .context("parent created_at_ms")?;
+        let job = QueuedPrompt {
+            queue_task_metadata: serde_json::json!({
+                "business_os_command_id": command_id,
+                "business_os_command_type": "business_os.chat.task"
+            }),
+            prompt: "Run the campaign".to_string(),
+            goal: "Research campaign".to_string(),
+            preview: "Research campaign".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("outbound-lead-generation-research".to_string()),
+            leased_message_keys: vec![task_id],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("business-os/outbound-lead-generation/campaign/test".to_string()),
+            workspace_root: Some(root.join("workspace").display().to_string()),
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+
+        let missing = completion_review_writeback_action_guard_outcome(&root, &job)?
+            .context("missing child coverage must fail")?;
+        assert!(missing.summary.contains("2 have no child command"));
+        assert!(missing.evidence.iter().any(|line| line.contains("lead_1")));
+
+        let conn = channels::open_channel_db(&crate::paths::core_db(&root))?;
+        let insert_child = |command_id: &str,
+                            record_id: &str,
+                            phase: &str,
+                            terminal_status: &str,
+                            stamp: i64|
+         -> anyhow::Result<()> {
+            conn.execute(
+                r#"
+                INSERT INTO business_command_aggregates (
+                    command_id, idempotency_key, payload_hash, module,
+                    command_type, record_id, execution_mode, execution_phase,
+                    terminal_status, attempt, projection_version, intent_json,
+                    retryable, created_at_ms, updated_at_ms
+                ) VALUES (?1, ?1, ?2, 'outbound-lead-generation',
+                    'web_stack.person_research', ?3, 'control', ?4,
+                    ?5, 1, 1, ?6, 0, ?7, ?7)
+                "#,
+                params![
+                    command_id,
+                    format!("hash-{command_id}"),
+                    record_id,
+                    phase,
+                    terminal_status,
+                    serde_json::json!({
+                        "id": command_id,
+                        "command_id": command_id,
+                        "module": "outbound-lead-generation",
+                        "command_type": "web_stack.person_research",
+                        "record_id": record_id,
+                        "payload": { "operation_id": record_id }
+                    })
+                    .to_string(),
+                    stamp,
+                ],
+            )?;
+            Ok(())
+        };
+        insert_child(
+            "cmd_child_terminal",
+            "lead_1",
+            "terminal",
+            "completed",
+            parent_created_at_ms + 1,
+        )?;
+        insert_child(
+            "cmd_child_running",
+            "lead_2",
+            "running",
+            "none",
+            parent_created_at_ms + 2,
+        )?;
+
+        let unresolved = completion_review_writeback_action_guard_outcome(&root, &job)?
+            .context("non-terminal child coverage must fail")?;
+        assert!(unresolved.summary.contains("1 are still non-terminal"));
+        assert!(unresolved
+            .evidence
+            .iter()
+            .any(|line| line.contains("lead_2 (running/none)")));
+
+        conn.execute(
+            "UPDATE business_command_aggregates SET execution_phase='terminal', terminal_status='failed', updated_at_ms=?1 WHERE command_id='cmd_child_running'",
+            [parent_created_at_ms + 3],
+        )?;
+        assert!(completion_review_writeback_action_guard_outcome(&root, &job)?.is_none());
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[test]
@@ -36918,6 +37733,126 @@ Use shell tools to create or update these files."
             !should_skip_idle_durable_queue_empty_probe(&root),
             "real queue source changes must reopen durable queue leasing"
         );
+
+        clear_idle_durable_queue_empty_gate(&root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn worker_idle_kick_bypasses_stale_empty_queue_gate() {
+        let root = temp_root("worker-idle-kick-stale-empty-gate");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Continue reviewed work".to_string(),
+                prompt: "Continue the same reviewed task.".to_string(),
+                thread_key: "thread:worker-idle-kick".to_string(),
+                workspace_root: None,
+                priority: "urgent".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("create durable queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+
+        mark_idle_durable_queue_empty_probe(&root);
+        assert!(
+            should_skip_idle_durable_queue_empty_probe(&root),
+            "test precondition requires a fresh stale empty-queue gate"
+        );
+
+        let leased = maybe_lease_next_durable_queue_after_worker_idle(&root, &state)
+            .expect("worker-idle kick should not fail")
+            .expect("worker-idle kick should bypass stale empty-queue gate");
+        assert_eq!(leased.leased_message_keys, vec![task.message_key.clone()]);
+        assert_eq!(route_status_for(&root, &task.message_key), "leased");
+
+        clear_idle_durable_queue_empty_gate(&root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn idle_dispatch_replaces_stale_durable_queue_lease_probe() {
+        let root = temp_root("stale-durable-queue-lease-probe");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Recover after stuck lease probe".to_string(),
+                prompt: "Lease this task after the previous probe became stale.".to_string(),
+                thread_key: "thread:stale-durable-lease-probe".to_string(),
+                workspace_root: None,
+                priority: "urgent".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("create durable queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        let stale_guard =
+            begin_durable_queue_lease_attempt(&root, &state, DurableQueueDispatchGuard::StrictIdle)
+                .expect("start first lease probe");
+        {
+            let gate = DURABLE_QUEUE_LEASE_ATTEMPT_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
+            let mut gate = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            gate.get_mut(&root).expect("active lease probe").started_at =
+                Instant::now() - Duration::from_secs(DURABLE_QUEUE_LEASE_ATTEMPT_STALE_SECS + 1);
+        }
+
+        let leased = maybe_next_idle_dispatch_prompt(&root, &state)
+            .expect("replacement idle dispatch should not fail")
+            .expect("replacement idle dispatch should lease pending work");
+        let IdleDispatchPrompt::Durable(leased) = leased else {
+            panic!("replacement idle dispatch must return durable work");
+        };
+        assert_eq!(leased.leased_message_keys, vec![task.message_key.clone()]);
+        assert_eq!(route_status_for(&root, &task.message_key), "leased");
+        assert!(!stale_guard.is_current());
+        assert!(!lock_shared_state(&state).durable_queue_lease_in_progress);
+
+        drop(stale_guard);
+        clear_idle_durable_queue_empty_gate(&root);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn idle_dispatch_replaces_stale_app_recovery_guard() {
+        let root = temp_root("stale-app-recovery-idle-dispatch");
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Recover after stuck app recovery".to_string(),
+                prompt: "Lease this task after the app recovery guard became stale.".to_string(),
+                thread_key: "thread:stale-app-recovery-idle-dispatch".to_string(),
+                workspace_root: None,
+                priority: "urgent".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("create durable queue task");
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.app_recovery_active = true;
+            shared.app_recovery_started_epoch_secs =
+                Some(current_epoch_secs().saturating_sub(BUSINESS_OS_APP_RECOVERY_STALE_SECS + 1));
+        }
+
+        let leased = maybe_next_idle_dispatch_prompt(&root, &state)
+            .expect("replacement idle dispatch should not fail")
+            .expect("replacement idle dispatch should lease pending work");
+        let IdleDispatchPrompt::Durable(leased) = leased else {
+            panic!("replacement idle dispatch must return durable work");
+        };
+        assert_eq!(leased.leased_message_keys, vec![task.message_key.clone()]);
+        assert_eq!(route_status_for(&root, &task.message_key), "leased");
+        let shared = lock_shared_state(&state);
+        assert!(!shared.app_recovery_active);
+        assert!(shared.app_recovery_started_epoch_secs.is_none());
 
         clear_idle_durable_queue_empty_gate(&root);
         let _ = std::fs::remove_dir_all(root);

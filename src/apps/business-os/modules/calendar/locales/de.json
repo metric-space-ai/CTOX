@@ -62,5 +62,15 @@
   "bookingHolds": "Temporäre Holds",
   "bookings": "Buchungen",
   "presenceEditing": "bearbeitet gerade",
-  "syncingData": "Daten werden synchronisiert."
+  "syncingData": "Daten werden synchronisiert.",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen",
+  "visible": "Sichtbar",
+  "hidden": "Ausgeblendet",
+  "eventsCount": "Termine",
+  "minutesShort": "Min",
+  "internalActive": "Intern aktiv",
+  "internalInactive": "Intern inaktiv",
+  "notPublished": "Nicht veröffentlicht",
+  "noTimezone": "Ohne Zeitzone"
 }

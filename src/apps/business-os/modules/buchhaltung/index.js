@@ -1,6 +1,6 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { importTemplateToDb } from './templates/skr.js';
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 
 
 // --- Native ES Module Imports for Fibu Core Engines ---
@@ -37,6 +37,9 @@ const state = {
   activeRightTab: 'ocr',
   skrName: 'SKR03', // Default
   bookingGrammar: { search: '', view: 'cards', band: 'all', filters: { kind: 'all', sort: 'date', direction: 'desc' } },
+  // Die Darstellung (Karten/Liste) haelt das Modul selbst: der Umschalter ist
+  // ein einzelner Aktionsknopf, kein aria-pressed-Zustandspaar der Grammatik.
+  bookingView: 'cards',
   selectedBookingKey: null,
   evidenceUserCollapsed: false,
 
@@ -342,6 +345,7 @@ function bindElements(host) {
     root: host.querySelector('[data-fibu-root]'),
     bookingPane: host.querySelector('[data-booking-pane]'),
     bookingList: host.querySelector('[data-booking-list]'),
+    bookingViewToggle: host.querySelector('[data-fibu-view-toggle]'),
     bookingImportInput: host.querySelector('[data-booking-import-input]'),
     workbenchView: host.querySelector('[data-workbench-view]'),
     navItems: host.querySelectorAll('[data-nav]'),
@@ -728,9 +732,16 @@ function wireEvents() {
   // Shell-owned pane grammar reports its current filter/view state. Only data
   // or grammar changes rebuild this list; selecting a row never does.
   els.bookingPane?.addEventListener('ctox-pane-grammar-change', (event) => {
-    state.bookingGrammar = event.detail || state.bookingGrammar;
+    // Suche, Band und Filter kommen aus der Grammatik; die Darstellung nicht --
+    // sie gehoert dem Ein-Knopf-Umschalter und wird hier bewahrt.
+    state.bookingGrammar = { ...(event.detail || state.bookingGrammar), view: state.bookingView };
     renderBookingList();
   });
+
+  els.bookingViewToggle?.addEventListener('click', () => {
+    setBookingView(state.bookingView === 'list' ? 'cards' : 'list');
+  });
+  syncBookingViewToggle();
 
   els.bookingList?.addEventListener('click', (event) => {
     const row = event.target.closest('[data-booking-key]');
@@ -999,6 +1010,29 @@ function bookingKindLabel(kind) {
   return kind === 'receipt' ? 'Beleg' : 'Buchung';
 }
 
+// Ein-Knopf-Umschalter: das Icon zeigt die Ansicht, zu der gewechselt wird,
+// Beschriftung und Tooltip benennen genau diese Aktion. Der Knopf traegt
+// keinen aria-pressed-Zustand.
+function syncBookingViewToggle() {
+  const toggle = state.els?.bookingViewToggle;
+  if (!toggle) return;
+  const view = state.bookingView === 'list' ? 'list' : 'cards';
+  const label = view === 'list' ? 'Als Karten anzeigen' : 'Als Liste anzeigen';
+  toggle.dataset.fibuView = view;
+  toggle.setAttribute('aria-label', label);
+  toggle.setAttribute('title', label);
+  toggle.removeAttribute('aria-pressed');
+}
+
+function setBookingView(view) {
+  const next = view === 'list' ? 'list' : 'cards';
+  if (state.bookingView === next) return;
+  state.bookingView = next;
+  state.bookingGrammar = { ...(state.bookingGrammar || {}), view: next };
+  syncBookingViewToggle();
+  renderBookingList();
+}
+
 function renderBookingList() {
   const pane = state.els.bookingPane;
   const container = state.els.bookingList;
@@ -1036,17 +1070,27 @@ function renderBookingList() {
       ? fibuSyncingBlock()
       : '<div class="ctox-empty">Keine Belege oder Buchungen in dieser Ansicht.</div>';
   } else {
-    container.innerHTML = filtered.map((record) => `
-      <button type="button" class="ctox-list-item fibu-booking-row ${grammar.view === 'list' ? 'is-compact' : ''} ${state.selectedBookingKey === record.key ? 'is-selected' : ''}"
+    // Zwei echte Dichten statt zweier Varianten derselben Zeile:
+    // KARTEN tragen Titel plus zwei Meta-Zeilen (Zuordnung/Status/Datum, dann
+    // Beschreibung und Betrag), LISTE genau eine Zeile aus Titel und einem
+    // Kurz-Meta rechts.
+    const compact = grammar.view === 'list';
+    container.innerHTML = filtered.map((record) => {
+      const selected = state.selectedBookingKey === record.key;
+      const head = `<button type="button" class="ctox-list-item fibu-booking-row ${compact ? 'is-compact' : ''} ${selected ? 'is-selected' : ''}"
         data-booking-key="${escapeHtml(record.key)}"
         data-context-record-id="${escapeHtml(record.id)}"
         data-context-record-type="${record.kind === 'receipt' ? 'accounting_receipt' : 'accounting_journal_entry'}"
         data-context-label="${escapeHtml(record.label)}"
-        aria-selected="${state.selectedBookingKey === record.key ? 'true' : 'false'}">
-        <strong>${escapeHtml(record.label)}</strong>
-        <span>${escapeHtml(record.description)} · ${bookingKindLabel(record.kind)} · ${record.date || 'ohne Datum'} · ${bookingStatusLabel(record.status)} · ${formatCents(record.amount)}</span>
-      </button>
-    `).join('');
+        aria-selected="${selected ? 'true' : 'false'}">`;
+      const body = compact
+        ? `<strong>${escapeHtml(record.label)}</strong>
+        <span class="fibu-booking-lead">${formatCents(record.amount)}</span>`
+        : `<strong>${escapeHtml(record.label)}</strong>
+        <span class="fibu-booking-meta">${bookingKindLabel(record.kind)} · <em class="fibu-booking-status is-${record.status}">${bookingStatusLabel(record.status)}</em> · ${escapeHtml(record.date || 'ohne Datum')}</span>
+        <span class="fibu-booking-meta fibu-booking-meta-split"><span class="fibu-booking-desc">${escapeHtml(record.description)}</span><span class="fibu-booking-amount">${formatCents(record.amount)}</span></span>`;
+      return `${head}${body}</button>`;
+    }).join('');
   }
 
   const grammarHandle = pane.__ctoxPaneGrammar;
@@ -4419,7 +4463,7 @@ function initBuchhaltungContextMenu(state) {
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu buchhaltung-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  (state.els.root || state.ctx?.host)?.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {
@@ -4567,10 +4611,11 @@ function renderBuchhaltungContextMenu(state, context, x, y) {
   state.contextMenu.style.top = '0px';
   const rect = state.contextMenu.getBoundingClientRect();
   const clampNumber = (val, min, max) => Math.min(max, Math.max(min, val));
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  state.contextMenu.style.left = `${clampNumber(x, 8, maxLeft)}px`;
-  state.contextMenu.style.top = `${clampNumber(y, 8, maxTop)}px`;
+  const rootRect = state.els.root?.getBoundingClientRect?.() || { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+  const maxLeft = Math.max(8, rootRect.width - rect.width - 8);
+  const maxTop = Math.max(8, rootRect.height - rect.height - 8);
+  state.contextMenu.style.left = `${clampNumber(x - rootRect.left, 8, maxLeft)}px`;
+  state.contextMenu.style.top = `${clampNumber(y - rootRect.top, 8, maxTop)}px`;
 
   const form = state.contextMenu.querySelector('[data-buchhaltung-context-chat-form]');
   const textarea = state.contextMenu.querySelector('[data-buchhaltung-context-message]');

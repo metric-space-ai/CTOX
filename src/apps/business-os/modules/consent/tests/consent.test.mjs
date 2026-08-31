@@ -33,14 +33,35 @@ test('consent: denied collection access renders a locked state instead of an emp
 test('consent: left column carries the canonical grammar markup pins', () => {
   // Search + shard/list toggle + collapsed tray with reset + footer target.
   assert.match(html, /data-pg-search/, 'grammar search input');
-  assert.match(html, /data-pg-view="cards"/, 'shard view toggle');
-  assert.match(html, /data-pg-view="list"/, 'list view toggle');
+  assert.match(html, /data-pg-view="cards"/, 'view toggle starts in the card view');
   assert.match(html, /data-pg-tray-toggle/, 'filter tray toggle');
   assert.match(html, /data-pg-tray\b/, 'collapsed tray');
   assert.match(html, /data-pg-reset/, 'tray reset control');
   assert.match(html, /data-pg-footer/, 'one-line footer target');
   // Status select in the tray drives the filter.
   assert.match(html, /data-pg-filter[^>]*data-pg-name="status"/, 'status filter in tray');
+});
+
+// Betreiber-Direktive 31.08.2026: der Karten/Listen-Umschalter ist EIN Knopf,
+// der die Ansicht wechselt — kein Paar aus zwei Zustandsknoepfen. Der Wächter
+// prüft deshalb die Anzahl der Bedienelemente, nicht mehr nur die Existenz
+// zweier Marker, und dazu die Aktionssemantik (Ziel-Beschriftung, kein
+// aria-pressed) sowie die Verdrahtung beider Ansichten in index.js.
+test('consent: the card/list switch is ONE action button, not a state pair', () => {
+  const viewControls = html.match(/data-pg-view="[^"]*"/g) || [];
+  assert.equal(viewControls.length, 1, `expected exactly one view control, got ${viewControls.length}`);
+  // Der eine Knopf benennt beide Ansichten: aktuelle und Gegenansicht.
+  assert.match(html, /data-pg-view="cards"[^>]*data-pg-view-alt="list"/, 'toggle declares current + alternate view');
+  // Eine Aktion hat keinen Gedrueckt-Zustand.
+  const toggleTag = html.match(/<button[^>]*consent-view-toggle[^>]*>/)?.[0] || '';
+  assert.ok(toggleTag, 'toggle button is present');
+  assert.ok(!/aria-pressed/.test(toggleTag), 'action button carries no aria-pressed');
+  assert.match(toggleTag, /aria-label="Als Liste anzeigen"/, 'label names the target view, not the current one');
+  // index.js tauscht beide Werte, Icon und Beschriftung und raeumt das von der
+  // generischen Shell-Verdrahtung gesetzte aria-pressed wieder ab.
+  assert.match(indexJs, /viewToList/, 'target-view copy for the list direction');
+  assert.match(indexJs, /viewToCards/, 'target-view copy for the card direction');
+  assert.match(indexJs, /removeAttribute\('aria-pressed'\)/, 'shell-set aria-pressed is stripped');
 });
 
 test('consent: counted band has >= 2 real views derived from status', () => {
@@ -109,6 +130,40 @@ test('consent: record list renders selector rows from a stub doc array', async (
 
   const empty = mod.renderRecordList([], { view: 'cards', nowMs: now });
   assert.match(empty, /ctox-empty/, 'empty state renders the kit empty class');
+});
+
+// Betreiber-Direktive 31.08.2026: die beiden Ansichten muessen sich in der
+// DICHTE unterscheiden, nicht nur marginal — Karte mehrzeilig mit den
+// wichtigsten Detailfeldern, Liste genau eine kompakte Zeile.
+test('consent: card and list view differ in density, not just in detail', async () => {
+  const mod = await import('../index.js');
+  const now = 1_781_990_000_000;
+  const rows = [{
+    id: 'c1', subject_id: 'cand-10422', purpose: 'Bewerbung', legal_basis: 'consent',
+    granted_at_ms: now - 86_400_000, expires_at_ms: now + 86_400_000,
+  }];
+
+  const cards = mod.renderRecordList(rows, { view: 'cards', nowMs: now });
+  const cardMeta = cards.match(/class="consent-row-meta/g) || [];
+  assert.ok(cardMeta.length >= 2, `card view carries >= 2 meta lines, got ${cardMeta.length}`);
+  assert.match(cards, /consent-row--cards/, 'card rows carry the card modifier');
+  // Die Detailfelder der App, keine neuen Datenpfade.
+  assert.match(cards, /cand-10422/, 'card meta shows the subject');
+  assert.match(cards, /Rechtsgrundlage/, 'card meta shows the legal basis');
+  assert.match(cards, /erteilt/, 'card meta shows the grant date');
+  assert.match(cards, /gültig bis/, 'card meta shows the expiry');
+
+  const list = mod.renderRecordList(rows, { view: 'list', nowMs: now });
+  assert.match(list, /consent-row--list/, 'list rows carry the list modifier');
+  assert.equal((list.match(/class="consent-row-meta/g) || []).length, 0,
+    'the compact list row carries no meta lines');
+  // Nur der sichtbare Rumpf zaehlt — die Kontext-Attribute des Zeilen-Wrappers
+  // (data-context-label) tragen den Subjektnamen weiterhin fuer das Kontextmenue.
+  const listBody = list.replace(/^<div[^>]*>/, '').replace(/<\/div>$/, '');
+  assert.ok(!/cand-10422/.test(listBody), 'the compact row shows no assignment detail');
+  assert.ok(!/consent-row-head/.test(listBody), 'the compact row needs no head wrapper');
+  // Genau ein Kurz-Meta rechts: der Status.
+  assert.equal((list.match(/ctox-badge/g) || []).length, 1, 'exactly one short meta in the list row');
 });
 
 test('consent: collection readiness gates the data-driven empty state', async () => {

@@ -166,6 +166,9 @@ function applyStaticLabels(host, t) {
     kindChips.setAttribute('aria-label', t('kindFilterLabel', 'Typ filtern'));
   }
 
+  // One-button view switch — icon/label always name the target view.
+  syncViewToggleButton(root);
+
   // Right-pane actions toggle — title and aria label swap depending on state.
   const toggleActions = root.querySelector('[data-toggle-actions]');
   if (toggleActions) {
@@ -173,6 +176,38 @@ function applyStaticLabels(host, t) {
     toggleActions.dataset.hideLabel = t('hideActions', 'Aktionen ausblenden');
     updateToggleActionsAria(root);
   }
+}
+
+// One-button view switch (Betreiber-Direktive 31.08.2026). The button is an
+// action, not a state, so it carries no aria-pressed; icon, aria-label and
+// title always describe the view it switches TO. `data-pg-view` stays on it
+// because shared/pane-grammar.js reads a pane's view from there — it must
+// always hold the CURRENT view, otherwise an unrelated grammar emit (a search
+// keystroke, a tray filter, a band tab) would flip the mode as a side effect.
+const VIEW_ICON_LIST = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>';
+const VIEW_ICON_CARDS = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>';
+
+function syncViewToggleButton(root) {
+  const button = root?.querySelector('[data-reports-view-toggle]');
+  if (!button) return;
+  // The shell's generic view-button wiring stamps aria-pressed on click; a
+  // single toggle is an action, so the state attribute is removed again — on
+  // every sync, even when the view itself did not move.
+  button.removeAttribute('aria-pressed');
+  const view = state.viewMode === 'list' ? 'list' : 'cards';
+  // Only touch the icon when the view actually moved. Rewriting innerHTML
+  // detaches the <svg> the click originated on, which silently breaks any
+  // delegated handler further up the bubble path (measured, 31.08.2026).
+  if (button.getAttribute('data-pg-view') === view && button.firstElementChild) return;
+  const cards = view === 'cards';
+  const t = state.t || ((key, fallback) => fallback ?? key);
+  const label = cards
+    ? t('showAsList', 'Als Liste anzeigen')
+    : t('showAsCards', 'Als Karten anzeigen');
+  button.setAttribute('data-pg-view', view);
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.innerHTML = cards ? VIEW_ICON_LIST : VIEW_ICON_CARDS;
 }
 
 function updateToggleActionsAria(root) {
@@ -199,6 +234,16 @@ function wireUi() {
   // grammar event and re-renders — the same contract knowledge/threads/
   // app-store use.
   root.querySelector('.reports-rail')?.addEventListener('ctox-pane-grammar-change', onRailGrammarChange);
+  // One-button view switch. Bound on the button itself, not delegated: the
+  // shell's grammar listener runs on the same click and re-renders, and a
+  // delegated handler would receive an already-detached SVG target.
+  // `data-pg-view` always carries the CURRENT view, so whichever of the two
+  // listeners runs first, the grammar never flips the mode as a side effect.
+  root.querySelector('[data-reports-view-toggle]')?.addEventListener('click', () => {
+    state.viewMode = state.viewMode === 'list' ? 'cards' : 'list';
+    syncViewToggleButton(root);
+    renderList({ resetScroll: true });
+  });
   // Right actions column is collapsible — same toggle pattern threads/tickets
   // use. The toggle stays in the detail header so the actions pane never has
   // to render its own chrome.
@@ -616,7 +661,10 @@ function delegationPromptFor(report) {
 function openDelegateDialog(report) {
   const host = state.ctx.host;
   host.querySelector('[data-delegate-modal]')?.remove();
-  const actorId = state.ctx.session?.user_id || state.ctx.session?.userId || '';
+  const actorId = state.ctx.session?.user?.id
+    || state.ctx.session?.user_id
+    || state.ctx.session?.userId
+    || '';
   // The reviewer must themselves be authorized to run coding turns for the
   // module (server policy refuses otherwise) — offer only admin/chef roles.
   const reviewers = (state.users || []).filter((user) => (user.id || user.user_id) !== actorId
@@ -651,14 +699,24 @@ function openDelegateDialog(report) {
   promptInput.value = delegationPromptFor(report);
   wrap.querySelector('[data-delegate-cancel]').addEventListener('click', () => wrap.remove());
   wrap.addEventListener('click', (event) => { if (event.target === wrap) wrap.remove(); });
-  wrap.querySelector('[data-delegate-submit]').addEventListener('click', async () => {
+  const submitButton = wrap.querySelector('[data-delegate-submit]');
+  submitButton.addEventListener('click', async () => {
     const target = wrap.querySelector('#delegate-target').value;
     const reviewer = wrap.querySelector('#delegate-reviewer').value.trim();
     const prompt = promptInput.value.trim();
     if (!target || !reviewer || prompt.length < 20) {
-      state.ctx.notifications?.notify?.({ title: 'Delegation unvollständig', body: 'Ziel-App, Reviewer und ein aussagekräftiger Auftrag sind nötig.' });
+      showReportNotification(state.ctx.notifications, {
+        type: 'warning',
+        title: 'Delegation unvollständig',
+        message: 'Ziel-App, Reviewer und ein aussagekräftiger Auftrag sind nötig.',
+      });
       return;
     }
+    if (submitButton.disabled) return;
+    submitButton.disabled = true;
+    submitButton.setAttribute('aria-busy', 'true');
+    const originalSubmitLabel = submitButton.textContent;
+    submitButton.textContent = 'Wird eingereicht …';
     try {
       await dispatchModuleCommand({
         commandType: 'threads.ctox_approval.request',
@@ -684,12 +742,39 @@ function openDelegateDialog(report) {
         },
       });
       wrap.remove();
-      state.ctx.notifications?.notify?.({ title: 'Zur Freigabe eingereicht', body: `Der Auftrag wartet in Threads auf die Freigabe.` });
+      showReportNotification(state.ctx.notifications, {
+        type: 'success',
+        title: 'Zur Freigabe eingereicht',
+        message: 'Der Auftrag wartet in Threads auf die Freigabe.',
+      });
       await refreshReports({});
     } catch (error) {
-      state.ctx.notifications?.notify?.({ title: 'Delegation fehlgeschlagen', body: safeErrorMessage(error) });
+      showReportNotification(state.ctx.notifications, {
+        type: 'error',
+        title: 'Delegation fehlgeschlagen',
+        message: safeErrorMessage(error),
+      });
+    } finally {
+      if (submitButton.isConnected) {
+        submitButton.disabled = false;
+        submitButton.removeAttribute('aria-busy');
+        submitButton.textContent = originalSubmitLabel;
+      }
     }
   });
+}
+
+export function showReportNotification(notifications, options) {
+  if (typeof notifications?.show === 'function') {
+    return notifications.show(options);
+  }
+  if (typeof notifications?.notify === 'function') {
+    return notifications.notify({
+      ...options,
+      body: options?.message || '',
+    });
+  }
+  return null;
 }
 
 function syncGrammarSurfaces(allItems, searched) {
@@ -716,12 +801,13 @@ function syncGrammarSurfaces(allItems, searched) {
 function renderList({ resetScroll = false } = {}) {
   const list = state.ctx.host.querySelector('[data-reports-list]');
   if (!list) return;
+  syncViewToggleButton(state.ctx.host.querySelector('[data-reports-root]'));
   const items = filteredReports();
   const allItems = normalizedReports();
   // Counted view band (zeros included) + one-line footer.
   const searched = filterReportItems(normalizedReports(), { search: state.search, kind: 'all', status: state.status });
   syncGrammarSurfaces(allItems, searched);
-  const well = state.ctx.host.querySelector('.reports-well');
+  const well = state.ctx.host.querySelector('.ctox-well');
   const savedScrollTop = well ? well.scrollTop : 0;
   list.classList.toggle('is-list-view', state.viewMode === 'list');
   if (!items.length) {
@@ -731,22 +817,26 @@ function renderList({ resetScroll = false } = {}) {
     return;
   }
   if (state.viewMode === 'list') {
+    // LIST: exactly ONE compact line per entry — title plus a single short
+    // meta on the right. Maximum density, no badges, no wrapping.
     list.innerHTML = items.map((report) => `
       <button type="button" class="ctox-list-item report-row-compact ${report.id === state.selectedId ? 'is-selected' : ''}" data-report-id="${escapeAttr(report.id)}" data-context-record-id="${escapeAttr(report.id)}" data-context-record-type="business_report" data-context-label="${escapeAttr(report.title || report.id)}" aria-selected="${report.id === state.selectedId ? 'true' : 'false'}">
         <span class="reports-compact-title">${escapeHtml(report.title)}</span>
-        <span class="ctox-badge${statusBadgeClass(report.status)}">${escapeHtml(displayStatus(report.status))}</span>
+        <span class="reports-compact-meta">${escapeHtml(displayStatus(report.status))}</span>
       </button>
     `).join('');
   } else {
+    // CARDS (shards): title in bold, then the meta lines that actually decide
+    // triage — type/status/severity badges and module · date. Roomier padding.
     list.innerHTML = items.map((report) => `
     <button type="button" class="ctox-list-item report-row ${report.id === state.selectedId ? 'is-selected' : ''}" data-report-id="${escapeAttr(report.id)}" data-context-record-id="${escapeAttr(report.id)}" data-context-record-type="business_report" data-context-label="${escapeAttr(report.title || report.id)}" aria-selected="${report.id === state.selectedId ? 'true' : 'false'}">
+      <strong class="report-row-title">${escapeHtml(report.title)}</strong>
       <span class="reports-badges">
         <span class="ctox-badge ${report.kind === 'bug' ? 'is-danger' : 'is-feature'}">${escapeHtml(report.kindLabel)}</span>
         <span class="ctox-badge${statusBadgeClass(report.status)}">${escapeHtml(displayStatus(report.status))}</span>
         <span class="ctox-badge">${escapeHtml(report.severity || 'medium')}</span>
       </span>
-      <strong>${escapeHtml(report.title)}</strong>
-      <small>${escapeHtml(report.moduleId)} · ${escapeHtml(formatDate(report.updatedAt || report.createdAt))}</small>
+      <small class="report-row-sub">${escapeHtml(report.moduleId)} · ${escapeHtml(formatDate(report.updatedAt || report.createdAt))}</small>
     </button>
   `).join('');
   }
@@ -1297,10 +1387,12 @@ function reportStoreEmptyMessage(prefix = '') {
 
 function initReportsContextMenu(state) {
   state.contextMenu?.remove();
+  const moduleHost = state.ctx?.host;
+  if (!moduleHost) return () => {};
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu reports-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  moduleHost.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {

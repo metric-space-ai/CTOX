@@ -10,10 +10,12 @@
     "check:office": "node office-engine/oracle/validate-feature-matrix.mjs && node office-engine/validate-rollout.mjs && node office-engine/validate-completion-audit.mjs && node office-engine/capture-release-evidence.mjs --self-test && node ../../scripts/check-office-skill-gating.mjs && node scripts/assert-managed-business-os-assets.mjs --self-test && node --test office-engine/office-engine.test.mjs",
     "check:deps": "node scripts/assert-business-os-js-bootstrap.mjs",
     "check:platform-freeze": "node scripts/assert-app-platform-freeze.mjs",
-    "check:app-inventory": "node scripts/assert-app-migration-inventory.mjs",
+    "check:app-inventory": "node scripts/assert-app-migration-inventory.mjs && node scripts/assert-standard-app-bundle.mjs",
     "check:app-starter": "node scripts/assert-app-starter.mjs",
     "check:app-quality-contracts": "node scripts/assert-app-quality-contracts.mjs",
     "check:design-system": "node scripts/assert-design-system.mjs",
+    "check:content": "node scripts/audit-business-os-content.mjs",
+    "test:content": "node --test scripts/audit-business-os-content.test.mjs",
     "check:managed-assets": "node scripts/assert-managed-business-os-assets.mjs",
     "check:context-contracts": "node scripts/assert-module-context-contract.mjs && node scripts/assert-global-context-menu-policy.mjs",
     "qa:design-matrix": "node scripts/capture-design-matrix.mjs",
@@ -24,6 +26,10 @@
     "qa:creator-browser": "node scripts/assert-creator-browser.mjs",
     "audit:app-quality": "node scripts/audit-app-quality.mjs",
     "qa:design-gates": "node scripts/run-design-quality-gates.mjs",
+    "shell:artifact": "node scripts/build-shell-artifact.mjs",
+    "shell:sign-release": "node scripts/sign-shell-release.mjs",
+    "shell:sbom": "node scripts/build-shell-sbom.mjs",
+    "test:shell-artifact": "node --test scripts/build-shell-artifact.test.mjs scripts/build-shell-sbom.test.mjs scripts/sign-shell-release.test.mjs",
     "test:shared": "node --test shared/*.test.mjs",
     "test:app-store": "node modules/app-store/app-store.test.mjs",
     "test:app-stories": "node scripts/run-app-story-tests.mjs",
@@ -31,7 +37,7 @@
     "test:document-format": "node --test modules/documents/document-format/document-format.test.mjs",
     "check:release-docs": "node scripts/assert-production-release-docs.mjs",
     "check:security-signoff": "node scripts/assert-security-privacy-signoff.mjs --self-test && node scripts/assert-security-privacy-signoff.mjs",
-    "test": "npm run check:deps && npm run check:office && npm run check:platform-freeze && npm run check:app-inventory && npm run check:app-starter && npm run check:app-quality-contracts && npm run check:design-system && npm run check:context-contracts && npm run check:release-docs && npm run check:security-signoff && npm run test:shared && npm run test:app-store && npm run test:app-stories"
+    "test": "npm run check:deps && npm run check:office && npm run check:platform-freeze && npm run check:app-inventory && npm run check:app-starter && npm run check:app-quality-contracts && npm run check:design-system && npm run check:content && npm run test:content && npm run check:context-contracts && npm run check:release-docs && npm run check:security-signoff && npm run test:shared && npm run test:app-store && npm run test:app-stories"
   },
   "devDependencies": {
     "esbuild": "0.28.1",

@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { loadAppAuditScenarios } from './app-audit-scenarios.mjs';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 
@@ -302,6 +303,20 @@ function validate(options) {
   }
   const dataRuntimeFailures = collectDataRuntimeFailures(moduleDir);
   failures.push(...dataRuntimeFailures);
+  const auditScenarioPath = join(moduleDir, 'tests', 'audit-scenarios.json');
+  if (existsSync(auditScenarioPath)) {
+    try {
+      const auditScenarios = loadAppAuditScenarios(moduleDir);
+      checks.push({
+        name: 'app_audit_scenarios',
+        ok: true,
+        detail: `${auditScenarios.scenarios.length} declarative scenario(s)`,
+      });
+    } catch (error) {
+      failures.push(`invalid ${rel(options.workspace, auditScenarioPath)}: ${error.message}`);
+      checks.push({ name: 'app_audit_scenarios', ok: false, detail: error.message });
+    }
+  }
   checks.push({
     name: 'data_runtime_v1',
     ok: dataRuntimeFailures.length === 0,

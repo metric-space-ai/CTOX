@@ -38,8 +38,16 @@ test('submissions: left column carries the canonical grammar markup pins', () =>
   assert.match(html, /data-pg-search/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // Ein-Knopf-Umschalter (Betreiber-Direktive 31.08.2026): the shard/list
+  // toggle is ONE module-wired action button, not the former aria-pressed pair
+  // of two [data-pg-view] buttons in a .ctox-view-toggle group. The pane
+  // publishes the live view through data-pg-default-view, which is what the
+  // shell grammar reads.
+  const markup = html.replace(/<!--[\s\S]*?-->/g, '');
+  assert.equal((markup.match(/data-subs-view-toggle/g) || []).length, 1);
+  assert.match(markup, /data-pg-default-view="cards"/);
+  assert.doesNotMatch(markup, /data-pg-view=/);
+  assert.doesNotMatch(markup, /ctox-view-toggle/);
   // Footer target.
   assert.match(html, /data-pg-footer/);
   // Counted view band with >= 2 real views (bands with a single tab are a

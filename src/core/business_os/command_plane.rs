@@ -262,7 +262,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 57] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 60] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -318,6 +318,9 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 57] = [
     "ctox.subscription_auth.start",
     "ctox.task.delete",
     "ctox.task.update",
+    "ctox.workjet.project.list",
+    "ctox.workjet.project.upsert",
+    "ctox.workjet.working_copy.upsert",
     "knowledge.command",
     "web_stack.person_research",
 ];
@@ -791,6 +794,17 @@ impl CentralCommandPolicyRequirement {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::IntegrationsManage,
             ))
+        } else if command_type == "ctox.workjet.project.list" {
+            Some(CommandPolicyRequirement::workspace(
+                BusinessOsPermission::DataRead,
+            ))
+        } else if matches!(
+            command_type,
+            "ctox.workjet.project.upsert" | "ctox.workjet.working_copy.upsert"
+        ) {
+            Some(CommandPolicyRequirement::workspace(
+                BusinessOsPermission::DataWrite,
+            ))
         } else if is_appsec_business_command(command_type) {
             let permission = if appsec_business_command_requires_data_write(command_type) {
                 BusinessOsPermission::DataWrite
@@ -1028,6 +1042,28 @@ fn dispatch_business_command(
         | "ctox.business_os.support.export_diagnostics"
         | "ctox.business_os.why" => {
             handle_business_os_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
+        }
+        "ctox.workjet.project.list"
+        | "ctox.workjet.project.upsert"
+        | "ctox.workjet.working_copy.upsert" => {
+            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
+            let owner_user_id = session_user_id(session)
+                .context("authorized Workjet project command is missing a user identity")?;
+            match super::store_workjet_projects::handle_workjet_project_store_command(
+                root,
+                command,
+                owner_user_id,
+            ) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    None,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
         }
         "ctox.secret.list"
         | "ctox.secret.put"
@@ -1298,6 +1334,8 @@ fn dispatch_business_command(
             handle_source_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         "kundenpipeline.triage.write"
+        | "kundenpipeline.decision.request"
+        | "kundenpipeline.decision.resolve"
         | "kundenpipeline.decision.answer"
         | "kundenpipeline.mail.send"
         | "kundenpipeline.delegate" => {

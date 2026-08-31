@@ -1,0 +1,34 @@
+{
+  "schema": "workjet.icon-provenance.v1",
+  "app_id": "kundenpipeline",
+  "candidate_id": "kundenpipeline-decision-route-v1",
+  "operator_approved_for_pilot": false,
+  "source": {
+    "media_type": "image/svg+xml",
+    "path": "kundenpipeline-icon.svg",
+    "sha256": "cbd2f9324d9bd0b14f99e44eb89bee7357e06f4ebeb88b4effd57afa38d7e257",
+    "provider": "local-svg-rasterizer",
+    "provider_mode": "checked-in-vector-rasterized-locally",
+    "width": 256,
+    "height": 256
+  },
+  "derivatives": [
+    {
+      "path": "decision-hub-256.png",
+      "media_type": "image/png",
+      "size_px": 256,
+      "sha256": "cb491ce77d4a7f5d1a40d9fe9c126e3ea33837dce26ef2d0e89cdc7d4edd5ad3"
+    },
+    {
+      "path": "decision-hub-60.png",
+      "media_type": "image/png",
+      "size_px": 60,
+      "sha256": "36b3cd7f2e83066f2a41d4435df68e5490be6f264108a2ac8610a3ff711579d5"
+    }
+  ],
+  "validation": {
+    "strict_reference_review_passed": false,
+    "production_svg_available": true,
+    "note": "Distinctive shell icon rasterized from the checked-in vector source. OpenAI image generation was unavailable because OPENAI_API_KEY was not set in this environment."
+  }
+}

@@ -1,6 +1,8 @@
-import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260811-fremde-collection-mitladen-v106';
+import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260831-shell-v2-merged-v323';
+import { showBusinessAlert } from './dialogs.js';
 
 const STATUS_KEY = 'ctox.businessOs.importer.status.v1';
+const IMPORTER_STYLE_BUILD = '20260827-thesen-import-preview-v1';
 
 export async function openUniversalImporter(ctx, config = {}) {
   await ensureImporterStyles();
@@ -11,7 +13,16 @@ export async function openUniversalImporter(ctx, config = {}) {
   drawer.setAttribute('role', 'dialog');
   drawer.setAttribute('aria-modal', 'true');
   drawer.innerHTML = importerTemplate(config);
-  document.body.append(drawer);
+  // Der Importer gehoert in das Modulfenster, nicht auf die Shell-Ebene:
+  // auf `document.body` legt er sich ueber Titelleiste und Fensterrahmen.
+  const host = resolveImporterHost(ctx, config);
+  // Ein zweiter Aufruf hinterliess bisher eine zweite Schublade im DOM.
+  host.querySelectorAll(':scope > .universal-importer-drawer').forEach((old) => old.remove());
+  if (host !== document.body && window.getComputedStyle(host).position === 'static') {
+    host.style.position = 'relative';
+  }
+  drawer.dataset.scope = host === document.body ? 'shell' : 'module';
+  host.append(drawer);
 
   const close = () => drawer.remove();
   drawer.querySelector('[data-action="close-importer"]')?.addEventListener('click', close);
@@ -294,6 +305,24 @@ export async function openUniversalImporter(ctx, config = {}) {
     status.textContent = config.submittingLabel || 'Import wird vorbereitet...';
     try {
       const payload = await buildImportPayload(drawer, config);
+      if (typeof config.previewImport === 'function') {
+        const signature = importPreviewSignature(payload);
+        const preview = await config.previewImport({ payload, drawer });
+        if (drawer.importPreviewSignature !== signature) {
+          renderImportPreview(drawer, preview);
+          drawer.importPreviewSignature = signature;
+          submitButton.textContent = preview?.canProceed === false
+            ? (config.submitLabel || 'Vorschau erneut prüfen')
+            : (config.confirmSubmitLabel || 'Gültige Datensätze importieren');
+          submitButton?.removeAttribute('disabled');
+          status.textContent = preview?.message || 'Vorschau geprüft. Bitte den Import bestätigen.';
+          return;
+        }
+        if (preview?.canProceed === false) {
+          renderImportPreview(drawer, preview);
+          throw new Error(preview?.message || 'Der Import enthält keine gültigen Datensätze.');
+        }
+      }
       const command = {
         id: payload.record_id,
         module: config.moduleId || 'business-os',
@@ -329,7 +358,22 @@ export async function openUniversalImporter(ctx, config = {}) {
       };
       if (config.closeOnSubmit) {
         close();
-        runImport().catch((error) => console.warn('[business-os importer] background import failed', error));
+        // Mit geschlossener Schublade gibt es kein Statusfeld mehr. Ohne diesen
+        // Zweig verschwand jede Validierungsmeldung in der Konsole.
+        runImport().catch((error) => {
+          const detail = error?.message || String(error);
+          console.warn('[business-os importer] background import failed', error);
+          recordImportStatus({
+            id: payload.record_id,
+            module_id: config.moduleId || '',
+            title: payload.title,
+            source_type: payload.source_type,
+            status: 'failed',
+            detail,
+            updated_at_ms: Date.now(),
+          });
+          showBusinessAlert(detail, { title: config.failureTitle || 'Import fehlgeschlagen', kind: 'danger' });
+        });
         return;
       }
       await runImport();
@@ -851,11 +895,39 @@ function importerTemplate(config) {
         >${escapeHtml(config.defaultFilterPrompt || '')}</textarea>
       </label>
       ${config.helperText ? `<p class="universal-importer-help">${escapeHtml(config.helperText)}</p>` : ''}
+      <section class="universal-importer-preview" data-import-preview hidden aria-live="polite"></section>
       <footer>
         <span data-import-status></span>
         <button type="button" data-action="submit-importer">${escapeHtml(config.submitLabel || 'Importieren')}</button>
       </footer>
     </div>
+  `;
+}
+
+function importPreviewSignature(payload) {
+  return JSON.stringify({
+    title: payload?.title || '',
+    source_type: payload?.source_type || '',
+    text: payload?.source?.text || '',
+    url: payload?.source?.url || '',
+    files: (payload?.source?.files || []).map((file) => ({
+      name: file?.name || '',
+      size: Number(file?.size) || 0,
+      lastModified: Number(file?.lastModified) || 0,
+    })),
+  });
+}
+
+function renderImportPreview(drawer, preview = {}) {
+  const section = drawer.querySelector('[data-import-preview]');
+  if (!section) return;
+  const items = Array.isArray(preview.items) ? preview.items : [];
+  section.hidden = false;
+  section.innerHTML = `
+    <strong>${escapeHtml(preview.heading || 'Importvorschau')}</strong>
+    ${items.length
+      ? `<ul>${items.map((item) => `<li data-kind="${escapeHtml(item?.kind || 'info')}">${escapeHtml(item?.text || '')}</li>`).join('')}</ul>`
+      : `<p>${escapeHtml(preview.message || 'Keine prüfbaren Datensätze gefunden.')}</p>`}
   `;
 }
 
@@ -872,8 +944,15 @@ function updateImporterFields(drawer) {
   }
 }
 
+function resolveImporterHost(ctx, config = {}) {
+  const candidate = config.host || ctx?.host || null;
+  return candidate && typeof candidate.append === 'function' && candidate.isConnected
+    ? candidate
+    : document.body;
+}
+
 async function ensureImporterStyles() {
-  const href = new URL('./universal-importer.css', import.meta.url).pathname;
+  const href = new URL(`./universal-importer.css?v=${IMPORTER_STYLE_BUILD}`, import.meta.url).href;
   if (document.querySelector(`link[href="${href}"]`)) return;
   const link = document.createElement('link');
   link.rel = 'stylesheet';

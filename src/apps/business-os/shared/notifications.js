@@ -86,6 +86,46 @@ export function createNotifications({ container, t }) {
     return id;
   }
 
+  function showSystem(options = {}) {
+    const payload = normalizeSystemNotification(options, translate);
+    if (!payload) return false;
+
+    // Workjet Mobile owns the system-notification permission and delivery.
+    // The signed Business OS shell can only pass this bounded, non-secret
+    // presentation payload through the native surface bridge.
+    if (typeof globalThis.workjetBusinessOsNotify === 'function') {
+      try {
+        return globalThis.workjetBusinessOsNotify(payload) !== false;
+      } catch (error) {
+        console.error('[notifications] mobile system notification failed:', error);
+        return false;
+      }
+    }
+
+    // Electron grants the isolated CTOX instance session access to the Web
+    // Notification API. Ordinary browsers remain fail-closed until the user
+    // has explicitly granted notification permission.
+    if (typeof globalThis.Notification !== 'function'
+      || globalThis.Notification.permission !== 'granted') return false;
+    try {
+      const notice = new globalThis.Notification(payload.title, {
+        body: payload.body,
+        tag: payload.tag,
+      });
+      notice.onclick = () => {
+        globalThis.focus?.();
+        try { options.action?.callback?.(); } catch (error) {
+          console.error('[notifications] system notification action failed:', error);
+        }
+        notice.close?.();
+      };
+      return true;
+    } catch (error) {
+      console.error('[notifications] desktop system notification failed:', error);
+      return false;
+    }
+  }
+
   function close(id) {
     if (!id) return;
     const toast = container.querySelector(`#${cssEscape(id)}`) || document.getElementById(id);
@@ -109,7 +149,40 @@ export function createNotifications({ container, t }) {
     clearAll();
   }
 
-  return { show, close, clearAll, destroy };
+  return { show, showSystem, close, clearAll, destroy };
+}
+
+export function normalizeSystemNotification(options = {}, translate = (_key, fallback) => fallback) {
+  const title = boundedText(
+    options.title || translate('notificationsTitle', 'Benachrichtigung'),
+    160,
+  );
+  const body = boundedText(options.message || options.body || '', 240);
+  const tag = boundedToken(options.tag || '', 180);
+  const kind = options.kind === 'decision_hub' ? 'decision_hub' : 'business_os';
+  const urgency = ['normal', 'high', 'critical'].includes(options.urgency)
+    ? options.urgency
+    : 'normal';
+  if (!title || !body) return null;
+  return {
+    kind,
+    title,
+    body,
+    ...(tag ? { tag } : {}),
+    urgency,
+    ...(boundedToken(options.recordId || '', 180)
+      ? { recordId: boundedToken(options.recordId, 180) }
+      : {}),
+  };
+}
+
+function boundedText(value, maxLength) {
+  return String(value || '').replace(/\s+/g, ' ').trim().slice(0, maxLength).trim();
+}
+
+function boundedToken(value, maxLength) {
+  const token = String(value || '').trim();
+  return /^[A-Za-z0-9._:-]+$/.test(token) ? token.slice(0, maxLength) : '';
 }
 
 function cssEscape(value) {

@@ -39,7 +39,7 @@ pub(super) const BROWSER_FRAME_RATE_TARGET_DEFAULT: u64 = 15;
 pub(super) const BROWSER_FRAME_RATE_LIMIT: u64 = 15;
 /// Bildrate ohne Interaktion. Fernsteuerung ist kein Videofeed: eine Seite,
 /// die vor sich hin animiert, waehrend niemand etwas tut, braucht keine 15
-/// Bilder pro Sekunde. Gemessen auf der Thesen-Instanz am 19.08.2026: acht
+/// Bilder pro Sekunde. Gemessen auf der Produktionsinstanz am 19.08.2026: acht
 /// aktive Sitzungen erzeugten 120 Bildschirmfotos je Sekunde und hielten
 /// ctox-real dauerhaft bei 150 % CPU, ohne dass jemand den Browser bediente.
 pub(super) const BROWSER_FRAME_RATE_IDLE: u64 = 2;

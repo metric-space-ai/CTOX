@@ -167,6 +167,8 @@ test('Presentation layer stays compact and shell-native', () => {
   assert.match(html, /class="ctox-column-resizer"[^>]*data-resizer-var="--ctox-left-width"/);
   assert.doesNotMatch(css, /\.ctox-column-resizer\s*\{/);
   assert.doesNotMatch(css, /grid-template-columns:\s*var\(--ctox-left-width\)/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.ctox-harness-app \.ctox-pane-header[\s\S]*grid-template-rows:/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.ctox-harness-app \.ctox-filterbar[\s\S]*flex-wrap: nowrap/);
   assert.match(manifest, /currentColor/);
 });
 
@@ -193,7 +195,18 @@ test('Task column pins the shell-owned canonical grammar contract', () => {
   const markup = taskColumnMarkup(tasks, state);
 
   // SHELL-owned data-pg-* grammar with the kit classes (no bespoke chrome).
-  assert.match(markup, /class="ctox-filterbar"[\s\S]*data-pg-search[\s\S]*data-pg-view="cards"[\s\S]*data-pg-view="list"[\s\S]*data-pg-tray-toggle/);
+  // Betreiber-Direktive 31.08.2026: the shard/list switch is ONE button, not a
+  // pressed pair. It stays a data-pg-view node (the shell reads the pane's view
+  // from it) and that attribute carries the CURRENT view, so an unrelated
+  // grammar emit — a search keystroke, a filter, a band tab — cannot flip the
+  // mode; the icon and the label name the view the click switches TO.
+  assert.match(markup, /class="ctox-filterbar"[\s\S]*data-pg-search[\s\S]*data-ctox-view-toggle data-pg-view="cards"[\s\S]*data-pg-tray-toggle/);
+  assert.equal((markup.match(/data-pg-view=/g) || []).length, 1, 'exactly one view control');
+  assert.match(markup, /data-ctox-view-toggle[^>]*aria-label="Show as list" title="Show as list"/);
+  assert.doesNotMatch(markup, /data-ctox-view-toggle[^>]*aria-pressed/);
+  const listMarkup = taskColumnMarkup(tasks, { ...state, taskViewMode: 'list' });
+  assert.match(listMarkup, /data-ctox-view-toggle data-pg-view="list"[^>]*aria-label="Show as cards"/);
+  assert.equal((listMarkup.match(/data-pg-view=/g) || []).length, 1, 'exactly one view control');
   assert.match(markup, /class="ctox-filter-tray" data-pg-tray hidden[\s\S]*data-pg-name="source"[\s\S]*data-pg-name="pin"[\s\S]*data-pg-name="sort"[\s\S]*data-pg-reset/);
   assert.match(markup, /class="ctox-view-switch"/);
   assert.doesNotMatch(markup, /ctox-task-filterbar|ctox-task-filter-tray|ctox-task-view-switch|data-task-search|data-toggle-task-filters|data-task-primary-view/);

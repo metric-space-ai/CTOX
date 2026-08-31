@@ -3,6 +3,20 @@
    empty states and callouts come from the shared kit (app.css + shared/base.css).
    This file keeps only what is genuinely module-specific (marked /* custom */). */
 
+/* Shell V2 keeps accounting pane headers compact and action rows single-line;
+   overflow is local to the pane instead of wrapping the header. */
+.shell-window[data-shell-contract="v2"] .fibu-module { position: relative; padding: 0; overflow: hidden; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .fibu-module > .ctox-context-menu { max-width: calc(100% - 16px); }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-filterbar,
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-workbench-tools { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-panel-toolbar { flex-wrap: nowrap; overflow-x: auto; }
+
 .fibu-module {
   --ctox-left-width: var(--fibu-left-width, 300px);
   --ctox-right-width: var(--fibu-right-width, 340px);
@@ -46,6 +60,79 @@
   display: none;
 }
 
+/* --------------------------------------------------------------------------
+   Shell-V2-Kopfgeometrie (custom): Die Shell legt drei Zonen ueber den
+   App-Inhalt, ohne `.shell-window-content` einzuruecken -- App-Icon 80x80
+   oben links, Kopfband 37px ueber die volle Breite, Fenstersteuerung 74x74
+   oben rechts. Die App haelt diese Zonen frei. Referenz und Vorbild:
+   modules/knowledge/index.css.
+   -------------------------------------------------------------------------- */
+
+/* Erste Kopfzeile jeder Spalte exakt auf die Bandhoehe der Shell. */
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-header {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .fibu-module .ctox-pane-header > .ctox-pane-title-row {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+}
+
+/* Zweite Kopfzeile innerhalb des Kopfes; zusammen mit der ersten deckt sie
+   die 74px hohe Icon- und Steuerungszone ab. */
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-left > .ctox-pane-header > .ctox-filterbar,
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-center > .ctox-pane-header > .fibu-workbench-tools {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  align-items: center;
+  margin-top: 0;
+  padding-block: 0;
+  padding-inline: 0;
+}
+
+/* Zweite Kopfzeile der Evidenzspalte ist ein eigenes Band. */
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-right > .fibu-evidence-tabs {
+  box-sizing: border-box;
+  display: flex;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  align-items: center;
+  padding-block: 0;
+  padding-right: 70px;
+}
+
+/* Icon-Zone freihalten: erster Kopf der obersten Zeile. */
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-left > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* Der ausklappbare Filterschacht liegt unterhalb der Icon-Zone und nimmt die
+   Einrueckung wieder zurueck, damit die Selects nutzbar breit bleiben. */
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-left > .ctox-pane-header > .ctox-filter-tray {
+  margin-left: calc(-1 * var(--shell-v2-icon-size, 80px));
+}
+
+/* Fenstersteuerung freihalten: letzter Kopf der obersten Zeile. Ohne
+   Evidenzspalte ist das die Mitte, mit ihr die rechte Spalte. */
+.shell-window[data-shell-contract="v2"] .fibu-module.is-evidence-hidden .fibu-center > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .fibu-module .fibu-right > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+/* Ein-Knopf-Umschalter Karten/Liste: sichtbar ist immer nur das Icon der
+   Ansicht, zu der gewechselt wird. Kein Zustandspaar, kein aria-pressed. */
+.fibu-view-toggle .fibu-view-icon {
+  display: none;
+}
+
+.fibu-view-toggle[data-fibu-view="cards"] .fibu-view-icon[data-fibu-view-icon="list"],
+.fibu-view-toggle[data-fibu-view="list"] .fibu-view-icon[data-fibu-view-icon="cards"] {
+  display: block;
+}
+
 .fibu-toggle-evidence[aria-pressed="true"] {
   background: var(--accent-soft);
   color: var(--accent);
@@ -57,11 +144,20 @@
   gap: 6px;
 }
 
+/* --------------------------------------------------------------------------
+   Zwei Dichten, nicht zwei Varianten derselben Zeile.
+
+   KARTEN (Shards): Titel plus zwei Meta-Zeilen -- erste Zeile Zuordnung,
+   Status und Datum, zweite Zeile Beschreibung links und Betrag rechts.
+   Grosszuegiges Polster, damit der Eintrag als Karte liest.
+   -------------------------------------------------------------------------- */
 .fibu-booking-row {
   display: grid;
   gap: 3px;
   min-width: 0;
   text-align: left;
+  padding: 11px 14px;
+  line-height: 1.35;
 }
 
 .fibu-booking-row strong,
@@ -76,10 +172,52 @@
   font-size: var(--fs-meta);
 }
 
+/* Zweite Meta-Zeile: Beschreibung faellt weg, der Betrag bleibt stehen. */
+.fibu-booking-row .fibu-booking-meta-split {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  overflow: visible;
+}
+
+.fibu-booking-desc {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fibu-booking-amount {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.fibu-booking-status {
+  font-style: normal;
+}
+
+.fibu-booking-status.is-posted {
+  color: var(--accent);
+}
+
+/* --------------------------------------------------------------------------
+   LISTE: genau eine Zeile je Eintrag -- Titel und ein Kurz-Meta rechts,
+   enge Zeilenhoehe, maximale Dichte.
+   -------------------------------------------------------------------------- */
 .fibu-booking-row.is-compact {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+  padding: 4px 14px;
+  line-height: 1.3;
+}
+
+.fibu-booking-row.is-compact .fibu-booking-lead {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .fibu-evidence-tabs {
@@ -927,10 +1065,26 @@
 }
 
 /* --------------------------------------------------------------------------
-   Schmale Fenster: Spalten stapeln (Kit bricht bei 760px um; das Modul
-   stapelt wegen der drei dichten Fach-Spalten bereits bei 1100px).
+   Schmale Fenster: Die Haltepunkte sind die der Shell -- 1024px fuehrt von
+   drei auf zwei Spalten (die Evidenzspalte rutscht als volle Zeile unter den
+   Arbeitsbereich), 768px stapelt auf eine Spalte.
    -------------------------------------------------------------------------- */
-@container business-app-window (max-width: 1100px) {
+@container business-app-window (max-width: 1024px) {
+  .fibu-module[data-fibu-root] {
+    grid-template-columns: var(--ctox-left-width) 12px minmax(0, 1fr);
+  }
+
+  .fibu-module > [data-resizer="right"] {
+    display: none;
+  }
+
+  .fibu-right {
+    grid-column: 1 / -1;
+    min-height: 260px;
+  }
+}
+
+@container business-app-window (max-width: 768px) {
   .fibu-module[data-fibu-root] {
     grid-template-columns: minmax(0, 1fr);
     grid-auto-rows: auto;
@@ -977,9 +1131,19 @@
   .fibu-bilanz-divider {
     display: none;
   }
+
+  /* Gestapelt steht nur noch die linke Spalte in der obersten Zeile: sie
+     haelt jetzt die Fenstersteuerung frei, die Mitte nicht mehr. */
+  .shell-window[data-shell-contract="v2"] .fibu-module .fibu-left > .ctox-pane-header {
+    padding-right: 70px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .fibu-module.is-evidence-hidden .fibu-center > .ctox-pane-header {
+    padding-right: 14px;
+  }
 }
 
-@container business-app-window (max-width: 640px) {
+@container business-app-window (max-width: 768px) {
   .fibu-module[data-fibu-root] {
     padding: 4px;
     gap: 6px;
@@ -1057,9 +1221,15 @@
     grid-template-columns: minmax(0, 1fr);
   }
 
+  /* Einspaltig gestapelte Werkzeuge sprengen die feste Shell-Zeilenhoehe. */
+  .shell-window[data-shell-contract="v2"] .fibu-module .fibu-center > .ctox-pane-header > .fibu-workbench-tools {
+    height: auto;
+  }
+
+  /* Die Liste bleibt auch gestapelt einzeilig: Titel links, Kurz-Meta rechts. */
   .fibu-booking-row.is-compact {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 3px;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 10px;
   }
 
   .fibu-module .ctox-bottom-drawer,
@@ -1069,5 +1239,43 @@
 
   .fibu-drawer-content {
     padding: 10px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Touch-Bedienung auf groben Zeigern (Telefon/Tablet): jedes interaktive
+   Control erreicht das 44px-Minimum, Icon-Buttons in beiden Dimensionen.
+   Das Spalten-Stacking selbst steuern die @container-Regeln oben
+   (nur 1024px und 768px, die Haltepunkte der Shell); hier nur Tap-Ziele.
+   Desktop (fine pointer) unveraendert.
+   -------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  .fibu-module button,
+  .fibu-module input,
+  .fibu-module select,
+  .fibu-module textarea {
+    min-height: 44px;
+  }
+
+  .fibu-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .fibu-module .ctox-pane-tab,
+  .fibu-module .fibu-toolbar-actions .ctox-button {
+    min-height: 44px;
+  }
+
+  .fibu-module .ctox-sort-dir,
+  .fibu-module .dropzone-icon {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .fibu-module .fibu-booking-row,
+  .fibu-module .fibu-tree-row,
+  .fibu-module .ctox-list-item {
+    min-height: 44px;
   }
 }

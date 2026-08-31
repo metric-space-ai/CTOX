@@ -25,12 +25,66 @@ test('intake: schema declares its owned collection', () => {
 test('intake: left column carries the canonical grammar markup pins', () => {
   // Search + shard/list toggle + collapsed tray with reset + footer target.
   assert.match(html, /data-pg-search/, 'grammar search input');
-  assert.match(html, /data-pg-view="cards"/, 'shard view toggle');
-  assert.match(html, /data-pg-view="list"/, 'list view toggle');
+  assert.match(html, /data-pg-view="cards"/, 'view toggle starts in the card view');
   assert.match(html, /data-pg-tray-toggle/, 'filter tray toggle');
   assert.match(html, /data-pg-tray\b/, 'collapsed tray');
   assert.match(html, /data-pg-reset/, 'tray reset control');
   assert.match(html, /data-pg-footer/, 'one-line footer target');
+});
+
+test('intake: the view toggle is ONE action button, not a pressed-state pair', () => {
+  // Ein-Knopf-Umschalter (Betreiber-Direktive 31.08.): der einzige Knopf
+  // togglet; `data-pg-view` traegt die AKTUELLE, `data-pg-view-alt` die
+  // Gegenansicht. Ein Aktionsknopf hat keinen Gedrueckt-Zustand.
+  const viewControls = (html.match(/data-pg-view=/g) || []).length;
+  assert.equal(viewControls, 1, `expected exactly ONE view-toggle control, got ${viewControls}`);
+  assert.match(html, /data-pg-view="cards"[^>]*data-pg-view-alt="list"/, 'toggle declares current + alternate view');
+  assert.doesNotMatch(html, /<button[^>]*data-pg-view[^>]*aria-pressed/, 'the toggle carries no aria-pressed');
+  assert.match(html, /class="[^"]*intake-view-toggle/, 'toggle is module-wired via its own class');
+  // Icon + Beschriftung benennen das ZIEL des Klicks, nicht den Zustand.
+  assert.match(html, /data-pg-view="cards"[^>]*aria-label="Als Liste anzeigen"/, 'label names the click target');
+  assert.match(indexJs, /viewToList: '[^']+'/, 'de copy carries the "to list" action label');
+  assert.match(indexJs, /viewToCards: '[^']+'/, 'de copy carries the "to cards" action label');
+  assert.match(indexJs, /function onViewToggle\(/, 'module owns the toggle behaviour');
+  assert.match(indexJs, /removeAttribute\('aria-pressed'\)/, 'shell-set aria-pressed is stripped');
+});
+
+test('intake: cards and list are different densities, not the same row twice', () => {
+  // KARTE = drei Zeilen (Name + Status, Zuordnung, Eckdaten), LISTE = genau
+  // eine Zeile (Name + ein Kurz-Meta rechts). Betreiber-Direktive 31.08.
+  const css = read('index.css');
+  assert.match(css, /\.intake-row--cards\b/, 'card density rule exists');
+  assert.match(css, /\.intake-row--list\b/, 'list density rule exists');
+  assert.match(css, /\.intake-row--list[\s\S]*?line-height: 1\.25/, 'list rows use the tight line height');
+  assert.match(css, /\.intake-row--cards[\s\S]*?line-height: 1\.45/, 'card rows use the roomy line height');
+});
+
+test('intake: card rows carry meta lines, list rows carry exactly one', async () => {
+  const mod = await import('../index.js');
+  const rec = {
+    id: 'a1', channel: 'job_board', status: 'screening', vacancy_id: 'VAC-7',
+    candidate: { name: 'Alice Ng', email: 'a@example.org' },
+    documents: ['cv.pdf'], received_at_ms: Date.UTC(2026, 7, 30),
+  };
+  const card = mod.applicationRow(rec, { view: 'cards' });
+  assert.equal((card.match(/class="intake-row-meta/g) || []).length, 2, 'card renders two meta lines below the title');
+  assert.equal((card.match(/class="intake-row-head"/g) || []).length, 1, 'card renders a title/status head line');
+  assert.match(card, /VAC-7/, 'card shows the vacancy assignment');
+  assert.match(card, /a@example\.org/, 'card shows the contact');
+  assert.match(card, /Jobbörse/, 'channel renders as a label, not a schema key');
+
+  const row = mod.applicationRow(rec, { view: 'list' });
+  assert.doesNotMatch(row, /intake-row-meta/, 'list row carries no meta lines');
+  assert.match(row, /intake-row-side/, 'list row carries exactly one short meta on the right');
+  assert.doesNotMatch(row, /VAC-7|a@example\.org/, 'list row stays a single dense line');
+});
+
+test('intake: channel keys render as translated labels', async () => {
+  const mod = await import('../index.js');
+  assert.equal(mod.channelLabel('career_site'), 'Karriereseite');
+  assert.equal(mod.channelLabel('walk_in'), 'Walk-in');
+  assert.equal(mod.channelLabel(''), '—', 'a missing channel does not render an empty cell');
+  assert.equal(mod.channelLabel('some_future_channel'), 'some_future_channel', 'unknown keys fall back to the raw value');
 });
 
 test('intake: counted band has >= 2 real views (no stray single-tab chip)', () => {

@@ -1,9 +1,9 @@
 pub fn rxdb_store_path(root: &Path) -> PathBuf {
-    root.join("runtime").join(RXDB_STORE_FILE)
+    crate::paths::runtime_dir(root).join(RXDB_STORE_FILE)
 }
 
 pub fn status(root: &Path) -> anyhow::Result<BusinessOsStatus> {
-    let path = root.join("runtime").join(STORE_FILE);
+    let path = crate::paths::runtime_dir(root).join(STORE_FILE);
     let ctox_service = Some(cheap_ctox_service_status(root));
     let sync_config = sync_config(root)?;
     Ok(BusinessOsStatus {
@@ -537,6 +537,27 @@ pub fn sync_config(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
     })
 }
 
+/// Builds only the immutable connection material required by a short-lived
+/// Workjet device invite. Unlike `sync_config`, this deliberately does not
+/// inspect the running native peer or transport status: invite creation can
+/// itself execute inside that peer's auxiliary request handler, where a
+/// recursive liveness snapshot would contend with the response path.
+pub(crate) fn mobile_invite_sync_config(
+    root: &Path,
+) -> anyhow::Result<BusinessOsMobileInviteSyncConfig> {
+    let connection = sync_connection_config(root)?;
+    let signaling_auth = signaling_auth_config(root, &connection.signaling_room_password)?;
+    Ok(BusinessOsMobileInviteSyncConfig {
+        native_peer_id: format!("ctox-core-{}", short_hash(&connection.instance_id)),
+        instance_id: connection.instance_id,
+        sync_room: connection.sync_room,
+        signaling_urls: connection.signaling_urls,
+        signaling_auth_version: signaling_auth.version,
+        signaling_browser_token: signaling_auth.browser_token,
+        signaling_browser_token_hash: signaling_auth.browser_token_hash,
+        signaling_native_token_hash: signaling_auth.native_token_hash,
+    })
+}
 pub(crate) const BUSINESS_OS_SIGNALING_AUTH_VERSION: &str = "ctox-role-bound-v1";
 
 pub(crate) fn signaling_auth_config(
@@ -600,7 +621,7 @@ fn read_or_create_native_signaling_token(root: &Path) -> anyhow::Result<String> 
 }
 
 fn generate_native_signaling_token() -> anyhow::Result<String> {
-    let mut bytes = [0u8; 32];
+    let mut bytes = [0_u8; 32];
     SystemRandom::new()
         .fill(&mut bytes)
         .map_err(|_| anyhow::anyhow!("failed to generate native signaling token"))?;
@@ -624,8 +645,8 @@ pub fn sync_config_for_browser(
     turn_session_id: &str,
 ) -> anyhow::Result<BusinessOsSyncConfig> {
     let mut config = sync_config(root)?;
-    // Role-bound signaling gives the browser its own credential. Do not expose
-    // the root room secret as a redundant credential in any browser payload.
+    // Role-bound signaling gives the browser its own credential. Never expose
+    // the root room secret as a redundant credential in a browser payload.
     config.signaling_room_password.clear();
     if let Some(turn) = ephemeral_turn_server(root, turn_session_id) {
         config.ice_servers.push(turn);
@@ -635,7 +656,7 @@ pub fn sync_config_for_browser(
 }
 
 pub fn rotate_sync_native_signaling_token(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
-    let _rotation_guard = native_signaling_token_lock()
+    let rotation_guard = native_signaling_token_lock()
         .lock()
         .map_err(|_| anyhow::anyhow!("native signaling token rotation lock poisoned"))?;
     let generated = generate_native_signaling_token()?;
@@ -644,14 +665,12 @@ pub fn rotate_sync_native_signaling_token(root: &Path) -> anyhow::Result<Busines
         &generated,
         "business_os_native_signaling_token_rotation",
     )?;
-    // Avoid reacquiring the same non-reentrant lock through sync_config().
-    drop(_rotation_guard);
+    // sync_config reads the token under this same non-reentrant lock.
+    drop(rotation_guard);
     sync_config(root)
 }
 
-/// Rotate both signaling roles for incident response and managed pairing
-/// revocation. The room change forces the native peer to respawn while the
-/// independent native token invalidates any leaked native-only credential.
+/// Rotate both signaling roles for incident response and pairing revocation.
 pub fn rotate_sync_credentials(root: &Path) -> anyhow::Result<BusinessOsSyncConfig> {
     ensure_sync_room_password_rotation_allowed()?;
     rotate_sync_native_signaling_token(root)?;

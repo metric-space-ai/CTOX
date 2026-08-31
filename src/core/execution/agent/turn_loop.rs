@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 // Re-export PersistentSession so callers (main.rs, service.rs) can hold one.
@@ -40,6 +41,7 @@ pub(crate) struct WorkerAttemptContext {
     pub(crate) attempt_id: String,
     pub(crate) work_key: String,
     pub(crate) source_label: String,
+    pub(crate) progress_error: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -612,11 +614,12 @@ pub(crate) struct ApiModelProviderSpec {
     /// into provider-native forms only at this outer boundary.
     pub(crate) wire_api: &'static str,
     pub(crate) requires_full_responses_history: bool,
+    pub(crate) subscription_provider: Option<String>,
 }
 
 impl ApiModelProviderSpec {
     pub(crate) fn ctox_core_cli_overrides(&self) -> Vec<(String, TomlValue)> {
-        vec![
+        let mut overrides = vec![
             (
                 format!("model_providers.{}.name", self.provider_id),
                 TomlValue::String(self.name.to_string()),
@@ -640,7 +643,19 @@ impl ApiModelProviderSpec {
                 ),
                 TomlValue::Boolean(self.requires_full_responses_history),
             ),
-        ]
+        ];
+        if let Some(provider) = self.subscription_provider.as_ref() {
+            let mut headers = toml::map::Map::new();
+            headers.insert(
+                "X-CTOX-Provider".to_owned(),
+                TomlValue::String(provider.clone()),
+            );
+            overrides.push((
+                format!("model_providers.{}.http_headers", self.provider_id),
+                TomlValue::Table(headers),
+            ));
+        }
+        overrides
     }
 }
 
@@ -1331,6 +1346,19 @@ fn persist_successful_assistant_with_retry(
     for attempt in 1..=4 {
         let result = (|| {
             if let Some(worker_attempt) = worker_attempt {
+                if let Some(error) = worker_attempt
+                    .progress_error
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("task progress error latch poisoned"))?
+                    .clone()
+                {
+                    anyhow::bail!("durable task progress failed: {error}");
+                }
+                // A service-owned queue task may only enter native review
+                // after its durable, model-authored plan is fully complete.
+                // This is intentionally before the finalization marker so a
+                // planless completion remains retryable.
+                lcm::run_prepare_task_execution_review(db_path, &worker_attempt.work_key)?;
                 let durable = lcm::run_begin_worker_attempt_finalization(
                     db_path,
                     lcm::WorkerAttemptFinalizationInput {
@@ -1861,11 +1889,34 @@ pub(crate) fn resolve_api_model_provider_spec(
                 "responses",
                 false,
             ),
+            "ctox_subscription" => (
+                "CTOX_SUBSCRIPTION_PROXY_NO_AUTH",
+                "ctox_subscription",
+                "responses",
+                false,
+            ),
             "azure_foundry" => ("AZURE_FOUNDRY_API_KEY", "azure_foundry", "responses", false),
             _ => return None,
         };
-    let base_url = resolved_runtime
-        .map(|runtime| runtime.internal_responses_base_url())
+    let subscription_provider = (normalized == "ctox_subscription")
+        .then(|| {
+            settings
+                .get(runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV)
+                .map(|value| value.trim().to_ascii_lowercase())
+        })
+        .flatten()
+        .filter(|provider| {
+            matches!(
+                provider.as_str(),
+                "codex" | "claude" | "antigravity" | "kimi"
+            )
+        });
+    if normalized == "ctox_subscription" && subscription_provider.is_none() {
+        return None;
+    }
+    let base_url = (normalized == "ctox_subscription")
+        .then(crate::execution::cliproxyapi_host::instance_codex_proxy_base_url)
+        .or_else(|| resolved_runtime.map(|runtime| runtime.internal_responses_base_url()))
         .or_else(|| {
             settings
                 .get("CTOX_UPSTREAM_BASE_URL")
@@ -1883,6 +1934,7 @@ pub(crate) fn resolve_api_model_provider_spec(
         env_key,
         wire_api,
         requires_full_responses_history,
+        subscription_provider,
     })
 }
 
@@ -2166,7 +2218,23 @@ mod tests {
             attempt_id: "turn-success-attempt".to_string(),
             work_key: "queue:turn-success".to_string(),
             source_label: "turn-loop-test".to_string(),
+            progress_error: Arc::new(Mutex::new(None)),
         };
+        let completed_steps = [lcm::TaskExecutionPlanStepInput {
+            label: "Persist the successful reply".to_string(),
+            status: "completed".to_string(),
+        }];
+        lcm::run_record_task_execution_plan(
+            &db_path,
+            lcm::TaskExecutionPlanUpdate {
+                work_key: &context.work_key,
+                task_id: "turn-success",
+                command_id: "cmd-turn-success",
+                attempt_id: &context.attempt_id,
+                explanation: None,
+                steps: &completed_steps,
+            },
+        )?;
         let mut events = Vec::new();
         let first = persist_successful_assistant_with_retry(
             &db_path,
@@ -2202,6 +2270,35 @@ mod tests {
     }
 
     #[test]
+    fn service_owned_turn_cannot_persist_success_without_a_completed_plan() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let db_path = temp.path().join("ctox.sqlite3");
+        let context = WorkerAttemptContext {
+            attempt_id: "turn-planless-attempt".to_string(),
+            work_key: "queue:turn-planless".to_string(),
+            source_label: "turn-loop-test".to_string(),
+            progress_error: Arc::new(Mutex::new(None)),
+        };
+        let error = persist_successful_assistant_with_retry(
+            &db_path,
+            7102,
+            "must not persist",
+            Some(&context),
+            &mut |_| {},
+        )
+        .expect_err("planless service-owned completion must fail closed");
+        assert!(error.to_string().contains("has no durable execution plan"));
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let replies: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = 7102",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(replies, 0);
+        Ok(())
+    }
+
+    #[test]
     fn api_provider_overrides_define_core_provider_without_env_key() {
         let spec = ApiModelProviderSpec {
             provider_id: "ctox_core_api",
@@ -2210,6 +2307,7 @@ mod tests {
             env_key: "AZURE_FOUNDRY_API_KEY",
             wire_api: "responses",
             requires_full_responses_history: false,
+            subscription_provider: None,
         };
 
         let overrides = spec
@@ -2240,6 +2338,38 @@ mod tests {
             Some(&TomlValue::Boolean(false))
         );
         assert!(!overrides.contains_key("model_providers.ctox_core_api.env_key"));
+    }
+
+    #[test]
+    fn subscription_provider_routes_harness_through_instance_proxy() {
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "CTOX_API_PROVIDER".to_string(),
+            "ctox_subscription".to_string(),
+        );
+        settings.insert(
+            runtime_state::CTOX_SUBSCRIPTION_PROVIDER_ENV.to_string(),
+            "claude".to_string(),
+        );
+
+        let spec = resolve_api_model_provider_spec("claude-opus-4-6", &settings, None)
+            .expect("subscription provider spec");
+        assert_eq!(
+            spec.base_url,
+            crate::execution::cliproxyapi_host::instance_codex_proxy_base_url()
+        );
+        assert_eq!(spec.subscription_provider.as_deref(), Some("claude"));
+        let overrides = spec
+            .ctox_core_cli_overrides()
+            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            overrides
+                .get("model_providers.ctox_core_api.http_headers")
+                .and_then(TomlValue::as_table)
+                .and_then(|headers| headers.get("X-CTOX-Provider")),
+            Some(&TomlValue::String("claude".to_string()))
+        );
     }
 
     #[test]

@@ -47,7 +47,7 @@
     {
       "id": "app-store",
       "title": "App Store",
-      "description": "CTOX GitHub module catalog to discover repository apps, create apps from templates, and manage local Business OS installations.",
+      "description": "CTOX App Store to discover repository apps, create apps from templates, and manage local Business OS installations.",
       "entry": "modules/app-store/index.html",
       "collections": [
         "business_commands",
@@ -55,6 +55,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-app-store\"><defs><linearGradient id=\"grad-app-store\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#f59e0b\" /><stop offset=\"100%\" stop-color=\"#ec4899\" /></linearGradient></defs><path d=\"M21 8H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2z\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.12\" stroke=\"url(#grad-app-store)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M16 8A4 4 0 0 0 8 8\" stroke=\"url(#grad-app-store)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><rect x=\"5\" y=\"12\" width=\"5\" height=\"5\" rx=\"1\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.25\" stroke=\"url(#grad-app-store)\" stroke-width=\"1.2\"></rect><rect x=\"14\" y=\"12\" width=\"5\" height=\"5\" rx=\"1\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.25\" stroke=\"url(#grad-app-store)\" stroke-width=\"1.2\"></rect></svg>",
         "left": "Categories and Search",
         "center": "Available Applications Catalog",
@@ -62,7 +64,12 @@
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
-        "min_height": 480
+        "min_height": 480,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/app-store.jpg",
+        "icon_asset_sha256": "b6e9bc5bfa8bb42b86748efc00e9b5e736c4a0b6809b6c763aa6e8e7164de108",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "b6e9bc5bfa8bb42b86748efc00e9b5e736c4a0b6809b6c763aa6e8e7164de108"
       },
       "category": "Development",
       "version": "v1",
@@ -131,13 +138,20 @@
       "deletable": false,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-appsec\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-appsec\" x1=\"2\" y1=\"2\" x2=\"22\" y2=\"22\" gradientUnits=\"userSpaceOnUse\"><stop stop-color=\"#0f766e\"/><stop offset=\"1\" stop-color=\"#dc2626\"/></linearGradient></defs><path d=\"M12 2.75 20 6v5.9c0 4.65-3.25 7.9-8 9.35-4.75-1.45-8-4.7-8-9.35V6l8-3.25Z\" fill=\"url(#grad-appsec)\" fill-opacity=\".12\" stroke=\"url(#grad-appsec)\" stroke-width=\"1.8\" stroke-linejoin=\"round\"/><path d=\"M8 12h8M12 8v8\" stroke=\"url(#grad-appsec)\" stroke-width=\"1.8\" stroke-linecap=\"round\"/><circle cx=\"12\" cy=\"12\" r=\"2.4\" fill=\"#fff\" stroke=\"url(#grad-appsec)\" stroke-width=\"1.4\"/></svg>",
         "left": "assessment launch, scope, and navigation",
         "center": "selected penetration-test evidence workbench",
         "default_width": 1280,
         "default_height": 820,
         "min_width": 640,
-        "min_height": 480
+        "min_height": 480,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/appsec-pentest.jpg",
+        "icon_asset_sha256": "85fd7ee28a9d4f8a047569cbc376b63e5f26d16584272ccd0785fae638fb1a53",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "85fd7ee28a9d4f8a047569cbc376b63e5f26d16584272ccd0785fae638fb1a53"
       },
       "category": "Security",
       "version": "v0.2",
@@ -194,7 +208,7 @@
         "browser_frames",
         "browser_input_events",
         "ctox_queue_tasks",
-        "thesen_outbound_adapters"
+        "outbound_lead_generation_adapters"
       ],
       "launch_kind": "desktop-app",
       "presentation": {
@@ -217,16 +231,27 @@
       },
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "browser-v2-reference-1",
+        "shell_header_rows": 2,
+        "shell_icon_rows": 2,
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
         "min_height": 480,
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-browser\"><defs><linearGradient id=\"grad-browser\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0ea5e9\" /><stop offset=\"100%\" stop-color=\"#22c55e\" /></linearGradient></defs><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"3\" fill=\"url(#grad-browser)\" fill-opacity=\"0.12\" stroke=\"url(#grad-browser)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M3 9h18\" stroke=\"url(#grad-browser)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><circle cx=\"7\" cy=\"6.5\" r=\"0.8\" fill=\"url(#grad-browser)\"></circle><circle cx=\"10\" cy=\"6.5\" r=\"0.8\" fill=\"url(#grad-browser)\"></circle><path d=\"M8 15h8M12 11v8\" stroke=\"url(#grad-browser)\" stroke-width=\"1.7\" stroke-linecap=\"round\"></path></svg>",
         "top": "browser tabs and address bar",
-        "center": "web page"
+        "center": "web page",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg",
+        "icon_asset_srcset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg 1x",
+        "icon_provenance": "shared/assets/workjet-icons/operator-selection-v1/manifest.json",
+        "icon_asset_sha256": "8fa94a7ae4b6db8885c0088a68cf736a23c0fd717a3711cd9b015c969f799a11",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "8fa94a7ae4b6db8885c0088a68cf736a23c0fd717a3711cd9b015c969f799a11"
       },
       "category": "Workspace",
-      "version": "v0.2.1",
+      "version": "v0.2.5",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -267,10 +292,17 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-buchhaltung\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-buchhaltung\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#818cf8\" /><stop offset=\"100%\" stop-color=\"#db2777\" /></linearGradient></defs><path d=\"M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z\" fill=\"url(#grad-buchhaltung)\" fill-opacity=\"0.12\" stroke=\"url(#grad-buchhaltung)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M8 11h8M8 15h5M9 7h6\" stroke=\"url(#grad-buchhaltung)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Fibu-Navigationsstruktur & Kontenrahmen-Wähler",
         "center": "Aktiver Arbeitsbereich & Journale",
-        "right": "Zugeordnete Belege, AI-Vorschläge & Begleitaktionen"
+        "right": "Zugeordnete Belege, AI-Vorschläge & Begleitaktionen",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/buchhaltung.jpg",
+        "icon_asset_sha256": "56b558dd0dbc5210bf6b0472ccef3df5602ce582b987ae04ee4c5f762d14eb0a",
+        "icon_selection_candidate": "candidate-14",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "56b558dd0dbc5210bf6b0472ccef3df5602ce582b987ae04ee4c5f762d14eb0a"
       },
       "category": "Finance",
       "version": "v1",
@@ -320,7 +352,7 @@
     {
       "id": "calendar",
       "title": "Kalender",
-      "description": "Mac/Outlook-style calendar with native booking links and availability scheduling.",
+      "description": "Mac/Outlook-style calendar with integrated booking links and availability scheduling.",
       "entry": "modules/calendar/index.html",
       "collections": [
         "business_commands",
@@ -335,10 +367,17 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-calendar\"><defs><linearGradient id=\"grad-calendar\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#3b82f6\" /><stop offset=\"100%\" stop-color=\"#8b5cf6\" /></linearGradient></defs><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"3\" ry=\"3\" fill=\"url(#grad-calendar)\" fill-opacity=\"0.12\" stroke=\"url(#grad-calendar)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-calendar)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"9\" y1=\"9\" x2=\"9\" y2=\"20\" stroke=\"url(#grad-calendar)\" stroke-width=\"1.2\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><line x1=\"15\" y1=\"9\" x2=\"15\" y2=\"20\" stroke=\"url(#grad-calendar)\" stroke-width=\"1.2\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><path d=\"M8 2v3M16 2v3\" stroke=\"url(#grad-calendar)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><rect x=\"5\" y=\"12\" width=\"3\" height=\"3\" rx=\"0.5\" fill=\"url(#grad-calendar)\" fill-opacity=\"0.3\" stroke=\"url(#grad-calendar)\" stroke-width=\"1\"></rect><rect x=\"10\" y=\"12\" width=\"4\" height=\"5\" rx=\"1\" fill=\"url(#grad-calendar)\" fill-opacity=\"0.3\" stroke=\"url(#grad-calendar)\" stroke-width=\"1\"></rect></svg>",
         "left": "Mini-Calendar & Lists",
         "center": "Calendar Grid",
-        "right": "Inspector & Booking Pages"
+        "right": "Inspector & Booking Pages",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/calendar.jpg",
+        "icon_asset_sha256": "c3de8ab4a29322bb08256ac953058904ac73d8d945df22f20df72ff988067f67",
+        "icon_selection_candidate": "candidate-05",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "c3de8ab4a29322bb08256ac953058904ac73d8d945df22f20df72ff988067f67"
       },
       "category": "Productivity",
       "version": "v1",
@@ -351,7 +390,7 @@
         "scheduler"
       ],
       "store": {
-        "summary": "Local-first spatial calendar app with native booking pages, slot reservations, and recurrence rules.",
+        "summary": "Local-first spatial calendar app with integrated booking pages, slot reservations, and recurrence rules.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/calendar",
         "installable": true,
@@ -397,11 +436,18 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-coding-agents\"><defs><linearGradient id=\"grad-coding-agents\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#3b82f6\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" ry=\"2\" fill=\"url(#grad-coding-agents)\" fill-opacity=\"0.12\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M9 16l-3-3 3-3M15 10l3 3-3 3\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"13\" y1=\"8\" x2=\"11\" y2=\"16\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\"></line></svg>",
         "left": "Agent selector and remote connection status",
         "center": "Unified Agent Control, subscriptions, permission bypasses, and active terminal",
         "right": "Sessions, remote jobs logs, and CLI runner",
-        "third_pane_justification": "Coding-agent work needs persistent workspace selection, active session workbench, and session/history inspection visible together so long-running provider tasks can be monitored without hiding the active prompt surface."
+        "third_pane_justification": "Coding-agent work needs persistent workspace selection, active session workbench, and session/history inspection visible together so long-running provider tasks can be monitored without hiding the active prompt surface.",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/coding-agents.jpg",
+        "icon_asset_sha256": "1cf4cc4fd8e785f1b557be6dbbc3d0d8f02ab7462f9c16b17b163fc023c0bae3",
+        "icon_selection_candidate": "candidate-09",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "1cf4cc4fd8e785f1b557be6dbbc3d0d8f02ab7462f9c16b17b163fc023c0bae3"
       },
       "category": "Development",
       "version": "v1",
@@ -417,9 +463,9 @@
         "summary": "Unified dashboard to manage, configure, license, and remotely run Antigravity, Claude, and Codex agents.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/coding-agents",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
       "install_scope": "core",
       "default_installed": true,
@@ -445,7 +491,7 @@
       "source": "core",
       "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "consent",
@@ -462,8 +508,15 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
-        "center": "Einwilligungen"
+        "center": "Einwilligungen",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/consent.jpg",
+        "icon_asset_sha256": "a886247228318a5bf11d85a7e64ffd4f9e914454327718be8e1f451f9b032596",
+        "icon_selection_candidate": "candidate-13",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "a886247228318a5bf11d85a7e64ffd4f9e914454327718be8e1f451f9b032596"
       },
       "category": "Operations",
       "version": "v0.1",
@@ -521,11 +574,18 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-conversations\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-conversations\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#4f46e5\" /><stop offset=\"100%\" stop-color=\"#7c3aed\" /></linearGradient></defs><path d=\"M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z\" fill=\"url(#grad-conversations)\" fill-opacity=\"0.12\" stroke=\"url(#grad-conversations)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"9\" cy=\"11\" r=\"1.5\" fill=\"url(#grad-conversations)\"></circle><circle cx=\"13\" cy=\"11\" r=\"1.5\" fill=\"url(#grad-conversations)\"></circle><circle cx=\"17\" cy=\"11\" r=\"1.5\" fill=\"url(#grad-conversations)\"></circle></svg>",
         "left": "Conversation list filtered by channel and search",
         "center": "Selected conversation timeline with channel-aware messages",
         "right": "Contact card, related business records, and CTOX agent attribution",
-        "third_pane_justification": "The contact and linked-record inspector must stay visible beside long communication timelines in wide mode; compact mode moves it into the shared drawer."
+        "third_pane_justification": "The contact and linked-record inspector must stay visible beside long communication timelines in wide mode; compact mode moves it into the shared drawer.",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/conversations.jpg",
+        "icon_asset_sha256": "1656adf1e387e7db50c4b7f6ea99998de43ecd6373fc1bedeb760e3cd109941b",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "1656adf1e387e7db50c4b7f6ea99998de43ecd6373fc1bedeb760e3cd109941b"
       },
       "category": "Collaboration",
       "version": "v1",
@@ -589,11 +649,18 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><rect x=\"3\" y=\"5\" width=\"18\" height=\"14\" rx=\"3\" fill=\"currentColor\" fill-opacity=\"0.12\" stroke=\"currentColor\" stroke-width=\"1.8\"/><path d=\"m5 8 7 5 7-5\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></svg>",
         "left": "Mailkonten, Ordner und Kampagnengruppen",
         "center": "Gefilterte Threads, Entwürfe oder Kampagnenmails",
         "right": "Nachrichtenverlauf, Entwurf und Kampagnensteuerung",
-        "third_pane_justification": "Der Nachrichten- oder Kampagnenkontext bleibt beim Scannen der Mail-Liste sichtbar; in schmalen Fenstern stapelt die App die Bereiche."
+        "third_pane_justification": "Der Nachrichten- oder Kampagnenkontext bleibt beim Scannen der Mail-Liste sichtbar; in schmalen Fenstern stapelt die App die Bereiche.",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/mail.jpg",
+        "icon_asset_sha256": "dd943203a5729623a71df00b3c994f5a9085cf8d1373c6c7f440494409f3bcc4",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "dd943203a5729623a71df00b3c994f5a9085cf8d1373c6c7f440494409f3bcc4"
       },
       "category": "Collaboration",
       "version": "1.0.0",
@@ -609,12 +676,12 @@
         "summary": "Eine Mail-Workbench für persönliche Postfächer, gemeinsame Accounts und gruppierte Kampagnenmails.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/mail",
-        "installable": false,
-        "editable_after_install": false,
-        "distribution": "system-module"
+        "installable": true,
+        "editable_after_install": true,
+        "distribution": "catalog-module"
       },
-      "install_scope": "core",
-      "default_installed": true,
+      "install_scope": "store",
+      "default_installed": false,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -634,10 +701,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "core",
-      "core": true,
+      "source": "catalog",
+      "core": false,
       "editable": true,
-      "deletable": false
+      "deletable": true
     },
     {
       "id": "importer",
@@ -647,10 +714,17 @@
       "collections": [],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-importer\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-importer\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0ea5e9\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"12\" rx=\"2.5\" fill=\"url(#grad-importer)\" fill-opacity=\"0.12\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></rect><path d=\"M12 3v9\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M8.5 8.5 12 12l3.5-3.5\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Source: folder or GitHub",
         "center": "Transcode report and module details",
-        "right": "Install into local-modules"
+        "right": "Install into local-modules",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/importer.jpg",
+        "icon_asset_sha256": "13c493fc01ebc97db2fd6d098281ffde490761deadfbfc9963db7b8ecda60e61",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "13c493fc01ebc97db2fd6d098281ffde490761deadfbfc9963db7b8ecda60e61"
       },
       "category": "Development",
       "version": "0.1.0",
@@ -707,10 +781,17 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-credentials\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-credentials\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#14b8a6\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><path d=\"M12 2l8 3v6c0 5-3.5 8-8 11-4.5-3-8-6-8-11V5l8-3z\" fill=\"url(#grad-credentials)\" fill-opacity=\"0.12\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"10\" r=\"2.4\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\"></circle><path d=\"M12 12.4V16\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
         "left": "Credential catalog and status",
         "center": "Set, rotate and remove credentials",
-        "right": "Security notes"
+        "right": "Security notes",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/credentials.jpg",
+        "icon_asset_sha256": "d796dc418c8f64faadc3f43e914a7bfb6ea6e6a4b54a7b6d643e6ff40b1f4e57",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "d796dc418c8f64faadc3f43e914a7bfb6ea6e6a4b54a7b6d643e6ff40b1f4e57"
       },
       "category": "Security",
       "version": "v0.1",
@@ -723,7 +804,7 @@
         "security"
       ],
       "store": {
-        "summary": "Write-only credentials manager backed by the encrypted CTOX secret store. Set, rotate and remove provider credentials; values never leave the daemon.",
+        "summary": "Write-only credentials manager backed by the encrypted CTOX secret store. Set, rotate and remove provider credentials; values never leave the local service.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/credentials",
         "installable": false,
@@ -776,6 +857,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-ctox\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"12 2 22 8 22 16 12 22 2 16 2 8\" fill=\"currentColor\" fill-opacity=\"0.12\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polygon><polyline points=\"12 22 12 12 22 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 12 2 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 2 12 12\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><circle cx=\"12\" cy=\"12\" r=\"3.5\" fill=\"currentColor\" fill-opacity=\"0.88\"></circle></svg>",
         "left": "runtime scopes",
         "center": "active workbench",
@@ -783,7 +866,12 @@
         "default_width": 1320,
         "default_height": 860,
         "min_width": 640,
-        "min_height": 480
+        "min_height": 480,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/ctox.jpg",
+        "icon_asset_sha256": "595492dd0ab23f3db59a0ebe9a6ec8062b1b2a80cbc54f566ee32b0501bcf0ce",
+        "icon_selection_candidate": "candidate-02",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "595492dd0ab23f3db59a0ebe9a6ec8062b1b2a80cbc54f566ee32b0501bcf0ce"
       },
       "category": "System",
       "version": "v1",
@@ -832,7 +920,7 @@
     {
       "id": "customers",
       "title": "Kunden",
-      "description": "Native CRM-App für Bestandskunden, Kontakte, Opportunities, Aufgaben, Notizen, Aktivitäten und Outbound-Handoffs.",
+      "description": "CRM-App für Bestandskunden, Kontakte, Opportunities, Aufgaben, Notizen, Aktivitäten und Outbound-Handoffs.",
       "entry": "modules/customers/index.html",
       "collections": [
         "business_commands",
@@ -855,10 +943,17 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-customers\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-customers\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><path d=\"M4 20V7a3 3 0 0 1 3-3h10a3 3 0 0 1 3 3v13\" fill=\"url(#grad-customers)\" fill-opacity=\"0.12\" stroke=\"url(#grad-customers)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M8 20v-5a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v5\" stroke=\"url(#grad-customers)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M8 8h2M14 8h2M8 11h8\" stroke=\"url(#grad-customers)\" stroke-width=\"1.8\" stroke-linecap=\"round\"></path><circle cx=\"18\" cy=\"6\" r=\"3\" fill=\"#ffffff\" stroke=\"url(#grad-customers)\" stroke-width=\"1.5\"></circle><path d=\"M16.9 6h2.2M18 4.9v2.2\" stroke=\"url(#grad-customers)\" stroke-width=\"1.3\" stroke-linecap=\"round\"></path></svg>",
         "left": "Customer segments, saved views and review inbox",
         "center": "Customer account list, opportunity pipeline and task workbench",
-        "right": "Selected customer inspector, contacts, open tasks and activity timeline"
+        "right": "Selected customer inspector, contacts, open tasks and activity timeline",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/customers.jpg",
+        "icon_asset_sha256": "3a03210ceaa9ce7850ebd0409bff33e09e20e0c1850d9f84805682c307c4a5f9",
+        "icon_selection_candidate": "candidate-16",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "3a03210ceaa9ce7850ebd0409bff33e09e20e0c1850d9f84805682c307c4a5f9"
       },
       "category": "Sales",
       "version": "v1",
@@ -921,9 +1016,16 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-cv-print-builder\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-cv-print-builder\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\"/><stop offset=\"100%\" stop-color=\"#64748b\"/></linearGradient></defs><path d=\"M6 3h8l4 4v14H6z\" fill=\"url(#grad-cv-print-builder)\" fill-opacity=\"0.12\" stroke=\"url(#grad-cv-print-builder)\" stroke-width=\"2\" stroke-linejoin=\"round\"/><path d=\"M14 3v5h4\" stroke=\"url(#grad-cv-print-builder)\" stroke-width=\"2\" stroke-linejoin=\"round\"/><path d=\"M8.5 12h7M8.5 15h7M8.5 18h4\" stroke=\"url(#grad-cv-print-builder)\" stroke-width=\"1.8\" stroke-linecap=\"round\"/></svg>",
         "left": "Kandidaten-Shards und CV-Import",
-        "center": "Original-PDF, Split-Ansicht und Druckansicht"
+        "center": "Original-PDF, Split-Ansicht und Druckansicht",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/cv-print-builder.jpg",
+        "icon_asset_sha256": "bfda9b1a621037eb1d508614ddc3a9d4221abfe941976ddf326764d6b02c2b87",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "bfda9b1a621037eb1d508614ddc3a9d4221abfe941976ddf326764d6b02c2b87"
       },
       "category": "Recruiting",
       "version": "v0.1",
@@ -968,7 +1070,7 @@
     {
       "id": "documents",
       "title": "CTOX Documents",
-      "description": "Native DOCX workspace with the CTOX Documents fork, explorer, versions, and CTOX runbooks.",
+      "description": "DOCX workspace with the CTOX Documents fork, explorer, versions, and CTOX runbooks.",
       "entry": "modules/documents/index.html",
       "collections": [
         "business_commands",
@@ -982,6 +1084,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-documents\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-documents\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#3b82f6\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z\" fill=\"url(#grad-documents)\" fill-opacity=\"0.12\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"8\" y1=\"12\" x2=\"16\" y2=\"12\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"8\" y1=\"16\" x2=\"16\" y2=\"16\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"8\" y1=\"8\" x2=\"10\" y2=\"8\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line></svg>",
         "left": "document navigation and explorer",
         "center": "DOCX viewer/editor workbench",
@@ -990,7 +1094,12 @@
           "left": "document metadata and import settings",
           "right": "runbook details and generated commands",
           "bottom": "diagnostics, export evidence, and selected document context"
-        }
+        },
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/documents.jpg",
+        "icon_asset_sha256": "31123bf173860e01f05eb6be2431f71925bab9f355241b2582d30a2d06aef216",
+        "icon_selection_candidate": "candidate-05",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "31123bf173860e01f05eb6be2431f71925bab9f355241b2582d30a2d06aef216"
       },
       "category": "Knowledge",
       "version": "v1",
@@ -1003,15 +1112,15 @@
         "runbooks"
       ],
       "store": {
-        "summary": "DOCX and Markdown workspace with the CTOX Documents ESM fork, native Rust roundtrip, versions, blob chunks, and automation runbooks.",
+        "summary": "DOCX and Markdown workspace with the CTOX Documents ESM fork, verified local roundtrip, versions, blob chunks, and automation runbooks.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/documents",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -1031,10 +1140,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "esign",
@@ -1045,14 +1154,21 @@
         "business_commands",
         "signature_requests"
       ],
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true,
+      "deletable": false,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
-        "center": "E-Signatur"
+        "center": "E-Signatur",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/esign.jpg",
+        "icon_asset_sha256": "766c1175e036a870e4a28465ddc9e294bd0df22a9376e3acb8e125683026089f",
+        "icon_selection_candidate": "candidate-04",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "766c1175e036a870e4a28465ddc9e294bd0df22a9376e3acb8e125683026089f"
       },
       "category": "Operations",
       "version": "v0.1",
@@ -1107,8 +1223,15 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
-        "center": "Bewerbungseingang"
+        "center": "Bewerbungseingang",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/intake.jpg",
+        "icon_asset_sha256": "0a6d81e7d9c14b8526ab8d19f8344164d054db52fdc9b3856108f12729e532e7",
+        "icon_selection_candidate": "candidate-14",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "0a6d81e7d9c14b8526ab8d19f8344164d054db52fdc9b3856108f12729e532e7"
       },
       "category": "Operations",
       "version": "v0.1",
@@ -1164,8 +1287,15 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
-        "center": "Interviews"
+        "center": "Interviews",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/interviews.jpg",
+        "icon_asset_sha256": "642cda9e3cb5c56c9ac63b46d731696087f980b48423501f2d8428bf5554f9d7",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "642cda9e3cb5c56c9ac63b46d731696087f980b48423501f2d8428bf5554f9d7"
       },
       "category": "Recruiting",
       "version": "v0.1",
@@ -1241,11 +1371,18 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-invoices\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#f97316\" /></linearGradient></defs><path d=\"M6 2h9l5 5v13a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z\" fill=\"url(#grad-invoices)\" fill-opacity=\"0.12\" stroke=\"url(#grad-invoices)\" stroke-width=\"2\" stroke-linejoin=\"round\" /><path d=\"M15 2v6h6\" stroke=\"url(#grad-invoices)\" stroke-width=\"2\" stroke-linejoin=\"round\" /><line x1=\"9\" y1=\"12\" x2=\"15\" y2=\"12\" stroke=\"url(#grad-invoices)\" stroke-width=\"1.8\" stroke-linecap=\"round\" /><line x1=\"9\" y1=\"15\" x2=\"15\" y2=\"15\" stroke=\"url(#grad-invoices)\" stroke-width=\"1.8\" stroke-linecap=\"round\" /><line x1=\"9\" y1=\"18\" x2=\"13\" y2=\"18\" stroke=\"url(#grad-invoices)\" stroke-width=\"1.8\" stroke-linecap=\"round\" /></svg>",
         "left": "Rechnungs-Scopes, Status-Chips, Schnellfilter (ueberfaellig, Mahnstufe 1, offene Posten)",
         "center": "Editor und Detail mit Tabs (Stammdaten, Positionen, Steuern, Zahlungen, PDF, Verlauf)",
         "right": "Kunden-Inspector, offene Posten, AI-Aktionen (Mahnlauf, Skonto, Gutschrift)",
-        "third_pane_justification": "The financial inspector provides approval, open-item and customer context alongside the invoice editor; compact mode moves it into the shared drawer."
+        "third_pane_justification": "The financial inspector provides approval, open-item and customer context alongside the invoice editor; compact mode moves it into the shared drawer.",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/invoices.jpg",
+        "icon_asset_sha256": "1a0828f86f17d972434a30390e81f7d58fb8bff6e4fd4f9f5a7476088c36c52e",
+        "icon_selection_candidate": "candidate-04",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "1a0828f86f17d972434a30390e81f7d58fb8bff6e4fd4f9f5a7476088c36c52e"
       },
       "category": "Finance",
       "version": "v0.1",
@@ -1308,16 +1445,23 @@
         "iot_dashboards",
         "iot_widgets"
       ],
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true,
+      "deletable": false,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-iot\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-iot\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"url(#grad-iot)\" fill-opacity=\"0.18\" stroke=\"url(#grad-iot)\" stroke-width=\"2\"></circle><path d=\"M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4\" stroke=\"url(#grad-iot)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14\" stroke=\"url(#grad-iot)\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-opacity=\"0.7\"></path></svg>",
         "left": "Realm scope, asset/signal tree; right-click a signal to create an order or a webhook source",
         "center": "Dashboards of automation widgets (the three CTOX-programmed parts: trigger logic, widget code, order prompt), Karten ⇄ Liste",
-        "right": ""
+        "right": "",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/iot.jpg",
+        "icon_asset_sha256": "47e1a59d94e34baa238268a4eb5ec8190b8211e885ac418e106bb0de25bd2e43",
+        "icon_selection_candidate": "candidate-14",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "47e1a59d94e34baa238268a4eb5ec8190b8211e885ac418e106bb0de25bd2e43"
       },
       "category": "Operations",
       "version": "v1",
@@ -1334,12 +1478,12 @@
         "summary": "Task CTOX in plain text (Wenn/Dann) to watch your signals and act. Each dashboard widget is a standing order CTOX programs in three parts (Rhai watcher · sandboxed render code · order prompt that spawns a chat on fire). Webhooks in & out; MQTT/HTTP/WS ingest; multi-realm isolation; sandboxed generated code.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/iot",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -1363,7 +1507,7 @@
     {
       "id": "knowledge",
       "title": "Knowledge",
-      "description": "Native CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
+      "description": "CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
       "entry": "modules/knowledge/index.html",
       "collections": [
         "business_commands",
@@ -1373,7 +1517,24 @@
       ],
       "layout": {
         "shell": "windowed",
-        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-knowledge\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-knowledge\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#d946ef\" /></linearGradient></defs><path d=\"M4 19.5A2.5 2.5 0 0 1 6.5 17H20\" stroke=\"url(#grad-knowledge)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z\" fill=\"url(#grad-knowledge)\" fill-opacity=\"0.12\" stroke=\"url(#grad-knowledge)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M12 2v10l2.5-2 2.5 2V2z\" fill=\"url(#grad-knowledge)\" fill-opacity=\"0.25\" stroke=\"url(#grad-knowledge)\" stroke-width=\"1.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"9\" cy=\"12\" r=\"1.5\" fill=\"url(#grad-knowledge)\"></circle><circle cx=\"14\" cy=\"15\" r=\"1\" fill=\"url(#grad-knowledge)\"></circle></svg>",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "knowledge-v2-reference-4",
+        "shell_header_rows": 2,
+        "shell_icon_rows": 2,
+        "icon_asset": "modules/knowledge/assets/icon/knowledge-256.png",
+        "icon_asset_srcset": "modules/knowledge/assets/icon/knowledge-256.png 1x, modules/knowledge/assets/icon/knowledge-512.png 2x, modules/knowledge/assets/icon/knowledge-1024.png 4x",
+        "icon_asset_60": "modules/knowledge/assets/icon/knowledge-60.png",
+        "icon_provenance": "modules/knowledge/assets/icon/provenance.json",
+        "frame_palette": {
+          "start": "#f0b774",
+          "middle": "#936b63",
+          "top_joint": "#936b63",
+          "left_joint": "#715365",
+          "end": "#0f2a4c",
+          "surface": "#10151c",
+          "surface_alt": "#141b24",
+          "accent": "#936b63"
+        },
         "left": "Knowledge selection and source groups",
         "center": "Markdown reader/editor and dataframe table tabs",
         "right": "Runbooks as operational knowledge layer",
@@ -1382,13 +1543,17 @@
           "right": "Runbook configuration, modification, and execution",
           "bottom": "Selected rows, dataframe diagnostics, and CTOX task evidence"
         },
-        "default_width": 1180,
-        "default_height": 780,
-        "min_width": 640,
-        "min_height": 480
+        "default_width": 1200,
+        "default_height": 720,
+        "min_width": 360,
+        "min_height": 480,
+        "icon_asset_sha256": "257526ec6c932c287be864be47e7e7708f32d136d587ab2d17da6cc62629c220",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "6aaaac3c849a444f1bc8af3e4f019eb4eded5ad64ac70ec85eee5c54cdb06e3b"
       },
       "category": "Knowledge",
-      "version": "v1",
+      "version": "1.1.7",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -1415,11 +1580,11 @@
           "focus"
         ],
         "initial_size": {
-          "width": 1180,
-          "height": 780
+          "width": 1200,
+          "height": 720
         },
         "minimum_size": {
-          "width": 640,
+          "width": 360,
           "height": 480
         },
         "multi_instance": false,
@@ -1443,6 +1608,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-matching\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-matching\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#f59e0b\" /><stop offset=\"100%\" stop-color=\"#ea580c\" /></linearGradient></defs><path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\" fill=\"url(#grad-matching)\" fill-opacity=\"0.12\" stroke=\"url(#grad-matching)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\" fill=\"url(#grad-matching)\" fill-opacity=\"0.12\" stroke=\"url(#grad-matching)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"12\" r=\"2.5\" fill=\"#ffffff\" stroke=\"url(#grad-matching)\" stroke-width=\"1\"></circle></svg>",
         "left": "Requirement/source records and import task prompts",
         "center": "Configured matching tasks, queue state, and match results",
@@ -1451,7 +1618,12 @@
           "left": "Column import and source configuration",
           "right": "Object pool configuration and selected record detail",
           "bottom": "Matching prompt, schema, task status, and evidence"
-        }
+        },
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/matching.jpg",
+        "icon_asset_sha256": "3ececa42f99f1d63104468b920b6fea37fcc398186cae1f3b409de1647e2c3b7",
+        "icon_selection_candidate": "candidate-02",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "3ececa42f99f1d63104468b920b6fea37fcc398186cae1f3b409de1647e2c3b7"
       },
       "category": "Operations",
       "version": "v1",
@@ -1512,8 +1684,15 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Subjekt- und Statusfilter",
-        "center": "Nachweise mit Ablauf und Verifikationsstatus"
+        "center": "Nachweise mit Ablauf und Verifikationsstatus",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/nachweise.jpg",
+        "icon_asset_sha256": "cd43c8c297a229317fab2d9cd399e889e7377a6dcf16025bf52a1ce325f6d76a",
+        "icon_selection_candidate": "candidate-11",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "cd43c8c297a229317fab2d9cd399e889e7377a6dcf16025bf52a1ce325f6d76a"
       },
       "category": "Operations",
       "version": "v0.1",
@@ -1566,10 +1745,17 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-notes\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-notes\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#eab308\" /><stop offset=\"100%\" stop-color=\"#d97706\" /></linearGradient></defs><path d=\"M16 2H4a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z\" fill=\"url(#grad-notes)\" fill-opacity=\"0.12\" stroke=\"url(#grad-notes)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M2 6h2M2 10h2M2 14h2M2 18h2\" stroke=\"url(#grad-notes)\" stroke-width=\"1.5\" stroke-linecap=\"round\"></path><path d=\"M18.5 2.5a2.121 2.121 0 0 1 3 3L11 16l-4 1 1-4 10.5-10.5z\" fill=\"url(#grad-notes)\" fill-opacity=\"0.3\" stroke=\"url(#grad-notes)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Folders and note list",
         "center": "Markdown editor and rich text live preview",
-        "right": "Command dashboard and formatting shortcuts"
+        "right": "Command dashboard and formatting shortcuts",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/notes.jpg",
+        "icon_asset_sha256": "aa1aafef932cb21d16611927780be82d4a5d68c9b474b70308aaeda83be5cf8b",
+        "icon_selection_candidate": "candidate-06",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "aa1aafef932cb21d16611927780be82d4a5d68c9b474b70308aaeda83be5cf8b"
       },
       "category": "Productivity",
       "version": "v1",
@@ -1585,12 +1771,12 @@
         "summary": "Local-first markdown notes workspace with folder navigation and live preview.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/notes",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -1610,10 +1796,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "outbound",
@@ -1645,9 +1831,16 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-outbound\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-outbound\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#ec4899\" /><stop offset=\"100%\" stop-color=\"#f43f5e\" /></linearGradient></defs><line x1=\"22\" y1=\"2\" x2=\"11\" y2=\"13\" stroke=\"url(#grad-outbound)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><polygon points=\"22 2 15 22 11 13 2 9 22 2\" fill=\"url(#grad-outbound)\" fill-opacity=\"0.12\" stroke=\"url(#grad-outbound)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polygon><path d=\"M6 19c3-1 6-1 9-3\" stroke=\"url(#grad-outbound)\" stroke-width=\"1.5\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></path></svg>",
         "left": "campaign selection and source import",
-        "center": "company qualification and pipeline workbench"
+        "center": "company qualification and pipeline workbench",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/outbound.jpg",
+        "icon_asset_sha256": "a47a0a7e7e42acf918ae7e8a64304566b62ce94d31513a33894e163fda735c5a",
+        "icon_selection_candidate": "candidate-05",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "a47a0a7e7e42acf918ae7e8a64304566b62ce94d31513a33894e163fda735c5a"
       },
       "category": "Sales",
       "version": "0.1.0",
@@ -1705,8 +1898,15 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
-        "center": "Vermittlungen"
+        "center": "Vermittlungen",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/placements.jpg",
+        "icon_asset_sha256": "f5818b645ddd2f8c4ea3f54a90b34003c1fb3fa86228b2f44ac5c4c90703079c",
+        "icon_selection_candidate": "candidate-13",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "f5818b645ddd2f8c4ea3f54a90b34003c1fb3fa86228b2f44ac5c4c90703079c"
       },
       "category": "Recruiting",
       "version": "v0.1",
@@ -1756,20 +1956,31 @@
         "ctox_bug_reports",
         "business_module_releases",
         "business_commands",
-        "ctox_queue_tasks"
+        "ctox_queue_tasks",
+        "ctox_task_approval_requests",
+        "business_users"
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-reports\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-reports\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#ef4444\" /><stop offset=\"100%\" stop-color=\"#f97316\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-reports)\" fill-opacity=\"0.12\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M18 17V10M12 17V6M6 17v-4\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"6\" r=\"2\" fill=\"#ffffff\" stroke=\"url(#grad-reports)\" stroke-width=\"1.2\"></circle></svg>",
         "left": "Bug and feature filters and history",
         "center": "Selected report evidence, CTOX change log, and rollback",
+        "right": "CTOX task, coding-agent delegation, and rollback actions for the selected report",
+        "third_pane_justification": "Die Aktions-Spalte (CTOX Task zeigen, Übergabe an den Coding Agent, Modul-Rollback) gehört zum selektierten Report und muss in breiten Fenstern neben Liste und Detail sichtbar bleiben; sie ist default-eingeklappt und öffnet über den Aktionen-Toggle im Detail-Header.",
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
-        "min_height": 480
+        "min_height": 480,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/reports.jpg",
+        "icon_asset_sha256": "f83ec81f7954a899490a63d02af84fc4d145f49184b7884b97a749a8bd373275",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "f83ec81f7954a899490a63d02af84fc4d145f49184b7884b97a749a8bd373275"
       },
       "category": "Governance",
-      "version": "v1",
+      "version": "1.1.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -1839,7 +2050,12 @@
         "drawers": {
           "right": "task setup, scoring model, and selected source detail",
           "bottom": "Knowledge table diagnostics and raw row evidence"
-        }
+        },
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/research.jpg",
+        "icon_asset_sha256": "a888d0b6ca2053cd15030286577951004fb449a97e79980df76ffaf643e796fb",
+        "icon_selection_candidate": "candidate-14",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "a888d0b6ca2053cd15030286577951004fb449a97e79980df76ffaf643e796fb"
       },
       "category": "Research",
       "version": "v1",
@@ -1855,11 +2071,11 @@
         "summary": "Knowledge-backed web research with a live semantic graph, source scoring, and CTOX systematic-research handoff.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/research",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "internal",
+      "install_scope": "core",
       "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
@@ -1880,10 +2096,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "internal",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "shiftflow",
@@ -1900,6 +2116,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-shiftflow\"><defs><linearGradient id=\"grad-shiftflow\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#7c3aed\" /></linearGradient></defs><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"3\" fill=\"url(#grad-shiftflow)\" fill-opacity=\"0.12\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"2\" stroke-linecap=\"round\"></line><line x1=\"9\" y1=\"9\" x2=\"9\" y2=\"20\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><line x1=\"15\" y1=\"9\" x2=\"15\" y2=\"20\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\"></line><rect x=\"5\" y=\"12\" width=\"8\" height=\"4\" rx=\"1.5\" fill=\"url(#grad-shiftflow)\" fill-opacity=\"0.3\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\"></rect><circle cx=\"17\" cy=\"15\" r=\"2.5\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1.2\"></circle><polyline points=\"17 13.5 17 15 18 15\" stroke=\"url(#grad-shiftflow)\" stroke-width=\"1\" stroke-linecap=\"round\"></polyline></svg>",
         "left": "team status, absence scopes and department selection",
         "center": "interactive scheduler timeline and timesheet grid",
@@ -1908,7 +2126,12 @@
           "left": "Arbeitszeitmodelle und Einstellungen",
           "right": "Dienstplaner und Detail-Inspektor",
           "bottom": "Schnelleingabe & Massenaktionen"
-        }
+        },
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/shiftflow.jpg",
+        "icon_asset_sha256": "19b53504a0ce1129bc049039aa24c1e5f2baa64f70afe6cc23011420e5a81ef0",
+        "icon_selection_candidate": "candidate-14",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "19b53504a0ce1129bc049039aa24c1e5f2baa64f70afe6cc23011420e5a81ef0"
       },
       "category": "Operations",
       "version": "v1",
@@ -1957,7 +2180,7 @@
     {
       "id": "spreadsheets",
       "title": "CTOX Spreadsheets",
-      "description": "Native XLSX workspace with the CTOX Spreadsheets fork, explorer, versions, and CTOX runbooks.",
+      "description": "XLSX workspace with the CTOX Spreadsheets fork, explorer, versions, and CTOX runbooks.",
       "entry": "modules/spreadsheets/index.html",
       "collections": [
         "business_commands",
@@ -1968,6 +2191,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-spreadsheets\"><defs><linearGradient id=\"grad-spreadsheets\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#10b981\" /><stop offset=\"100%\" stop-color=\"#059669\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-spreadsheets)\" fill-opacity=\"0.12\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"9\" y1=\"3\" x2=\"9\" y2=\"21\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"15\" x2=\"21\" y2=\"15\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><path d=\"M5 17l3-3 4 2 4-4\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"16\" cy=\"12\" r=\"1.5\" fill=\"#ffffff\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1\"></circle></svg>",
         "left": "spreadsheet navigation and explorer",
         "center": "Spreadsheet viewer/editor workbench",
@@ -1976,7 +2201,12 @@
           "left": "spreadsheet metadata and import settings",
           "right": "runbook details and generated commands",
           "bottom": "diagnostics, export evidence, and selected spreadsheet context"
-        }
+        },
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/spreadsheets.jpg",
+        "icon_asset_sha256": "664b5a31fa43c3d1135b15979c8348e0397dc648c37dbd823e681f4da35db284",
+        "icon_selection_candidate": "candidate-05",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "664b5a31fa43c3d1135b15979c8348e0397dc648c37dbd823e681f4da35db284"
       },
       "category": "Analytics",
       "version": "v1",
@@ -1989,15 +2219,15 @@
         "runbooks"
       ],
       "store": {
-        "summary": "XLSX spreadsheet workspace with the CTOX Spreadsheets ESM fork, native Rust roundtrip, versions, and automation runbooks.",
+        "summary": "XLSX spreadsheet workspace with the CTOX Spreadsheets ESM fork, verified local roundtrip, versions, and automation runbooks.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/spreadsheets",
-        "installable": true,
-        "editable_after_install": true,
-        "distribution": "catalog-module"
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
       },
-      "install_scope": "store",
-      "default_installed": false,
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
@@ -2017,10 +2247,10 @@
         "multi_instance": false,
         "auto_restore": false
       },
-      "source": "catalog",
-      "core": false,
+      "source": "core",
+      "core": true,
       "editable": true,
-      "deletable": true
+      "deletable": false
     },
     {
       "id": "submissions",
@@ -2037,8 +2267,15 @@
       "deletable": true,
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Filter",
-        "center": "Vorstellungen"
+        "center": "Vorstellungen",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/submissions.jpg",
+        "icon_asset_sha256": "8cbfd230fafe8eacc84752410f1e1321024378125bb17189b9fcb7b7b39bfc13",
+        "icon_selection_candidate": "candidate-08",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "8cbfd230fafe8eacc84752410f1e1321024378125bb17189b9fcb7b7b39bfc13"
       },
       "category": "Recruiting",
       "version": "v0.1",
@@ -2081,7 +2318,7 @@
     {
       "id": "support",
       "title": "Support",
-      "description": "Native CTOX Support Desk for omnichannel support queues, customer context, ticket links, SLA, macros, and CTOX Harness-assisted drafts.",
+      "description": "CTOX Support Desk for omnichannel support queues, customer context, ticket links, SLA, macros, and CTOX Harness-assisted drafts.",
       "entry": "modules/support/index.html",
       "collections": [
         "business_commands",
@@ -2118,10 +2355,17 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "left": "Support queue, saved views, and channel filters",
         "center": "Selected support conversation timeline and composer",
         "right": "Customer context, ticket links, SLA, macros, and CTOX Agent suggestions",
-        "third_pane_justification": "Support operators need customer identity, linked tickets, SLA state, and CTOX suggestions visible while reading and replying; moving this context into drawers would force repeated context switches during every conversation."
+        "third_pane_justification": "Support operators need customer identity, linked tickets, SLA state, and CTOX suggestions visible while reading and replying; moving this context into drawers would force repeated context switches during every conversation.",
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/support.jpg",
+        "icon_asset_sha256": "d5058006ec868a0ea19378ea477e16f8ddb51bb92c7817c1c39c390291e26235",
+        "icon_selection_candidate": "candidate-02",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "d5058006ec868a0ea19378ea477e16f8ddb51bb92c7817c1c39c390291e26235"
       },
       "category": "Operations",
       "version": "0.1.0",
@@ -2135,7 +2379,7 @@
         "agent"
       ],
       "store": {
-        "summary": "CTOX-native support desk layered over communication, ticket, customer, and harness projections.",
+        "summary": "CTOX support desk layered over communication, ticket, customer, and harness projections.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/support",
         "installable": true,
@@ -2185,6 +2429,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-threads\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-threads\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#7c3aed\" /></linearGradient></defs><path d=\"M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7A2.5 2.5 0 0 1 17.5 15H10l-5 4v-4.2A2.5 2.5 0 0 1 4 12.5z\" fill=\"url(#grad-threads)\" fill-opacity=\"0.12\" stroke=\"url(#grad-threads)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M8 8h8M8 11h5\" stroke=\"url(#grad-threads)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><circle cx=\"18\" cy=\"18\" r=\"3\" fill=\"#fff\" stroke=\"url(#grad-threads)\" stroke-width=\"1.5\"></circle><path d=\"M18 16.6v1.7l1.2.8\" stroke=\"url(#grad-threads)\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "personal inbox, approvals, and source filters",
         "center": "durable thread timeline tied to app records",
@@ -2192,7 +2438,12 @@
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
-        "min_height": 480
+        "min_height": 480,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/threads.jpg",
+        "icon_asset_sha256": "b4cf784881d8c5463837688755795dffbd66b5082333bf1508357df3a10d28ed",
+        "icon_selection_candidate": "candidate-01",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "b4cf784881d8c5463837688755795dffbd66b5082333bf1508357df3a10d28ed"
       },
       "category": "System",
       "version": "v0.1",
@@ -2242,7 +2493,7 @@
     {
       "id": "tickets",
       "title": "Tickets",
-      "description": "Native CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
+      "description": "CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
       "entry": "modules/tickets/index.html",
       "collections": [
         "ctox_ticket_items",
@@ -2260,6 +2511,8 @@
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-tickets\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-tickets\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><path d=\"M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z\" fill=\"url(#grad-tickets)\" fill-opacity=\"0.12\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M15 3v5h5\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M8 12h8M8 16h6\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
         "left": "ticket inbox, source and state filters",
         "center": "selected ticket timeline and case evidence",
@@ -2267,7 +2520,12 @@
         "default_width": 1180,
         "default_height": 780,
         "min_width": 640,
-        "min_height": 480
+        "min_height": 480,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/tickets.jpg",
+        "icon_asset_sha256": "6d0cbd2138977725b6043fd582b1d2b65b7214c8c9153ad7977942c26ebc4675",
+        "icon_selection_candidate": "candidate-02",
+        "icon_asset_kind": "raster-reference",
+        "icon_selection_sha256": "6d0cbd2138977725b6043fd582b1d2b65b7214c8c9153ad7977942c26ebc4675"
       },
       "category": "Operations",
       "version": "v1",
@@ -2280,7 +2538,7 @@
         "support"
       ],
       "store": {
-        "summary": "Read-only CTOX ticket operations app over native RxDB/WebRTC ticket projections.",
+        "summary": "Read-only CTOX ticket operations app over synchronized ticket projections.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/tickets",
         "installable": false,
@@ -2299,6 +2557,79 @@
         "initial_size": {
           "width": 1180,
           "height": 780
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
+      "launch_kind": "desktop-app",
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "kundenpipeline",
+      "title": "Decision Hub",
+      "description": "Bounded customer decisions, triage proposals, approvals, and follow-up actions.",
+      "entry": "modules/kundenpipeline/index.html",
+      "collections": [
+        "kundenpipeline_vorgaenge",
+        "kundenpipeline_entscheidungen",
+        "kundenpipeline_projekte",
+        "business_commands"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_asset": "modules/kundenpipeline/assets/icon/decision-hub-256.png",
+        "icon_asset_srcset": "modules/kundenpipeline/assets/icon/decision-hub-256.png 1x",
+        "icon_asset_60": "modules/kundenpipeline/assets/icon/decision-hub-60.png",
+        "icon_provenance": "modules/kundenpipeline/assets/icon/provenance.json",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5 5.5h14v13H5z\" stroke=\"currentColor\" stroke-width=\"1.8\"/><path d=\"M8 9h8M8 12h5M8 15h7\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/><circle cx=\"18\" cy=\"18\" r=\"3\" fill=\"var(--surface)\" stroke=\"currentColor\" stroke-width=\"1.6\"/><path d=\"M18 16.7v1.5l1 0.6\" stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linecap=\"round\"/></svg>",
+        "left": "Offene Entscheidungen und Vorgänge",
+        "center": "Entscheidungsdetails, Kontext und Audit",
+        "right": "Freigabe, Antwort und Übergabe",
+        "third_pane_justification": "Die Aktions-Spalte gehört zur ausgewählten Entscheidung und bleibt auf breiten Fenstern sichtbar; auf kleinen Fenstern wird sie über den Shell-Aktionen-Toggle erreichbar.",
+        "default_width": 1120,
+        "default_height": 760,
+        "min_width": 640,
+        "min_height": 480
+      },
+      "category": "Operations",
+      "version": "0.1.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "decision-hub",
+        "kundenpipeline",
+        "approvals",
+        "triage"
+      ],
+      "store": {
+        "summary": "Decision Hub for bounded owner decisions and customer pipeline follow-up.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/kundenpipeline",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1120,
+          "height": 760
         },
         "minimum_size": {
           "width": 640,

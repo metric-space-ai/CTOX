@@ -154,7 +154,9 @@ test('left column follows the canonical shell-wired column grammar', async () =>
   // Filterbar: search + shard/list toggle + collapsed filter tray with reset.
   assert.match(html, /data-pg-search/);
   assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+// Betreiber-Direktive 31.08.2026: EIN Umschalt-Knopf statt Knopfpaar.
+  // data-pg-view traegt die aktuelle Ansicht; beide Ziel-Icons stecken im Knopf.
+  assert.equal((html.match(/data-pg-view=/g) || []).length, 1);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);
@@ -294,4 +296,21 @@ test('selecting a booking page is an in-place class flip, never a list rebuild',
   // A rebuild (renderLeftList) would reset the operator's scroll — selection
   // must not trigger it.
   assert.doesNotMatch(selectFn[0], /renderLeftList\(/);
+});
+
+test('calendar does not advertise an unavailable public booking route', async () => {
+  const js = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(js, /window\.location\.origin\}\/book\//);
+  assert.doesNotMatch(js, /href="\$\{publicUrl\}"/);
+  assert.match(js, /Nicht veröffentlicht/);
+});
+
+test('v2 inspector drawer is contained by the calendar app and icons have a fallback', async () => {
+  const [css, js] = await Promise.all([
+    readFile(new URL('./index.css', import.meta.url), 'utf8'),
+    readFile(new URL('./index.js', import.meta.url), 'utf8'),
+  ]);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.calendar-app \{ position: relative;[\s\S]*overflow: hidden;/);
+  assert.match(js, /function actionIcon\(name\) \{[\s\S]*const paths = \{/);
+  assert.doesNotMatch(js, /return state\.ctx\?\.getActionIcon\?\.\(name\) \|\| ''/);
 });

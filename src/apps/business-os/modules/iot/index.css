@@ -30,22 +30,98 @@
    in the top-right element-action cluster. */
 .iot-main-tools { justify-content: flex-end; }
 
+/* ---------------------------------------------------------------------------
+   Shell contract v2 — pane head geometry.
+   The v2 shell paints three zones OVER the module, because
+   .shell-window-content is `inset: 0` and is never indented:
+     · the app icon, --shell-v2-icon-size (80px) square, top left, z-index 35,
+       reaching down over BOTH header rows (2 x 37px = 74px);
+     · the header band, --shell-v2-header-row-size (37px) tall, full width,
+       carrying the drag zone and the version menu;
+     · the window controls, 74x74, top right.
+   The module therefore keeps its first row exactly one header row high, indents
+   the leftmost head past the icon and the rightmost head past the controls.
+   Reference: modules/knowledge/index.css. Geometry only — no functional change.
+   -------------------------------------------------------------------------- */
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-pane-title-row {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+}
+
+/* Kicker and title share the single 37px row instead of stacking. */
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+/* The title is the shell's version-menu trigger; it must never be squeezed to
+   zero by the action cluster next to it. */
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Leftmost head: clear the icon column. The padding sits on the <header> so
+   the filter row underneath — still inside the icon's 74px reach — clears it
+   as well. */
+.shell-window[data-shell-contract="v2"] .iot-module .iot-left > .ctox-pane-header {
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* Second head row: the filter/search bar is exactly one header row, so the
+   whole head is 2 x var(--shell-v2-header-row-size, 37px) = 74px. */
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+  align-items: center;
+}
+
+/* Rightmost head: clear the 74x74 window controls. */
+.shell-window[data-shell-contract="v2"] .iot-module .iot-center > .ctox-pane-header {
+  padding-top: 0;
+  padding-bottom: 0;
+  padding-right: 70px;
+}
+
 /* custom: nested asset/signal tree — indentation per depth, twisties,
-   hover-reveal add buttons and bindable signal rows have no kit component. */
+   hover-reveal add buttons and bindable signal rows have no kit component.
+   SHARD (cards) view: two lines per node — bold title over a meta line — with
+   the roomier padding that distinguishes it from the list view below. */
 .iot-tree { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px 18px; }
 .iot-node { display: flex; align-items: center; gap: 8px; border-radius: var(--control-radius);
-  padding: 7px 8px; cursor: pointer; border: 1px solid transparent; }
+  padding: 9px 8px; cursor: pointer; border: 1px solid transparent; }
 .iot-node:hover { background: var(--kit-hover); }
 .iot-node.is-selected, .iot-node[aria-selected="true"] { background: var(--accent-soft); }
 .iot-node .iot-twisty { width: 16px; text-align: center; color: var(--muted); font-size: 11px; flex: none; cursor: pointer; }
-.iot-node-name { flex: 1; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iot-node-body { display: grid; gap: 1px; flex: 1; min-width: 0; }
+.iot-node-name { font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iot-node-meta { font-size: 11px; line-height: 1.35; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iot-node-meta:empty { display: none; }
 .iot-node-add { opacity: 0; }
 .iot-node:hover .iot-node-add, .iot-node-add:focus-visible { opacity: 1; }
 
-/* flat (list-view) selector rows — kit list item stacked as name + meta. */
-.iot-flat-row { display: grid; gap: 3px; cursor: pointer; }
-.iot-flat-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.iot-flat-meta { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* flat (list-view) selector rows — exactly ONE compact line: dot, title, one
+   short meta pushed right. Tight line height, maximum density; the second line
+   and the type badge live in the shard view above. */
+.iot-flat-row { display: flex; align-items: center; gap: 8px; cursor: pointer;
+  padding: 5px 12px; line-height: 1.3; }
+.iot-flat-row .iot-node-name { flex: 1 1 auto; min-width: 0; font-weight: 500; }
+.iot-flat-meta { flex: 0 0 auto; margin-left: auto; color: var(--muted); font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
 
 /* signals (bindable) under an asset — a selector row, scopes the MAIN dashboard. */
 .iot-signal { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-radius: var(--control-radius);
@@ -77,14 +153,24 @@
 
 /* custom: the dashboard itself — a grid (or list) of automation widgets.
    No kit component covers draggable, rearrangeable widget cards. */
-.iot-dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 8px; padding: 10px; align-content: start; align-items: start; overflow: auto; min-height: 0; }
-.iot-dash-grid.list { display: block; padding: 10px; overflow: auto; }
+.iot-dash-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; padding: 12px; align-content: start; align-items: start; overflow: auto; min-height: 0; }
+
+/* LIST view: a dense stack of single-line rows, not a second card grid. */
+.iot-dash-grid.is-list { display: flex; flex-direction: column; gap: 0; padding: 0; overflow: auto; }
+/* The row itself is not a control (like the shard card, only its ⋯ and the
+   context menu act), so it keeps the default cursor. */
+.iot-row { display: flex; align-items: center; gap: 8px; padding: 4px 12px; line-height: 1.3; cursor: default; }
+.iot-row .ctox-pane-icon { width: 24px; height: 24px; }
+.iot-row-title { flex: 1 1 auto; min-width: 0; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.iot-row-meta { flex: 0 0 auto; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.iot-row .iot-widget-more { flex: none; }
+.iot-row:hover .iot-widget-more { opacity: 1; }
 
 /* custom: the automation widget = one standing order to CTOX (signature
    element of this app): drag reorder, sandboxed render slot / sparkline,
    Wenn/Dann program rows and a status footer. */
 .iot-widget { background: var(--surface); border: 1px solid var(--line); border-radius: var(--panel-radius);
-  padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; position: relative; }
+  padding: 14px 16px; display: flex; flex-direction: column; gap: 8px; position: relative; }
 .iot-widget[draggable="true"] { cursor: grab; }
 .iot-widget[draggable="true"]:active { cursor: grabbing; }
 .iot-widget.drag-over { outline: 2px dashed var(--accent); outline-offset: 3px; }
@@ -92,8 +178,12 @@
 .iot-widget-title { flex: 1; font-size: 13px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .iot-widget-more { opacity: 0; }
 .iot-widget:hover .iot-widget-more,
-.iot-dash-grid.list tr:hover .iot-widget-more,
 .iot-widget-more:focus-visible { opacity: 1; }
+
+/* Shard meta line: status + where the signal sits, directly under the title. */
+.iot-widget-meta { display: flex; align-items: center; gap: 8px; margin-top: -2px; min-width: 0; }
+.iot-widget-scope { flex: 1 1 auto; min-width: 0; font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 .iot-widget-viz { position: relative; min-height: 40px; display: flex; align-items: center; }
 .iot-render-host { flex: 1; min-width: 0; display: flex; align-items: center; }
@@ -128,7 +218,7 @@
 
 /* custom: narrow windows stack the left pane above the dashboard (the kit grid
    collapse only goes single-column); hides the resizer like the kit. */
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 768px) {
   .iot-module {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: minmax(240px, 40vh) minmax(360px, 1fr);
@@ -136,10 +226,23 @@
     min-height: 100%;
     overflow-y: auto;
     gap: 8px;
+    /* Full-bleed horizontally. The kit's narrow padding (6px) would put the
+       left pane's own border edge exactly on the icon zone's left sample
+       column, so the pane — not its (exempt) header — becomes the topmost
+       painted element under the 80x74 app icon. At zero horizontal padding the
+       pane starts at the 6px window border and the indented header covers the
+       whole zone. Reference: knowledge. */
+    padding: 6px 0;
   }
 
   .iot-left { grid-column: 1; }
   .iot-center { grid-column: 1; }
+
+  /* Stacked: the left head is now also the LAST head of the top row, so it
+     has to clear the window controls itself. */
+  .shell-window[data-shell-contract="v2"] .iot-module .iot-left > .ctox-pane-header {
+    padding-right: 70px;
+  }
 
   .iot-module > .ctox-column-resizer {
     display: none !important;
@@ -150,4 +253,113 @@
     gap: 8px;
     padding: 10px;
   }
+}
+
+/* Phone sheet (container <= 767px): the <= 760px block already stacks the
+   asset tree above the dashboard and forces single-column widgets. What
+   remains for touch operability: >=44px tap targets (tree rows, twisties,
+   widget footers, form controls) and — critically — the hover-reveal
+   affordances (.iot-node-add, .iot-widget-more) become always visible,
+   because touch has no hover. */
+@container business-app-window (max-width: 768px) {
+  .iot-module .ctox-button,
+  .iot-module .ctox-run-control,
+  .iot-module .ctox-pane-icon,
+  .iot-module .ctox-icon-button,
+  .iot-module .ctox-sort-dir {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .iot-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .iot-module .ctox-input,
+  .iot-module .ctox-select,
+  .iot-module textarea {
+    min-height: 44px;
+    font-size: 16px;
+  }
+
+  /* Touch equivalent of the hover-reveal: always-on, full-height buttons. */
+  .iot-node-add,
+  .iot-widget-more {
+    opacity: 1;
+  }
+
+  .iot-node,
+  .iot-flat-row,
+  .iot-row {
+    min-height: 44px;
+  }
+
+  .iot-node .iot-twisty {
+    width: 32px;
+    align-self: stretch;
+    display: grid;
+    place-items: center;
+  }
+
+  .iot-signal {
+    min-height: 44px;
+  }
+
+  .iot-widget-foot {
+    flex-wrap: wrap;
+  }
+
+  .iot-form-actions {
+    flex-wrap: wrap;
+  }
+
+  .iot-form-actions .ctox-button,
+  .iot-ed-actions .ctox-button {
+    flex: 1 1 auto;
+  }
+}
+
+/* Shell-v2 geometry: the shared frame supplies app identity and window
+   controls. Keep the left title clear of the 80px app glyph and the dashboard
+   header clear of the right close control. */
+.shell-window[data-shell-contract="v2"] .iot-module {
+  padding: 0;
+  background: var(--shell-v2-surface, var(--bg));
+}
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-pane {
+  border: 0;
+  border-radius: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+  box-shadow: none;
+}
+.shell-window[data-shell-contract="v2"] .iot-left > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .iot-center > .ctox-pane-header { padding: 0; background: var(--shell-v2-surface-alt, var(--surface)); }
+.shell-window[data-shell-contract="v2"] .iot-left > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+}
+.shell-window[data-shell-contract="v2"] .iot-center > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 62px 0 8px;
+}
+.shell-window[data-shell-contract="v2"] .iot-module [data-shell-v2-header-row="2"] {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+.shell-window[data-shell-contract="v2"] .iot-left .ctox-pane-kicker { display: none; }
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-pane-title-row { height: 100%; }
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-pane-title { margin-top: 0; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .iot-module .ctox-pane-icon {
+  width: min(26px, var(--shell-v2-header-row-size, 37px));
+  height: min(26px, var(--shell-v2-header-row-size, 37px));
+}
+.shell-window[data-shell-contract="v2"] .iot-modal-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 90;
 }

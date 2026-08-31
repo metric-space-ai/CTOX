@@ -31,7 +31,7 @@ ctox-pdf-parse = { path = "src/tools/pdf-parse" }
 ctox-qwen3-embedding-0-6b = { path = "src/core/inference/models/qwen3_embedding_0_6b" }
 ctox-voxtral-mini-4b-realtime-2602 = { path = "src/core/inference/models/voxtral_mini_4b_realtime_2602" }
 ctox-voxtral-4b-tts-2603 = { path = "src/core/inference/models/voxtral_4b_tts_2603" }
-ctox-web-stack = { git = "https://github.com/metric-space-ai/workjet", rev = "8e78945bc" }
+ctox-web-stack = { git = "https://github.com/metric-space-ai/workjet", rev = "5681203574c40c0215d2d3614709432d907f5e83" }
 ctox-sqlserver-adapter = { path = "src/tools/sqlserver-mcp" }
 ctox-postgres-adapter = { path = "src/tools/postgres-adapter" }
 rxdb = { package = "ctox-rxdb", path = "src/core/rxdb" }
@@ -48,7 +48,6 @@ mailparse = "0.16"
 notify = "8.2"
 polars = { version = "0.53.0", default-features = false, features = [
     "lazy",
-    "new_streaming",
     "dtype-full", "strings", "regex", "timezones",
     "is_in", "diagonal_concat", "concat_str",
     "fmt", "describe",
@@ -107,6 +106,7 @@ windows-sys = { version = "0.59", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Pipes",
     "Win32_System_IO",
+    "Win32_System_Services",
     "Win32_System_Threading",
     "Win32_Security",
 ] }
@@ -127,11 +127,9 @@ exclude = [
     "src/core/inference/models/voxtral_4b_tts_2603",
     "src/core/inference/models/voxtral_mini_4b_realtime_2602",
     "src/core/mailserver",
-    "src/core/office-engine",
     "src/core/rxdb",
     "src/tools/appsec-pentest",
     "src/tools/doc-stack",
-    "src/tools/google-fetch",
     "src/tools/pdf-parse",
     "src/tools/sqlserver-mcp",
     "src/tools/web-stack",
@@ -145,10 +143,6 @@ ratatui = { git = "https://github.com/nornagon/ratatui", branch = "nornagon-v0.2
 tokio-tungstenite = { git = "https://github.com/openai-oss-forks/tokio-tungstenite", rev = "132f5b39c862e3a970f731d709608b3e6276d5f6" }
 tungstenite = { git = "https://github.com/openai-oss-forks/tungstenite-rs", rev = "9200079d3b54a1ff51072e24d81fd354f085156f" }
 rtc-ice = { path = "src/core/rxdb/patches/rtc-ice" }
-# Polars 0.53 requires object_store 0.13.x. Keep that reviewed API while
-# replacing its vulnerable quick-xml 0.39 dependency with the compatible 0.41
-# release. Remove this local patch once Polars can consume object_store 0.14+.
-object_store = { path = "src/tools/object-store-patched" }
 # rama 0.3.0-alpha.4 still pins vulnerable hickory 0.25. Keep the alpha API
 # while using the fixed hickory 0.26 resolver until the pinned Rust toolchain
 # can consume rama 0.4.

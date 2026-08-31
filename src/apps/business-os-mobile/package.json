@@ -1,0 +1,19 @@
+{
+  "name": "@ctox/business-os-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "stage": "node scripts/stage-shell.mjs",
+    "verify:stage": "node scripts/verify-stage.mjs",
+    "guard": "node scripts/static-guard.mjs",
+    "scan:secrets": "node scripts/secret-canary-scan.mjs",
+    "check": "npm test && npm run guard && npm run scan:secrets",
+    "invite": "node scripts/mobile-invite.mjs"
+  },
+  "dependencies": {
+    "qrcode": "1.5.4"
+  }
+}

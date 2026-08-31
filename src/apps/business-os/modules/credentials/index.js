@@ -1,5 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260811-fremde-collection-mitladen-v106';
+import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 
 // Write-only credentials manager. The browser never receives a secret value:
 // it dispatches ctox.secret.{list,put,delete} control commands over the
@@ -28,6 +28,8 @@ const labels = {
     exportAction: 'Exportieren',
     searchPlaceholder: 'Suchen...',
     closeDetail: 'Details schließen',
+    viewToList: 'Als Liste anzeigen',
+    viewToCards: 'Als Karten anzeigen',
     sourceAll: 'Alle Quellen',
     sourceCatalog: 'Katalog',
     sourceExtra: 'Eigene',
@@ -79,6 +81,8 @@ const labels = {
     exportAction: 'Export',
     searchPlaceholder: 'Search...',
     closeDetail: 'Close details',
+    viewToList: 'Show as list',
+    viewToCards: 'Show as cards',
     sourceAll: 'All sources',
     sourceCatalog: 'Catalog',
     sourceExtra: 'Custom',
@@ -189,9 +193,14 @@ function sourceLabel(entry) {
   return entry && entry.source === 'extra' ? tr('sourceExtra') : tr('sourceCatalog');
 }
 
-// A shard is a pure selector: mono key + ONE muted meta line + a status badge.
-// No inline expansion, no per-row buttons (design-guide "Canonical Column
-// Grammar"). It never renders a value.
+// A shard is a pure selector: it never renders a value, never expands inline
+// and carries no per-row buttons (design-guide "Canonical Column Grammar").
+// The two views are genuinely different densities (Betreiber-Direktive
+// 31.08.2026), not the same row with a different class:
+//   cards — 2-3 lines: bold mono key + status, source · description, and the
+//           rotation date when the credential is set. Generous padding.
+//   list  — exactly ONE line: key + a single short status meta on the right,
+//           tight leading, maximum density.
 export function credentialRow(entry, opts = {}) {
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selected = Boolean(opts.selected);
@@ -207,9 +216,11 @@ export function credentialRow(entry, opts = {}) {
   }
   const metaBits = [esc(sourceLabel(entry))];
   if (entry?.description) metaBits.push(esc(entry.description));
+  const updated = entry?.is_set && entry?.updated_at ? esc(formatUpdated(entry.updated_at)) : '';
   return '<div' + attrs + '>'
     + '<div class="cred-row-head"><span class="cred-row-title">' + esc(name) + '</span>' + badge + '</div>'
     + '<div class="cred-row-meta">' + metaBits.join(' · ') + '</div>'
+    + (updated ? '<div class="cred-row-meta cred-row-meta--sub">' + updated + '</div>' : '')
     + '</div>';
 }
 
@@ -340,6 +351,7 @@ export async function mount(ctx) {
   const gateEl = root?.querySelector('[data-cred-gate]');
   const titleEl = root?.querySelector('[data-cred-title]');
   const modeEl = root?.querySelector('[data-cred-mode]');
+  const viewToggleEl = root?.querySelector('[data-cred-view-toggle]');
 
   const canManage = canUseBusinessPermission({
     session: ctx.session,
@@ -358,6 +370,9 @@ export async function mount(ctx) {
   // (and the outcome arrives over) the replicated business_commands bridge —
   // so its readiness gates the data-driven empty state. Render-hint only.
   let listReadiness = null;
+  // Module-owned view mode: the shell grammar only wires the two-button
+  // [data-pg-view] radio pair, and this app renders ONE toggle button.
+  let viewMode = 'cards';
 
   const collection = () => { try { return ctx.db?.collection?.('business_commands') || null; } catch { return null; } };
 
@@ -365,10 +380,26 @@ export async function mount(ctx) {
   function readGrammar() {
     return {
       search: (rail?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
-      view: rail?.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards',
+      view: viewMode,
       band: rail?.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'all',
       source: rail?.querySelector('[data-pg-filter][data-pg-name="source"]')?.value || 'all',
     };
+  }
+
+  // The single toggle names the view it switches TO: glyph, aria-label and
+  // title all move together, and aria-pressed never appears (it is an action,
+  // not a state).
+  function updateViewToggle() {
+    if (!viewToggleEl) return;
+    const listNow = viewMode === 'list';
+    const label = listNow ? t('viewToCards') : t('viewToList');
+    viewToggleEl.dataset.viewMode = listNow ? 'list' : 'cards';
+    viewToggleEl.setAttribute('aria-label', label);
+    viewToggleEl.title = label;
+    viewToggleEl.removeAttribute('aria-pressed');
+    viewToggleEl.querySelectorAll('[data-view-glyph]').forEach((glyph) => {
+      glyph.hidden = glyph.dataset.viewGlyph !== (listNow ? 'cards' : 'list');
+    });
   }
   function writeCounts(counts) {
     const pg = rail?.__ctoxPaneGrammar;
@@ -426,6 +457,9 @@ export async function mount(ctx) {
     const g = readGrammar();
     const filtered = filterRows(rowsCache, g);
     if (listEl) {
+      // The well itself carries the view so the list variant can collapse the
+      // inter-row gap to zero (maximum density) without a second class per row.
+      listEl.dataset.credView = g.view;
       const dataEmpty = !rowsCache.length;
       const emptyText = dataEmpty ? t('empty_all') : t('empty_filtered');
       listEl.innerHTML = renderRecordList(filtered, {
@@ -640,12 +674,18 @@ export async function mount(ctx) {
     else if (action === 'delete') handleDelete(btn.dataset.name || selectedName);
   }
   const onGrammarChange = () => { render(); };
+  function onViewToggle() {
+    viewMode = viewMode === 'list' ? 'cards' : 'list';
+    updateViewToggle();
+    render();
+  }
 
   listEl?.addEventListener('click', onListClick);
   listEl?.addEventListener('keydown', onListKey);
   root?.addEventListener('click', onAction);
   formEl?.addEventListener('submit', onSubmit);
   rail?.addEventListener('ctox-pane-grammar-change', onGrammarChange);
+  viewToggleEl?.addEventListener('click', onViewToggle);
 
   // Readiness: the shell emits an immediate snapshot and re-emits only on
   // state changes; each change re-renders so the syncing shell resolves to
@@ -678,6 +718,7 @@ export async function mount(ctx) {
   }
 
   // Usable window before the list round-trip completes.
+  updateViewToggle();
   render();
   if (!canManage) setControlsEnabled(false);
   void refresh();
@@ -694,6 +735,7 @@ export async function mount(ctx) {
     root?.removeEventListener('click', onAction);
     formEl?.removeEventListener('submit', onSubmit);
     rail?.removeEventListener('ctox-pane-grammar-change', onGrammarChange);
+    viewToggleEl?.removeEventListener('click', onViewToggle);
     ctx.host.replaceChildren();
   };
 }

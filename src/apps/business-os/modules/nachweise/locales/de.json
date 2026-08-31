@@ -10,5 +10,7 @@
   "bandValid": "Gültig",
   "bandExpiring": "Ablaufend",
   "bandCritical": "Kritisch",
-  "syncing": "Daten werden synchronisiert."
+  "syncing": "Daten werden synchronisiert.",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen"
 }

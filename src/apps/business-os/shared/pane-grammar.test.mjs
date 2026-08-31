@@ -101,6 +101,25 @@ test('pane grammar wires search, tray, reset, dot, band and counts', () => {
   assert.equal(footer.textContent, '12 Einträge');
 });
 
+test('a single view control cycles cards and list without duplicate buttons', () => {
+  const toggle = el({
+    dataset: { pgView: 'cards', pgViewCycle: 'cards,list' },
+    attrs: { 'aria-pressed': 'true' },
+  });
+  const events = [];
+  wirePaneGrammar(paneWith({ 'data-pg-view': [toggle] }), { onChange: (state) => events.push(state) });
+
+  toggle.fire('click');
+  assert.equal(toggle.dataset.pgView, 'list');
+  assert.equal(toggle.getAttribute('aria-label'), 'Zur Kachelansicht wechseln');
+  assert.equal(events.at(-1).view, 'list');
+
+  toggle.fire('click');
+  assert.equal(toggle.dataset.pgView, 'cards');
+  assert.equal(toggle.getAttribute('aria-label'), 'Zur Listenansicht wechseln');
+  assert.equal(events.at(-1).view, 'cards');
+});
+
 test('scroll guard restores a clamped rebuild but honors intentional resets', () => {
   const pane = {};
   const well = { isConnected: true, scrollTop: 800, scrollHeight: 1400, clientHeight: 360 };

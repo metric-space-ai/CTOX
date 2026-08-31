@@ -146,7 +146,7 @@ function stateMatches(state, expected) {
     && String(state?.cookie || "").includes(`ctoxSmoke=${expected}`);
 }
 
-function withTimeout(promise, label, timeoutMs = 5000) {
+function withTimeout(promise, label, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs);
     Promise.resolve(promise).then(

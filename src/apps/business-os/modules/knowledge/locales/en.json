@@ -10,5 +10,11 @@
   "queued": "Command queued",
   "queueFailed": "Could not queue command",
   "edit": "Edit",
-  "closeEditor": "Close editor"
+  "closeEditor": "Close editor",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards",
+  "scopeUser": "User",
+  "scopeSystem": "System",
+  "scopeMixed": "User + System",
+  "neverEdited": "Never edited"
 }

@@ -1,6 +1,6 @@
 {
   "schema_version": "business-os-db-isolation-inventory-v1",
-  "updated_at": "2026-08-21",
+  "updated_at": "2026-08-06",
   "owner": "business-os-platform",
   "purpose": "Phase 13A inventory plus Phase 13D drift guard for packaged/core module data-isolation migration, unscoped facade exceptions, and tested scoped system/internal module exceptions.",
   "modules": {
@@ -81,8 +81,7 @@
         "browser_sessions",
         "browser_tabs",
         "business_commands",
-        "ctox_queue_tasks",
-        "thesen_outbound_adapters"
+        "ctox_queue_tasks"
       ],
       "notes": "Scoped system exception: Browser resolves browser_sessions, browser_tabs, browser_frames, browser_input_events, business_commands and ctox_queue_tasks only through the scoped system facade. Browser/Rust dynamic-app smoke denies the registered foreign business_module_catalog collection through collection(), property, raw and collections access and checks the permission/capability facade contract."
     },
@@ -131,7 +130,7 @@
       "install_scope": "core",
       "distribution": "catalog-module",
       "default_installed": true,
-      "classification": "system-development-module",
+      "classification": "catalog-user-module",
       "isolation_status": "guarded-facade-migrated",
       "owner": "business-os-platform",
       "review_by": "2026-07-31",
@@ -141,7 +140,7 @@
         "uses_collections_proxy": false,
         "uses_cached_db_handle": false
       },
-      "notes": "Core development module with P13G resolver hardening: Coding Agents uses the guarded DB facade in Shell context and resolves projection collections through ctx.db.collection(name) without ctx.db.collections fallback. Browser/Rust dynamic-app smoke registers its module schema and requires collection/property/raw/context denial on the manifest-declared coding_agent_sessions collection before data.read, read success after an exact collection data.read grant and write denial without data.write."
+      "notes": "P13C packaged user-module batch plus P13G resolver hardening: Coding Agents uses the guarded DB facade in Shell context and resolves projection collections through ctx.db.collection(name) without ctx.db.collections fallback. Browser/Rust dynamic-app smoke registers its module schema and requires collection/property/raw/context denial on the manifest-declared coding_agent_sessions collection before data.read, read success after an exact collection data.read grant and write denial without data.write."
     },
     "consent": {
       "title": "Einwilligungen",

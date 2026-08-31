@@ -9,6 +9,15 @@
   --ctox-left-width: 290px;
 }
 
+/* Die Bibliotheksspalte hat VIER Zeilen: Kopf, Ansichtsband, Well, Fuss. Das
+   Kit-Raster (.ctox-pane) definiert nur `auto minmax(0,1fr)`, also fiel die
+   dehnbare Zeile auf das ANSICHTSBAND statt auf das Well - gemessen 403 bis
+   538px leeres Band, waehrend die Trefferliste content-hoch am unteren Rand
+   klebte. Die Zeilen stehen so, wie das Markup sie beschreibt. */
+.creator-library {
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+}
+
 /* custom: the composer is a centered, document-style form canvas (prompt,
    examples, options), not a data pane — content column is width-capped. */
 .creator-workspace {
@@ -209,7 +218,11 @@
 
 /* Library shards — pure selectors inside the kit .ctox-list well (frame,
    header, filterbar, tray, view band, well, footer and selection accent bar
-   are all kit/shell-owned). A shard is title + ONE muted meta line. */
+   are all kit/shell-owned).
+
+   Die beiden Ansichten sind bewusst VERSCHIEDEN (Betreiber-Direktive 31.08.):
+   KARTE = mehrzeiliger Eintrag mit grosszuegigem Padding, LISTE = genau eine
+   kompakte Zeile mit maximaler Dichte. */
 .creator-shard { cursor: pointer; }
 
 .creator-shard-head {
@@ -237,29 +250,184 @@
   white-space: nowrap;
 }
 
+/* KARTE: Titel fett, darunter ein bis zwei Meta-Zeilen, mehr Luft. */
+.creator-shard--cards {
+  padding: 12px 14px;
+  line-height: 1.35;
+}
+
+.creator-shard--cards .creator-shard-title { font-weight: 700; }
+
+.creator-shard-sub {
+  margin-top: 1px;
+  font-size: 11px;
+  opacity: 0.85;
+}
+
+/* LISTE: eine Zeile, enge Zeilenhoehe, ein Kurz-Meta rechts. */
 .creator-shard--list {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
+  padding: 5px 14px;
+  line-height: 1.25;
 }
 
-/* The kit collapses the workspace frame to one column at 760px; these are
-   the creator-specific inner adjustments for the stacked layout. */
-@container business-app-window (max-width: 760px) {
+.creator-shard--list .creator-shard-title { font-size: 13px; }
+
+.creator-shard-side {
+  flex: 0 0 auto;
+  max-width: 45%;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Responsive-Stufen. Beide Haltepunkte gehoeren der SHELL (Vertrag §6):
+   1024px macht aus drei Spalten zwei, 768px aus zwei eine. Creator ist eine
+   Zwei-Spalten-App, kennt also nur die 768er-Stufe und definiert KEINE eigene
+   Grenze daneben. Die Spaltendefinition selbst schreibt die Shell zurueck
+   (shared/base.css), es bleibt keine leere Spur reserviert. */
+@container business-app-window (max-width: 768px) {
   /* Keep the primary task (composer) first when the panes stack. */
   .creator-main { order: -1; }
+
+  /* Gestapelt ist die Bahn die ganze Fensterbreite: der 6px-Rahmen des Kits
+     wuerde den ersten Kopf in die Icon-Zone schieben, deshalb faellt das
+     aeussere Padding weg (gleiche Geometrie wie Knowledge/Calendar). Der
+     Bogen scrollt als Ganzes, damit die zweite Sektion nicht abgeschnitten
+     wird. */
+  .creator-module[data-creator-root] {
+    padding: 0;
+    height: auto;
+    min-height: 100%;
+    overflow-y: auto;
+    row-gap: 8px;
+  }
+
+  .creator-library,
+  .creator-main {
+    height: auto;
+    min-height: 220px;
+  }
 
   .creator-example-grid,
   .creator-form-grid,
   .creator-options-grid { grid-template-columns: minmax(0, 1fr); }
   .creator-example:nth-child(odd) { border-right: 0; }
   .creator-example:nth-child(even) { padding-left: 0; }
-}
 
-@container business-app-window (max-width: 520px) {
   .creator-workspace { padding: 18px 12px; }
   .creator-url-row { grid-template-columns: minmax(0, 1fr); }
   .creator-submit { align-items: stretch; flex-direction: column; }
   .creator-submit #btn-deploy-app { width: 100%; }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, plus
+   the example picker cells and the tiny URL-chip remove button. */
+@media (pointer: coarse) {
+  .creator-module button,
+  .creator-module input,
+  .creator-module select,
+  .creator-module textarea {
+    min-height: 44px;
+  }
+
+  .creator-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .creator-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .creator-module .creator-shard {
+    min-height: 44px;
+  }
+
+  .creator-module .creator-example {
+    min-height: 44px;
+  }
+
+  .creator-module .creator-url-chip button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* The accordion summaries are the only way to reach the options/log —
+     give them a full finger-height hit area. */
+  .creator-module .creator-options summary,
+  .creator-module .creator-status-details summary,
+  .creator-module .creator-requests-details summary {
+    min-height: 44px;
+    padding: 12px 0;
+  }
+}
+
+/* Shell V2 (Vertrag §7): Kopfgeometrie. Beide Pane-Koepfe der obersten Zeile
+   sind zusammen exakt zwei Header-Zeilen hoch (2 x 37px). Links: Titelzeile +
+   Filterzeile (Muster Knowledge/Browser), beide ueber die Kopf-Einrueckung aus
+   der Icon-Zone (80px) herausgehalten. Rechts: eine ueber beide Kopfzeilen
+   zentrierte Titelzeile. */
+.shell-window[data-shell-contract="v2"] .creator-module .ctox-pane-header {
+  box-sizing: border-box;
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding-block: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .creator-module .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .creator-module .ctox-pane-header > .ctox-filterbar {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0;
+}
+
+/* 14px Kicker + 17px Titel bleiben gestapelt und passen in die 37px-Zeile
+   (gleiche Loesung wie im Browser-Modul). */
+.shell-window[data-shell-contract="v2"] .creator-module .ctox-pane-titles {
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .creator-module .ctox-pane-title {
+  margin-top: 0;
+  line-height: 1.15;
+}
+
+/* Linke Spalte: Icon-Zone freihalten — Titel- UND Filterzeile erben die
+   Einrueckung vom Kopf; das offene Filter-Tray ebenso. */
+.shell-window[data-shell-contract="v2"] .creator-module .creator-library > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* Rechte Spalte: die einzelne Titelzeile fuellt beide Kopfzeilen und zentriert
+   den Titel vertikal. Als LETZTER Kopf der obersten Reihe haelt sie zugleich
+   die 74px-Fenstersteuerung frei (Vertrag §7.3). */
+.shell-window[data-shell-contract="v2"] .creator-module .creator-main > .ctox-pane-header {
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
+.shell-window[data-shell-contract="v2"] .creator-module .creator-main > .ctox-pane-header .ctox-pane-title-row {
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+}
+
+/* Eine Spalte (<= 768px): gestapelt ist der Composer-Kopf der ERSTE und
+   einzige Kopf der obersten Reihe. Er haelt jetzt links die Icon-Zone und
+   rechts die Fenstersteuerung frei; der Bibliothekskopf steht unterhalb der
+   Falte und gibt seine Icon-Einrueckung zurueck, damit dort keine leere
+   94px-Flaeche stehen bleibt. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .creator-module .creator-main > .ctox-pane-header {
+    padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  }
+
+  .shell-window[data-shell-contract="v2"] .creator-module .creator-library > .ctox-pane-header {
+    padding-left: 14px;
+  }
 }

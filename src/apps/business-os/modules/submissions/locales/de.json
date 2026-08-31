@@ -17,5 +17,7 @@
   "composerTitle": "Kandidat vorstellen",
   "recordKicker": "VORSTELLUNG",
   "importDone": "Import abgeschlossen.",
-  "exportDone": "Export erstellt."
+  "exportDone": "Export erstellt.",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen"
 }

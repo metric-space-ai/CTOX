@@ -22,7 +22,7 @@ import {
 } from './businessOsDataSource.js';
 import { createSyncFeedback } from './syncFeedback.js';
 import { getActiveMatchingDefinition, matchingText, setActiveMatchingDefinition } from './matchingDefinition.js';
-import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessAlert, showBusinessConfirm, showBusinessPrompt } from '../../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../../shared/i18n.js';
 import { renderListOrState } from '../../../shared/list-state.js';
 
@@ -88,8 +88,18 @@ function getMatchingModuleHost() {
     : document.querySelector('[data-matching-module="native"]') || document.body;
 }
 
+function getScopedMatchingHost() {
+  const host = matchingModuleHost?.isConnected
+    ? matchingModuleHost
+    : document.querySelector('[data-matching-module="native"]');
+  return host || null;
+}
+
 function appendMatchingLayer(element) {
-  getMatchingModuleHost().appendChild(element);
+  const host = getScopedMatchingHost();
+  if (!host || !element) return false;
+  host.appendChild(element);
+  return true;
 }
 
 export async function importObjectFromPdfFile(file) {
@@ -1029,8 +1039,8 @@ function updateMatchingInitialSyncFeedback() {
   syncFeedback.upsertProgress?.(MATCHING_SYNC_PROGRESS_ID, {
     title: uiText('syncingTitle', 'Matching wird synchronisiert'),
     detail: pending
-      ? uiText('syncingCollections', 'RxDB lädt gerade: {collections}.', { collections: pending })
-      : uiText('syncingPreparing', 'RxDB bereitet die lokalen Daten vor.'),
+      ? uiText('syncingCollections', 'Daten werden gerade geladen: {collections}.', { collections: pending })
+      : uiText('syncingPreparing', 'Lokale Daten werden vorbereitet.'),
     meta: `${progress.ready}/${progress.total}`,
     value: (progress.ready / progress.total) * 100,
     indeterminate: false,
@@ -9192,8 +9202,9 @@ export async function mountMatchingDashboard(ctx = {}){
     setActiveMatchingDefinition(ctx.matchingDefinition || globalThis.CTOX_MATCHING_DEFINITION);
   }
   applyMatchingDefinitionUi();
-  syncFeedback.setHostRoot?.(document.body);
-  syncFeedback.ensureHost();
+  const matchingHost = getScopedMatchingHost();
+  syncFeedback.setHostRoot?.(matchingHost);
+  if (matchingHost) syncFeedback.ensureHost();
   setupMatchingCollectionReadiness();
   await ensureMatchScoreFormulaUpdate();
   await loadFromRxdb();
@@ -9220,20 +9231,19 @@ export async function mountMatchingDashboard(ctx = {}){
 // export/search-sort icon buttons into a single trigger per pane header. The
 // menu items still carry data-column / data-column-action / data-drawer-side,
 // so the existing businessOsControls.js delegated listener that opens the
-// column-drawer fires unchanged. The menu is moved to <body> on first open so
-// it escapes the .ctox-pane { overflow: hidden } clip.
+// column-drawer fires unchanged. Menus stay inside this module host so a
+// second Business OS window cannot see or close them.
 // ---------------------------------------------------------------------------
 function setupMatchingOverflowMenus() {
-  const root = getMatchingModuleHost();
+  const root = getScopedMatchingHost();
   if (!root) return;
   if (root.dataset.matchingOverflowWired === '1') return;
   root.dataset.matchingOverflowWired = '1';
 
-  // Menus get re-parented to <body> on first open so they escape the
-  // .ctox-pane { overflow: hidden } clip — query from the document so close
-  // still finds them after re-parenting.
+  // Menus remain host-scoped so close and outside-click handling cannot cross
+  // Business OS window boundaries.
   const allTriggers = () => root.querySelectorAll('[data-toggle-pane-options]');
-  const allMenus = () => document.querySelectorAll('.matching-overflow-menu');
+  const allMenus = () => root.querySelectorAll('.matching-overflow-menu');
 
   const closeAll = () => {
     allMenus().forEach((menu) => { menu.hidden = true; });
@@ -9248,8 +9258,8 @@ function setupMatchingOverflowMenus() {
     if (left < 8) left = 8;
     if (left + menuWidth > viewportWidth - 8) left = viewportWidth - 8 - menuWidth;
     const top = rect.bottom + 4;
-    if (menu.parentElement !== document.body) {
-      document.body.appendChild(menu);
+    if (menu.parentElement !== root) {
+      root.appendChild(menu);
     }
     menu.style.top = `${top}px`;
     menu.style.left = `${left}px`;
@@ -9319,6 +9329,8 @@ function openCreateRequirementForm() {
   // dialog look so it fits the column design without depending on the
   // bottom-drawer flow.
   const layer = document.createElement('div');
+  const root = getScopedMatchingHost();
+  if (!root) return;
   layer.className = 'business-dialog-layer is-info is-open';
   layer.style.zIndex = '260';
   layer.innerHTML = `
@@ -9345,7 +9357,7 @@ function openCreateRequirementForm() {
       </div>
     </section>
   `;
-  document.body.append(layer);
+  root.append(layer);
 
   const close = () => {
     layer.classList.remove('is-open');
@@ -9394,7 +9406,7 @@ async function createRequirementFromForm({ sourceName, title, description }) {
     await loadFromRxdb();
   }
   if (!rxdb?.sources || !rxdb?.requirements) {
-    throw new Error('RxDB collections sind nicht bereit.');
+    throw new Error('Die lokalen Daten sind noch nicht bereit.');
   }
   const now = Date.now();
   const sourceId = `manualsrc_${now}_${Math.random().toString(16).slice(2, 8)}`;

@@ -1,7 +1,7 @@
 import {
   canModifyBusinessModule,
   canViewBusinessModuleSource,
-} from '../../shared/permissions.js?v=20260811-fremde-collection-mitladen-v106';
+} from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 
 export const manifest = {
   id: 'code-editor',
@@ -12,6 +12,24 @@ export const manifest = {
 };
 
 let monacoPromise;
+
+const ACTION_ICON_FALLBACKS = Object.freeze({
+  open: '<path d="M9 3h6v6"/><path d="M15 3 8 10"/><path d="M13 8v6H3V4h6"/>',
+  diff: '<path d="M5 4h10"/><path d="M5 8h10"/><path d="M5 12h6"/><path d="m12 11 3 3-3 3"/>',
+  format: '<path d="m4 5 3-2 9 9-2 3-3-1z"/><path d="m3 13 4 4"/>',
+  undo: '<path d="M4 7h8a4 4 0 1 1 0 8H9"/><path d="m4 7 3-3M4 7l3 3"/>',
+  refresh: '<path d="M14 6V3l3 3-3 3"/><path d="M15 6a6 6 0 1 0 1 6"/>',
+  save: '<path d="M4 3h9l3 3v11H4z"/><path d="M7 3v5h6V3M7 17v-5h6v5"/>',
+  commit: '<circle cx="6" cy="8" r="2"/><circle cx="14" cy="4" r="2"/><circle cx="14" cy="14" r="2"/><path d="M8 8h4M6 10v4h6"/>',
+  history: '<path d="M4 7a7 7 0 1 1 1 7"/><path d="M4 3v4h4M10 6v4l3 2"/>',
+  agent: '<path d="m8 2 1.2 3.4L13 7l-3.8 1.6L8 12l-1.2-3.4L3 7l3.8-1.6z"/><path d="m14 11 .6 1.8L16 13.5l-1.4.7L14 16l-.6-1.8-1.4-.7 1.4-.7z"/>',
+});
+
+function actionIcon(ctx, name, size = 14, strokeWidth = 1.8) {
+  const shellIcon = ctx?.getActionIcon?.(name, size, strokeWidth);
+  if (typeof shellIcon === 'string' && shellIcon.trim()) return shellIcon;
+  return `<svg viewBox="0 0 20 20" width="${size}" height="${size}" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ACTION_ICON_FALLBACKS[name] || ACTION_ICON_FALLBACKS.open}</svg>`;
+}
 
 export async function mount(container, ctx) {
   ensureStyles();
@@ -39,7 +57,7 @@ export async function mount(container, ctx) {
   };
 
   container.innerHTML = `
-    <section class="source-editor" data-source-editor data-locked-module="${state.lockedModule ? 'true' : 'false'}">
+    <section class="source-editor" data-source-editor data-shell-v2="true" data-locked-module="${state.lockedModule ? 'true' : 'false'}">
       <aside class="source-editor-sidebar">
         <div class="source-editor-sidebar-head">
           <strong data-source-module-title>${escapeHtml(state.moduleTitle)}</strong>
@@ -53,21 +71,21 @@ export async function mount(container, ctx) {
         <nav data-source-file-list aria-label="Source files"></nav>
       </aside>
       <main class="source-editor-main">
-        <header class="source-editor-toolbar">
+        <header class="source-editor-toolbar" data-shell-v2-header-row="1">
           <div class="source-editor-file-meta">
             <strong data-source-active-file>Source</strong>
             <span data-source-file-detail></span>
           </div>
           <div class="source-editor-actions">
-            <button type="button" data-source-open-app aria-label="App öffnen" title="App öffnen"><span aria-hidden="true">↗</span><span>App</span></button>
-            <button type="button" data-source-diff aria-label="Diff anzeigen" title="Diff anzeigen"><span aria-hidden="true">⇄</span><span>Diff</span></button>
-            <button type="button" data-source-format aria-label="Datei formatieren" title="Datei formatieren"><span aria-hidden="true">{}</span><span>Format</span></button>
-            <button type="button" data-source-revert aria-label="Änderungen verwerfen" title="Änderungen verwerfen"><span aria-hidden="true">↶</span><span>Revert</span></button>
-            <button type="button" data-source-reload aria-label="Neu laden" title="Neu laden"><span aria-hidden="true">↻</span><span>Laden</span></button>
-            <button type="button" data-source-save aria-label="Speichern" title="Speichern"><span aria-hidden="true">✓</span><span>Speichern</span></button>
-            <button type="button" data-source-commit aria-label="Commit erstellen" title="Änderungen als Commit versiegeln"><span aria-hidden="true">⎇</span><span>Commit</span></button>
-            <button type="button" data-source-history aria-label="History anzeigen" title="Commit-History"><span aria-hidden="true">≡</span><span>History</span></button>
-            <button type="button" data-source-agent aria-label="pi-Agent delegieren" title="Coding-Task an den pi-Agent delegieren"><span aria-hidden="true">✦</span><span>Agent</span></button>
+            <button type="button" data-source-open-app aria-label="App öffnen" title="App öffnen"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'open')}</span><span>App</span></button>
+            <button type="button" data-source-diff aria-label="Diff anzeigen" title="Diff anzeigen"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'diff')}</span><span>Diff</span></button>
+            <button type="button" data-source-format aria-label="Datei formatieren" title="Datei formatieren"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'format')}</span><span>Format</span></button>
+            <button type="button" data-source-revert aria-label="Änderungen verwerfen" title="Änderungen verwerfen"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'undo')}</span><span>Revert</span></button>
+            <button type="button" data-source-reload aria-label="Neu laden" title="Neu laden"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'refresh')}</span><span>Laden</span></button>
+            <button type="button" data-source-save aria-label="Speichern" title="Speichern"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'save')}</span><span>Speichern</span></button>
+            <button type="button" data-source-commit aria-label="Commit erstellen" title="Änderungen als Commit versiegeln"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'commit')}</span><span>Commit</span></button>
+            <button type="button" data-source-history aria-label="History anzeigen" title="Commit-History"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'history')}</span><span>History</span></button>
+            <button type="button" data-source-agent aria-label="pi-Agent delegieren" title="Coding-Task an den pi-Agent delegieren"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'agent')}</span><span>Agent</span></button>
           </div>
         </header>
         <div class="source-editor-workbench" data-source-workbench>
@@ -89,7 +107,7 @@ export async function mount(container, ctx) {
               <textarea data-source-agent-task class="source-editor-agent-task" rows="5" placeholder="Was soll der Agent an dieser App ändern?" required></textarea>
               <div class="source-editor-agent-actions">
                 <span class="source-editor-agent-model">Model: Kimi K3 (CTOX)</span>
-                <button type="button" data-source-agent-open-app class="source-editor-agent-openapp" title="Diese App in der Coding-Agent-App öffnen"><span aria-hidden="true">↗</span><span>Coding-Agent-App</span></button>
+                <button type="button" data-source-agent-open-app class="source-editor-agent-openapp" title="Diese App in der Coding-Agent-App öffnen"><span class="source-editor-action-icon" aria-hidden="true">${actionIcon(ctx, 'open')}</span><span>Coding-Agent-App</span></button>
                 <button type="submit" data-source-agent-run class="source-editor-agent-run">Delegieren</button>
               </div>
               <p data-source-agent-hint class="source-editor-agent-hint" aria-live="polite"></p>
@@ -387,7 +405,7 @@ export async function mount(container, ctx) {
       state.activePath = '';
       clearEditor('Source nicht verfügbar', `${state.moduleTitle}: ${error?.message || error}`);
       renderFileList();
-      setStatus(`Source konnte nicht über RxDB/WebRTC geladen werden: ${error?.message || error}`, true);
+      setStatus(`Source konnte nicht geladen werden: ${error?.message || error}`, true);
     } finally {
       state.loading = false;
       renderFileList();
@@ -771,9 +789,7 @@ export async function mount(container, ctx) {
 
   async function commitActiveModule() {
     if (!state.moduleId || state.readonly || state.saving) return;
-    const message = (typeof window !== 'undefined' && typeof window.prompt === 'function')
-      ? window.prompt('Commit-Nachricht:', '')
-      : '';
+    const message = await requestCommitMessage();
     if (message === null) return; // cancelled
     state.saving = true;
     updateActionState();
@@ -799,6 +815,57 @@ export async function mount(container, ctx) {
       state.saving = false;
       updateActionState();
     }
+  }
+
+  function requestCommitMessage() {
+    const editorRoot = container.querySelector('[data-source-editor]');
+    if (!editorRoot) return Promise.resolve(null);
+    editorRoot.querySelector('[data-source-commit-dialog]')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'source-editor-dialog';
+    overlay.dataset.sourceCommitDialog = 'true';
+    overlay.innerHTML = `
+      <form class="source-editor-dialog-card" data-source-commit-form role="dialog" aria-modal="true" aria-labelledby="source-editor-commit-title">
+        <h2 id="source-editor-commit-title">Commit erstellen</h2>
+        <p>Die aktuellen Änderungen werden als Versionspunkt versiegelt.</p>
+        <label>Commit-Nachricht
+          <input data-source-commit-message type="text" maxlength="160" autocomplete="off" required placeholder="Kurz beschreiben, was geändert wurde">
+        </label>
+        <div class="source-editor-dialog-actions">
+          <button type="button" data-source-commit-cancel>Abbrechen</button>
+          <button type="submit" data-source-commit-confirm>Commit erstellen</button>
+        </div>
+      </form>
+    `;
+    editorRoot.append(overlay);
+    const form = overlay.querySelector('[data-source-commit-form]');
+    const input = overlay.querySelector('[data-source-commit-message]');
+    let settled = false;
+    return new Promise((resolve) => {
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        overlay.remove();
+        resolve(value);
+      };
+      form.addEventListener('submit', (event) => {
+        event.preventDefault();
+        finish(input.value.trim());
+      });
+      overlay.querySelector('[data-source-commit-cancel]').addEventListener('click', () => finish(null));
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) finish(null);
+      });
+      overlay.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          finish(null);
+        }
+      });
+      requestAnimationFrame(() => {
+        input.focus();
+      });
+    });
   }
 
   async function delegateAgentTurn() {
@@ -949,7 +1016,7 @@ export async function mount(container, ctx) {
       if (expectedCount <= 0 || files.length >= expectedCount) return files;
       await delay(300);
     }
-    throw new Error('Source-Dateien wurden nicht über RxDB repliziert.');
+    throw new Error('Source-Dateien konnten nicht geladen werden.');
   }
 
   async function waitForSourceFile(id, timeoutMs = 45000) {
@@ -1824,6 +1891,222 @@ function ensureStyles() {
       }
       .source-editor-lines {
         padding-right: 8px;
+      }
+    }
+    .source-editor-action-icon {
+      display: inline-flex;
+      flex: 0 0 auto;
+      width: 14px;
+      height: 14px;
+      align-items: center;
+      justify-content: center;
+      line-height: 0;
+    }
+    .source-editor-action-icon svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .source-editor-dialog {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      display: grid;
+      place-items: center;
+      padding: 16px;
+      background: color-mix(in srgb, #061017 68%, transparent);
+    }
+    .source-editor-dialog-card {
+      width: min(420px, 100%);
+      min-width: 0;
+      display: grid;
+      gap: 12px;
+      box-sizing: border-box;
+      padding: 18px;
+      border: 1px solid var(--hairline, var(--line));
+      border-radius: 10px;
+      background: var(--surface, #111a20);
+      color: var(--text);
+      box-shadow: 0 18px 48px color-mix(in srgb, #000 35%, transparent);
+    }
+    .source-editor-dialog-card h2,
+    .source-editor-dialog-card p {
+      margin: 0;
+    }
+    .source-editor-dialog-card h2 {
+      font-size: 14px;
+    }
+    .source-editor-dialog-card p {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .source-editor-dialog-card label {
+      display: grid;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .source-editor-dialog-card input {
+      width: 100%;
+      min-width: 0;
+      min-height: 34px;
+      box-sizing: border-box;
+      border: 1px solid var(--hairline, var(--line));
+      border-radius: 7px;
+      background: var(--surface-2, #18232a);
+      color: var(--text);
+      padding: 0 9px;
+      outline: none;
+    }
+    .source-editor-dialog-card input:focus {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    }
+    .source-editor-dialog-actions {
+      display: flex;
+      justify-content: flex-end;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .source-editor-dialog-actions button {
+      min-height: 32px;
+      border: 1px solid var(--hairline, var(--line));
+      border-radius: 7px;
+      background: var(--surface-2, #18232a);
+      color: var(--text);
+      padding: 0 11px;
+      font-weight: 700;
+    }
+    .source-editor-dialog-actions [data-source-commit-confirm] {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+      background: var(--accent);
+      color: var(--on-accent, #fff);
+    }
+    /* Shell v2 owns the window chrome. This editor only supplies its embedded workbench. */
+    .shell-window[data-shell-contract="v2"] .source-editor,
+    .source-editor[data-shell-v2="true"] {
+      position: relative;
+      min-width: 0;
+      min-height: 0;
+      padding: 0;
+      background: var(--shell-v2-surface, var(--surface));
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-sidebar,
+    .source-editor[data-shell-v2="true"] .source-editor-sidebar {
+      grid-template-rows: var(--shell-v2-header-row-size, 37px) minmax(96px, 24%) auto minmax(0, 1fr);
+      background: var(--shell-v2-surface-alt, var(--surface-2));
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-sidebar-head,
+    .source-editor[data-shell-v2="true"] .source-editor-sidebar-head {
+      box-sizing: border-box;
+      min-height: var(--shell-v2-header-row-size, 37px);
+      height: var(--shell-v2-header-row-size, 37px);
+      padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      overflow: hidden;
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-sidebar-head strong,
+    .source-editor[data-shell-v2="true"] .source-editor-sidebar-head strong {
+      font-size: 12px;
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-sidebar-head span,
+    .source-editor[data-shell-v2="true"] .source-editor-sidebar-head span {
+      flex: 0 1 auto;
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-main,
+    .source-editor[data-shell-v2="true"] .source-editor-main {
+      grid-template-rows: var(--shell-v2-header-row-size, 37px) minmax(0, 1fr) 28px;
+      background: var(--shell-v2-surface, var(--surface));
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-toolbar,
+    .source-editor[data-shell-v2="true"] .source-editor-toolbar {
+      box-sizing: border-box;
+      min-width: 0;
+      min-height: var(--shell-v2-header-row-size, 37px);
+      height: var(--shell-v2-header-row-size, 37px);
+      flex-wrap: nowrap;
+      overflow: hidden;
+      padding: 0 8px;
+      background: var(--shell-v2-surface-alt, var(--surface-2));
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-file-meta,
+    .source-editor[data-shell-v2="true"] .source-editor-file-meta {
+      flex: 1 1 auto;
+      overflow: hidden;
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-actions,
+    .source-editor[data-shell-v2="true"] .source-editor-actions {
+      min-width: 0;
+      max-width: 100%;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: thin;
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-actions button,
+    .source-editor[data-shell-v2="true"] .source-editor-actions button {
+      flex: 0 0 auto;
+      white-space: nowrap;
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-workbench,
+    .source-editor[data-shell-v2="true"] .source-editor-workbench {
+      grid-template-columns: minmax(0, 1fr) minmax(220px, 34%);
+      background: var(--shell-v2-editor-surface, #0b1115);
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-status,
+    .source-editor[data-shell-v2="true"] .source-editor-status {
+      padding: 0 8px;
+      background: var(--shell-v2-surface, var(--surface));
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-agent-actions,
+    .source-editor[data-shell-v2="true"] .source-editor-agent-actions {
+      min-width: 0;
+      flex-wrap: nowrap;
+      overflow-x: auto;
+      scrollbar-width: thin;
+    }
+    .shell-window[data-shell-contract="v2"] .source-editor-agent-model,
+    .source-editor[data-shell-v2="true"] .source-editor-agent-model {
+      min-width: max-content;
+    }
+    @container business-app-window (max-width: 640px) {
+      .shell-window[data-shell-contract="v2"] .source-editor,
+      .source-editor[data-shell-v2="true"] {
+        grid-template-rows: minmax(168px, 36%) minmax(0, 1fr);
+      }
+      .shell-window[data-shell-contract="v2"] .source-editor-sidebar,
+      .source-editor[data-shell-v2="true"] .source-editor-sidebar {
+        grid-template-rows: var(--shell-v2-header-row-size, 37px) minmax(72px, 1fr) auto minmax(60px, 1fr);
+      }
+      .shell-window[data-shell-contract="v2"] .source-editor-toolbar,
+      .source-editor[data-shell-v2="true"] .source-editor-toolbar {
+        align-items: center;
+        flex-wrap: nowrap;
+        overflow: hidden;
+      }
+      .shell-window[data-shell-contract="v2"] .source-editor-actions,
+      .source-editor[data-shell-v2="true"] .source-editor-actions {
+        width: auto;
+        padding-bottom: 0;
+      }
+      .shell-window[data-shell-contract="v2"] .source-editor-actions button,
+      .source-editor[data-shell-v2="true"] .source-editor-actions button {
+        flex: 0 0 32px;
+        justify-content: center;
+        padding: 0;
+      }
+      .shell-window[data-shell-contract="v2"] .source-editor-actions button > span:not(.source-editor-action-icon),
+      .source-editor[data-shell-v2="true"] .source-editor-actions button > span:not(.source-editor-action-icon) {
+        display: none;
+      }
+      .shell-window[data-shell-contract="v2"] .source-editor-workbench,
+      .source-editor[data-shell-v2="true"] .source-editor-workbench {
+        grid-template-columns: minmax(0, 1fr);
+      }
+      .shell-window[data-shell-contract="v2"] .source-editor-diff,
+      .source-editor[data-shell-v2="true"] .source-editor-diff {
+        display: none;
       }
     }
   `;

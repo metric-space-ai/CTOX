@@ -52,7 +52,12 @@ impl SourceModule for Google {
         &[Country::De, Country::At, Country::Ch]
     }
     fn authoritative_for(&self) -> &'static [FieldKey] {
-        &[FieldKey::FirmaName, FieldKey::FirmaDomain]
+        &[
+            FieldKey::FirmaName,
+            FieldKey::FirmaDomain,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaHomepageFactSheet,
+        ]
     }
     fn shape_query(&self, query: &str, _ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
         shaped(&format!("\"{query}\" offizielle Website"), &[])
@@ -84,8 +89,10 @@ impl SourceModule for GoogleMaps {
         &[
             FieldKey::FirmaName,
             FieldKey::FirmaAnschrift,
+            FieldKey::FirmaBesucheranschrift,
             FieldKey::FirmaPlz,
             FieldKey::FirmaOrt,
+            FieldKey::FirmaLand,
             FieldKey::FirmaTelefon,
             FieldKey::FirmaDomain,
         ]
@@ -125,9 +132,17 @@ impl SourceModule for Moneyhouse {
             FieldKey::FirmaAnschrift,
             FieldKey::FirmaPlz,
             FieldKey::FirmaOrt,
+            FieldKey::FirmaLand,
+            FieldKey::FirmaFruehereNamen,
+            FieldKey::FirmaAktivitaetsstatus,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaGeschaeftsfuehrung,
+            FieldKey::FirmaProkura,
+            FieldKey::PersonTitel,
             FieldKey::PersonVorname,
             FieldKey::PersonNachname,
             FieldKey::PersonFunktion,
+            FieldKey::PersonPosition,
         ]
     }
     fn shape_query(&self, query: &str, ctx: &SourceCtx<'_>) -> Option<ShapedQuery> {
@@ -161,8 +176,11 @@ impl SourceModule for RocketReach {
     }
     fn authoritative_for(&self) -> &'static [FieldKey] {
         &[
+            FieldKey::PersonGeschlecht,
+            FieldKey::PersonTitel,
             FieldKey::PersonVorname,
             FieldKey::PersonNachname,
+            FieldKey::PersonFunktion,
             FieldKey::PersonPosition,
             FieldKey::PersonEmail,
             FieldKey::PersonTelefon,

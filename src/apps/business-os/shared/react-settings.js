@@ -1,23 +1,23 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260811-fremde-collection-mitladen-v106';
-import { appReleaseProjection } from './app-lifecycle.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from './dialogs.js?v=20260831-shell-v2-merged-v323';
+import { appReleaseProjection } from './app-lifecycle.js?v=20260831-shell-v2-merged-v323';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260811-fremde-collection-mitladen-v106';
+} from './permissions.js?v=20260831-shell-v2-merged-v323';
 import {
   brandingExportJson,
   normalizeBrandingImportPayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './branding.js?v=20260811-fremde-collection-mitladen-v106';
+} from './branding.js?v=20260831-shell-v2-merged-v323';
 import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
   roleDisplayName,
-} from './roles.js?v=20260811-fremde-collection-mitladen-v106';
-import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260811-fremde-collection-mitladen-v106';
+} from './roles.js?v=20260831-shell-v2-merged-v323';
+import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260831-shell-v2-merged-v323';
 
 const PROVIDER_SUBSCRIPTION_PROFILES = Object.freeze({
   codex: Object.freeze({ label: 'ChatGPT / Codex', accessMode: 'Subscription', defaultAccountId: 'codex-primary' }),
@@ -44,6 +44,8 @@ const PROVIDER_SUBSCRIPTION_COMMANDS = Object.freeze({
   rotate: 'ctox.provider_subscription.rotate',
   disconnect: 'ctox.provider_subscription.disconnect',
 });
+
+let subscriptionAuthWindowSequence = 0;
 
 export async function openReactSettings({
   mount,
@@ -102,6 +104,12 @@ export async function openReactSettings({
       error: '',
       copied: '',
     },
+    workjetPairing: {
+      loading: false,
+      invite: null,
+      error: '',
+      passwordVisible: false,
+    },
     modules: Array.isArray(modules) ? modules : [],
     governance,
     templates: null,
@@ -124,6 +132,7 @@ export async function openReactSettings({
   let usersSub = null;
   let activityRetryTimer = null;
   let activityRetryAttempts = 0;
+  let workjetPairingExpiryTimer = null;
   const ensureChannelCollections = async () => {
     await Promise.allSettled([
       sync?.startCollection?.('communication_accounts'),
@@ -212,8 +221,15 @@ export async function openReactSettings({
     render();
     try {
       await ensureRuntimeCollections();
-      settingsState.runtimeSettings = await loadRuntimeSettings({ db });
-      settingsState.commandStatus = '';
+      const loadedRuntimeSettings = await loadRuntimeSettings({ db });
+      settingsState.runtimeSettings = runtimeSettingsPreservingPendingSubscription(
+        loadedRuntimeSettings,
+        settingsState.runtimeSettings,
+        settingsState.subscriptionAuth,
+      );
+      if (!isPendingSubscriptionAuth(settingsState.subscriptionAuth)) {
+        settingsState.commandStatus = '';
+      }
     } catch (error) {
       settingsState.commandStatus = `Runtime-Status konnte nicht geladen werden: ${error.message || error}`;
     }
@@ -360,6 +376,37 @@ export async function openReactSettings({
   const revokeModuleSupportDownloadUrls = () => {
     Object.keys(settingsState.moduleSupportStatus || {}).forEach(revokeModuleSupportDownloadUrl);
   };
+  const stopWorkjetPairingExpiryTimer = () => {
+    if (workjetPairingExpiryTimer) clearInterval(workjetPairingExpiryTimer);
+    workjetPairingExpiryTimer = null;
+  };
+  const refreshWorkjetPairingCountdown = () => {
+    const invite = settingsState.workjetPairing.invite;
+    if (!invite) {
+      stopWorkjetPairingExpiryTimer();
+      return;
+    }
+    const remainingMs = Date.parse(invite.expiresAt) - Date.now();
+    if (!Number.isFinite(remainingMs) || remainingMs <= 0) {
+      stopWorkjetPairingExpiryTimer();
+      settingsState.workjetPairing = {
+        ...settingsState.workjetPairing,
+        loading: false,
+        invite: null,
+        error: '',
+      };
+      render();
+      return;
+    }
+    const countdown = body.querySelector('[data-workjet-pairing-countdown]');
+    if (countdown) countdown.textContent = workjetPairingRemainingLabel(invite.expiresAt);
+  };
+  const startWorkjetPairingExpiryTimer = () => {
+    stopWorkjetPairingExpiryTimer();
+    if (!settingsState.workjetPairing.invite || settingsState.tab !== 'sync') return;
+    refreshWorkjetPairingCountdown();
+    workjetPairingExpiryTimer = setInterval(refreshWorkjetPairingCountdown, 1_000);
+  };
 
   const render = () => {
     const canOpenAdmin = canOpenModuleAdmin({
@@ -394,6 +441,7 @@ export async function openReactSettings({
       governance: settingsState.governance,
       channels: settingsState.channels,
       mcp: settingsState.mcp,
+      workjetPairing: settingsState.workjetPairing,
     });
     wireProviderLogoFallbacks(body);
     body.querySelector('[data-close-settings]')?.addEventListener('click', () => {
@@ -409,6 +457,7 @@ export async function openReactSettings({
         clearTimeout(activityRetryTimer);
         activityRetryTimer = null;
       }
+      stopWorkjetPairingExpiryTimer();
       revokeModuleSupportDownloadUrls();
       onClose?.();
     });
@@ -444,12 +493,16 @@ export async function openReactSettings({
     });
     body.querySelector('[data-runtime-save]')?.addEventListener('click', async () => {
       const runtimePayload = runtimePayloadFromForm(body);
+      settingsState.runtimeSettings = runtimeSettingsWithDraft(
+        settingsState.runtimeSettings,
+        runtimePayload,
+      );
       settingsState.commandStatus = 'Runtime/Auth wird gespeichert...';
       render();
       try {
         settingsState.runtimeSettings = await saveRuntimeSettings(
           runtimePayload,
-          { commandBus, db, session, sync },
+          { db },
         );
         settingsState.commandStatus = 'Runtime/Auth gespeichert.';
       } catch (error) {
@@ -458,6 +511,52 @@ export async function openReactSettings({
       render();
     });
     body.querySelector('[data-runtime-refresh]')?.addEventListener('click', refreshRuntimeSettings);
+    body.querySelectorAll('[data-runtime-choice]').forEach((button) => {
+      button.addEventListener('click', () => {
+        const target = body.querySelector(`[${button.dataset.runtimeChoice}]`);
+        if (!target) return;
+        target.value = button.dataset.value || '';
+        body.querySelectorAll(`[data-runtime-choice="${cssEscape(button.dataset.runtimeChoice)}"]`)
+          .forEach((candidate) => {
+            const selected = candidate === button;
+            candidate.classList.toggle('is-selected', selected);
+            candidate.setAttribute('aria-pressed', selected ? 'true' : 'false');
+          });
+        if (['data-runtime-provider', 'data-runtime-auth-mode'].includes(button.dataset.runtimeChoice)) {
+          target.dispatchEvent(new Event('change', { bubbles: true }));
+        } else if (button.dataset.runtimeChoice === 'data-runtime-model') {
+          settingsState.runtimeSettings = runtimeSettingsWithDraft(
+            settingsState.runtimeSettings,
+            runtimePayloadFromForm(body),
+          );
+          render();
+        }
+      });
+    });
+    body.querySelector('[data-runtime-model-manual]')?.addEventListener('input', (event) => {
+      const target = body.querySelector('[data-runtime-model]');
+      if (target) target.value = event.currentTarget.value;
+    });
+    body.querySelector('[data-runtime-model-manual]')?.addEventListener('change', () => {
+      settingsState.runtimeSettings = runtimeSettingsWithDraft(
+        settingsState.runtimeSettings,
+        runtimePayloadFromForm(body),
+      );
+      render();
+    });
+    body.querySelectorAll('[data-runtime-copy-code]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const code = String(button.dataset.runtimeCopyCode || '').trim();
+        if (!code || !navigator.clipboard?.writeText) return;
+        try {
+          await navigator.clipboard.writeText(code);
+          button.textContent = 'Kopiert';
+          button.setAttribute('aria-label', 'Geräte-Code kopiert');
+        } catch {
+          button.textContent = 'Kopieren fehlgeschlagen';
+        }
+      });
+    });
     body.querySelector('[data-branding-refresh]')?.addEventListener('click', refreshBranding);
     body.querySelector('[data-branding-save]')?.addEventListener('click', async () => {
       const input = body.querySelector('[data-branding-json]');
@@ -519,13 +618,32 @@ export async function openReactSettings({
         render();
       });
     });
+    body.querySelector('[data-sync-password-toggle]')?.addEventListener('click', () => {
+      settingsState.workjetPairing.passwordVisible = !settingsState.workjetPairing.passwordVisible;
+      render();
+    });
+    body.querySelectorAll('[data-sync-copy]').forEach((button) => {
+      button.addEventListener('click', async () => {
+        const value = syncCopyValue(button.dataset.syncCopy, syncConfig, settingsState.workjetPairing.invite);
+        if (!value || !navigator.clipboard?.writeText) return;
+        try {
+          await navigator.clipboard.writeText(value);
+          button.textContent = '✓';
+          button.setAttribute('aria-label', 'Kopiert');
+        } catch {}
+      });
+    });
+    body.querySelector('[data-workjet-pairing-generate]')?.addEventListener('click', ensureWorkjetPairingInvite);
     body.querySelectorAll('[data-runtime-authorize-subscription]').forEach((button) => button.addEventListener('click', async () => {
       const providerId = String(button.dataset.runtimeAuthorizeSubscription || 'codex');
       const profile = providerSubscriptionProfile(providerId);
       const providerLabel = profile.label;
       const accountInput = body.querySelector(`[data-provider-account-id="${cssEscape(providerId)}"]`);
       const accountId = normalizeProviderAccountId(accountInput?.value || profile.defaultAccountId);
-      const authWindow = window.open('', `ctox-${providerId}-subscription`);
+      const usesInlineDeviceFlow = ['codex', 'openai'].includes(providerId);
+      const authWindow = usesInlineDeviceFlow
+        ? null
+        : window.open('', nextSubscriptionAuthWindowName(providerId));
       settingsState.subscriptionAuth = {
         status: 'starting', provider: providerId, accountId, action: 'connect', message: 'Login wird bei CTOX angefordert.',
       };
@@ -572,14 +690,21 @@ export async function openReactSettings({
             message: 'Code im OpenAI-Fenster eingeben.',
           };
           settingsState.commandStatus = `${providerLabel} Geräte-Code: ${payload.user_code}. Code im Provider-Fenster eingeben.`;
+          writeSubscriptionDeviceCodeWindow(
+            authWindow,
+            providerLabel,
+            payload.user_code,
+            payload.verification_url || payload.auth_url,
+          );
           render();
         }
         const authUrl = payload.auth_url || payload.verification_url;
-        if (authUrl && authWindow && !authWindow.closed) {
+        const deviceCodeWindowOwnsNavigation = payload.status === 'device_code' && payload.user_code;
+        if (!deviceCodeWindowOwnsNavigation && authUrl && authWindow && !authWindow.closed) {
           authWindow.location.href = authUrl;
-        } else if (authUrl) {
+        } else if (!deviceCodeWindowOwnsNavigation && authUrl) {
           window.location.href = authUrl;
-        } else if (authWindow && !authWindow.closed) {
+        } else if (!deviceCodeWindowOwnsNavigation && authWindow && !authWindow.closed) {
           authWindow.close();
         }
         settingsState.commandStatus = payload.status === 'connected'
@@ -587,7 +712,7 @@ export async function openReactSettings({
           : payload.user_code
           ? `${providerLabel} Geräte-Code: ${payload.user_code}. Danach Status neu laden.`
           : `${providerLabel} Login geöffnet. Danach Status neu laden.`;
-        if (providerId === 'codex') saveRuntimeSettings(runtimePayload, {
+        saveRuntimeSettings(runtimePayload, {
           commandBus,
           db,
           session,
@@ -600,10 +725,32 @@ export async function openReactSettings({
             : message;
           render();
         });
-        setTimeout(refreshRuntimeSettings, 3000);
-        setTimeout(refreshRuntimeSettings, 9000);
-        setTimeout(refreshRuntimeSettings, 30000);
-        setTimeout(refreshRuntimeSettings, 90000);
+        waitForSubscriptionConnection(providerId, {
+          db,
+          onProjection: (projection) => {
+            settingsState.runtimeSettings = {
+              ...(settingsState.runtimeSettings || {}),
+              provider_subscriptions: projection,
+            };
+          },
+        }).then(async (projection) => {
+          settingsState.runtimeSettings = {
+            ...(settingsState.runtimeSettings || {}),
+            provider_subscriptions: projection,
+            auth: {
+              ...(settingsState.runtimeSettings?.auth || {}),
+              configured: true,
+              subscription_session_configured: true,
+            },
+          };
+          settingsState.subscriptionAuth = { status: 'connected', provider: providerId, accountId };
+          settingsState.commandStatus = `${providerLabel} ist verbunden.`;
+          await refreshRuntimeSettings();
+        }).catch((error) => {
+          if (String(error?.message || error).includes('Zeitüberschreitung')) return;
+          settingsState.commandStatus = String(error?.message || error);
+          render();
+        });
       } catch (error) {
         writeSubscriptionAuthWindow(
           authWindow,
@@ -710,9 +857,15 @@ export async function openReactSettings({
     }));
     body.querySelectorAll('[data-runtime-provider], [data-runtime-auth-mode]').forEach((control) => {
       control.addEventListener('change', () => {
+        const previousProvider = String(settingsState.runtimeSettings?.runtime?.provider || '').toLowerCase();
+        const runtimePayload = runtimePayloadFromForm(body);
+        if (control.matches('[data-runtime-provider]')
+          && previousProvider !== String(runtimePayload.provider || '').toLowerCase()) {
+          runtimePayload.chat_model = '';
+        }
         settingsState.runtimeSettings = runtimeSettingsWithDraft(
           settingsState.runtimeSettings,
-          runtimePayloadFromForm(body),
+          runtimePayload,
         );
         settingsState.commandStatus = '';
         render();
@@ -925,7 +1078,36 @@ export async function openReactSettings({
         render();
       }
     });
+    startWorkjetPairingExpiryTimer();
   };
+
+  async function ensureWorkjetPairingInvite() {
+    if (!isAdmin || settingsState.tab !== 'sync') return;
+    if (settingsState.workjetPairing.loading || settingsState.workjetPairing.invite) return;
+    settingsState.workjetPairing = {
+      ...settingsState.workjetPairing,
+      loading: true,
+      invite: null,
+      error: '',
+    };
+    render();
+    try {
+      settingsState.workjetPairing = {
+        ...settingsState.workjetPairing,
+        loading: false,
+        invite: await createWorkjetPairingInvite(sync, 'Workjet Gerät'),
+        error: '',
+      };
+    } catch (error) {
+      settingsState.workjetPairing = {
+        ...settingsState.workjetPairing,
+        loading: false,
+        invite: null,
+        error: String(error?.message || error),
+      };
+    }
+    render();
+  }
 
   render();
   refreshRuntimeSettings();
@@ -980,6 +1162,7 @@ function settingsTemplate({
   governance,
   channels,
   mcp,
+  workjetPairing,
 }) {
   return `
     <header class="drawer-header-row settings-head">
@@ -996,13 +1179,13 @@ function settingsTemplate({
       <mark class="role-badge">${escapeHtml(roleDisplayName(role))}</mark>
     </section>
 
-    <nav class="settings-tabs" aria-label="Settings Bereiche">
+    <nav class="settings-tabs" aria-label="Einstellungsbereiche">
       ${tabButton('runtime', 'Runtime', tab)}
-      ${tabButton('channels', 'Channels', tab)}
+      ${tabButton('channels', 'Kanäle', tab)}
       ${tabButton('sync', 'Sync', tab)}
       ${branding?.canManage ? tabButton('appearance', 'Design', tab) : ''}
       ${isAdmin ? tabButton('mcp', 'MCP', tab) : ''}
-      ${tabButton('users', 'Nutzer', tab)}
+      ${tabButton('users', 'Team', tab)}
       ${isAdmin ? tabButton('activity', 'Aktivität', tab) : ''}
       ${canOpenAdmin ? tabButton('admin', 'Module', tab) : ''}
     </nav>
@@ -1010,7 +1193,7 @@ function settingsTemplate({
     <div class="settings-scroll">
       ${tab === 'runtime' ? runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth) : ''}
       ${tab === 'channels' ? channelsPanel(channels) : ''}
-      ${tab === 'sync' ? syncPanel(syncConfig, isAdmin) : ''}
+      ${tab === 'sync' ? syncPanel(syncConfig, isAdmin, workjetPairing) : ''}
       ${tab === 'appearance' && branding?.canManage ? appearancePanel(branding) : ''}
       ${tab === 'mcp' && isAdmin ? mcpPanel(mcp) : ''}
       ${tab === 'users' ? usersPanel(user, role, isAdmin, users, canManageUsers) : ''}
@@ -1028,8 +1211,8 @@ function settingsTemplate({
     </div>
 
     <footer class="settings-footer">
-      <button class="text-button" type="button" data-open-account-settings>Account</button>
-      <button class="text-button" type="button" data-logout-settings>Logout</button>
+      <button class="text-button" type="button" data-open-account-settings>Konto</button>
+      <button class="text-button" type="button" data-logout-settings>Abmelden</button>
       ${commandStatus ? `<span class="settings-status">${escapeHtml(commandStatus)}</span>` : ''}
     </footer>
   `;
@@ -1090,17 +1273,8 @@ function settingsPreferenceControls() {
 function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth = null) {
   if (runtimeLoading && !runtimeSettings) {
     return `
-      <section class="settings-section">
-        <header><h3>Model Runtime</h3><span>Status wird gelesen.</span></header>
-        <div class="runtime-status-strip">
-          ${runtimePill('Modelle', 'Status wird gelesen.', false)}
-          ${runtimePill('Autorisierung', 'Status wird gelesen.', false)}
-          ${runtimePill('CTOX Service', 'Status wird gelesen.', false)}
-          ${runtimePill('Route', 'Status wird gelesen.', false)}
-        </div>
-      </section>
-      <section class="settings-section">
-        <header><h3>Queue Policy</h3><span>Operative Arbeit läuft über CTOX Tasks.</span></header>
+      <section class="settings-section runtime-editor">
+        <header><h3>Inference</h3><span>Status wird geladen…</span></header>
       </section>
     `;
   }
@@ -1111,91 +1285,230 @@ function runtimePanel(isAdmin, runtimeSettings, runtimeLoading, subscriptionAuth
   const providerLoaded = Boolean(provider);
   const authMode = normalizedRuntimeAuthMode(provider, auth.mode);
   const isLocalProvider = provider === 'local';
-  const usesSubscription = provider === 'openai' && isSubscriptionMode(authMode);
+  const usesSubscription = isSubscriptionMode(authMode);
   const usesApiKey = providerLoaded && !isLocalProvider && !usesSubscription;
   const serviceNeedsAttention = Boolean(diagnostics.service_needs_attention);
   const authNeedsAttention = Boolean(diagnostics.auth_needs_attention);
   const canManage = Boolean(isAdmin && runtimeSettings?.can_manage !== false);
+  const providerChoices = [
+    ['local', 'Local CTOX'],
+    ['openai', 'OpenAI'],
+    ['anthropic', 'Anthropic'],
+    ['antigravity', 'Google'],
+    ['kimi', 'Kimi'],
+    ['minimax', 'MiniMax'],
+    ['openrouter', 'OpenRouter'],
+    ['ctox_proxy', 'CTOX LLM Proxy'],
+  ];
   return `
-    <section class="settings-section">
+    <section class="settings-section runtime-editor">
       <header>
-        <h3>Model Runtime</h3>
-        <span>${escapeHtml(runtimeLoading ? 'Status wird gelesen.' : runtimeAuthSummary(provider, authMode, auth))}</span>
+        <div><h3>Anbieter, Zugang und Modell</h3></div>
+        <span>${escapeHtml(runtimeLoading ? 'Status wird geladen…' : diagnostics.service_message || 'Status unbekannt')}</span>
       </header>
-      <div class="runtime-status-strip">
-        ${runtimeProviderPill(provider, providerLoaded ? `${runtimeProviderLabel(provider)}${runtime.chat_model ? ` · ${runtime.chat_model}` : ''}` : 'nicht geladen')}
-        ${runtimePill('Autorisierung', runtimeAuthSummary(provider, authMode, auth), authNeedsAttention)}
-        ${runtimePill('CTOX Service', diagnostics.service_message || 'Status unbekannt', serviceNeedsAttention)}
-        ${runtimePill('Route', runtimeRouteSummary(runtime, provider, auth), false)}
+      <div class="runtime-healthline ${serviceNeedsAttention || authNeedsAttention ? 'is-danger' : 'is-ok'}">
+        <span aria-hidden="true"></span>
+        <strong>${escapeHtml(providerLoaded ? `${runtimeProviderLabel(provider)}${runtime.chat_model ? ` · ${runtime.chat_model}` : ''}` : 'Runtime nicht geladen')}</strong>
+        <em>${escapeHtml(runtimeAuthSummary(provider, authMode, auth, runtimeSettings?.provider_subscriptions))}</em>
       </div>
-      <div class="settings-grid">
-        <label><span>Provider</span><select data-runtime-provider ${canManage ? '' : 'disabled'}>
-          ${providerLoaded ? '' : option('', 'Nicht geladen', provider)}
-          ${option('local', 'Local CTOX', provider)}
-          ${option('openai', 'OpenAI', provider)}
-          ${option('openrouter', 'OpenRouter', provider)}
-          ${option('anthropic', 'Anthropic', provider)}
-          ${option('minimax', 'MiniMax', provider)}
-          ${option('ctox_proxy', 'CTOX LLM Proxy', provider)}
-        </select></label>
+      <div class="runtime-flow">
+        <div class="runtime-choice-section">
+          <span class="runtime-section-label">Provider</span>
+          <input type="hidden" data-runtime-provider value="${escapeAttr(provider)}" />
+          <div class="runtime-choice-row runtime-provider-choices">
+            ${providerChoices.map(([value, label]) => runtimeChoiceButton(
+              'data-runtime-provider', value, label, provider === value, canManage, providerLogoHtml(value),
+            )).join('')}
+          </div>
+        </div>
         ${!isLocalProvider ? `
-          <label><span>Autorisierung</span><select data-runtime-auth-mode ${canManage ? '' : 'disabled'}>
-            ${option('api_key', 'API Key', authMode)}
-            ${provider === 'openai' ? option('chatgpt_subscription', 'ChatGPT Subscription', authMode) : ''}
-          </select></label>
+          <div class="runtime-choice-section">
+            <span class="runtime-section-label">Zugang</span>
+            <input type="hidden" data-runtime-auth-mode value="${escapeAttr(authMode)}" />
+            <div class="runtime-choice-row">
+              ${runtimeAccessModes(provider).map(([value, label]) => runtimeChoiceButton(
+                'data-runtime-auth-mode', value, label, authMode === value, canManage,
+              )).join('')}
+            </div>
+          </div>
         ` : ''}
-        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtime.available_models)}
-        <label><span>Preset</span><select data-runtime-preset ${canManage ? '' : 'disabled'}>
-          ${option('Quality', 'Quality', runtimePresetValue(runtime.preset))}
-          ${option('Performance', 'Performance', runtimePresetValue(runtime.preset))}
-        </select></label>
-        <label><span>Context</span><select data-runtime-context ${canManage ? '' : 'disabled'}>
-          ${option('256k', '256k', runtimeContextValue(runtime.context))}
-        </select></label>
-        <label><span>Max Run</span><input data-runtime-timeout inputmode="numeric" value="${escapeAttr(runtime.max_run_secs || 1800)}" ${canManage ? '' : 'disabled'} /></label>
-        ${usesApiKey ? `<label><span>${escapeHtml(auth.api_key_name || 'API Key')}</span><input data-runtime-api-key type="password" autocomplete="off" placeholder="${escapeAttr(auth.api_key_configured ? 'gespeichert - leer lassen' : 'API Key eingeben')}" ${canManage ? '' : 'disabled'} /></label>` : ''}
+        ${usesApiKey ? `<label class="runtime-field runtime-access-detail"><span>API Key</span><input data-runtime-api-key type="password" autocomplete="off" placeholder="${escapeAttr(auth.api_key_configured ? 'Gespeichert · leer lassen, um ihn zu behalten' : 'API Key eingeben')}" ${canManage ? '' : 'disabled'} /></label>` : ''}
+        ${usesSubscription ? subscriptionStatus(provider, runtimeSettings?.provider_subscriptions, auth, canManage, subscriptionAuth) : ''}
+        ${runtimeModelControl(provider, runtime.chat_model, canManage, runtimeAvailableModels(runtime, provider, authMode), 'Modell')}
+        ${runtimeReasoningControl(provider, runtime.chat_model, runtime.reasoning_effort, canManage, runtimeAvailableModels(runtime, provider, authMode))}
+        <details class="runtime-advanced">
+          <summary>Weitere Einstellungen</summary>
+          <div class="runtime-advanced-grid">
+            <label><span>Maximale Laufzeit</span><input data-runtime-timeout inputmode="numeric" value="${escapeAttr(runtime.max_run_secs || 1800)}" ${canManage ? '' : 'disabled'} /></label>
+          </div>
+          <input type="hidden" data-runtime-preset value="${escapeAttr(runtimePresetValue(runtime.preset))}" />
+          <input type="hidden" data-runtime-context value="${escapeAttr(runtimeContextValue(runtime.context))}" />
+        </details>
       </div>
-      ${usesSubscription ? subscriptionStatus(auth, canManage, subscriptionAuth) : ''}
       ${canManage ? `
         <div class="runtime-actions">
-          <button class="text-button settings-primary" type="button" data-runtime-save>Runtime speichern</button>
-          <button class="text-button" type="button" data-runtime-refresh>Status neu laden</button>
+          <button class="text-button settings-primary" type="button" data-runtime-save>Übernehmen</button>
+          <button class="text-button" type="button" data-runtime-refresh>Neu laden</button>
         </div>
       ` : ''}
-    </section>
-    ${providerSubscriptionsPanel(runtimeSettings?.provider_subscriptions, canManage, subscriptionAuth)}
-    <section class="settings-section">
-      <header><h3>Queue Policy</h3><span>Operative Arbeit läuft über CTOX Tasks.</span></header>
-      <div class="settings-grid is-one">
-        <label><span>Verantwortlichen-Prüfung</span><select data-policy-review ${isAdmin ? '' : 'disabled'}><option value="strict-founder-review">Externe Nachrichten immer prüfen</option><option value="internal-autonomy">Interne Tasks autonom</option></select></label>
-      </div>
-      ${isAdmin ? `<button class="text-button settings-primary" type="button" data-settings-command="policy">Policy prüfen lassen</button>` : ''}
     </section>
   `;
 }
 
-function syncPanel(syncConfig, isAdmin) {
+function syncPanel(syncConfig, isAdmin, workjetPairing = {}) {
   const urls = syncConfig?.signaling_urls || [];
+  const endpoints = urls.map(signalingEndpoint).filter(Boolean);
+  const pairingUri = String(workjetPairing?.invite?.pairingUri || '');
+  const password = String(syncConfig?.signaling_room_password || syncConfig?.signaling_browser_token || '');
+  const passwordDisplay = workjetPairing?.passwordVisible
+    ? (password || '-')
+    : (password ? '••••••••••••' : '-');
   return `
-    <section class="settings-section">
-      <header><h3>Business OS Hosting</h3><span>App Server gehört zur CTOX Instanz.</span></header>
-      <dl class="settings-kv">
-        ${kv('App Hosting', syncConfig?.app_hosting || 'ctox_instance_webserver')}
-        ${kv('Sync Mode', syncConfig?.sync_mode || 'p2p-first')}
-        ${kv('Transport', syncConfig?.transport || 'webrtc')}
-        ${kv('Peer Role', syncConfig?.peer_role || 'ctox_instance')}
-        ${kv('Instance', syncConfig?.instance_id || '-')}
+    <section class="settings-section" data-sync-pairing-only>
+      <dl class="settings-kv settings-kv--wrap">
+        ${syncCopyRow('Signaling-Server', endpoints.join(', ') || '-', 'signaling')}
+        ${syncCopyRow('Raum', syncConfig?.sync_room || '-', 'room')}
+        <div>
+          <dt>Passwort</dt>
+          <dd>
+            <span data-sync-password-value>${escapeHtml(passwordDisplay)}</span>
+            ${password ? `<button class="channels-copy" type="button" data-sync-password-toggle aria-label="Passwort ${workjetPairing?.passwordVisible ? 'verbergen' : 'anzeigen'}" title="Passwort ${workjetPairing?.passwordVisible ? 'verbergen' : 'anzeigen'}">👁</button>${syncCopyButton('password', 'Passwort kopieren')}` : ''}
+          </dd>
+        </div>
+        <div>
+          <dt>QR-Code</dt>
+          <dd>${workjetPairingQr(workjetPairing, isAdmin)}</dd>
+        </div>
+        <div>
+          <dt>Link</dt>
+          <dd>${pairingUri
+            ? `${syncCopyButton('link', 'Link kopieren')}<a data-workjet-pairing-link href="${escapeAttr(pairingUri)}">${escapeHtml(pairingUri)}</a>`
+            : '<span data-workjet-pairing-link-pending>—</span>'}
+          </dd>
+        </div>
       </dl>
     </section>
-    <section class="settings-section">
-      <header><h3>WebRTC Signaling</h3><span>${escapeHtml(isAdmin ? 'Änderungen werden als CTOX Task angelegt.' : 'Nur lesbar.')}</span></header>
-      <div class="settings-grid is-one">
-        <label><span>Room</span><input data-sync-room value="${escapeAttr(syncConfig?.sync_room || '')}" ${isAdmin ? '' : 'disabled'} /></label>
-        <label><span>Signaling URLs</span><textarea data-sync-signaling ${isAdmin ? '' : 'disabled'}>${escapeHtml(urls.join('\n'))}</textarea></label>
-      </div>
-      ${isAdmin ? `<button class="text-button settings-primary" type="button" data-settings-command="sync">Sync Konfiguration an CTOX geben</button>` : ''}
-    </section>
   `;
+}
+
+function syncCopyRow(label, value, key) {
+  return `<div><dt>${escapeHtml(label)}</dt><dd><span>${escapeHtml(value)}</span>${value !== '-' ? syncCopyButton(key, `${label} kopieren`) : ''}</dd></div>`;
+}
+
+function syncCopyButton(key, label) {
+  return `<button class="channels-copy" type="button" data-sync-copy="${escapeAttr(key)}" aria-label="${escapeAttr(label)}" title="${escapeAttr(label)}">⧉</button>`;
+}
+
+function syncCopyValue(key, syncConfig = {}, invite = null) {
+  if (key === 'signaling') {
+    const urls = Array.isArray(syncConfig?.signaling_urls) ? syncConfig.signaling_urls : [];
+    return urls.map(signalingEndpoint).filter(Boolean).join(', ');
+  }
+  if (key === 'room') return String(syncConfig?.sync_room || '');
+  if (key === 'password') {
+    return String(syncConfig?.signaling_room_password || syncConfig?.signaling_browser_token || '');
+  }
+  if (key === 'link') return String(invite?.pairingUri || '');
+  return '';
+}
+
+function signalingEndpoint(raw) {
+  try {
+    const url = new URL(String(raw || ''));
+    if (url.protocol !== 'wss:') return '';
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return '';
+  }
+}
+
+function signalingAuthExpiry(urls = []) {
+  for (const raw of urls) {
+    try {
+      const seconds = Number(new URL(String(raw || '')).searchParams.get('token_exp'));
+      if (!Number.isFinite(seconds) || seconds <= 0) continue;
+      return new Date(seconds * 1000).toLocaleString([], {
+        day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit',
+      });
+    } catch {}
+  }
+  return '';
+}
+
+function syncAuthenticationLabel(syncConfig = {}) {
+  const version = String(syncConfig?.signaling_auth_version || '').trim();
+  return version === 'ctox-role-bound-v1'
+    ? 'Rollen­gebundener Kurzzeit-Token'
+    : (version || 'Kurzlebige Verbindungsfreigabe');
+}
+
+function workjetPairingQr(state = {}, isAdmin = false) {
+  if (!isAdmin) {
+    return '<span>Nur für Admins verfügbar</span>';
+  }
+  if (state.invite) {
+    const qrDataUrl = workjetPairingSvgDataUrl(state.invite.qrSvg);
+    return `<div><img class="workjet-pairing-qr" data-workjet-pairing-ready src="${escapeAttr(qrDataUrl)}" alt="Workjet Pairing QR-Code" /><span class="settings-note" data-workjet-pairing-countdown>${escapeHtml(workjetPairingRemainingLabel(state.invite.expiresAt))}</span></div>`;
+  }
+  return `<button class="text-button settings-primary" type="button" data-workjet-pairing-generate ${state.loading ? 'disabled' : ''}>${state.loading ? 'Wird erzeugt…' : 'QR-Code generieren'}</button>${state.error ? `<span class="settings-alert" role="alert">${escapeHtml(state.error)}</span>` : ''}`;
+}
+
+function workjetPairingRemainingLabel(expiresAt, nowMs = Date.now()) {
+  const remainingSeconds = Math.max(0, Math.ceil((Date.parse(expiresAt) - nowMs) / 1_000));
+  const minutes = Math.floor(remainingSeconds / 60);
+  const seconds = String(remainingSeconds % 60).padStart(2, '0');
+  return `Gültig für ${minutes}:${seconds}`;
+}
+
+function workjetPairingSvgDataUrl(svgText) {
+  const svg = String(svgText || '').trim();
+  if (!svg.includes('<svg') || svg.length > 1_000_000) {
+    throw new Error('CTOX hat keinen gültigen QR-Code geliefert.');
+  }
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function normalizeWorkjetPairingInvite(response) {
+  const pairingUri = String(response?.pairingUri || '');
+  const qrSvg = String(response?.qrSvg || '');
+  const expiresAt = String(response?.expiresAt || response?.invite?.expires_at || '');
+  if (!/^workjet:\/\/pair\?payload=[A-Za-z0-9_-]{1,2300}$/u.test(pairingUri)) {
+    throw new Error('CTOX hat eine ungültige Workjet-Verbindung geliefert.');
+  }
+  if (!qrSvg.includes('<svg') || !qrSvg.includes('<path')) {
+    throw new Error('CTOX hat keinen gültigen QR-Code geliefert.');
+  }
+  if (!Number.isFinite(Date.parse(expiresAt)) || Date.parse(expiresAt) <= Date.now()) {
+    throw new Error('Der Workjet-QR-Code ist bereits abgelaufen.');
+  }
+  return Object.freeze({ pairingUri, qrSvg, expiresAt });
+}
+
+async function createWorkjetPairingInvite(sync, displayName, retryDelaysMs = [0, 750, 1_500]) {
+  if (typeof sync?.requestNative !== 'function') {
+    throw new Error('Der CTOX-Gerätekanal ist noch nicht bereit.');
+  }
+  let lastError = null;
+  for (const [index, retryDelayMs] of retryDelaysMs.entries()) {
+    if (index > 0 && retryDelayMs > 0) await delay(retryDelayMs);
+    try {
+      const response = await sync.requestNative('ctox.workjet.device.v1', {
+        action: 'invite.create',
+        ttlSeconds: 300,
+        displayName: String(displayName || 'Workjet Gerät').trim() || 'Workjet Gerät',
+      }, {
+        requiredCapability: 'ctox-workjet-device-control-v1',
+        timeoutMs: 10_000,
+      });
+      return normalizeWorkjetPairingInvite(response);
+    } catch (error) {
+      lastError = error;
+      const message = String(error?.message || error || '');
+      const transient = /protocol-incompatible|not open|noch nicht bereit|exceeded|closed|destroyed|data.?channel/i.test(message);
+      if (!transient || index === retryDelaysMs.length - 1) throw error;
+    }
+  }
+  throw lastError || new Error('Der CTOX-Gerätekanal ist noch nicht bereit.');
 }
 
 function appearancePanel(branding = {}) {
@@ -1215,12 +1528,13 @@ function appearancePanel(branding = {}) {
         ${kv('Dark Tokens', String(Object.keys(document.dark || {}).length))}
       </dl>
       <div class="settings-grid is-one">
-        <label><span>Branding JSON</span><textarea data-branding-json rows="14" spellcheck="false">${escapeHtml(jsonText)}</textarea></label>
+        <label><span>Branding-JSON</span><textarea data-branding-json rows="14" spellcheck="false" aria-describedby="branding-json-help">${escapeHtml(jsonText)}</textarea></label>
       </div>
+      <p class="settings-note" id="branding-json-help">Das JSON wird vor dem Import vollständig validiert. Fehler verändern das aktive Branding nicht.</p>
       <div class="runtime-actions">
         <button class="text-button settings-primary" type="button" data-branding-save ${branding.loading ? 'disabled' : ''}>Branding importieren</button>
         <button class="text-button" type="button" data-branding-refresh ${branding.loading ? 'disabled' : ''}>Neu laden</button>
-        <button class="text-button" type="button" data-branding-reset ${branding.loading ? 'disabled' : ''}>CTOX Default</button>
+        <button class="text-button settings-reset" type="button" data-branding-reset ${branding.loading ? 'disabled' : ''}>CTOX-Standard wiederherstellen</button>
       </div>
       ${branding.error ? `<p class="settings-note">${escapeHtml(branding.error)}</p>` : ''}
     </section>
@@ -1257,7 +1571,7 @@ function mcpPanel(mcp = {}) {
         <button class="text-button settings-primary" type="button" data-mcp-refresh ${mcp.loading ? 'disabled' : ''}>MCP Status laden</button>
         ${info ? `<button class="text-button" type="button" data-mcp-copy="managedEndpoint">Managed Endpoint kopieren</button>` : ''}
       </div>
-      ${mcp.error ? `<p class="settings-note">${escapeHtml(mcp.error)}</p>` : ''}
+      ${mcp.error ? `<p class="settings-alert" role="alert">${escapeHtml(mcpErrorMessage(mcp.error))}</p>` : ''}
       ${copied ? `<p class="settings-note">${escapeHtml(copied === 'failed' ? 'Kopieren fehlgeschlagen.' : 'In die Zwischenablage kopiert.')}</p>` : ''}
       ${managed && !managedReady ? `<p class="settings-note">Managed MCP ist ${escapeHtml(managedStatus)}. Agent Tokens werden im ctox.dev Dashboard rotiert.</p>` : ''}
     </section>
@@ -1289,6 +1603,14 @@ function mcpEffectiveStatus(info, error) {
   return String(info.status || 'Status unbekannt');
 }
 
+function mcpErrorMessage(error) {
+  const message = String(error?.message || error || '').trim();
+  if (/failed to fetch|networkerror|load failed/i.test(message)) {
+    return 'Der MCP-Status konnte nicht geladen werden. Verbindung prüfen und erneut versuchen.';
+  }
+  return message || 'Der MCP-Status konnte nicht geladen werden.';
+}
+
 function mcpStatusLabel(info, error) {
   if (error) return 'Nicht verbunden.';
   if (!info) return 'Noch nicht geladen.';
@@ -1318,7 +1640,7 @@ function usersPanel(user, role, isAdmin, users, canManageUsers) {
   const roleOptions = assignableRolesForActor(role);
   return `
     <section class="settings-section">
-      <header><h3>Aktive Sitzung</h3><span>${escapeHtml(roleDisplayName(role))} Session</span></header>
+      <header><h3>Aktive Sitzung</h3><span>Rolle: ${escapeHtml(roleDisplayName(role))}</span></header>
       <table class="settings-table">
         <tbody>
           <tr><th>Teammitglied</th><td>${escapeHtml(user.display_name || user.id || '-')}</td></tr>
@@ -1328,7 +1650,7 @@ function usersPanel(user, role, isAdmin, users, canManageUsers) {
       </table>
     </section>
     <section class="settings-section">
-      <header><h3>Team & Zugaenge</h3><span>${escapeHtml(canManageUsers ? 'Persistenter Business-OS Team Store.' : 'Nur eigene Sitzung sichtbar.')}</span></header>
+      <header><h3>Team & Zugänge</h3><span>${escapeHtml(canManageUsers ? 'Persistenter Business-OS-Team-Speicher.' : 'Nur eigene Sitzung sichtbar.')}</span></header>
       <table class="settings-table">
         <thead><tr><th>Teammitglied</th><th>Rolle</th><th>Status</th></tr></thead>
         <tbody>
@@ -1336,16 +1658,16 @@ function usersPanel(user, role, isAdmin, users, canManageUsers) {
             <tr>
               <td>${escapeHtml(row.display_name || row.id)}</td>
               <td>${escapeHtml(roleDisplayName(row.role || 'user'))}</td>
-              <td>${escapeHtml(row.active === false ? 'inaktiv' : 'aktiv')}</td>
+              <td><span class="settings-status-badge" data-state="${row.active === false ? 'inactive' : 'active'}">${escapeHtml(row.active === false ? 'Inaktiv' : 'Aktiv')}</span></td>
             </tr>
           `).join('')}
         </tbody>
       </table>
       ${canManageUsers ? `
         <div class="settings-user-form">
-          <input data-user-id placeholder="team-id" />
-          <input data-user-name placeholder="Anzeigename" />
-          <select data-user-role>
+          <input data-user-id aria-label="Team-ID" placeholder="team-id" />
+          <input data-user-name aria-label="Anzeigename" placeholder="Anzeigename" />
+          <select data-user-role aria-label="Rolle">
             ${roleOptions.map((option) => `<option value="${escapeAttr(option)}">${escapeHtml(roleDisplayName(option))}</option>`).join('')}
           </select>
           <button class="text-button settings-primary" type="button" data-user-save>Nutzer speichern</button>
@@ -1370,14 +1692,14 @@ function activityPanel(activity = {}) {
         <button class="text-button settings-primary" type="button" data-activity-refresh ${activity.loading ? 'disabled' : ''}>Neu laden</button>
       </div>
       ${activity.error ? `<p class="settings-note">${escapeHtml(activity.error)}</p>` : ''}
-      ${events.length ? `
+      ${activity.loading ? '<p class="settings-loading" role="status">Aktivität wird geladen…</p>' : events.length ? `
         <table class="settings-table">
           <thead><tr><th>Ereignis</th><th>Ausgeführt von</th><th>Zeit</th></tr></thead>
           <tbody>
             ${events.map(activityRow).join('')}
           </tbody>
         </table>
-      ` : `<p class="settings-note">${escapeHtml(activity.loaded ? 'Noch keine Aktivität.' : 'Noch nicht geladen.')}</p>`}
+      ` : `<p class="settings-note">${escapeHtml(activity.loaded ? 'Noch keine Aktivität.' : 'Aktivität wurde noch nicht geladen.')}</p>`}
     </section>
   `;
 }
@@ -1695,7 +2017,7 @@ function moduleRow(mod, editingModuleId, permissions) {
 	        ${supportHtml}
 	        ${permissions.isAdmin ? `
 	          <div class="module-admin-actions">
-	            <input data-founder-user="${escapeAttr(mod.id)}" placeholder="team user-id" />
+	            <input data-founder-user="${escapeAttr(mod.id)}" aria-label="Verantwortliche Team-ID für ${escapeAttr(mod.title || mod.id)}" placeholder="Team-ID" />
 	            <button class="text-button" type="button" data-founder-save="${escapeAttr(mod.id)}">Verantwortliche:n zuweisen</button>
 	          </div>
 	        ` : ''}
@@ -2095,8 +2417,10 @@ function normalizedRuntimeAuthMode(provider, mode) {
   if (!String(provider || '').trim()) return '';
   if (String(provider || '').toLowerCase() === 'local') return 'local';
   const value = String(mode || '').toLowerCase();
-  if (String(provider || '').toLowerCase() !== 'openai') return 'api_key';
-  return isSubscriptionMode(value) ? 'chatgpt_subscription' : 'api_key';
+  const accessModes = runtimeAccessModes(provider);
+  if (!accessModes.some(([access]) => access === 'api_key')) return accessModes[0]?.[0] || 'api_key';
+  if (!accessModes.some(([access]) => access === 'subscription')) return 'api_key';
+  return isSubscriptionMode(value) ? 'subscription' : 'api_key';
 }
 
 function isSubscriptionMode(mode) {
@@ -2111,19 +2435,40 @@ function runtimeProviderLabel(provider) {
     openai: 'OpenAI',
     openrouter: 'OpenRouter',
     anthropic: 'Anthropic',
+    antigravity: 'Google',
+    kimi: 'Kimi',
     minimax: 'MiniMax',
     ctox_proxy: 'CTOX LLM Proxy',
   }[String(provider || '').toLowerCase()] || provider || 'nicht geladen';
 }
 
-function runtimeAuthSummary(provider, authMode, auth) {
+function runtimeAccessModes(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  if (['openai', 'anthropic'].includes(normalized)) {
+    return [['api_key', 'API Key'], ['subscription', 'Subscription']];
+  }
+  if (['antigravity', 'kimi'].includes(normalized)) return [['subscription', 'Subscription']];
+  return [['api_key', 'API Key']];
+}
+
+function runtimeSubscriptionProvider(provider) {
+  return {
+    openai: 'codex',
+    anthropic: 'claude',
+    antigravity: 'antigravity',
+    kimi: 'kimi',
+  }[String(provider || '').trim().toLowerCase()] || '';
+}
+
+function runtimeAuthSummary(provider, authMode, auth, projection = null) {
   if (!String(provider || '').trim()) return 'nicht geladen';
   if (String(provider || '').toLowerCase() === 'local') return 'nicht erforderlich';
   if (isSubscriptionMode(authMode)) {
-    if (auth.subscription_session_configured) {
-      return auth.subscription_account_email || 'ChatGPT Subscription autorisiert';
+    if (auth.subscription_session_configured
+      || subscriptionProviderConnected(projection, runtimeSubscriptionProvider(provider))) {
+      return auth.subscription_account_email || auth.subscription_account_id || 'Subscription verbunden';
     }
-    return 'ChatGPT Subscription nicht autorisiert';
+    return 'Subscription nicht verbunden';
   }
   return auth.api_key_configured
     ? `${auth.api_key_name || 'API Key'} gespeichert`
@@ -2157,32 +2502,102 @@ function hostLabel(value) {
   }
 }
 
-function runtimeModelControl(provider, model, canManage, availableModels = []) {
+function runtimeModelControl(provider, model, canManage, availableModels = [], label = 'Chat Modell') {
   const value = String(model || '');
   if (!String(provider || '').trim()) {
-    return `<label><span>Chat Modell</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="Runtime nicht geladen" ${canManage ? '' : 'disabled'} /></label>`;
+    return `<label class="runtime-field"><span>${escapeHtml(label)}</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="Runtime nicht geladen" ${canManage ? '' : 'disabled'} /></label>`;
   }
   if (String(provider || '').toLowerCase() === 'local') {
-    return `<label><span>Lokales Modell</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="kein Modell aus Runtime gemeldet" ${canManage ? '' : 'disabled'} /></label>`;
+    return `<label class="runtime-field"><span>${escapeHtml(label)}</span><input data-runtime-model value="${escapeAttr(value)}" placeholder="Lokales Modell" ${canManage ? '' : 'disabled'} /></label>`;
   }
   const options = runtimeModelOptions(provider, value, availableModels);
-  return `<label><span>Chat Modell</span><select data-runtime-model ${canManage ? '' : 'disabled'}>
-    ${options.map(([optionValue, label]) => option(optionValue, label, value)).join('')}
-  </select></label>`;
+  return `<div class="runtime-choice-section">
+    <span class="runtime-section-label">${escapeHtml(label)}</span>
+    <input type="hidden" data-runtime-model value="${escapeAttr(value)}" />
+    <div class="runtime-choice-row">
+      ${options.filter(([optionValue]) => optionValue).map(([optionValue, optionLabel]) => runtimeChoiceButton(
+        'data-runtime-model', optionValue, optionLabel, optionValue.toLowerCase() === value.toLowerCase(), canManage,
+      )).join('')}
+    </div>
+    <details class="runtime-manual-model">
+      <summary aria-label="Modell-ID manuell bearbeiten">Modell-ID manuell</summary>
+      <input data-runtime-model-manual value="${escapeAttr(value)}" placeholder="Modell-ID" ${canManage ? '' : 'disabled'} />
+    </details>
+  </div>`;
+}
+
+function runtimeChoiceButton(target, value, label, selected, canManage, leading = '') {
+  return `<button class="runtime-choice ${selected ? 'is-selected' : ''}" type="button" data-runtime-choice="${escapeAttr(target)}" data-value="${escapeAttr(value)}" ${canManage ? '' : 'disabled'} aria-pressed="${selected ? 'true' : 'false'}">${leading}${escapeHtml(label)}</button>`;
+}
+
+function runtimeReasoningOptions(provider, model, availableModels = []) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  const normalizedModel = String(model || '').trim().toLowerCase();
+  if (normalizedProvider === 'local') return [];
+  const discovered = Array.isArray(availableModels)
+    ? availableModels.find((candidate) => {
+      const id = typeof candidate === 'string' ? candidate : candidate?.id;
+      return String(id || '').trim().toLowerCase() === normalizedModel;
+    })
+    : null;
+  if (discovered && typeof discovered === 'object' && Array.isArray(discovered.reasoning_levels)) {
+    return [...new Set(discovered.reasoning_levels
+      .map((effort) => String(effort || '').trim().toLowerCase())
+      .filter(Boolean))];
+  }
+  if (normalizedModel.includes('5.6-luna')) return ['low', 'medium', 'high', 'xhigh', 'max'];
+  if (normalizedModel.includes('5.6-sol') || normalizedModel.includes('5.6-terra')) {
+    return ['low', 'medium', 'high', 'xhigh', 'max'];
+  }
+  return ['low', 'medium', 'high', 'xhigh'];
+}
+
+function runtimeReasoningControl(provider, model, current, canManage, availableModels = []) {
+  const value = String(current || '').trim().toLowerCase();
+  const options = runtimeReasoningOptions(provider, model, availableModels);
+  if (!options.length) return '<input type="hidden" data-runtime-reasoning value="" />';
+  return `<div class="runtime-choice-section">
+    <span class="runtime-section-label">Reasoning</span>
+    <input type="hidden" data-runtime-reasoning value="${escapeAttr(value)}" />
+    <div class="runtime-choice-row">
+      ${runtimeChoiceButton('data-runtime-reasoning', '', 'Automatisch', !value, canManage)}
+      ${options.map((effort) => runtimeChoiceButton(
+        'data-runtime-reasoning', effort, effort, effort === value, canManage,
+      )).join('')}
+    </div>
+  </div>`;
 }
 
 function runtimeModelOptions(provider, current, availableModels = []) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
   const discovered = Array.isArray(availableModels)
     ? availableModels
       .map((model) => typeof model === 'string' ? model.trim() : String(model?.id || '').trim())
       .filter(Boolean)
     : [];
+  const visibleDiscovered = [...new Set(discovered)]
+    .filter((model) => normalizedProvider !== 'openai'
+      || (!model.toLowerCase().startsWith('gpt-image-')
+        && model.toLowerCase() !== 'codex-auto-review'));
+  if (normalizedProvider === 'openai') {
+    visibleDiscovered.sort((left, right) => {
+      const priority = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'];
+      const leftPriority = priority.indexOf(left.toLowerCase());
+      const rightPriority = priority.indexOf(right.toLowerCase());
+      if (leftPriority >= 0 || rightPriority >= 0) {
+        return (leftPriority < 0 ? priority.length : leftPriority)
+          - (rightPriority < 0 ? priority.length : rightPriority);
+      }
+      return left.localeCompare(right);
+    });
+  }
   const byProvider = {
     openai: [
-      ['gpt-5.5', 'gpt-5.5'],
+      ['gpt-5.6-sol', 'gpt-5.6-sol'],
+      ['gpt-5.6-terra', 'gpt-5.6-terra'],
+      ['gpt-5.6-luna', 'gpt-5.6-luna'],
       ['gpt-5.4', 'gpt-5.4'],
       ['gpt-5.4-mini', 'gpt-5.4-mini'],
-      ['gpt-5.3-codex', 'gpt-5.3-codex'],
     ],
     openrouter: [
       ['openrouter/minimax/m2.7', 'openrouter/minimax/m2.7'],
@@ -2190,22 +2605,42 @@ function runtimeModelOptions(provider, current, availableModels = []) {
     anthropic: [
       ['claude-opus-4-6', 'claude-opus-4-6'],
     ],
+    antigravity: visibleDiscovered.map((model) => [model, model]),
+    kimi: visibleDiscovered.length ? visibleDiscovered.map((model) => [model, model]) : [['kimi-k3[1m]', 'kimi-k3[1m]']],
     minimax: [
       ['MiniMax-M3', 'MiniMax-M3'],
     ],
-    ctox_proxy: discovered.length
-      ? discovered.map((model) => [model, model])
+    ctox_proxy: visibleDiscovered.length
+      ? visibleDiscovered.map((model) => [model, model])
       : [
         ['MiniMax-M3', 'MiniMax-M3'],
         ['kimi-k3', 'kimi-k3'],
       ],
   };
-  const options = byProvider[String(provider || '').toLowerCase()] || [];
+  const options = visibleDiscovered.length
+    ? visibleDiscovered.map((model) => [model, model])
+    : (byProvider[normalizedProvider] || []);
   if (!current) return [['', 'Nicht gesetzt'], ...options];
   if (!options.some(([value]) => value.toLowerCase() === current.toLowerCase())) {
     return [[current, current], ...options];
   }
   return options;
+}
+
+function runtimeAvailableModels(runtime, provider, authMode) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  if (isSubscriptionMode(authMode)) {
+    const discovered = runtime?.available_models_by_provider?.[normalizedProvider];
+    if (Array.isArray(discovered)) return discovered;
+  }
+  if (String(runtime?.model_catalog_source || '').trim().toLowerCase() === 'subscription') {
+    return [];
+  }
+  if (normalizedProvider === String(runtime?.provider || '').trim().toLowerCase()
+    && Array.isArray(runtime?.available_models)) {
+    return runtime.available_models;
+  }
+  return [];
 }
 
 function runtimeDiagnosticMessage(provider, authMode, auth, diagnostics) {
@@ -2219,18 +2654,23 @@ function runtimeDiagnosticMessage(provider, authMode, auth, diagnostics) {
   return message || 'Runtime-Status wird geladen.';
 }
 
-function subscriptionStatus(auth, canManage, subscriptionAuth = null) {
-  const configured = Boolean(auth.subscription_session_configured);
+function subscriptionStatus(provider, projection, auth, canManage, subscriptionAuth = null) {
+  const subscriptionProvider = runtimeSubscriptionProvider(provider);
+  const profile = providerSubscriptionProfile(subscriptionProvider);
+  const configured = Boolean(
+    auth.subscription_session_configured
+    || subscriptionProviderConnected(projection, subscriptionProvider),
+  );
   const userCode = String(subscriptionAuth?.userCode || '').trim();
+  const verificationUrl = String(subscriptionAuth?.verificationUrl || '').trim();
   const failed = subscriptionAuth?.status === 'failed';
   const pending = subscriptionAuth?.status === 'starting';
   const lines = [];
   if (auth.subscription_account_email) lines.push(kv('Account', auth.subscription_account_email));
   if (auth.subscription_plan) lines.push(kv('Plan', auth.subscription_plan));
   return `
-    <div class="runtime-auth-status ${configured ? 'is-ok' : 'is-danger'}">
-      <strong>${escapeHtml(configured ? 'ChatGPT Subscription verbunden' : 'ChatGPT Subscription verbinden')}</strong>
-      <span>${escapeHtml(configured ? 'OpenAI Modelle können diese Subscription verwenden.' : 'Öffnet den ChatGPT Login und speichert die Subscription für OpenAI Modelle.')}</span>
+    <div class="runtime-access-detail ${configured ? 'is-ok' : ''}">
+      <div><strong>${escapeHtml(configured ? 'Verbunden' : 'Noch nicht verbunden')}</strong><span>${escapeHtml(configured ? `${profile.label} ist verbunden und einsatzbereit.` : `Mit ${profile.label} anmelden.`)}</span></div>
       ${pending ? `
         <div class="subscription-device-code is-pending">
           <span>Geräte-Code</span>
@@ -2240,13 +2680,14 @@ function subscriptionStatus(auth, canManage, subscriptionAuth = null) {
       ${userCode ? `
         <div class="subscription-device-code">
           <span>Geräte-Code</span>
-          <strong>${escapeHtml(formatDeviceCode(userCode))}</strong>
+          <div class="subscription-device-code-value"><strong>${escapeHtml(formatDeviceCode(userCode))}</strong><button class="text-button subscription-copy-button" type="button" data-runtime-copy-code="${escapeAttr(userCode)}" aria-label="Geräte-Code kopieren">Kopieren</button></div>
           <em>${escapeHtml(subscriptionAuth?.message || 'Im OpenAI-Fenster eingeben.')}</em>
+          ${verificationUrl ? `<a class="text-button" href="${escapeAttr(verificationUrl)}" target="_blank" rel="noopener noreferrer">OpenAI öffnen</a>` : ''}
         </div>
       ` : ''}
       ${failed ? `<div class="subscription-device-error">${escapeHtml(subscriptionAuth.error || 'ChatGPT Login konnte nicht gestartet werden.')}</div>` : ''}
       ${lines.length ? `<dl class="settings-kv">${lines.join('')}</dl>` : ''}
-      ${canManage ? `<button class="text-button" type="button" data-runtime-authorize-subscription="codex">${escapeHtml(configured ? 'Subscription erneuern' : 'Subscription verbinden')}</button>` : ''}
+      ${canManage ? `<button class="text-button" type="button" data-runtime-authorize-subscription="${escapeAttr(subscriptionProvider)}">${escapeHtml(configured ? 'Neu anmelden' : 'Anmelden')}</button>` : ''}
     </div>
   `;
 }
@@ -2576,6 +3017,7 @@ function runtimePayloadFromForm(root) {
     provider,
     auth_mode: authMode,
     chat_model: root.querySelector('[data-runtime-model]')?.value || '',
+    reasoning_effort: root.querySelector('[data-runtime-reasoning]')?.value || '',
     preset: runtimePresetValue(root.querySelector('[data-runtime-preset]')?.value),
     context: runtimeContextValue(root.querySelector('[data-runtime-context]')?.value),
     max_run_secs: Number(root.querySelector('[data-runtime-timeout]')?.value || 1800),
@@ -2586,6 +3028,11 @@ function runtimePayloadFromForm(root) {
 function runtimeSettingsWithDraft(current, draft) {
   const provider = draft.provider || current?.runtime?.provider || '';
   const authMode = normalizedRuntimeAuthMode(provider, draft.auth_mode);
+  const availableModels = runtimeAvailableModels(current?.runtime, provider, authMode);
+  const supportedReasoning = runtimeReasoningOptions(provider, draft.chat_model, availableModels);
+  const reasoningEffort = String(draft.reasoning_effort || '').trim().toLowerCase();
+  const providerChanged = String(provider).toLowerCase()
+    !== String(current?.runtime?.provider || '').toLowerCase();
   return {
     ...(current || {}),
     runtime: {
@@ -2593,16 +3040,57 @@ function runtimeSettingsWithDraft(current, draft) {
       provider,
       source: provider === 'local' ? 'local' : 'api',
       chat_model: draft.chat_model,
+      reasoning_effort: supportedReasoning.includes(reasoningEffort) ? reasoningEffort : '',
       preset: runtimePresetValue(draft.preset),
       context: runtimeContextValue(draft.context),
       max_run_secs: draft.max_run_secs,
+      available_models: availableModels,
     },
     auth: {
       ...(current?.auth || {}),
       mode: authMode,
-      subscription_selected: authMode === 'chatgpt_subscription',
+      subscription_selected: isSubscriptionMode(authMode),
+      subscription_session_configured: providerChanged
+        ? false
+        : Boolean(current?.auth?.subscription_session_configured),
+      subscription_account_id: providerChanged ? '' : (current?.auth?.subscription_account_id || ''),
+      api_key_configured: providerChanged ? false : Boolean(current?.auth?.api_key_configured),
     },
   };
+}
+
+function isPendingSubscriptionAuth(subscriptionAuth) {
+  return ['starting', 'device_code', 'pending'].includes(String(subscriptionAuth?.status || ''));
+}
+
+function runtimeProviderForSubscription(provider) {
+  const normalized = String(provider || '').trim().toLowerCase();
+  if (normalized === 'codex') return 'openai';
+  if (normalized === 'claude') return 'anthropic';
+  return normalized;
+}
+
+function nextSubscriptionAuthWindowName(provider) {
+  subscriptionAuthWindowSequence += 1;
+  const safeProvider = String(provider || 'provider').replace(/[^a-z0-9_-]/gi, '-');
+  return `ctox-${safeProvider}-subscription-${Date.now()}-${subscriptionAuthWindowSequence}`;
+}
+
+function runtimeSettingsPreservingPendingSubscription(loaded, current, subscriptionAuth) {
+  if (!isPendingSubscriptionAuth(subscriptionAuth)) return loaded;
+  const provider = runtimeProviderForSubscription(subscriptionAuth?.provider);
+  if (!provider) return loaded;
+  const currentRuntime = current?.runtime || {};
+  const draft = {
+    provider,
+    auth_mode: 'subscription',
+    chat_model: String(currentRuntime.chat_model || ''),
+    reasoning_effort: String(currentRuntime.reasoning_effort || ''),
+    preset: currentRuntime.preset,
+    context: currentRuntime.context,
+    max_run_secs: Number(currentRuntime.max_run_secs || 1800),
+  };
+  return runtimeSettingsWithDraft(loaded, draft);
 }
 
 
@@ -3240,7 +3728,30 @@ async function startSubscriptionAuth(provider = 'codex', accountId = '', { comma
       source: 'business_commands',
     };
   }
-  throw new Error(`Command ${command.command_id || command.id || ''} lieferte keinen Geräte-Code.`);
+  throw new Error('CTOX lieferte weder eine Login-URL noch einen Geräte-Code.');
+}
+
+function subscriptionProviderConnected(projection, provider) {
+  const normalizedProvider = String(provider || '').trim().toLowerCase();
+  if (!normalizedProvider) return false;
+  const normalized = normalizeProviderSubscriptions(projection || {});
+  return normalized.accounts.some((account) => account.provider === normalizedProvider
+    && account.enabled
+    && ['ready', 'connected', 'active'].includes(account.status));
+}
+
+async function waitForSubscriptionConnection(provider, options = {}) {
+  const timeoutMs = Number(options.timeoutMs || 600000);
+  const pollMs = Number(options.pollMs || 1500);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const settings = await loadRuntimeSettings({ db: options.db });
+    const projection = settings?.provider_subscriptions || {};
+    options.onProjection?.(projection);
+    if (subscriptionProviderConnected(projection, provider)) return projection;
+    await delay(pollMs);
+  }
+  throw new Error('Zeitüberschreitung beim Provider-Login. Der Geräte-Code bleibt sichtbar.');
 }
 
 async function runProviderSubscriptionCommand(action, provider, accountId, {
@@ -3286,6 +3797,7 @@ function runtimeSettingsReflectPayload(settings, payload, previousUpdatedAtMs = 
   if (String(runtime.provider || '').toLowerCase() !== provider) return false;
   if (String(auth.mode || '').toLowerCase() !== authMode) return false;
   if (payload.chat_model && String(runtime.chat_model || '') !== String(payload.chat_model)) return false;
+  if (String(runtime.reasoning_effort || '') !== String(payload.reasoning_effort || '')) return false;
   if (payload.preset && runtimePresetValue(runtime.preset) !== runtimePresetValue(payload.preset)) {
     return false;
   }
@@ -3322,6 +3834,29 @@ function writeSubscriptionAuthWindow(authWindow, title, message, danger = false)
         <section style="max-width: 520px; padding: 32px; border: 1px solid ${danger ? '#ff4d4d' : '#16d9ad'}; border-radius: 10px; background: #162021;">
           <h1 style="margin: 0 0 12px; font-size: 22px;">${escapeHtml(title)}</h1>
           <p style="margin: 0; color: #a8b6ba; line-height: 1.5;">${escapeHtml(message)}</p>
+        </section>
+      </main>
+    `;
+  } catch {
+    // Cross-origin navigation can make the placeholder window no longer writable.
+  }
+}
+
+function writeSubscriptionDeviceCodeWindow(authWindow, providerLabel, userCode, authUrl) {
+  if (!authWindow || authWindow.closed) return;
+  try {
+    const formattedCode = formatDeviceCode(userCode);
+    authWindow.document.title = `${providerLabel} Geräte-Code`;
+    authWindow.document.body.innerHTML = `
+      <main style="font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; margin: 0; min-height: 100vh; display: grid; place-items: center; background: #111819; color: #f4f8f8;">
+        <section style="width: min(520px, calc(100vw - 48px)); padding: 32px; border: 1px solid #16d9ad; border-radius: 12px; background: #162021; box-sizing: border-box;">
+          <p style="margin: 0 0 8px; color: #8fa2a7; font-size: 13px; font-weight: 700; text-transform: uppercase;">${escapeHtml(providerLabel)}</p>
+          <h1 style="margin: 0 0 20px; font-size: 24px;">Geräte-Code</h1>
+          <div style="padding: 18px; border-radius: 10px; background: #0d1415; text-align: center;">
+            <strong style="font: 700 36px/1.1 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; user-select: all;">${escapeHtml(formattedCode)}</strong>
+          </div>
+          <p style="margin: 18px 0; color: #a8b6ba; line-height: 1.5;">Dieses Fenster offen lassen. Öffne OpenAI separat und gib dort den Code ein.</p>
+          <a href="${escapeAttr(authUrl)}" target="_blank" rel="noopener noreferrer" style="display: block; padding: 13px 18px; border-radius: 9px; background: #16d9ad; color: #07110f; font-weight: 750; text-align: center; text-decoration: none;">OpenAI öffnen</a>
         </section>
       </main>
     `;
@@ -3528,7 +4063,7 @@ const CHANNEL_DEFINITIONS = [
     id: 'teams',
     title: 'MS Teams',
     dot: '#5059c9',
-    short: 'Microsoft Teams via Graph-API. OAuth-Login mit deinem Tenant.',
+    short: 'Microsoft Teams via Graph-API. OAuth-Login mit deiner Organisation.',
   },
   {
     id: 'slack',
@@ -3646,7 +4181,7 @@ const BOT_CHAT_CHANNELS = {
       ['homeserverUrl', 'Homeserver URL', 'url', 'https://matrix.example.org'],
       ['accessToken', 'Access Token', 'password', ''],
       ['userId', 'User-ID', 'text', '@ctox:example.org'],
-      ['roomIds', 'Room-IDs', 'text', '!room:example.org'],
+      ['roomIds', 'Verbindungs-IDs', 'text', '!channel:example.org'],
     ],
   },
   mattermost: {
@@ -3696,7 +4231,7 @@ function channelsHubPanel(state) {
   return `
     <section class="settings-section channels-hub">
       <header>
-        <h3>Kommunikations-Channels</h3>
+        <h3>Kommunikationskanäle</h3>
         <span>Hier richtest du ein, über welche Kanäle CTOX für dich kommuniziert.</span>
       </header>
       <div class="channels-hub-list">
@@ -4104,7 +4639,7 @@ function jamiWizard(state) {
       body: `
         <div class="channels-testing">
           <div class="channels-testing-step is-active">⏳ Jami-Account wird erzeugt…</div>
-          <small class="channels-form-note">CTOX-Core ruft den Jami-Daemon. Das dauert wenige Sekunden.</small>
+          <small class="channels-form-note">CTOX verbindet den Jami-Dienst. Das dauert wenige Sekunden.</small>
         </div>
         ${errorBlock}
       `,
@@ -4179,7 +4714,7 @@ function emailWizard(state) {
       body: `
         <div class="channels-testing">
           <div class="channels-testing-step is-active">⏳ CTOX testet IMAP + SMTP …</div>
-          <small class="channels-form-note">Backend ruft <code>email_native::test()</code> via <code>RxDB-Command ctox.channel.test</code>.</small>
+          <small class="channels-form-note">Backend führt den Verbindungstest aus.</small>
         </div>
       `,
     });
@@ -4233,7 +4768,7 @@ function emailProviderForm(state) {
         </label>
         ${state.data?.emailCustomApp ? `
           <label class="channels-field">
-            <span>Tenant-ID</span>
+            <span>Organisations-ID</span>
             <input type="text" data-channel-input="email:tenantId" placeholder="00000000-0000-0000-0000-000000000000" />
           </label>
           <label class="channels-field">
@@ -4323,20 +4858,20 @@ function teamsWizard(state) {
         <div class="channels-explain">
           <p>CTOX verbindet sich mit Teams über die <strong>Microsoft Graph API</strong>. Es gibt zwei unterstützte Modi:</p>
           <ul class="channels-explain-list">
-            <li><strong>Service-Principal</strong> (empfohlen für Produktion): eine Azure-AD-App mit Tenant-ID, Client-ID und Client-Secret. Dein Admin registriert die App einmalig und du trägst die Werte hier ein.</li>
+            <li><strong>Service-Principal</strong> (empfohlen für Produktion): eine Azure-AD-App mit Organisations-ID, Client-ID und Client-Secret. Dein Admin registriert die App einmalig und du trägst die Werte hier ein.</li>
             <li><strong>Benutzerkonto (ROPC)</strong>: Microsoft-365-Benutzername + Passwort. Funktioniert nur ohne MFA und nutzt Microsofts öffentlichen Office-Client. Eher für Test-Setups.</li>
           </ul>
           <label class="channels-toggle">
             <input type="checkbox" data-channel-input="teams:customApp" ${customApp ? 'checked' : ''} />
-            <span>Service-Principal-Modus (Tenant + Client-ID + Secret)</span>
+            <span>Service-Principal-Modus (Organisation + Client-ID + Secret)</span>
           </label>
           ${customApp ? `
-            <label class="channels-field"><span>Tenant-ID</span><input type="text" data-channel-input="teams:tenantId" placeholder="00000000-0000-0000-0000-000000000000" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
+            <label class="channels-field"><span>Organisations-ID</span><input type="text" data-channel-input="teams:tenantId" placeholder="00000000-0000-0000-0000-000000000000" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
             <label class="channels-field"><span>Client-ID</span><input type="text" data-channel-input="teams:clientId" value="${escapeHtml(state.data?.teamsClientId || '')}" /></label>
             <label class="channels-field"><span>Client-Secret</span><input type="password" data-channel-input="teams:clientSecret" /></label>
             <small class="channels-form-note">Mit diesen Werten ruft CTOX <code>acquire_app_token</code> (Client-Credentials-Flow) gegen <code>login.microsoftonline.com</code> auf.</small>
           ` : `
-            <label class="channels-field"><span>Tenant-ID (optional)</span><input type="text" data-channel-input="teams:tenantId" placeholder="leer → organizations" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
+            <label class="channels-field"><span>Organisations-ID (optional)</span><input type="text" data-channel-input="teams:tenantId" placeholder="leer → organizations" value="${escapeHtml(state.data?.teamsTenantId || '')}" /></label>
             <label class="channels-field"><span>Microsoft-Account</span><input type="email" data-channel-input="teams:username" placeholder="name@firma.de" value="${escapeHtml(state.data?.teamsUsername || '')}" /></label>
             <label class="channels-field"><span>Passwort</span><input type="password" data-channel-input="teams:password" /></label>
             <small class="channels-form-note">ROPC-Flow über Microsofts öffentlichen Office-Client. <strong>Bei aktivierter MFA scheitert dieser Modus</strong> — dann musst du Service-Principal nutzen.</small>
@@ -4355,7 +4890,7 @@ function teamsWizard(state) {
       body: `
         <div class="channels-testing">
           <div class="channels-testing-step is-active">⏳ CTOX testet Graph-API …</div>
-          <small class="channels-form-note">Backend ruft <code>teams_native::test()</code> via <code>RxDB-Command ctox.channel.test</code>.</small>
+          <small class="channels-form-note">Backend führt den Verbindungstest aus.</small>
         </div>
         ${errorBlock}
       `,
@@ -4370,7 +4905,7 @@ function teamsWizard(state) {
       <div class="channels-confirm">
         <div class="channels-confirm-icon channels-confirm-icon--ok">✓</div>
         <h4>Teams ist verbunden</h4>
-        <div class="channels-confirm-detail"><span>Tenant</span><strong>${escapeHtml(tenantLabel)}</strong></div>
+        <div class="channels-confirm-detail"><span>Organisation</span><strong>${escapeHtml(tenantLabel)}</strong></div>
         ${testResult?.ok !== undefined ? `<div class="channels-confirm-detail"><span>Graph-API</span><strong>${testResult.ok ? 'OK' : 'Fehler'}</strong></div>` : ''}
       </div>
     `,
@@ -4934,13 +5469,29 @@ function formatMsShort(value) {
 }
 
 export const __reactSettingsTestHooks = {
+  createWorkjetPairingInvite,
   confirmedUsersAfterUpsert,
   normalizeProviderSubscriptions,
   providerCredentialRequirement,
   providerSubscriptionCommandRequest,
+  startSubscriptionAuth,
+  saveRuntimeSettings,
+  loadRuntimeSettings,
+  subscriptionProviderConnected,
+  waitForSubscriptionConnection,
   providerLogoHtml,
   providerLogoSpec,
   runtimeModelOptions,
+  runtimeReasoningOptions,
+  runtimeSettingsPreservingPendingSubscription,
+  nextSubscriptionAuthWindowName,
+  normalizeWorkjetPairingInvite,
+  signalingAuthExpiry,
+  signalingEndpoint,
   settingsTemplate,
+  syncCopyValue,
+  syncAuthenticationLabel,
+  workjetPairingRemainingLabel,
+  workjetPairingSvgDataUrl,
   wireProviderLogoFallbacks,
 };

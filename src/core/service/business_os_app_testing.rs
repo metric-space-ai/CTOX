@@ -20,11 +20,12 @@ use anyhow::Context;
 use base64::Engine;
 use serde::Deserialize;
 use serde::Serialize;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
-use std::io::Read;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -1149,11 +1150,12 @@ pub(super) fn run_business_os_app_e2e(
     let mut idx = 0;
     while idx < args.len() {
         match args[idx].as_str() {
-            "--installed" | "--source" | "--json" => {
+            "--installed" | "--source" | "--json" | "--require-scenario" => {
                 command.arg(&args[idx]);
                 idx += 1;
             }
-            "--url" | "--timeout-ms" | "--output" | "--screenshot" | "--marker" => {
+            "--url" | "--timeout-ms" | "--output" | "--screenshot" | "--marker" | "--profile"
+            | "--scenario" => {
                 let value = args
                     .get(idx + 1)
                     .with_context(|| format!("{} requires a value", args[idx]))?;
@@ -1175,6 +1177,665 @@ pub(super) fn run_business_os_app_e2e(
     command
         .output()
         .context("failed to run Business OS app browser E2E")
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct BusinessOsAppAuditTarget {
+    version: &'static str,
+    target_kind: &'static str,
+    module_id: String,
+    mode: String,
+    source_root: String,
+    manifest_path: String,
+    source_sha256: String,
+    shell_url: String,
+    route_fragment: String,
+    scanner_boundary: &'static str,
+}
+
+pub(crate) fn run_business_os_app_audit(
+    root: &Path,
+    module_id: &str,
+    args: &[String],
+) -> anyhow::Result<Value> {
+    validate_business_os_app_module_id(module_id)?;
+    validate_app_audit_args(args)?;
+    let profile = app_audit_flag_value(args, "--profile").unwrap_or("quick");
+    anyhow::ensure!(
+        matches!(profile, "quick" | "release" | "full"),
+        "business-os app audit --profile must be quick, release, or full"
+    );
+    let mode = if args.iter().any(|arg| arg == "--source") {
+        "source"
+    } else {
+        "installed"
+    };
+    anyhow::ensure!(
+        !(mode == "source" && args.iter().any(|arg| arg == "--installed")),
+        "business-os app audit accepts only one of --source or --installed"
+    );
+    let shell_url = app_audit_flag_value(args, "--url")
+        .unwrap_or("http://127.0.0.1:8765")
+        .to_string();
+    validate_app_audit_url(&shell_url, "--url")?;
+    let deployed_url = app_audit_flag_value(args, "--deployed-url").map(str::to_owned);
+    if let Some(url) = deployed_url.as_deref() {
+        validate_app_audit_url(url, "--deployed-url")?;
+        anyhow::ensure!(
+            Url::parse(url)? != Url::parse(&shell_url)?,
+            "--deployed-url must identify an isolated deployment, not the Business OS shell URL"
+        );
+    }
+    let active = args.iter().any(|arg| arg == "--active");
+    let approval_id = app_audit_flag_value(args, "--approval-id");
+    if active {
+        anyhow::ensure!(
+            deployed_url.is_some(),
+            "active app auditing requires --deployed-url; the Business OS #module route is not an isolated HTTP target"
+        );
+        anyhow::ensure!(
+            approval_id.is_some(),
+            "active app auditing requires --approval-id"
+        );
+    }
+
+    let source_root = resolve_app_audit_source_root(root, module_id, mode)?;
+    let manifest_path = source_root.join("module.json");
+    let source_sha256 = hash_app_audit_source(&source_root)?;
+    let target = BusinessOsAppAuditTarget {
+        version: "ctox.appsec.target.v1",
+        target_kind: "ctox-business-os-app",
+        module_id: module_id.to_string(),
+        mode: mode.to_string(),
+        source_root: source_root.display().to_string(),
+        manifest_path: manifest_path.display().to_string(),
+        source_sha256: source_sha256.clone(),
+        shell_url: shell_url.clone(),
+        route_fragment: format!("#{module_id}"),
+        scanner_boundary: "The Business OS hash route is browser context, not an isolated HTTP scanner target. Generic HTTP scanners may target only an explicitly supplied --deployed-url.",
+    };
+    let state_dir = app_audit_state_dir(root, module_id, &source_sha256);
+    fs::create_dir_all(&state_dir)
+        .with_context(|| format!("failed to create app audit state {}", state_dir.display()))?;
+    write_app_audit_json(
+        &state_dir.join("target.json"),
+        &serde_json::to_value(&target)?,
+    )?;
+
+    let mode_flag = format!("--{mode}");
+    let validator =
+        run_business_os_app_validator(root, module_id, &[mode_flag.clone(), "--json".to_string()])?;
+    let validation = app_audit_process_result("validate", &validator);
+
+    let smoke = run_business_os_app_smoke(
+        root,
+        module_id,
+        &[
+            mode_flag.clone(),
+            "--json".to_string(),
+            "--url".to_string(),
+            shell_url.clone(),
+        ],
+    )?;
+    let smoke_result = app_audit_process_result("smoke", &smoke);
+
+    let e2e_result = if profile == "quick" {
+        serde_json::json!({
+            "ok": true,
+            "status": "not-required",
+            "reason": "quick profile proves validation and generic mount health only"
+        })
+    } else {
+        let e2e = run_business_os_app_e2e(
+            root,
+            module_id,
+            &[
+                mode_flag,
+                "--json".to_string(),
+                "--url".to_string(),
+                shell_url.clone(),
+                "--profile".to_string(),
+                profile.to_string(),
+                "--require-scenario".to_string(),
+            ],
+        )?;
+        app_audit_process_result("e2e", &e2e)
+    };
+
+    let local_ok = app_audit_step_ok(&validation)
+        && app_audit_step_ok(&smoke_result)
+        && app_audit_step_ok(&e2e_result);
+    let security = if profile == "quick" {
+        serde_json::json!({
+            "ok": true,
+            "status": "not-run",
+            "coverage_gap": "Source security and deployment review are outside the quick profile."
+        })
+    } else {
+        run_app_audit_security(
+            root,
+            &state_dir,
+            module_id,
+            &source_root,
+            profile,
+            deployed_url.as_deref(),
+            active,
+            approval_id,
+        )?
+    };
+    let security_review = security
+        .pointer("/review/completion_review")
+        .cloned()
+        .unwrap_or(Value::Null);
+    let security_closable = security_review.get("closable").and_then(Value::as_bool) == Some(true)
+        && security_review.get("blocker_count").and_then(Value::as_u64) == Some(0);
+    let workflow_closable = local_ok && (profile == "quick" || security_closable);
+    let release_decision = if !local_ok {
+        "blocked"
+    } else if profile == "quick" {
+        "not-assessed"
+    } else if !security_closable {
+        "incomplete"
+    } else {
+        security
+            .pointer("/report/release_decision/decision")
+            .and_then(Value::as_str)
+            .or_else(|| {
+                security
+                    .pointer("/report/release_decision")
+                    .and_then(Value::as_str)
+            })
+            .or_else(|| security.pointer("/report/decision").and_then(Value::as_str))
+            .unwrap_or("review-required")
+    };
+    let blockers = app_audit_blockers(&validation, &smoke_result, &e2e_result, &security);
+    let aggregate = serde_json::json!({
+        "ok": workflow_closable,
+        "command": "business-os app audit",
+        "version": "ctox.business_os.app_audit.v1",
+        "profile": profile,
+        "state_dir": state_dir,
+        "target": target,
+        "stages": {
+            "validation": validation,
+            "smoke": smoke_result,
+            "e2e": e2e_result,
+            "security": security,
+        },
+        "completion_review": {
+            "closable": workflow_closable,
+            "blocker_count": blockers.len(),
+            "blockers": blockers,
+        },
+        "release_decision": release_decision,
+        "go_live_approved": security.pointer("/report/release_decision/go_live_approved").and_then(Value::as_bool).unwrap_or(false)
+            && matches!(release_decision, "ready" | "approved"),
+    });
+    write_app_audit_json(&state_dir.join("app-audit.json"), &aggregate)?;
+    Ok(aggregate)
+}
+
+fn validate_business_os_app_module_id(module_id: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        !module_id.is_empty()
+            && module_id != "."
+            && module_id != ".."
+            && module_id.len() <= 160
+            && module_id
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'),
+        "invalid Business OS app module id `{module_id}`"
+    );
+    Ok(())
+}
+
+fn resolve_app_audit_source_root(
+    root: &Path,
+    module_id: &str,
+    mode: &str,
+) -> anyhow::Result<PathBuf> {
+    let candidate = if mode == "source" {
+        crate::business_os::store::resolve_business_os_app_root(root)?
+            .join("modules")
+            .join(module_id)
+    } else {
+        crate::business_os::store::resolve_business_os_installed_app_root(root)
+            .join("installed-modules")
+            .join(module_id)
+    };
+    let candidate_metadata = fs::symlink_metadata(&candidate).with_context(|| {
+        format!(
+            "module `{module_id}` was not found in {mode} mode at {}",
+            candidate.display()
+        )
+    })?;
+    anyhow::ensure!(
+        candidate_metadata.is_dir() && !candidate_metadata.file_type().is_symlink(),
+        "app audit source must be a real module directory, not a symlink"
+    );
+    anyhow::ensure!(
+        candidate.join("module.json").is_file(),
+        "module `{module_id}` was not found in {mode} mode"
+    );
+    let expected_parent = candidate
+        .parent()
+        .context("app audit source has no parent")?
+        .canonicalize()
+        .with_context(|| {
+            format!(
+                "failed to canonicalize app audit parent {}",
+                candidate.display()
+            )
+        })?;
+    let canonical = candidate.canonicalize().with_context(|| {
+        format!(
+            "failed to canonicalize app audit source {}",
+            candidate.display()
+        )
+    })?;
+    anyhow::ensure!(
+        canonical.parent() == Some(expected_parent.as_path()),
+        "app audit source must be a direct module directory and may not escape through symlinks"
+    );
+    Ok(canonical)
+}
+
+fn hash_app_audit_source(source_root: &Path) -> anyhow::Result<String> {
+    let mut files = Vec::new();
+    collect_app_audit_files(source_root, source_root, &mut files)?;
+    anyhow::ensure!(files.len() <= 4096, "app audit source exceeds 4096 files");
+    files.sort();
+    let mut hasher = Sha256::new();
+    let mut total = 0u64;
+    for path in files {
+        let metadata = fs::symlink_metadata(&path)?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "app audit source may not contain symlinks: {}",
+            path.display()
+        );
+        total = total.saturating_add(metadata.len());
+        anyhow::ensure!(
+            total <= 128 * 1024 * 1024,
+            "app audit source exceeds 128 MiB"
+        );
+        let relative = path.strip_prefix(source_root)?;
+        hasher.update(relative.to_string_lossy().as_bytes());
+        hasher.update([0]);
+        hasher.update(metadata.len().to_le_bytes());
+        hasher.update(fs::read(&path)?);
+    }
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn collect_app_audit_files(
+    root: &Path,
+    current: &Path,
+    out: &mut Vec<PathBuf>,
+) -> anyhow::Result<()> {
+    for entry in fs::read_dir(current)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        anyhow::ensure!(
+            !metadata.file_type().is_symlink(),
+            "app audit source may not contain symlinks: {}",
+            path.display()
+        );
+        if metadata.is_dir() {
+            collect_app_audit_files(root, &path, out)?;
+        } else if metadata.is_file() {
+            anyhow::ensure!(path.starts_with(root), "app audit source escaped its root");
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn app_audit_state_dir(root: &Path, module_id: &str, sha256: &str) -> PathBuf {
+    let runtime = if root.file_name().and_then(|name| name.to_str()) == Some("runtime") {
+        root.to_path_buf()
+    } else {
+        root.join("runtime")
+    };
+    runtime
+        .join("appsec")
+        .join("apps")
+        .join(module_id)
+        .join(&sha256[..16])
+}
+
+fn run_app_audit_security(
+    root: &Path,
+    state_dir: &Path,
+    module_id: &str,
+    source_root: &Path,
+    profile: &str,
+    deployed_url: Option<&str>,
+    active: bool,
+    approval_id: Option<&str>,
+) -> anyhow::Result<Value> {
+    let security_state = state_dir.join("security");
+    let tools_root = if root.file_name().and_then(|name| name.to_str()) == Some("runtime") {
+        root.join("tools/appsec")
+    } else {
+        root.join("runtime/tools/appsec")
+    };
+    let scanner_profile = if profile == "full" {
+        "full"
+    } else {
+        "standard"
+    };
+    let mut init_args = vec![
+        "init".to_string(),
+        "--name".to_string(),
+        format!("CTOX app {module_id}"),
+        "--profile".to_string(),
+        scanner_profile.to_string(),
+        "--target".to_string(),
+        source_root.display().to_string(),
+        "--json".to_string(),
+    ];
+    if let Some(url) = deployed_url {
+        init_args.extend(["--url".to_string(), url.to_string()]);
+    }
+    let init = run_raw_appsec(root, &security_state, &tools_root, init_args)?;
+    let assessment = if let Some(url) = deployed_url {
+        let mut args = vec![
+            "audit".to_string(),
+            "run".to_string(),
+            "--url".to_string(),
+            url.to_string(),
+            "--source".to_string(),
+            source_root.display().to_string(),
+            "--profile".to_string(),
+            scanner_profile.to_string(),
+            "--json".to_string(),
+        ];
+        if active {
+            args.extend([
+                "--active".to_string(),
+                "--approval-id".to_string(),
+                approval_id.unwrap_or_default().to_string(),
+            ]);
+        }
+        run_raw_appsec(root, &security_state, &tools_root, args)?
+    } else {
+        run_raw_appsec(
+            root,
+            &security_state,
+            &tools_root,
+            vec![
+                "assess".to_string(),
+                "--profile".to_string(),
+                scanner_profile.to_string(),
+                "--target".to_string(),
+                source_root.display().to_string(),
+                "--no-authz".to_string(),
+                "--json".to_string(),
+            ],
+        )?
+    };
+    let artifact_audit = run_raw_appsec(
+        root,
+        &security_state,
+        &tools_root,
+        vec![
+            "artifact".to_string(),
+            "audit".to_string(),
+            "--json".to_string(),
+        ],
+    )?;
+    let initial_review = run_raw_appsec(
+        root,
+        &security_state,
+        &tools_root,
+        vec!["review".to_string(), "--json".to_string()],
+    )?;
+    if initial_review
+        .pointer("/completion_review/closable")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "status": "incomplete",
+            "state_dir": security_state,
+            "init": init,
+            "assessment": assessment,
+            "artifact_audit": artifact_audit,
+            "review": initial_review,
+            "report": Value::Null,
+        }));
+    }
+
+    let finish = run_raw_appsec(
+        root,
+        &security_state,
+        &tools_root,
+        vec![
+            "finish".to_string(),
+            "--executive-summary".to_string(),
+            format!("Evidence-gated CTOX Business OS app audit for module {module_id}."),
+            "--methodology".to_string(),
+            format!("Server-resolved source snapshot, browser smoke, declared end-to-end scenarios, and the CTOX AppSec {scanner_profile} profile."),
+            "--technical-analysis".to_string(),
+            "Only evidence-backed findings and retained proof artifacts contribute to the release decision.".to_string(),
+            "--recommendations".to_string(),
+            "Remediate every validated release blocker and rerun the complete audit before deployment.".to_string(),
+            "--json".to_string(),
+        ],
+    )?;
+    let final_artifact_audit = run_raw_appsec(
+        root,
+        &security_state,
+        &tools_root,
+        vec![
+            "artifact".to_string(),
+            "audit".to_string(),
+            "--json".to_string(),
+        ],
+    )?;
+    let review = run_raw_appsec(
+        root,
+        &security_state,
+        &tools_root,
+        vec!["review".to_string(), "--json".to_string()],
+    )?;
+    let final_closable = review
+        .pointer("/completion_review/closable")
+        .and_then(Value::as_bool)
+        == Some(true)
+        && review
+            .pointer("/completion_review/blocker_count")
+            .and_then(Value::as_u64)
+            == Some(0);
+    let (report, report_markdown) = if final_closable {
+        let reports_dir = security_state.join("reports");
+        (
+            run_raw_appsec(
+                root,
+                &security_state,
+                &tools_root,
+                vec![
+                    "report".to_string(),
+                    "--format".to_string(),
+                    "json".to_string(),
+                    "--out".to_string(),
+                    reports_dir
+                        .join("deployment-audit-report.json")
+                        .display()
+                        .to_string(),
+                    "--gate".to_string(),
+                    "go-live".to_string(),
+                    "--json".to_string(),
+                ],
+            )?,
+            run_raw_appsec(
+                root,
+                &security_state,
+                &tools_root,
+                vec![
+                    "report".to_string(),
+                    "--format".to_string(),
+                    "markdown".to_string(),
+                    "--out".to_string(),
+                    reports_dir
+                        .join("deployment-audit-report.md")
+                        .display()
+                        .to_string(),
+                    "--json".to_string(),
+                ],
+            )?,
+        )
+    } else {
+        (Value::Null, Value::Null)
+    };
+    Ok(serde_json::json!({
+        "ok": true,
+        "status": if final_closable { "complete" } else { "incomplete" },
+        "state_dir": security_state,
+        "init": init,
+        "assessment": assessment,
+        "artifact_audit": final_artifact_audit,
+        "initial_artifact_audit": artifact_audit,
+        "finish": finish,
+        "review": review,
+        "report": report,
+        "report_markdown": report_markdown,
+    }))
+}
+
+fn run_raw_appsec(
+    root: &Path,
+    state_dir: &Path,
+    tools_root: &Path,
+    command: Vec<String>,
+) -> anyhow::Result<Value> {
+    let mut forwarded = vec![
+        "ctox-app-audit".to_string(),
+        "--state-dir".to_string(),
+        state_dir.display().to_string(),
+        "--tools-root".to_string(),
+        tools_root.display().to_string(),
+    ];
+    forwarded.extend(command);
+    let output = ctox_appsec_pentest::run_cli_json(forwarded.clone(), Some(root.to_path_buf()))?;
+    let _ = crate::appsec_state::project_cli_result(root, &forwarded, &output)?;
+    Ok(output)
+}
+
+fn app_audit_process_result(stage: &str, output: &std::process::Output) -> Value {
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    let parsed = serde_json::from_str::<Value>(&stdout).unwrap_or(Value::Null);
+    serde_json::json!({
+        "ok": output.status.success() && parsed.get("ok").and_then(Value::as_bool) != Some(false),
+        "stage": stage,
+        "exit_code": output.status.code(),
+        "result": parsed,
+        "stderr": stderr.chars().take(4000).collect::<String>(),
+    })
+}
+
+fn app_audit_step_ok(value: &Value) -> bool {
+    value.get("ok").and_then(Value::as_bool) == Some(true)
+}
+
+fn app_audit_blockers(
+    validation: &Value,
+    smoke: &Value,
+    e2e: &Value,
+    security: &Value,
+) -> Vec<Value> {
+    let mut blockers = Vec::new();
+    for (name, value) in [("validation", validation), ("smoke", smoke), ("e2e", e2e)] {
+        if !app_audit_step_ok(value) {
+            blockers.push(serde_json::json!({ "kind": "app-stage-failed", "stage": name }));
+        }
+    }
+    if security.get("status").and_then(Value::as_str) == Some("incomplete") {
+        let nested = security
+            .pointer("/review/completion_review/blockers")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        blockers.push(serde_json::json!({
+            "kind": "security-audit-incomplete",
+            "blockers": nested,
+        }));
+    }
+    blockers
+}
+
+fn write_app_audit_json(path: &Path, value: &Value) -> anyhow::Result<()> {
+    fs::write(path, serde_json::to_vec_pretty(value)?)
+        .with_context(|| format!("failed to write app audit artifact {}", path.display()))
+}
+
+fn app_audit_flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|arg| arg == flag)
+        .and_then(|index| args.get(index + 1))
+        .map(String::as_str)
+}
+
+fn validate_app_audit_url(value: &str, flag: &str) -> anyhow::Result<()> {
+    let url = Url::parse(value).with_context(|| format!("{flag} must be a valid URL"))?;
+    anyhow::ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "{flag} must use http or https"
+    );
+    anyhow::ensure!(url.host_str().is_some(), "{flag} must include a host");
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "{flag} must not embed credentials"
+    );
+    anyhow::ensure!(
+        url.query().is_none() && url.fragment().is_none(),
+        "{flag} must not contain a query or fragment"
+    );
+    Ok(())
+}
+
+fn validate_app_audit_args(args: &[String]) -> anyhow::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    let mut index = 0usize;
+    while index < args.len() {
+        let flag = args[index].as_str();
+        anyhow::ensure!(
+            matches!(
+                flag,
+                "--source"
+                    | "--installed"
+                    | "--active"
+                    | "--profile"
+                    | "--url"
+                    | "--deployed-url"
+                    | "--approval-id"
+            ),
+            "unsupported business-os app audit option `{flag}`"
+        );
+        anyhow::ensure!(
+            seen.insert(flag.to_string()),
+            "duplicate app audit option `{flag}`"
+        );
+        if matches!(
+            flag,
+            "--profile" | "--url" | "--deployed-url" | "--approval-id"
+        ) {
+            let value = args
+                .get(index + 1)
+                .with_context(|| format!("{flag} requires a value"))?;
+            anyhow::ensure!(
+                !value.trim().is_empty() && !value.starts_with("--"),
+                "{flag} requires a value"
+            );
+            index += 2;
+        } else {
+            index += 1;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn app_browser_evidence_arg(flag: &str, value: &str, caller_cwd: &Path) -> String {
@@ -1228,4 +1889,96 @@ pub(super) fn app_validator_args_from_finalize_args(args: &[String]) -> Vec<Stri
         out.push("--installed".to_string());
     }
     out
+}
+
+#[cfg(test)]
+mod app_audit_tests {
+    use super::{
+        app_audit_state_dir, hash_app_audit_source, resolve_app_audit_source_root,
+        run_business_os_app_audit, validate_app_audit_args, validate_app_audit_url,
+        validate_business_os_app_module_id,
+    };
+    use std::fs;
+    use tempfile::tempdir;
+
+    #[test]
+    fn target_contract_rejects_path_like_ids_and_non_http_urls() {
+        for invalid in ["", ".", "..", "../app", "nested/app", "app name"] {
+            assert!(
+                validate_business_os_app_module_id(invalid).is_err(),
+                "{invalid}"
+            );
+        }
+        assert!(validate_business_os_app_module_id("customer-portal_v2").is_ok());
+        assert!(validate_app_audit_url("https://example.test/app", "--url").is_ok());
+        assert!(validate_app_audit_url("file:///etc/passwd", "--url").is_err());
+        assert!(validate_app_audit_url("javascript:alert(1)", "--url").is_err());
+        assert!(validate_app_audit_url("https://user:secret@example.test", "--url").is_err());
+        assert!(validate_app_audit_url("https://example.test/?token=secret", "--url").is_err());
+        assert!(validate_app_audit_args(&["--unknown".into()]).is_err());
+        assert!(validate_app_audit_args(&["--profile".into(), "--active".into()]).is_err());
+
+        let temp = tempdir().expect("temporary app audit root");
+        let error = run_business_os_app_audit(
+            temp.path(),
+            "sample-app",
+            &[
+                "--url".into(),
+                "https://example.test/app".into(),
+                "--deployed-url".into(),
+                "https://example.test/app".into(),
+            ],
+        )
+        .expect_err("Business OS shell must not be accepted as scanner target");
+        assert!(
+            error.to_string().contains("isolated deployment"),
+            "{error:#}"
+        );
+    }
+
+    #[test]
+    fn source_hash_is_content_bound_and_namespaces_state() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let source = temp.path().join("sample-app");
+        fs::create_dir_all(&source)?;
+        fs::write(source.join("module.json"), r#"{"id":"sample-app"}"#)?;
+        fs::write(source.join("index.js"), "export const version = 1;\n")?;
+        let first = hash_app_audit_source(&source)?;
+        let first_state = app_audit_state_dir(temp.path(), "sample-app", &first);
+
+        fs::write(source.join("index.js"), "export const version = 2;\n")?;
+        let second = hash_app_audit_source(&source)?;
+        assert_ne!(first, second);
+        assert_ne!(
+            first_state,
+            app_audit_state_dir(temp.path(), "sample-app", &second)
+        );
+        assert!(first_state.ends_with(&first[..16]));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn source_hash_fails_closed_on_symlinks() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir()?;
+        let source = temp.path().join("sample-app");
+        fs::create_dir_all(&source)?;
+        fs::write(source.join("module.json"), r#"{"id":"sample-app"}"#)?;
+        fs::write(temp.path().join("outside.js"), "secret")?;
+        symlink(temp.path().join("outside.js"), source.join("index.js"))?;
+        let error = hash_app_audit_source(&source).expect_err("symlink must fail closed");
+        assert!(error.to_string().contains("symlink"), "{error:#}");
+
+        let installed = temp.path().join("business-os/installed-modules");
+        let real_module = installed.join("real-module");
+        fs::create_dir_all(&real_module)?;
+        fs::write(real_module.join("module.json"), r#"{"id":"real-module"}"#)?;
+        symlink(&real_module, installed.join("linked-module"))?;
+        let error = resolve_app_audit_source_root(temp.path(), "linked-module", "installed")
+            .expect_err("module root symlink must fail closed");
+        assert!(error.to_string().contains("not a symlink"), "{error:#}");
+        Ok(())
+    }
 }

@@ -320,10 +320,15 @@ function applyStaticLabels() {
 
 function wireUi() {
   const root = rootEl();
-  // Chrome (search / view-toggle / tray / reset / active-dot / counted band) is
+  // Chrome (search / tray / reset / active-dot / counted band / footer) is
   // SHELL-wired from the data-pg-* markup; the module only listens for the
-  // resulting bubbling change event and re-renders.
+  // resulting bubbling change event and re-renders. The one exception is the
+  // view toggle: it is a single action button now, so the module owns its
+  // label/icon and flips [data-pg-default-view] — the attribute the shell's
+  // wirePaneGrammar() reads when no [data-pg-view] pair exists.
   leftPane()?.addEventListener('ctox-pane-grammar-change', handleGrammarChange);
+  root.querySelector('[data-support-view-toggle]')?.addEventListener('click', () => toggleViewMode());
+  applyViewToggle();
   // Selection is an in-place class flip, never a list rebuild (design-guide
   // "Re-renders never move the operator").
   const list = root.querySelector('[data-support-list]');
@@ -490,7 +495,8 @@ function resolveConversationListState({ loading = false, sourceCount = 0, readin
 function renderConversationList() {
   const container = rootEl().querySelector('[data-support-list]');
   if (!container) return;
-  container.classList.toggle('is-list-view', state.viewMode === 'list');
+  // The view lives on the ROWS now (two different shapes, not two paddings of
+  // one shape), so the well itself carries no view class any more.
   const listState = resolveConversationListState({
     loading: state.loading,
     sourceCount: state.data.support_conversations?.length || 0,
@@ -535,25 +541,53 @@ function renderConversationList() {
       item.sla_due_at_ms || 0,
     ])),
   });
-  renderHtmlIfChanged(container, rows.map(renderConversationRow).join(''), { signature });
+  renderHtmlIfChanged(container, rows.map((item) => renderConversationRow(item, state.viewMode)).join(''), { signature });
   applyListSelection();
 }
 
-function renderConversationRow(item) {
+// The two views are deliberately DIFFERENT shapes, not two paddings of the same
+// row (Betreiber-Direktive 31.08.):
+//
+//   cards / shards — 3 lines: bold subject + the urgency badges, then the two
+//                    meta lines that actually decide a support conversation
+//                    (Status · Priorität · Inbox, and Zuordnung · letzte
+//                    Aktivität), on generous padding.
+//   list           — exactly ONE dense line: the subject plus a single short
+//                    meta hard right (the status word), nothing else.
+//
+// Every field comes from the conversation records the module already loads —
+// no new data path, no schema change.
+function renderConversationRow(item, viewMode = state.viewMode) {
+  const view = viewMode === 'list' ? 'list' : 'cards';
   const label = conversationLabel(item);
+  const attrs = `type="button" role="option" aria-selected="false" class="ctox-list-item support-conversation-row support-conversation-row--${view}" data-support-conversation-id="${escapeAttr(item.id)}" data-context-record-id="${escapeAttr(item.id)}" data-context-record-type="support_conversation" data-context-label="${escapeAttr(label)}"`;
+  if (view === 'list') {
+    return `
+    <button ${attrs}>
+      <span class="support-row-title">${escapeHtml(label)}</span>
+      <span class="support-row-tail">${escapeHtml(displayStatus(item.status))}</span>
+    </button>
+  `;
+  }
   const risk = isSlaRisk(item) ? `<span class="ctox-badge is-warning">${escapeHtml(state.t('slaRisk', 'SLA'))}</span>` : '';
   const agent = Number(item.agent_draft_count || 0) > 0 ? `<span class="ctox-badge is-info">${escapeHtml(state.t('agentDrafts', 'CTOX'))}</span>` : '';
+  const primary = [
+    displayStatus(item.status),
+    item.priority || 'normal',
+    item.inbox_id || state.t('inbox', 'Inbox'),
+  ];
+  const secondary = [
+    `${state.t('assignee', 'Zuordnung')}: ${item.assignee_id || state.t('unassigned', 'Unassigned')}`,
+    `${state.t('lastActivity', 'Letzte Aktivität')}: ${formatTime(item.last_activity_at_ms || item.updated_at_ms)}`,
+  ];
   return `
-    <button type="button" role="option" aria-selected="false" class="ctox-list-item support-conversation-row" data-support-conversation-id="${escapeAttr(item.id)}" data-context-record-id="${escapeAttr(item.id)}" data-context-record-type="support_conversation" data-context-label="${escapeAttr(label)}">
-      <span class="support-row-meta">
-        <span>${escapeHtml(item.inbox_id || state.t('inbox', 'Inbox'))}</span>
-        <span>${escapeHtml(item.priority || 'normal')}</span>
+    <button ${attrs}>
+      <span class="support-row-head">
+        <strong class="support-row-title">${escapeHtml(label)}</strong>
+        <span class="support-row-badges">${risk}${agent}</span>
       </span>
-      <strong>${escapeHtml(label)}</strong>
-      <span class="support-row-foot">
-        <span>${escapeHtml(displayStatus(item.status))}</span>
-        <span>${risk}${agent}</span>
-      </span>
+      <span class="support-row-meta">${escapeHtml(primary.join(' · '))}</span>
+      <span class="support-row-meta">${escapeHtml(secondary.join(' · '))}</span>
     </button>
   `;
 }
@@ -649,7 +683,8 @@ function toggleContext() {
 function handleGrammarChange(event) {
   const detail = event?.detail || {};
   state.search = String(detail.search ?? '').trim().toLowerCase();
-  state.viewMode = detail.view || 'cards';
+  state.viewMode = detail.view === 'list' ? 'list' : 'cards';
+  applyViewToggle();
   state.queue = BAND_QUEUES.includes(detail.band) ? detail.band : 'open';
   const filters = detail.filters || {};
   state.filters = {
@@ -664,17 +699,71 @@ function handleGrammarChange(event) {
   render();
 }
 
+// The grammar as the DOM currently states it — the same shape the shell emits,
+// so the module can re-emit it after flipping the view without inventing a
+// second state channel.
+function readGrammarFromDom() {
+  const pane = leftPane();
+  return {
+    search: String(pane?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
+    view: pane?.dataset.pgDefaultView === 'list' ? 'list' : 'cards',
+    band: pane?.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'open',
+    filters: {
+      status: pane?.querySelector('[data-pg-filter][data-pg-name="status"]')?.value || 'open',
+      priority: pane?.querySelector('[data-pg-filter][data-pg-name="priority"]')?.value || 'all',
+      focus: pane?.querySelector('[data-pg-filter][data-pg-name="focus"]')?.value || 'all',
+    },
+  };
+}
+
 function seedGrammarState() {
   const pane = leftPane();
   if (!pane) return;
-  state.search = String(pane.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase();
-  state.viewMode = pane.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards';
-  state.queue = pane.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'open';
-  state.filters = {
-    status: pane.querySelector('[data-pg-filter][data-pg-name="status"]')?.value || 'open',
-    priority: pane.querySelector('[data-pg-filter][data-pg-name="priority"]')?.value || 'all',
-    focus: pane.querySelector('[data-pg-filter][data-pg-name="focus"]')?.value || 'all',
-  };
+  const grammar = readGrammarFromDom();
+  state.search = grammar.search;
+  state.viewMode = grammar.view;
+  state.queue = grammar.band;
+  state.filters = grammar.filters;
+}
+
+// One button, one action: icon, title and aria-label always name the view the
+// click switches TO. No aria-pressed — this is an action, not a state control
+// (Betreiber-Direktive 31.08.).
+function applyViewToggle() {
+  const button = rootEl()?.querySelector('[data-support-view-toggle]');
+  if (!button) return;
+  const next = readGrammarFromDom().view === 'list' ? 'cards' : 'list';
+  const label = next === 'list'
+    ? state.t('showAsList', 'Als Liste anzeigen')
+    : state.t('showAsCards', 'Als Karten anzeigen');
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.removeAttribute('aria-pressed');
+  button.querySelectorAll('[data-support-view-icon]').forEach((icon) => {
+    // toggleAttribute, not `.hidden`: these are SVGElements, which do not
+    // implement the HTMLElement `hidden` IDL property — assigning it would set
+    // a silent JS expando and the icon would never swap.
+    icon.toggleAttribute('hidden', icon.dataset.supportViewIcon !== next);
+  });
+}
+
+function toggleViewMode() {
+  const pane = leftPane();
+  if (!pane) return;
+  pane.dataset.pgDefaultView = readGrammarFromDom().view === 'list' ? 'cards' : 'list';
+  applyViewToggle();
+  // Re-use the shell's own change channel: its scroll guard clears the recorded
+  // offsets (a view switch is an intentional reset) and handleGrammarChange
+  // below drives the re-render.
+  try {
+    pane.dispatchEvent(new CustomEvent('ctox-pane-grammar-change', {
+      detail: readGrammarFromDom(),
+      bubbles: true,
+    }));
+  } catch {
+    state.viewMode = readGrammarFromDom().view;
+    render();
+  }
 }
 
 function leftPane() {
@@ -1595,6 +1684,7 @@ function escapeAttr(value) {
 
 export const __supportTestHooks = {
   buildAgentInstruction,
+  renderConversationRow,
   supportSnapshot,
   timelineRows,
   visibleConversations,

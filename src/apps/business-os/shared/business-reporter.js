@@ -1,6 +1,20 @@
-const REPORTER_STYLE_ID = 'ctox-business-reporter-style';
-const REPORT_DISPATCH_TIMEOUT_MS = 25000;
+import { withTimeout } from './async-timeout.js';
 
+const REPORTER_STYLE_ID = 'ctox-business-reporter-style';
+// The first save of a session has to register the report schemas before the
+// first document can be written. That cold start used to run inside the very
+// first submit and looked like a hang, so the deadlines are generous and the
+// dialog retries once on its own before it bothers the user.
+const REPORTER_PREPARE_TIMEOUT_MS = 30000;
+const REPORTER_SUBMIT_TIMEOUT_MS = 45000;
+const REPORTER_RETRY_DELAY_MS = 600;
+// Screen capture can stall forever: a display picker that is never answered
+// leaves its promise pending, and with it the capture layer over the desktop.
+// Every capture therefore runs against a deadline and falls back to the plain
+// markup image.
+const REPORTER_CAPTURE_TIMEOUT_MS = 45000;
+const REPORTER_TOAST_MS = 4200;
+const DRAFT_FIELDS = Object.freeze(['kind', 'severity', 'title', 'summary', 'expected']);
 let reporterState = null;
 let fabButton = null;
 let bugActor = null;
@@ -49,14 +63,24 @@ function reporterCopy() {
     ? {
       fabLabel: 'An app is never finished',
       fabTitle: 'An app is never finished — tell CTOX what should improve.',
-      fabAria: 'Send feedback to CTOX: report a bug or feature',
-      tagline: 'An app is never finished. Your report goes straight into the CTOX work queue.',
+      fabAria: 'Save feedback: report a bug or feature',
+      tagline: 'An app is never finished. Save the report here first, then manage or delegate it from Bugs & Features.',
+      saving: 'Saving to Bugs & Features...',
+      retrying: 'Saving takes longer than usual. Trying again...',
+      savedToast: 'Report saved. You can manage or delegate it in Bugs & Features.',
+      keepOpenHint: 'Your text is kept. Use the X in the header to close this.',
+      failedTimeout: 'Saving took too long. Your text is kept — please send again.',
     }
     : {
       fabLabel: 'Eine App ist nie fertig',
       fabTitle: 'Eine App ist nie fertig — sag CTOX, was besser werden soll.',
-      fabAria: 'Feedback an CTOX senden: Bug oder Feature melden',
-      tagline: 'Eine App ist nie fertig. Dein Hinweis geht direkt in die CTOX-Arbeitsschlange.',
+      fabAria: 'Feedback speichern: Bug oder Feature melden',
+      tagline: 'Eine App ist nie fertig. Speichere den Hinweis zuerst hier und verwalte oder delegiere ihn danach in Bugs & Features.',
+      saving: 'Speichere in Bugs & Features...',
+      retrying: 'Das Speichern dauert länger als sonst. Neuer Versuch läuft...',
+      savedToast: 'Report gespeichert. Du kannst ihn in Bugs & Features verwalten oder delegieren.',
+      keepOpenHint: 'Dein Text bleibt erhalten. Zum Schließen bitte das X oben rechts benutzen.',
+      failedTimeout: 'Speichern hat zu lange gedauert. Dein Text bleibt erhalten – bitte noch einmal senden.',
     };
 }
 
@@ -345,10 +369,11 @@ function animLoop(timestamp) {
 export function initBusinessReporter({
   session,
   getActiveModule,
-  commandBus,
   db = null,
   sync = null,
+  ensureReportCollections = null,
   idleMs = IDLE_TIME,
+  captureTimeoutMs = REPORTER_CAPTURE_TIMEOUT_MS,
 }) {
   if (!session?.authenticated || document.querySelector('[data-ctox-reporter]')) return;
   idleDelay = Math.max(1000, Number(idleMs) || IDLE_TIME);
@@ -356,9 +381,9 @@ export function initBusinessReporter({
   reporterState = {
     session,
     getActiveModule,
-    commandBus,
     db,
     sync,
+    ensureReportCollections,
     modal: null,
     overlay: null,
     attachment: null,
@@ -368,6 +393,16 @@ export function initBusinessReporter({
     strokes: [],
     activeStroke: null,
     savingMarkup: false,
+    // The draft is the source of truth for what the user typed. It outlives
+    // the dialog element, so neither the markup overlay nor an accidental
+    // teardown of the backdrop can destroy the text.
+    draft: createEmptyDraft(),
+    dialogOpen: false,
+    submitting: false,
+    pendingReportIdentity: null,
+    collectionsReady: null,
+    overlayKeyHandler: null,
+    captureTimeoutMs: Math.max(1000, Number(captureTimeoutMs) || REPORTER_CAPTURE_TIMEOUT_MS),
   };
 
   const copy = reporterCopy();
@@ -434,7 +469,164 @@ export function initBusinessReporter({
   idleTimeout = setTimeout(startEasterEgg, idleDelay);
 }
 
+export function resolveBusinessReporterModule({
+  activeModule = null,
+  modules = [],
+  windowManager = null,
+} = {}) {
+  const focusedWindow = windowManager?.listWindows?.()
+    ?.find((entry) => entry?.isFocused && entry?.state !== 'minimized');
+  const ownerId = String(focusedWindow?.ownerId || '');
+  const focusedModuleId = ownerId.replace(/^(?:desktop-app|module):/, '');
+  if (focusedModuleId && focusedModuleId !== ownerId) {
+    const catalogModule = modules.find((entry) => entry?.id === focusedModuleId);
+    if (catalogModule) return catalogModule;
+    return {
+      id: focusedModuleId,
+      title: String(focusedWindow?.title || focusedModuleId).trim() || focusedModuleId,
+    };
+  }
+  return activeModule || { id: 'ctox', title: 'CTOX' };
+}
+
+function createEmptyDraft() {
+  return { kind: 'bug', severity: 'medium', title: '', summary: '', expected: '' };
+}
+
+function reporterForm(state) {
+  const modal = state.modal;
+  if (!modal || (typeof modal.isConnected === 'boolean' && !modal.isConnected)) return null;
+  return modal.querySelector?.('[data-report-form]') || null;
+}
+
+function isBlankValue(value) {
+  return String(value ?? '').trim() === '';
+}
+
+/**
+ * Read what is currently in the dialog back into the durable draft. Called on
+ * every input event and before anything hides, replaces or removes the
+ * dialog, so the text survives every transition.
+ */
+function captureDraft(state) {
+  const form = reporterForm(state);
+  if (!form) return state.draft;
+  for (const field of DRAFT_FIELDS) {
+    const control = form.querySelector?.(`[name="${field}"]`);
+    if (!control) continue;
+    const value = String(control.value ?? '');
+    if (field === 'kind' || field === 'severity') {
+      if (value) state.draft[field] = value;
+    } else {
+      state.draft[field] = value;
+    }
+  }
+  return state.draft;
+}
+
+/**
+ * The only write path into the dialog fields, and it is deliberately
+ * fill-empty-only: a value coming from anywhere but the keyboard may seed an
+ * empty field, never replace text the user has already written.
+ */
+function applyDraftToForm(form, draft) {
+  if (!form || !draft) return;
+  for (const field of DRAFT_FIELDS) {
+    const control = form.querySelector?.(`[name="${field}"]`);
+    if (!control) continue;
+    const incoming = String(draft[field] ?? '');
+    if (!incoming) continue;
+    if (field === 'kind' || field === 'severity') {
+      control.value = incoming;
+      continue;
+    }
+    if (!isBlankValue(control.value)) continue;
+    control.value = incoming;
+  }
+}
+
+/**
+ * Supported entry point for machine-generated context (module hints, captured
+ * error text, …). It can only seed fields that are still empty; user input is
+ * never replaced.
+ */
+export function prefillBusinessReporterDraft(values = {}, state = reporterState) {
+  if (!state) return null;
+  captureDraft(state);
+  for (const field of DRAFT_FIELDS) {
+    const incoming = values[field];
+    if (incoming === undefined || incoming === null) continue;
+    const text = String(incoming);
+    if (!text) continue;
+    if (field === 'kind' || field === 'severity') {
+      state.draft[field] = text;
+      continue;
+    }
+    if (!isBlankValue(state.draft[field])) continue;
+    state.draft[field] = text;
+  }
+  applyDraftToForm(reporterForm(state), state.draft);
+  return { ...state.draft };
+}
+
+function draftHasContent(state) {
+  captureDraft(state);
+  return !isBlankValue(state.draft.title)
+    || !isBlankValue(state.draft.summary)
+    || !isBlankValue(state.draft.expected)
+    || Boolean(state.attachment);
+}
+
+/**
+ * Registering the report schemas is the cold start that made the very first
+ * submit look like a hang. Warming it once when the dialog opens — and
+ * reusing that promise for the submit — keeps the first save as fast as the
+ * second one.
+ */
+function warmReportCollections(state) {
+  if (typeof state.ensureReportCollections !== 'function') return Promise.resolve();
+  if (!state.collectionsReady) {
+    state.collectionsReady = Promise.resolve()
+      .then(() => state.ensureReportCollections())
+      .catch((error) => {
+        state.collectionsReady = null;
+        throw error;
+      });
+  }
+  return state.collectionsReady;
+}
+
+function showReporterToast(message, tone = 'success') {
+  if (!message || typeof document === 'undefined' || !document.body) return;
+  const toast = document.createElement('div');
+  toast.className = 'ctox-report-toast';
+  toast.dataset.tone = tone;
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('aria-live', 'polite');
+  toast.textContent = message;
+  document.body.append(toast);
+  requestAnimationFrame(() => toast.classList.add('is-visible'));
+  setTimeout(() => {
+    toast.classList.remove('is-visible');
+    setTimeout(() => toast.remove(), 260);
+  }, REPORTER_TOAST_MS);
+}
+
+function setReporterStatus(state, text) {
+  const status = reporterForm(state)?.querySelector?.('[data-status]');
+  if (status) status.textContent = text || '';
+}
+
 function openReporterDialog(state) {
+  if (!state) return;
+  // A second open must never wipe a dialog that is already collecting text.
+  if (state.modal && (typeof state.modal.isConnected !== 'boolean' || state.modal.isConnected)) {
+    state.dialogOpen = true;
+    state.modal.hidden = false;
+    state.modal.style.display = '';
+    state.modal.querySelector('input[name="title"]')?.focus();
+    return;
+  }
   const module = state.getActiveModule?.() || { id: 'ctox', title: 'CTOX' };
   const backdrop = document.createElement('div');
   backdrop.className = 'ctox-report-backdrop';
@@ -442,7 +634,7 @@ function openReporterDialog(state) {
     <form class="ctox-report-dialog" data-report-form>
       <header>
         <div>
-          <strong>Bug oder Feature an CTOX</strong>
+          <strong>Bug oder Feature erfassen</strong>
           <span>${escapeHtml(module.title || module.id || 'Business OS')}</span>
         </div>
         <button type="button" class="ctox-report-close" data-close aria-label="Schließen">x</button>
@@ -475,7 +667,7 @@ function openReporterDialog(state) {
       </label>
       <label>
         <span>Erwartung</span>
-        <textarea name="expected" rows="3" placeholder="Was sollte CTOX tun oder prüfen?"></textarea>
+        <textarea name="expected" rows="3" placeholder="Was sollte stattdessen passieren?"></textarea>
       </label>
       <div class="ctox-report-actions">
         <button type="button" class="ctox-report-secondary" data-markup>${screenIconSvg()}<span>Screenshot + Kritzeln</span></button>
@@ -490,12 +682,12 @@ function openReporterDialog(state) {
       </div>
       <footer>
         <span data-status></span>
-        <button type="submit">An CTOX senden</button>
+        <button type="submit">In Bugs & Features speichern</button>
       </footer>
     </form>
   `;
   state.modal = backdrop;
-  state.attachment = null;
+  state.dialogOpen = true;
   backdrop.querySelector('[data-close]')?.addEventListener('click', () => closeReporterDialog(state));
   backdrop.querySelector('[data-open-reports]')?.addEventListener('click', () => {
     closeReporterDialog(state);
@@ -506,33 +698,80 @@ function openReporterDialog(state) {
     syncAttachmentPreview(state);
   });
   backdrop.querySelector('[data-markup]')?.addEventListener('click', () => startMarkup(state));
-  backdrop.addEventListener('click', (event) => {
-    if (event.target === backdrop) closeReporterDialog(state);
+  // Keep the durable draft in step with every keystroke.
+  const form = backdrop.querySelector('[data-report-form]');
+  form?.addEventListener('input', () => captureDraft(state));
+  form?.addEventListener('change', () => captureDraft(state));
+  // The dialog closes on explicit intent only. A backdrop click counts as
+  // intent when nothing is written yet; once there is text, a stray click
+  // that merely ends on the backdrop (text selection drags do this) must not
+  // throw the report away.
+  let backdropPointerDown = false;
+  backdrop.addEventListener('pointerdown', (event) => {
+    backdropPointerDown = event.target === backdrop;
   });
-  backdrop.querySelector('[data-report-form]')?.addEventListener('submit', async (event) => {
+  backdrop.addEventListener('click', (event) => {
+    const startedOnBackdrop = backdropPointerDown;
+    backdropPointerDown = false;
+    if (event.target !== backdrop || !startedOnBackdrop) return;
+    requestCloseReporterDialog(state);
+  });
+  backdrop.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape' || state.markupMode !== 'idle') return;
+    event.stopPropagation();
+    requestCloseReporterDialog(state);
+  });
+  form?.addEventListener('submit', async (event) => {
     event.preventDefault();
     await submitReport(state, module, event.currentTarget);
   });
   document.body.append(backdrop);
+  applyDraftToForm(form, state.draft);
+  syncAttachmentPreview(state);
+  // Pay the schema cold start while the user is still typing.
+  warmReportCollections(state).catch(() => {});
   backdrop.querySelector('input[name="title"]')?.focus();
 }
 
-function closeReporterDialog(state) {
-  if (state.markupMode !== 'idle') cancelMarkup(state);
+/**
+ * Soft close for the implicit gestures (backdrop click, Escape). With text in
+ * the form it refuses and says how to close on purpose; the X button and a
+ * successful save call closeReporterDialog directly.
+ */
+function requestCloseReporterDialog(state) {
+  if (state.submitting) return;
+  if (draftHasContent(state)) {
+    setReporterStatus(state, reporterCopy().keepOpenHint);
+    return;
+  }
+  closeReporterDialog(state);
+}
+
+function closeReporterDialog(state, { keepDraft = true } = {}) {
+  captureDraft(state);
+  state.dialogOpen = false;
+  destroyMarkupOverlay(state);
   state.modal?.remove();
   state.modal = null;
+  if (!keepDraft) {
+    state.draft = createEmptyDraft();
+    state.attachment = null;
+    state.pendingReportIdentity = null;
+  }
 }
 
 async function submitReport(state, module, form) {
+  if (state.submitting) return;
+  const copy = reporterCopy();
   const status = form.querySelector('[data-status]');
   const submit = form.querySelector('button[type="submit"]');
-  const data = new FormData(form);
+  captureDraft(state);
   const now = Date.now();
-  const title = data.get('title')?.toString().trim() || 'Business OS report';
-  const summary = data.get('summary')?.toString().trim() || '';
-  const expected = data.get('expected')?.toString().trim() || '';
-  const kind = data.get('kind')?.toString() || 'bug';
-  const severity = data.get('severity')?.toString() || 'medium';
+  const title = state.draft.title.trim() || 'Business OS report';
+  const summary = state.draft.summary.trim();
+  const expected = state.draft.expected.trim();
+  const kind = state.draft.kind || 'bug';
+  const severity = state.draft.severity || 'medium';
   const clientContext = {
     source: 'business-os-reporter',
     module_id: module.id || '',
@@ -549,11 +788,20 @@ async function submitReport(state, module, form) {
     created_at: new Date(now).toISOString(),
     attachment: reporterAttachmentContext(state.attachment),
   };
+  // A retried submit reuses the same report id, so the second attempt updates
+  // the same record instead of creating a duplicate.
+  const identity = state.pendingReportIdentity || {
+    reportId: `report_${newId()}`,
+  };
+  state.pendingReportIdentity = identity;
+  state.submitting = true;
   submit.disabled = true;
-  status.textContent = 'Sende...';
-  try {
-    const result = await dispatchBusinessReport({
-      commandBus: state.commandBus,
+  if (status) status.textContent = copy.saving;
+
+  const attempt = () => withTimeout(
+    () => saveBusinessReportLocally({
+      db: state.db,
+      sync: state.sync,
       session: state.session,
       module,
       kind,
@@ -563,31 +811,50 @@ async function submitReport(state, module, form) {
       expected,
       clientContext,
       now,
-    });
-    await upsertLocalReport(state, {
-      result,
-      module,
-      kind,
-      severity,
-      title,
-      summary,
-      expected,
-      clientContext,
-      now,
-    });
-    window.dispatchEvent(new CustomEvent('ctox-business-os-reports-updated', {
-      detail: { reportId: result.report_id || '', moduleId: module.id || '' },
-    }));
-    status.textContent = reporterStatusText(result);
-    setTimeout(() => closeReporterDialog(state), result.task_id ? 900 : 1400);
+      reportId: identity.reportId,
+    }),
+    REPORTER_SUBMIT_TIMEOUT_MS,
+    { message: 'business report save exceeded its deadline' },
+  );
+
+  try {
+    await withTimeout(
+      () => warmReportCollections(state),
+      REPORTER_PREPARE_TIMEOUT_MS,
+      { message: 'business report store preparation exceeded its deadline' },
+    );
+    let result;
+    try {
+      result = await attempt();
+    } catch (firstError) {
+      // Silent second try: cold bridges and a still-registering store are the
+      // known first-submit failure, and the draft stays untouched meanwhile.
+      console.warn('[business-reporter] first save attempt failed, retrying once', firstError);
+      if (status) status.textContent = copy.retrying;
+      state.collectionsReady = null;
+      await new Promise((resolve) => setTimeout(resolve, REPORTER_RETRY_DELAY_MS));
+      await warmReportCollections(state).catch(() => {});
+      result = await attempt();
+    }
+    notifyReportsUpdated(result.report_id || identity.reportId, module.id || '');
+    if (status) status.textContent = reporterStatusText(result);
+    // Confirmed: only now may the draft be dropped and the dialog closed.
+    closeReporterDialog(state, { keepDraft: false });
+    showReporterToast(copy.savedToast, 'success');
   } catch (error) {
+    // Draft, attachment and report id survive so the user can simply send again.
     submit.disabled = false;
-    status.textContent = reporterErrorText(error);
+    if (status) status.textContent = reporterErrorText(error);
+  } finally {
+    state.submitting = false;
+    // No capture overlay may outlive a submit — success, failure or timeout.
+    destroyMarkupOverlay(state);
   }
 }
 
-export async function dispatchBusinessReport({
-  commandBus,
+export async function saveBusinessReportLocally({
+  db,
+  sync = null,
   session,
   module,
   kind = 'bug',
@@ -597,56 +864,37 @@ export async function dispatchBusinessReport({
   expected = '',
   clientContext = {},
   now = Date.now(),
+  reportId = '',
 }) {
-  if (!commandBus?.dispatch) {
-    throw new Error('business_commands collection is required for reports');
-  }
-  const reportId = `report_${newId()}`;
-  const commandId = `cmd_${newId()}`;
-  const moduleId = module?.id || clientContext?.module_id || 'ctox';
-  const actor = session?.user ? {
-    id: session.user.id || '',
-    display_name: session.user.display_name || session.user.name || session.user.id || '',
-    role: session.user.role || 'user',
-    is_admin: Boolean(session.user.is_admin),
-  } : null;
-  const dispatchResult = await withTimeout(commandBus.dispatch({
-    id: commandId,
-    module: 'ctox',
-    type: `ctox.report.${kind || 'bug'}`,
-    record_id: reportId,
-    inbound_channel: moduleId,
-    payload: {
-      report_id: reportId,
-      module_id: moduleId,
+  const resolvedReportId = String(reportId || '').trim() || `report_${newId()}`;
+  const result = {
+    ok: true,
+    report_id: resolvedReportId,
+    command_id: '',
+    task_id: '',
+    task_status: 'not_delegated',
+    status: 'open',
+    report_status: 'open',
+    delivery_status: 'not_delegated',
+    transport: 'rxdb-webrtc',
+  };
+  await persistLocalBusinessReport({
+    db,
+    sync,
+    session,
+    report: {
+      result,
+      module,
       kind,
       severity,
       title,
       summary,
       expected,
-      reporter_id: actor?.id || '',
+      clientContext,
+      now,
     },
-    client_context: {
-      ...clientContext,
-      actor,
-      created_at: clientContext?.created_at || new Date(now).toISOString(),
-    },
-  }), REPORT_DISPATCH_TIMEOUT_MS, 'Report konnte nicht rechtzeitig an CTOX übergeben werden.');
-  const taskId = String(dispatchResult?.task_id || '').trim();
-  if (!taskId) {
-    throw new Error('CTOX hat fuer den Report keine echte Queue-ID zurueckprojiziert.');
-  }
-  const status = String(dispatchResult?.status || 'accepted').trim() || 'accepted';
-  const taskStatus = String(dispatchResult?.task_status || 'queued').trim() || 'queued';
-  return {
-    ok: dispatchResult?.ok !== false,
-    report_id: reportId,
-    command_id: dispatchResult?.command_id || commandId,
-    task_id: taskId,
-    task_status: taskStatus,
-    status,
-    transport: dispatchResult?.transport || 'rxdb-webrtc',
-  };
+  });
+  return result;
 }
 
 function reporterAttachmentContext(attachment) {
@@ -677,29 +925,44 @@ function countStrokePoints(strokes) {
 }
 
 function reporterStatusText(result) {
-  if (result?.task_id) return 'Als CTOX Task angelegt.';
-  return 'Report wurde nicht als CTOX Task bestaetigt.';
+  return result?.report_id
+    ? 'In Bugs & Features gespeichert. Dort kannst du den Report verwalten oder delegieren.'
+    : 'Report konnte nicht gespeichert werden.';
 }
 
 function reporterErrorText(error) {
+  if (error?.name === 'OperationTimeoutError') return reporterCopy().failedTimeout;
   const message = String(error?.message || error || '').trim();
   return message || 'Report konnte nicht gesendet werden.';
 }
 
-async function withTimeout(promise, timeoutMs, message) {
-  return Promise.race([
-    Promise.resolve(promise),
-    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), timeoutMs)),
-  ]);
-}
-
-async function upsertLocalReport(state, report) {
-  const raw = state.db?.raw;
-  if (!raw) return;
-  await prepareReportSync(state.sync);
+export async function persistLocalBusinessReport({ db, sync = null, session = null, report }) {
+  const moduleReports = db?.collection?.('business_module_reports')
+    || db?.raw?.business_module_reports
+    || null;
+  const bugReports = db?.collection?.('ctox_bug_reports')
+    || db?.raw?.ctox_bug_reports
+    || null;
+  if (!moduleReports || !bugReports) {
+    throw new Error('Bugs & Features ist noch nicht bereit. Bitte erneut senden.');
+  }
+  // Report visibility is local-first. Starting or catching up the WebRTC
+  // bridges must never block the write: delegation is an explicit later
+  // action from Bugs & Features, not part of this persistence step.
   const id = report.result?.report_id || `report_${crypto.randomUUID?.() || Date.now()}`;
   const taskId = report.result?.task_id || '';
   const commandId = report.result?.command_id || '';
+  const reportStatus = report.result?.report_status || 'open';
+  const deliveryStatus = report.result?.delivery_status
+    || (taskId ? 'accepted' : (commandId ? 'pending_sync' : 'not_delegated'));
+  const clientContext = {
+    ...(report.clientContext || {}),
+    report_delivery: {
+      status: deliveryStatus,
+      command_id: commandId,
+      task_id: taskId,
+    },
+  };
   const common = {
     id,
     report_id: id,
@@ -709,38 +972,46 @@ async function upsertLocalReport(state, report) {
     title: report.title,
     summary: report.summary,
     expected: report.expected,
-    status: report.result?.status || 'open',
-    reporter_id: state.session?.user?.id || '',
+    status: reportStatus,
+    reporter_id: session?.user?.id || '',
     ctox_command_id: commandId,
     task_id: taskId,
     inbound_channel: report.module.id || 'ctox',
-    client_context: report.clientContext,
+    client_context: clientContext,
     created_at_ms: report.now,
     updated_at_ms: report.now,
   };
-  await upsertRx(raw.business_module_reports, common);
-  await upsertRx(raw.ctox_bug_reports, {
+  await upsertRx(moduleReports, common);
+  await upsertRx(bugReports, {
     id,
     title: report.title,
-    status: report.result?.status || 'open',
+    status: reportStatus,
     module: report.module.id || 'ctox',
     inbound_channel: report.module.id || 'ctox',
     severity: report.severity,
     surface: 'business-os',
     description: report.summary,
-    evidence: report.clientContext,
+    evidence: clientContext,
     payload: {
       kind: report.kind,
       expected: report.expected,
       ctox_command_id: commandId,
       task_id: taskId,
+      delivery_status: deliveryStatus,
       change_summary: '',
       rollback_version_id: '',
     },
     created_at_ms: report.now,
     updated_at_ms: report.now,
   });
-  await waitForReportSync(state.sync);
+  void waitForReportSync(sync);
+  return true;
+}
+
+function notifyReportsUpdated(reportId, moduleId) {
+  window.dispatchEvent(new CustomEvent('ctox-business-os-reports-updated', {
+    detail: { reportId: reportId || '', moduleId: moduleId || '' },
+  }));
 }
 
 async function upsertRx(collection, doc) {
@@ -754,14 +1025,6 @@ async function upsertRx(collection, doc) {
   const existing = await collection.findOne(doc.id).exec();
   if (existing) await existing.patch(doc);
   else await collection.insert(doc);
-}
-
-async function prepareReportSync(sync) {
-  if (!sync?.startCollection) return;
-  await Promise.all([
-    sync.startCollection('business_module_reports').then((bridge) => waitForSyncBridgeReady(bridge, 10000)).catch(() => null),
-    sync.startCollection('ctox_bug_reports').then((bridge) => waitForSyncBridgeReady(bridge, 10000)).catch(() => null),
-  ]);
 }
 
 async function waitForReportSync(sync) {
@@ -797,6 +1060,9 @@ function isRxDbConflictError(error) {
 
 function startMarkup(state) {
   if (state.markupMode !== 'idle') return;
+  // Freeze what is typed before the dialog goes out of sight: from here on
+  // the draft, not the DOM, is what carries the report.
+  captureDraft(state);
   state.markupMode = 'selecting';
   state.selectionOrigin = null;
   state.selectionRect = null;
@@ -807,13 +1073,28 @@ function startMarkup(state) {
 }
 
 function cancelMarkup(state) {
+  destroyMarkupOverlay(state);
+}
+
+/**
+ * Single teardown for the capture overlay. It also sweeps stray overlay nodes
+ * so no capture layer can be left sitting over the desktop, and it always
+ * brings the reporter back.
+ */
+function destroyMarkupOverlay(state) {
   state.markupMode = 'idle';
   state.selectionOrigin = null;
   state.selectionRect = null;
   state.strokes = [];
   state.activeStroke = null;
+  state.savingMarkup = false;
+  if (state.overlayKeyHandler) {
+    document.removeEventListener('keydown', state.overlayKeyHandler, true);
+    state.overlayKeyHandler = null;
+  }
   state.overlay?.remove();
   state.overlay = null;
+  document.querySelectorAll?.('.ctox-report-markup-overlay')?.forEach?.((node) => node.remove());
   showReporterChrome(state);
 }
 
@@ -827,14 +1108,27 @@ function hideReporterChrome(state) {
   if (fab) fab.style.display = 'none';
 }
 
+/**
+ * Bring the reporter back after a capture. If the dialog element did not
+ * survive the round trip, it is rebuilt from the draft — with the text and
+ * the fresh attachment — instead of leaving the user with nothing.
+ */
 function showReporterChrome(state) {
-  if (state.modal) {
+  const fab = document.querySelector('[data-ctox-reporter]');
+  if (fab) fab.style.display = '';
+  const modalAlive = state.modal
+    && (typeof state.modal.isConnected !== 'boolean' || state.modal.isConnected);
+  if (modalAlive) {
     state.modal.style.display = '';
     if (state.modal.dataset.wasOpen === '1') state.modal.hidden = false;
     delete state.modal.dataset.wasOpen;
+    applyDraftToForm(reporterForm(state), state.draft);
+    syncAttachmentPreview(state);
+    return;
   }
-  const fab = document.querySelector('[data-ctox-reporter]');
-  if (fab) fab.style.display = '';
+  state.modal = null;
+  if (!state.dialogOpen) return;
+  openReporterDialog(state);
 }
 
 function renderMarkupOverlay(state) {
@@ -855,6 +1149,14 @@ function renderMarkupOverlay(state) {
   `;
   state.overlay = overlay;
   document.body.append(overlay);
+  // Escape must abort the capture, never leave the layer stranded.
+  state.overlayKeyHandler = (event) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelMarkup(state);
+  };
+  document.addEventListener('keydown', state.overlayKeyHandler, true);
   overlay.addEventListener('pointerdown', (event) => onOverlayPointerDown(state, event));
   overlay.addEventListener('pointermove', (event) => onOverlayPointerMove(state, event));
   overlay.addEventListener('pointerup', (event) => onOverlayPointerUp(state, event));
@@ -1003,32 +1305,43 @@ async function commitMarkup(state) {
     state.overlay.style.pointerEvents = 'none';
   }
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  const deadline = state.captureTimeoutMs || REPORTER_CAPTURE_TIMEOUT_MS;
+  // The outer bound keeps headroom over the picker deadline so the DOM
+  // fallback still gets its turn when the picker itself timed out.
+  const outerDeadline = deadline + Math.max(2000, Math.round(deadline / 3));
   try {
-    const screenDataUrl = await captureScreenRegion(rect).catch(() => null);
-    const domDataUrl = screenDataUrl ? null : await captureDomRegion(rect).catch(() => null);
-    const screenshotDataUrl = screenDataUrl || domDataUrl;
-    const compositeDataUrl = screenshotDataUrl
-      ? await buildCompositeDataUrl(rect, finalStrokes, screenshotDataUrl).catch(() => markupSvgDataUrl)
-      : markupSvgDataUrl;
+    const captured = await withTimeout(async () => {
+      const screenDataUrl = await captureScreenRegion(rect, deadline).catch(() => null);
+      const domDataUrl = screenDataUrl ? null : await captureDomRegion(rect).catch(() => null);
+      const screenshotDataUrl = screenDataUrl || domDataUrl;
+      const compositeDataUrl = screenshotDataUrl
+        ? await buildCompositeDataUrl(rect, finalStrokes, screenshotDataUrl).catch(() => markupSvgDataUrl)
+        : markupSvgDataUrl;
+      return {
+        screenshotDataUrl,
+        compositeDataUrl,
+        captureMode: screenDataUrl ? 'screen' : domDataUrl ? 'dom' : 'markup-only',
+      };
+    }, outerDeadline, { message: 'screen capture exceeded its deadline' }).catch((error) => {
+      console.warn('[business-reporter] screen capture unavailable, keeping the markup only', error);
+      return { screenshotDataUrl: null, compositeDataUrl: markupSvgDataUrl, captureMode: 'markup-only' };
+    });
     state.attachment = {
       rect,
       strokes: finalStrokes,
-      screenshotDataUrl,
+      screenshotDataUrl: captured.screenshotDataUrl,
       markupSvgDataUrl,
-      compositeDataUrl,
-      captureMode: screenDataUrl ? 'screen' : domDataUrl ? 'dom' : 'markup-only',
+      compositeDataUrl: captured.compositeDataUrl,
+      captureMode: captured.captureMode,
       capturedAt: new Date().toISOString(),
     };
     syncAttachmentPreview(state);
+  } catch (error) {
+    console.warn('[business-reporter] markup capture failed', error);
   } finally {
-    state.overlay?.remove();
-    state.overlay = null;
-    state.selectionOrigin = null;
-    state.selectionRect = null;
-    state.strokes = [];
-    state.activeStroke = null;
-    state.savingMarkup = false;
-    showReporterChrome(state);
+    // The overlay always goes away, and the dialog always comes back with
+    // the text that was typed before the capture started.
+    destroyMarkupOverlay(state);
   }
 }
 
@@ -1049,7 +1362,7 @@ function syncAttachmentPreview(state) {
     : 'Screenshot mit Markup';
 }
 
-async function captureScreenRegion(rect) {
+async function captureScreenRegion(rect, timeoutMs = REPORTER_CAPTURE_TIMEOUT_MS) {
   const chromeCapture = await captureVisibleTabPng();
   if (chromeCapture) {
     const image = await loadImage(chromeCapture);
@@ -1062,11 +1375,17 @@ async function captureScreenRegion(rect) {
   }
   if (!navigator.mediaDevices?.getDisplayMedia) return null;
   let stream;
+  // A picker that is never answered must not hold the capture layer hostage.
+  const pending = Promise.resolve()
+    .then(() => navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: 'browser' }, audio: false }));
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({ video: { displaySurface: 'browser' }, audio: false });
+    stream = await withTimeout(() => pending, timeoutMs, { message: 'display capture picker exceeded its deadline' });
   } catch {
+    // If the picker answers after the deadline, release the stream anyway.
+    pending.then((late) => late?.getTracks?.().forEach((track) => track.stop())).catch(() => {});
     return null;
   }
+  if (!stream) return null;
   try {
     const video = document.createElement('video');
     video.muted = true;
@@ -1268,7 +1587,9 @@ function installReporterStyles() {
       position: fixed;
       right: 18px;
       bottom: 18px;
-      z-index: 40;
+      /* Shell windows live at z-index 50. The standing reporter must remain
+         clickable above them while staying below shell menus and dialogs. */
+      z-index: 220;
       display: inline-flex;
       align-items: center;
       justify-content: flex-start;
@@ -1432,7 +1753,7 @@ function installReporterStyles() {
     .ctox-report-backdrop {
       position: fixed;
       inset: 0;
-      z-index: 80;
+      z-index: 280;
       display: grid;
       place-items: center;
       background: rgba(5, 8, 12, .62);
@@ -1555,6 +1876,36 @@ function installReporterStyles() {
       object-fit: contain;
       border-radius: 6px;
       background: #0a0d11;
+    }
+    /* Confirmation lives above the dialog layer so it is still readable in
+       the moment the dialog closes itself after a successful save. */
+    .ctox-report-toast {
+      position: fixed;
+      right: 18px;
+      bottom: 72px;
+      z-index: 300;
+      max-width: min(420px, calc(100vw - 36px));
+      padding: 11px 14px;
+      border: 1px solid color-mix(in srgb, var(--accent, #72b8aa) 45%, var(--line, #3a4149));
+      border-radius: 10px;
+      background: color-mix(in srgb, var(--surface, #171a1d) 96%, transparent);
+      color: var(--text, #e6e9eb);
+      font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      box-shadow: 0 14px 34px rgba(0, 0, 0, .32);
+      opacity: 0;
+      transform: translateY(8px);
+      transition: opacity 200ms ease, transform 200ms ease;
+      pointer-events: none;
+    }
+    .ctox-report-toast.is-visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+    .ctox-report-toast[data-tone="error"] {
+      border-color: rgba(239, 68, 68, .55);
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ctox-report-toast { transition: none; transform: none; }
     }
     .ctox-report-markup-overlay {
       position: fixed;

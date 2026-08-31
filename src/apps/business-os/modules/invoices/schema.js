@@ -1,6 +1,6 @@
 import { collections as accountingCollections } from '../buchhaltung/schema.js';
 import { collections as customerCollections } from '../customers/schema.js';
-import { collections as desktopCollections } from '../desktop/schema.js?v=20260811-fremde-collection-mitladen-v106';
+import { collections as desktopCollections } from '../desktop/schema.js?v=20260816-browser-sync-guards-v141';
 
 // invoices/schema.js — RxDB collection schemas for the invoices module.
 // All schemas follow the customers convention (cent-integer, *_ms timestamps,

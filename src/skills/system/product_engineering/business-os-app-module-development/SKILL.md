@@ -140,6 +140,13 @@ records so the agent knows what was clicked.
 - Runtime app: `ctox business-os app validate <module-id> --installed`
 - Source app: `ctox business-os app validate <module-id> --source`
 - Browser proof: `ctox business-os app smoke <module-id> --installed`
+- Release audit: `ctox business-os app audit <module-id> --installed --profile release`
+- Add `tests/audit-scenarios.json` for release/full audits. Use version
+  `ctox.business_os.app_audit_scenarios.v1`, semantic `data-action`,
+  `data-testid`, or `data-field` targets, and only declarative click/fill/assert/
+  reload steps. Raw selectors, scripts, commands, and navigation are forbidden.
+  A missing required scenario is a release blocker; it must not fall back to a
+  guessed Create/Save workflow.
 - Visual proof: inspect the mounted app in the real Business OS shell at a
   desktop viewport, a resized 640×480 window, and a 360px mobile sheet, in light
   and dark theme. The app must

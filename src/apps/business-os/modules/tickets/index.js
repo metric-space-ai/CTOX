@@ -1,5 +1,5 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 
 const REFRESH_DEBOUNCE_MS = 80;
 const TICKET_PRIMARY_COLLECTION = 'ctox_ticket_items';
@@ -15,6 +15,8 @@ const labels = {
     importInvalid: 'Ungültige JSON-Datei.',
     importEmpty: 'Keine Datensätze in der Datei.',
     search: 'Suchen...',
+    showAsList: 'Als Liste anzeigen',
+    showAsCards: 'Als Karten anzeigen',
     allStatus: 'Alle Status',
     open: 'Offen',
     pending: 'Pending',
@@ -22,7 +24,7 @@ const labels = {
     closed: 'Geschlossen',
     bandAll: 'Alle',
     bandOpen: 'Offen',
-    bandPending: 'Pending',
+    bandPending: 'Wartend',
     bandClosed: 'Geschlossen',
     entries: 'Einträge',
     openOps: 'Operationen einblenden',
@@ -93,6 +95,8 @@ const labels = {
     importInvalid: 'Invalid JSON file.',
     importEmpty: 'No records in the file.',
     search: 'Search...',
+    showAsList: 'Show as list',
+    showAsCards: 'Show as cards',
     allStatus: 'All status',
     open: 'Open',
     pending: 'Pending',
@@ -100,7 +104,7 @@ const labels = {
     closed: 'Closed',
     bandAll: 'All',
     bandOpen: 'Open',
-    bandPending: 'Pending',
+    bandPending: 'Wartend',
     bandClosed: 'Closed',
     entries: 'entries',
     openOps: 'Show operations',
@@ -283,8 +287,13 @@ export function resolveOpsVisible(opsMode, flowActive) {
   return Boolean(flowActive);
 }
 
-// A shard is a pure selector: title + ONE muted meta line. No inline expansion.
-// `rows` are shaped ({ id, key, title, status, source, subtitle }).
+// Two densities, not two paddings (Betreiber-Direktive 31.08.):
+//   KARTEN — bold title + status badge over two muted meta lines carrying the
+//            ticket's real detail fields (key/source, assignment/updated).
+//   LISTE  — exactly ONE line: title plus the status badge as the single short
+//            meta on the right.
+// Both stay pure selectors: no inline expansion in either view.
+// `rows` are shaped ({ id, key, title, status, source, subtitle, updated }).
 export function ticketRowHtml(row, opts = {}) {
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selected = Boolean(opts.selected);
@@ -298,10 +307,12 @@ export function ticketRowHtml(row, opts = {}) {
   if (view === 'list') {
     return '<div' + attrs + '><span class="ticket-row-title">' + escapeHtml(row.title || row.key || 'Ticket') + '</span>' + badge + '</div>';
   }
-  const meta = [escapeHtml(row.source || 'ctox'), escapeHtml(row.subtitle || '')].filter(Boolean).join(' · ');
+  const metaTop = [row.key, row.source || 'ctox'].filter(Boolean).map(escapeHtml).join(' · ');
+  const metaSub = [row.subtitle, row.updated].filter(Boolean).map(escapeHtml).join(' · ');
   return '<div' + attrs + '>'
     + '<div class="ticket-row-head"><span class="ticket-row-title">' + escapeHtml(row.title || row.key || 'Ticket') + '</span>' + badge + '</div>'
-    + '<div class="ticket-row-meta">' + meta + '</div>'
+    + (metaTop ? '<div class="ticket-row-meta">' + metaTop + '</div>' : '')
+    + (metaSub ? '<div class="ticket-row-meta ticket-row-meta--sub">' + metaSub + '</div>' : '')
     + '</div>';
 }
 
@@ -389,6 +400,7 @@ function applyStaticLabels() {
   }
   const search = el.querySelector('[data-pg-search]');
   if (search) search.placeholder = state.t('search', 'Suchen...');
+  syncViewToggle();
 }
 
 // Seed the cached grammar state from the DOM before the shell fires its first
@@ -397,7 +409,8 @@ function seedGrammarState() {
   const el = root();
   if (!el) return;
   state.search = (el.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase();
-  state.view = el.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards';
+  // ONE toggle button: data-pg-view carries the CURRENT view (no aria-pressed).
+  state.view = el.querySelector('[data-tickets-view-toggle]')?.dataset.pgView === 'list' ? 'list' : 'cards';
   state.band = el.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'all';
   state.status = el.querySelector('[data-pg-filter][data-pg-name="status"]')?.value || 'all';
 }
@@ -406,10 +419,42 @@ function wireUi() {
   const el = root();
   if (!el) return;
   el.addEventListener('click', onRootClick);
+  // One button, one action. Capture phase on the root runs BEFORE the
+  // shell-wired grammar listener sitting on the button itself, so the grammar
+  // reads the already-flipped data-pg-view and reports the new view exactly
+  // once.
+  el.addEventListener('click', onViewToggleCapture, true);
   el.addEventListener('keydown', onListKey);
   // The shell reports search / view / tray / band changes on this bubbling
   // event; re-render (with a list rebuild — an intentional reset).
   el.addEventListener('ctox-pane-grammar-change', onGrammarChange);
+  syncViewToggle();
+}
+
+function onViewToggleCapture(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const button = target?.closest('[data-tickets-view-toggle]');
+  if (!button || !root()?.contains(button)) return;
+  button.dataset.pgView = button.dataset.pgView === 'list' ? 'cards' : 'list';
+  syncViewToggle();
+}
+
+// The shard/list switch is ONE button and therefore an action, not a state:
+// icon, aria-label and title name the view the next click produces. The shared
+// grammar wiring stamps aria-pressed on every [data-pg-view] button it sees;
+// for a single-button switch that attribute would claim a toggle state the
+// control does not have, so it is stripped again here.
+function syncViewToggle() {
+  const button = root()?.querySelector('[data-tickets-view-toggle]');
+  if (!button) return;
+  const t = typeof state.t === 'function' ? state.t : (_key, fallback) => fallback;
+  const goesToList = button.dataset.pgView !== 'list';
+  const label = goesToList
+    ? t('showAsList', 'Als Liste anzeigen')
+    : t('showAsCards', 'Als Karten anzeigen');
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.removeAttribute('aria-pressed');
 }
 
 function onGrammarChange(event) {
@@ -418,6 +463,9 @@ function onGrammarChange(event) {
   state.view = detail.view || state.view || 'cards';
   state.band = detail.band || 'all';
   state.status = (detail.filters && detail.filters.status) || 'all';
+  // The grammar stamps aria-pressed on the single toggle; strip it again and
+  // keep icon/label pointing at the view the next click produces.
+  syncViewToggle();
   syncSelectionToVisible();
   render();
 }
@@ -552,7 +600,9 @@ function shapeTicket(ticket) {
     title: ticket.title || ticket.ticket_key || 'Ticket',
     status: ticket.remote_status || 'open',
     source: ticket.source_system || 'ctox',
-    subtitle: label?.label || ticket.priority || ticket.requester || ticket.ticket_key || '',
+    subtitle: label?.label || ticket.priority || ticket.requester || '',
+    // Card meta only — the list row stays one line and never paints it.
+    updated: formatDate(ticket.updated_at || ticket.last_synced_at),
   };
 }
 
@@ -641,15 +691,29 @@ function renderList() {
     ? state.t('noTicketsFiltered', 'Kein Ticket passt zum Filter.')
     : state.t('noTickets', 'Noch keine Tickets verfügbar.');
   list.innerHTML = renderTicketList(rows, { view: state.view, selectedId: state.selectedId, emptyText });
+  // Export ist nur mit Daten sinnvoll; der Knopf startet statisch deaktiviert
+  // (data-empty-disabled in index.html) und folgt hier dem Datenbestand.
+  const exportBtn = state.ctx.host.querySelector('[data-action="export"][data-empty-disabled]');
+  if (exportBtn) exportBtn.disabled = state.data.ctox_ticket_items.length === 0;
 }
 
 function renderDetail() {
   const detail = state.ctx.host.querySelector('[data-ticket-detail]');
   if (!detail) return;
+  // The pane head is static markup from index.html and must exist in every
+  // state; this renderer only refines its texts/actions and owns the body.
+  const headKicker = detail.querySelector('[data-detail-kicker]');
+  const headTitle = detail.querySelector('[data-detail-title]');
+  const headActions = detail.querySelector('[data-detail-actions]');
+  const body = detail.querySelector('[data-ticket-detail-body]');
+  if (!headKicker || !headTitle || !headActions || !body) return;
   const ticket = selectedTicket();
   if (!ticket) {
     clearRecordContext(detail);
-    detail.innerHTML = state.loading
+    headKicker.textContent = state.t('kicker', 'CTOX');
+    headTitle.textContent = state.t('detailColumnTitle', 'Ticket');
+    headActions.innerHTML = '';
+    body.innerHTML = state.loading
       ? renderTicketLoadingState('loading')
       : renderEmptyState(
         state.t('selectTicket', 'Wähle links ein Ticket aus.'),
@@ -675,19 +739,13 @@ function renderDetail() {
         </div>
       </section>`
     : '';
-  detail.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">${escapeHtml(ticket.ticket_key || ticket.id)}</span>
-          <h2 class="ctox-pane-title">${escapeHtml(ticket.title || ticket.ticket_key || 'Ticket')} <span class="ctox-badge ${statusBadgeClass(ticket.remote_status)}">${escapeHtml(displayStatus(ticket.remote_status || 'open'))}</span></h2>
-        </div>
-        <div class="ctox-pane-actions">
-          ${primary ? caseActionIconsHtml(primary) : ''}
-          <button type="button" class="ctox-pane-icon${opsOpen ? ' is-active' : ''}" data-action="toggle-ops" aria-pressed="${opsOpen ? 'true' : 'false'}" aria-label="${escapeAttr(opsLabel)}" title="${escapeAttr(opsLabel)}">${iconSvg(ICON.ops)}</button>
-        </div>
-      </div>
-    </header>
+  headKicker.textContent = ticket.ticket_key || ticket.id;
+  headTitle.innerHTML = `${escapeHtml(ticket.title || ticket.ticket_key || 'Ticket')} <span class="ctox-badge ${statusBadgeClass(ticket.remote_status)}">${escapeHtml(displayStatus(ticket.remote_status || 'open'))}</span>`;
+  headActions.innerHTML = `
+    ${primary ? caseActionIconsHtml(primary) : ''}
+    <button type="button" class="ctox-pane-icon${opsOpen ? ' is-active' : ''}" data-action="toggle-ops" aria-pressed="${opsOpen ? 'true' : 'false'}" aria-label="${escapeAttr(opsLabel)}" title="${escapeAttr(opsLabel)}">${iconSvg(ICON.ops)}</button>
+  `;
+  body.innerHTML = `
     <div class="ctox-pane-scroll tickets-detail-scroll os-scrollbar">
       <section class="ctox-card">
         <div class="ctox-card-body">
@@ -714,10 +772,20 @@ function renderDetail() {
 function renderOps() {
   const ops = state.ctx.host.querySelector('[data-ticket-ops]');
   if (!ops) return;
+  // Static pane head (index.html) exists in every state; this renderer only
+  // refines its texts/actions and owns the body.
+  const headKicker = ops.querySelector('[data-ops-kicker]');
+  const headTitle = ops.querySelector('[data-ops-title]');
+  const headActions = ops.querySelector('[data-ops-actions]');
+  const body = ops.querySelector('[data-ticket-ops-body]');
+  if (!headKicker || !headTitle || !headActions || !body) return;
+  headKicker.textContent = state.t('operations', 'Operationen');
   const ticket = selectedTicket();
   if (!ticket) {
     clearRecordContext(ops);
-    ops.innerHTML = '';
+    headTitle.textContent = state.t('detailColumnTitle', 'Ticket');
+    headActions.innerHTML = '';
+    body.innerHTML = '';
     return;
   }
   applyTicketContext(ops, ticket, 'operations');
@@ -725,18 +793,11 @@ function renderOps() {
   const selfWork = selfWorkForTicket(ticket.ticket_key);
   const clarifications = clarificationsForTicket(ticket.ticket_key);
   const bundles = state.data.ctox_ticket_control_bundles;
-  ops.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">${escapeHtml(state.t('operations', 'Operationen'))}</span>
-          <h2 class="ctox-pane-title">${escapeHtml(ticket.ticket_key || ticket.id)}</h2>
-        </div>
-        <div class="ctox-pane-actions">
-          <button type="button" class="ctox-pane-icon" data-action="close-ops" aria-label="${escapeAttr(state.t('closeOps', 'Operationen ausblenden'))}" title="${escapeAttr(state.t('closeOps', 'Operationen ausblenden'))}">${iconSvg(ICON.collapseOps)}</button>
-        </div>
-      </div>
-    </header>
+  headTitle.textContent = ticket.ticket_key || ticket.id;
+  headActions.innerHTML = `
+    <button type="button" class="ctox-pane-icon" data-action="close-ops" aria-label="${escapeAttr(state.t('closeOps', 'Operationen ausblenden'))}" title="${escapeAttr(state.t('closeOps', 'Operationen ausblenden'))}">${iconSvg(ICON.collapseOps)}</button>
+  `;
+  body.innerHTML = `
     <div class="ctox-pane-scroll tickets-ops-scroll os-scrollbar">
       <section class="tickets-section">
         <h3 class="ctox-field-label">${escapeHtml(state.t('cases', 'Cases'))}</h3>

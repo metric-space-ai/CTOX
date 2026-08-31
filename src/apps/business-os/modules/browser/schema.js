@@ -180,8 +180,8 @@ const browserInputEventSchema = {
 // under this German collection name. The Browser module reads it only after a
 // declared database-handle grant, so the manifest and schema must agree or the
 // shell cannot enforce the module's collection boundary.
-const thesenOutboundAdapterSchema = {
-  version: 1,
+const outboundLeadGenerationAdapterSchema = {
+  version: 2,
   primaryKey: 'id',
   type: 'object',
   properties: {
@@ -213,12 +213,23 @@ const thesenOutboundAdapterSchema = {
   additionalProperties: true,
 };
 
+// Die Kern-Adaptersammlung traegt dieselben Felder wie die tenant-lokale, liegt
+// aber auf Version 0. Ohne diesen Eintrag laesst sich die Sammlung im Browser
+// nicht registrieren, und die Scraping-Leiste sieht ausschliesslich die
+// tenant-lokalen Adapter. Auf der Produktivinstanz betraf das 17 aktive
+// Adapter, darunter als einziger Traeger linkedin.com.
+const outboundResearchAdapterSchema = {
+  ...outboundLeadGenerationAdapterSchema,
+  version: 0,
+};
+
 export const collections = {
   browser_sessions: browserSessionSchema,
   browser_tabs: browserTabSchema,
   browser_frames: browserFrameSchema,
   browser_input_events: browserInputEventSchema,
-  thesen_outbound_adapters: thesenOutboundAdapterSchema,
+  outbound_research_adapters: outboundResearchAdapterSchema,
+  outbound_lead_generation_adapters: outboundLeadGenerationAdapterSchema,
 };
 
 const retainV0BrowserDocument = (oldDoc) => ({ ...oldDoc });
@@ -228,5 +239,8 @@ export const migrationStrategies = {
   browser_tabs: { 1: retainV0BrowserDocument },
   browser_frames: { 1: retainV0BrowserDocument },
   browser_input_events: { 1: retainV0BrowserDocument },
-  thesen_outbound_adapters: { 1: retainV0BrowserDocument },
+  outbound_lead_generation_adapters: {
+    1: retainV0BrowserDocument,
+    2: retainV0BrowserDocument,
+  },
 };

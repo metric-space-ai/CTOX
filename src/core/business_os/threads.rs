@@ -220,7 +220,7 @@ pub(super) fn may_accept_peer_write(root: &Path, token: &str, collection: &str) 
     // Commands receive a second, command-specific authorization when the
     // native consumer accepts the document. The peer still needs an exact
     // data.write grant to put anything onto the replicated command bus.
-    store::capability_allows_collection_permission(
+    store::webrtc_capability_allows_collection_permission(
         root,
         token,
         collection,
@@ -242,6 +242,10 @@ const NATIVE_PROJECTION_COLLECTIONS: &[&str] = &[
     // projected from native channel/account records.
     "communication_accounts",
     "channel_pairing_state",
+    // Workjet project identity and local checkout bindings are native-authored
+    // through exact business_commands; peers render their projections only.
+    "workjet_projects",
+    "workjet_working_copies",
 ];
 
 /// A collection whose documents are server-authored (native core writes them,
@@ -269,7 +273,7 @@ pub(super) fn may_replicate_document(
     collection: &str,
     document: &Value,
 ) -> bool {
-    let Some((user_id, role)) = store::verify_capability_actor(root, token) else {
+    let Some((user_id, role)) = store::verify_webrtc_capability_actor(root, token) else {
         return false;
     };
     let collection_read_allowed = collection_read_allowed_for_actor(root, token, collection, &role);
@@ -288,7 +292,7 @@ pub(super) fn replication_document_filter(
     token: &str,
     collection: &str,
 ) -> Arc<dyn Fn(&Value) -> bool + Send + Sync> {
-    let Some((user_id, role)) = store::verify_capability_actor(root, token) else {
+    let Some((user_id, role)) = store::verify_webrtc_capability_actor(root, token) else {
         return Arc::new(|_| false);
     };
     let collection_read_allowed = collection_read_allowed_for_actor(root, token, collection, &role);
@@ -321,7 +325,7 @@ fn collection_read_allowed_for_actor(
     {
         return true;
     }
-    store::capability_allows_collection_permission(
+    store::webrtc_capability_allows_collection_permission(
         root,
         token,
         collection,
@@ -391,9 +395,34 @@ pub(super) fn may_accept_peer_document_write(
     collection: &str,
     document: &Value,
 ) -> bool {
-    let Some((user_id, role)) = store::verify_capability_actor(root, token) else {
+    let Some((user_id, role)) = store::verify_webrtc_capability_actor(root, token) else {
         return false;
     };
+    if collection == "business_commands" {
+        let client_context = document.get("client_context").and_then(|value| {
+            if let Some(encoded) = value.as_str() {
+                serde_json::from_str::<Value>(encoded).ok()
+            } else {
+                Some(value.clone())
+            }
+        });
+        let command_token = client_context
+            .as_ref()
+            .and_then(|value| value.get("capability_token"))
+            .and_then(Value::as_str);
+        // The command bus and the WebRTC runtime can import the shared token
+        // provider through different cache-busted module URLs during a rolling
+        // shell release. Both tokens are then native-signed and current, but
+        // not byte-identical. Authorize the command only when its token is
+        // independently valid and resolves to the exact same durable actor as
+        // the peer token. Role changes, grant changes, revocation, expiry, and
+        // device binding remain server-authoritative in the verifier.
+        let command_actor = command_token
+            .and_then(|command_token| store::verify_webrtc_capability_actor(root, command_token));
+        if command_actor.as_ref() != Some(&(user_id.clone(), role.clone())) {
+            return false;
+        }
+    }
     if !is_browser_collection(collection) {
         if let Some(owner_field) = per_user_owner_field(collection) {
             return per_user_document_write_allowed(
@@ -2515,6 +2544,16 @@ fn app_thread_status(collection: &str, document: &Value) -> String {
         }
     })
     .to_ascii_lowercase();
+    // A Workjet escalation is already the explicit request for an owner
+    // decision. Treating its native `offen` status as a generic open record
+    // would create the Threads row without an unread notification, so neither
+    // desktop nor mobile clients could raise an OS-level alert.
+    if collection == "kundenpipeline_entscheidungen"
+        && document.get("typ").and_then(Value::as_str) == Some("agent_escalation")
+        && status == "offen"
+    {
+        return "needs_review".to_owned();
+    }
     match status.as_str() {
         "pending" | "pending_review" | "review" | "needs_review" | "requested" => {
             "needs_review".to_owned()
@@ -6140,6 +6179,74 @@ mod tests {
     }
 
     #[test]
+    fn peer_command_write_accepts_refreshed_token_for_same_actor_only() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let now = now_ms();
+        let (peer_token, _) = store::issue_business_os_capability_token_for_managed_user(
+            temp.path(),
+            "alice",
+            "Alice",
+            "admin",
+            now,
+        )?;
+        let (refreshed_command_token, _) =
+            store::issue_business_os_capability_token_for_managed_user(
+                temp.path(),
+                "alice",
+                "Alice",
+                "admin",
+                now + 1,
+            )?;
+        let (foreign_command_token, _) =
+            store::issue_business_os_capability_token_for_managed_user(
+                temp.path(),
+                "bob",
+                "Bob",
+                "admin",
+                now + 1,
+            )?;
+
+        assert_ne!(peer_token, refreshed_command_token);
+        assert!(may_accept_peer_document_write(
+            temp.path(),
+            &peer_token,
+            "business_commands",
+            &json!({
+                "id": "cmd-refreshed",
+                "client_context": {
+                    "actor": { "id": "alice" },
+                    "capability_token": refreshed_command_token,
+                },
+            }),
+        ));
+        assert!(!may_accept_peer_document_write(
+            temp.path(),
+            &peer_token,
+            "business_commands",
+            &json!({
+                "id": "cmd-foreign",
+                "client_context": {
+                    "actor": { "id": "bob" },
+                    "capability_token": foreign_command_token,
+                },
+            }),
+        ));
+        assert!(!may_accept_peer_document_write(
+            temp.path(),
+            &peer_token,
+            "business_commands",
+            &json!({
+                "id": "cmd-invalid",
+                "client_context": {
+                    "actor": { "id": "alice" },
+                    "capability_token": "not-a-token",
+                },
+            }),
+        ));
+        Ok(())
+    }
+
+    #[test]
     fn peer_document_writes_bind_personal_collections_to_token_user() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let now = now_ms();
@@ -6613,6 +6720,73 @@ mod tests {
             .context("answered decision thread")?;
         assert_eq!(value_string(&closed, "status"), "completed");
 
+        Ok(())
+    }
+
+    #[test]
+    fn agent_escalation_projects_as_owner_review_without_changing_legacy_decisions() {
+        assert_eq!(
+            app_thread_status(
+                "kundenpipeline_entscheidungen",
+                &json!({ "typ": "agent_escalation", "status": "offen" }),
+            ),
+            "needs_review"
+        );
+        assert_eq!(
+            app_thread_status(
+                "kundenpipeline_entscheidungen",
+                &json!({ "typ": "triage", "status": "offen" }),
+            ),
+            "open"
+        );
+    }
+
+    #[test]
+    fn agent_escalation_creates_unread_owner_notification() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let now = now_ms();
+        let conn = store::open_store(temp.path())?;
+        store::upsert_business_record(
+            &conn,
+            "kundenpipeline_entscheidungen",
+            "kpl-e-agent-1",
+            now,
+            json!({
+                "id": "kpl-e-agent-1",
+                "typ": "agent_escalation",
+                "titel": "Architektur freigeben",
+                "status": "offen",
+                "owner_user_id": "michael",
+                "assigned_user_id": "michael",
+                "participant_ids": ["michael"],
+                "updated_at_ms": now
+            }),
+        )?;
+        drop(conn);
+
+        let projected =
+            project_app_relevance(temp.path(), &[("kundenpipeline_entscheidungen", 0)], 50)?;
+        let (_, notification_id) = projected
+            .projections
+            .iter()
+            .find(|(collection, _)| *collection == "user_notifications")
+            .context("projected Decision Hub notification")?;
+        let notification = load_record(temp.path(), "user_notifications", notification_id)?
+            .context("Decision Hub notification record")?;
+        assert_eq!(value_string(&notification, "user_id"), "michael");
+        assert_eq!(value_string(&notification, "status"), "unread");
+        assert_eq!(
+            value_string(&notification, "notification_type"),
+            "approval_requested"
+        );
+        assert_eq!(
+            value_string(&notification, "source_module"),
+            "kundenpipeline"
+        );
+        assert_eq!(
+            value_string(&notification, "source_record_id"),
+            "kpl-e-agent-1"
+        );
         Ok(())
     }
 

@@ -34,6 +34,39 @@ Historical `runtime/cto_agent.db` and `runtime/ctox_lcm.db` paths are migration
 inputs only. Tool-owned stores stay separate when the tool owns the lifecycle,
 for example `runtime/ticket_local.db` and `runtime/ctox_scraping.db`.
 
+## Durable Execution Plans and Activity Turns
+
+Every service-owned queue attempt starts with `update_plan` as its required
+initial harness tool. Until that call succeeds, the fork exposes no other tool
+to the model. A plan contains at least one ordered step and is valid only as a
+completed prefix, at most one active step, and a pending suffix. Successful
+assistant persistence fails closed unless the latest durable plan exists and
+all model-owned steps are completed; only then may the native CTOX review
+begin.
+
+`task_execution_plan_revisions` is the authoritative plan history. Status-only
+updates rewrite the current revision, while changed labels, count, or order
+create a new revision and retain the old one as execution evidence.
+`task_execution_activity_turns` stores deduplicated model activity keyed by a
+stable event id. Each model tool start, including `update_plan`, and each new
+reasoning section contributes one activity turn. Streaming deltas, tool ends,
+and transport replays do not. Reasoning contents are never copied into this
+store.
+
+Plan steps own the first 90 percent of progress, divided equally and rounded:
+`round(90 * completed_steps / total_steps)`. Completed model work remains at
+90 percent through pending or failed native review; validated review sets 100
+percent. Activity turns never alter this percentage. They are attributed to
+the active step when one exists and provide the step-clock and visible
+thinking/tool activity in Business OS.
+
+The service projects the latest `execution_progress` object onto both
+`business_commands` and `ctox_queue_tasks` through the existing RxDB/WebRTC
+path. The projection includes revision, phase, percent, current position,
+steps, review state, deduplicated thinking/tool totals, and update time. The
+older harness-flow stream remains an audit and observability projection, not
+the persistence authority.
+
 ## Business OS Command Architecture
 
 Lifecycle-v2 command work is gated by three accepted decisions:

@@ -1,0 +1,336 @@
+{
+  "schema_format": "ctox-business-os-module-collections-v1",
+  "collections": {
+    "kundenpipeline_vorgaenge": {
+      "version": 0,
+      "primaryKey": "id",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "is_deleted": {
+          "type": "boolean"
+        },
+        "created_at_ms": {
+          "type": "number"
+        },
+        "updated_at_ms": {
+          "type": "number"
+        },
+        "deleted_at_ms": {
+          "type": "number"
+        },
+        "title": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "kunde_id": {
+          "type": "string"
+        },
+        "kunde_name": {
+          "type": "string"
+        },
+        "quelle_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "triage_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "run_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "mails_json": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "audit_json": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "updated_at_ms",
+        "title",
+        "status"
+      ],
+      "indexes": [
+        "updated_at_ms",
+        [
+          "is_deleted",
+          "updated_at_ms"
+        ],
+        "status",
+        "kunde_id"
+      ],
+      "additionalProperties": true
+    },
+    "kundenpipeline_entscheidungen": {
+      "version": 0,
+      "primaryKey": "id",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "is_deleted": {
+          "type": "boolean"
+        },
+        "created_at_ms": {
+          "type": "number"
+        },
+        "updated_at_ms": {
+          "type": "number"
+        },
+        "deleted_at_ms": {
+          "type": "number"
+        },
+        "vorgang_id": {
+          "type": "string"
+        },
+        "typ": {
+          "type": "string"
+        },
+        "titel": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "frage_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "zeilen_json": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "detail_seiten_json": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "aktionen_json": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "backing_ref": {
+          "type": "string"
+        },
+        "source_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "correlation_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "request_fingerprint": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "antwort_json": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "expires_at_ms": {
+          "type": "number"
+        },
+        "requested_by": {
+          "type": "string"
+        },
+        "owner_user_id": {
+          "type": "string"
+        },
+        "assigned_user_id": {
+          "type": "string"
+        },
+        "participant_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "id",
+        "updated_at_ms",
+        "status"
+      ],
+      "indexes": [
+        "updated_at_ms",
+        [
+          "is_deleted",
+          "updated_at_ms"
+        ],
+        "status",
+        "vorgang_id",
+        "typ"
+      ],
+      "additionalProperties": true
+    },
+    "kundenpipeline_projekte": {
+      "version": 0,
+      "primaryKey": "id",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "is_deleted": {
+          "type": "boolean"
+        },
+        "created_at_ms": {
+          "type": "number"
+        },
+        "updated_at_ms": {
+          "type": "number"
+        },
+        "deleted_at_ms": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "code_projekt": {
+          "type": "string"
+        },
+        "adressen": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "domains": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "active": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "updated_at_ms",
+        "name"
+      ],
+      "indexes": [
+        "updated_at_ms",
+        [
+          "is_deleted",
+          "updated_at_ms"
+        ],
+        "name",
+        "active"
+      ],
+      "additionalProperties": true
+    },
+    "business_commands": {
+      "version": 1,
+      "primaryKey": "id",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "command_id": {
+          "type": "string"
+        },
+        "module": {
+          "type": "string"
+        },
+        "command_type": {
+          "type": "string"
+        },
+        "record_id": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string"
+        },
+        "inbound_channel": {
+          "type": "string"
+        },
+        "payload": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "client_context": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "task_id": {
+          "type": "string"
+        },
+        "task_status": {
+          "type": "string"
+        },
+        "updated_at_ms": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "command_id",
+        "module",
+        "command_type",
+        "status",
+        "updated_at_ms"
+      ],
+      "indexes": [
+        "status",
+        "command_id",
+        [
+          "status",
+          "updated_at_ms"
+        ],
+        [
+          "module",
+          "command_type",
+          "status",
+          "updated_at_ms"
+        ]
+      ],
+      "additionalProperties": true
+    }
+  },
+  "migration_strategies": {
+    "kundenpipeline_vorgaenge": {},
+    "kundenpipeline_entscheidungen": {},
+    "kundenpipeline_projekte": {}
+  }
+}

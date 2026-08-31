@@ -215,8 +215,22 @@ test('left column follows the canonical shell-wired column grammar', async () =>
 
   // Filterbar: search + shard/list toggle + collapsed filter tray with reset.
   assert.match(html, /data-pg-search/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // Operator directive 31.08.2026: the shard/list switch is ONE button that
+  // toggles, not a two-button segmented pair. It is therefore module-wired
+  // (data-conv-view-toggle) instead of a pair of [data-pg-view] controls, and
+  // the pane carries the current view for the shell grammar to read back.
+  const viewToggles = html.match(/data-conv-view-toggle/g) || [];
+  assert.equal(viewToggles.length, 1, `card/list switch must be ONE button, saw ${viewToggles.length}`);
+  assert.doesNotMatch(html, /data-pg-view=/);
+  assert.match(html, /data-pg-default-view="cards"/);
+  // An action, not a state: no aria-pressed anywhere on that control.
+  const toggleTag = html.match(/<button[^>]*data-conv-view-toggle[^>]*>/)?.[0] || '';
+  assert.doesNotMatch(toggleTag, /aria-pressed/);
+  assert.match(toggleTag, /aria-label=/);
+  assert.match(toggleTag, /title=/);
+  // Both glyphs live on the one button; JS shows the target view's icon.
+  assert.match(html, /data-conv-view-icon="cards"/);
+  assert.match(html, /data-conv-view-icon="list"/);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);
@@ -334,4 +348,15 @@ test('selecting a conversation is an in-place class flip, never a list rebuild',
   // A rebuild (renderList) would reset the operator's scroll — selection must
   // not trigger it.
   assert.doesNotMatch(selectFn[0], /renderList\(/);
+});
+
+test('v2 CTOX chat context form is bounded to the conversation window', async () => {
+  const [js, css] = await Promise.all([
+    readFile(new URL('./index.js', import.meta.url), 'utf8'),
+    readFile(new URL('./index.css', import.meta.url), 'utf8'),
+  ]);
+  assert.match(js, /menu\.style\.position = 'absolute'/);
+  assert.match(js, /root\.append\(menu\)/);
+  assert.doesNotMatch(js, /menu\.style\.position = 'fixed'/);
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.conv-module \{ position: relative;/);
 });

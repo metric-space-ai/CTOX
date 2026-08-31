@@ -162,6 +162,7 @@ export const CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   outbound_campaigns: '194e3748c589a9cfc50ed63dccab525028e9bdbd006f20b73c10e29aa865e58d',
   outbound_companies: '1d79eb4b67d84826ed2016b0385224600d51c334d5b91d4adb77e62e916d0bbf',
   outbound_engagements: 'f310db7ac3c7abdc78b40b227866ce673f5871601d594b00853000f7c4e088c2',
+  outbound_lead_generation_adapters: '6f4b2144d3ebe5f25047ae1b51fef0429261753135e3889c3998900c4a914583',
   outbound_letter_templates: '9839d58ede05148b48b2a7e494fc29d4aa94611034a11bc4c73b32de866a7466',
   outbound_meeting_requests: 'f04c3249c3a3d8cf7ca6c2a4b51fbb15729035bca707668fbef3988242e69aa2',
   outbound_messages: '93b8e2cea0670112b6499a86a774dafef3cbd289d11725bf57d4e0941ad13006',
@@ -209,12 +210,13 @@ export const CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   support_thread_links: 'c144074785a1e22697f7f2ebc30b297d404fd3ff2bfca797b78371e9f205a8be',
   support_view_filters: 'e8988877eef64c437758f90f5d6868d8310122bb5f78e854fad31d256d3cafe5',
   support_views: '10ac9212258aef30b798d1d4e6d58712b9f59ee725966a8c7bd0fa49f72c1033',
-  thesen_outbound_adapters: '2c55fa1c30faf50dfe88029278d2d32f7d9eaf1a159dabf24a28b4b3859f3bc9',
   user_notifications: '28593fbad81de44fc2218886d67284cc140ca4b657bf75267412859a32753e5b',
   user_thread_links: 'cc911076015a884b58fda2b28b5e8d840b048e78d958081429db31d573916129',
   user_thread_messages: '3e9ac54c218496245fdeaa9e8cd6f2f649455448703bada2ac290a1de4fd7646',
   user_thread_states: '71e70b8a2e44bd2b851b24fde40a5b4cd42cd9e0b6158525055a9c04743de9eb',
   user_threads: '97a226600a64559f18c795e6a6c39b56e478d455bc5ce1485b714e1d13c2e5cb',
+  workjet_projects: '16bf130df1fb7883a21198744dd3f5c2c0ecd621e39355b6f0d875d59cbe9a0e',
+  workjet_working_copies: 'a2e418eafc2ee8900b9d1422dbcfb68dfd4b542226ec022b26c2484837cf0e08',
 });
 
 export function canonicalJson(value) {
@@ -358,6 +360,10 @@ export function buildProtocolPayload({
   // bind this peer to its server-authenticated role and authorize per-collection
   // reads. Omitted when absent so the legacy handshake stays byte-identical.
   capabilityToken = null,
+  // Optional proof response for a native-issued nonce. The browser only
+  // carries a public JWK and signature returned by the native Workjet bridge;
+  // private key material is never accepted or serialized here.
+  deviceProof = null,
   // Phase 3 schema-validation hardening: the per-collection schema-hash map
   // for EVERY collection multiplexed on this one connection. Keyed by
   // collection name. The room handshake runs once off a single representative
@@ -384,6 +390,10 @@ export function buildProtocolPayload({
   if (cleanCapabilityToken) {
     peerSession.capabilityToken = cleanCapabilityToken;
   }
+  const proof = normalizeDeviceProof(deviceProof);
+  if (proof) {
+    peerSession.deviceProof = proof;
+  }
   return {
     protocol: CTOX_RXDB_PROTOCOL,
     checkpoint: checkpointEvidence,
@@ -408,6 +418,32 @@ export function buildProtocolPayload({
       ...CTOX_REQUIRED_PROTOCOL_CAPABILITIES,
       ...capabilities,
     ])).sort(),
+  };
+}
+
+function normalizeDeviceProof(proof) {
+  if (!proof || typeof proof !== 'object') return null;
+  const nonce = typeof proof.nonce === 'string' ? proof.nonce.trim() : '';
+  const signature = typeof proof.signature === 'string' ? proof.signature.trim() : '';
+  const jwk = proof.publicJwk;
+  const x = typeof jwk?.x === 'string' ? jwk.x.trim() : '';
+  const y = typeof jwk?.y === 'string' ? jwk.y.trim() : '';
+  if (
+    proof.version !== 'ctox-device-proof-v1'
+    || !/^[A-Za-z0-9_-]{43}$/.test(nonce)
+    || !/^[A-Za-z0-9_-]{86}$/.test(signature)
+    || jwk?.kty !== 'EC'
+    || jwk?.crv !== 'P-256'
+    || !/^[A-Za-z0-9_-]{43}$/.test(x)
+    || !/^[A-Za-z0-9_-]{43}$/.test(y)
+  ) {
+    return null;
+  }
+  return {
+    version: 'ctox-device-proof-v1',
+    nonce,
+    publicJwk: { kty: 'EC', crv: 'P-256', x, y },
+    signature,
   };
 }
 

@@ -6,6 +6,17 @@
    canvas/SVG state machine, live metric strip, timeline scrubber and drawer
    stepper. */
 
+/* Shell V2 compact pane headers: task/live-flow titles share one row and the
+   task filter strip scrolls locally instead of wrapping into the shell chrome. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app { padding: 0 0 84px; overflow: hidden; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
+
 .ctox-harness-app {
   /* custom: workflow canvas + SVG state machine tokens (no kit equivalent) */
   --ctox-left-width: 340px;
@@ -27,7 +38,12 @@
    the resizer column. */
 .ctox-harness-left {
   grid-column: 1;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  /* The single content column must not be widened by the intrinsic min-content
+     width of one of its rows (the collapsed filter tray's selects do exactly
+     that): without minmax(0, 1fr) the well grows past the pane and the pinned
+     row actions end up clipped by the pane's own overflow. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
 }
 
 .ctox-harness-app > [data-resizer="left"] {
@@ -43,17 +59,118 @@
   grid-template-rows: auto auto minmax(0, 1fr) auto auto;
 }
 
-/* Left column rides the shell-owned canonical grammar (header → view band →
-   well → footer); the chrome classes come from shared/base.css. */
+/* Left column rides the shell-owned canonical grammar (header → filterbar →
+   tray → view band → well → footer); the chrome classes come from
+   shared/base.css. Filterbar and tray are siblings of the header, not its
+   children, so the header itself stays exactly one shell header row high. */
 .ctox-harness-left > .ctox-pane-header { grid-row: 1; }
-.ctox-harness-left > .ctox-view-switch { grid-row: 2; }
-.ctox-harness-left > .ctox-well { grid-row: 3; }
-.ctox-harness-left > .ctox-pane-footer { grid-row: 4; }
+.ctox-harness-left > .ctox-filterbar { grid-row: 2; }
+.ctox-harness-left > .ctox-filter-tray { grid-row: 3; }
+.ctox-harness-left > .ctox-view-switch { grid-row: 4; }
+.ctox-harness-left > .ctox-well { grid-row: 5; }
+.ctox-harness-left > .ctox-pane-footer { grid-row: 6; }
 .ctox-harness-main > .ctox-pane-header { grid-row: 1; }
 .ctox-harness-main > .ctox-metrics-strip { grid-row: 2; }
 .ctox-harness-main > .ctox-flow-well { grid-row: 3; }
 .ctox-harness-main > .ctox-timeline-panel { grid-row: 4; }
 .ctox-harness-main > .ctox-harness-footer { grid-row: 5; }
+
+/* ---------------------------------------------------------------------------
+   Shell V2 header zones. `.shell-window-content` is `inset: 0` and is never
+   indented, so the app has to keep the three shell zones free itself: the
+   80px app icon top-left, the header band across the full width and the 74px
+   window controls top-right. Geometry follows the Knowledge reference.
+   -------------------------------------------------------------------------- */
+/* In a V2 window the 6px shell frame IS the pane frame, and the 12px channel
+   between the columns is the separator (contract §9). A pane border on top of
+   that would draw a second frame — and its 1px left edge sits inside the 80x74
+   icon zone as soon as the shell's workspace padding drops to 6px (narrow
+   window). Borderless and square, like the Knowledge reference. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-pane {
+  border: 0;
+  border-radius: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 14px;
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-pane > .ctox-pane-header > .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+/* Kicker and title sit side by side — the stacked pair does not fit one row —
+   and the title truncates instead of being squeezed to zero width. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-header .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-header .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Pre-boot: the task column aside ships empty (the chrome is JS-built by
+   buildTaskColumn, pinned by the module guard test). An empty pane must not
+   reserve a grid track — neither a 340px column nor a stacked row — so it is
+   removed and the console collapses to the single flow column. */
+.ctox-harness-app > .ctox-harness-left:empty {
+  display: none;
+}
+
+.ctox-harness-app:has(> .ctox-harness-left:empty) {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.ctox-harness-app:has(> .ctox-harness-left:empty) > [data-resizer] {
+  display: none;
+}
+
+.ctox-harness-app:has(> .ctox-harness-left:empty) > .ctox-harness-main {
+  grid-column: 1;
+}
+
+/* With no task column the flow head IS the top-left corner of the window, so
+   it takes over both shell zone duties: it starts past the 80px icon and it
+   spans the full two header rows the icon is tall (contract §2), which keeps
+   the whole 80x74 icon zone inside the header instead of over the canvas. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app:has(> .ctox-harness-left:empty) > .ctox-harness-main > .ctox-pane-header {
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+/* First head of the top row: the 80px app icon spans the header row AND the
+   filterbar below it, so both start past the icon. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-right: 14px;
+  padding-bottom: 0;
+}
+
+/* Last head of the top row: keep the 74px window controls free. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-main > .ctox-pane-header {
+  padding-right: 70px;
+}
 
 /* Loading empty state spans the whole console grid. */
 .ctox-harness-main > .ctox-empty {
@@ -135,10 +252,27 @@
   white-space: nowrap;
 }
 
+/* The two views are deliberately different shapes, not two paddings of the
+   same shape (Betreiber-Direktive 31.08.2026):
+     is-cards        roomy shards, 3 lines (title / meta row / stage pipeline)
+     is-compact-flow one dense line per entry, hairline separated
+   The gap belongs to the card view; the list view packs rows edge to edge. */
 .ctox-task-list {
   display: grid;
   align-content: start;
-  gap: 4px;
+  /* Rows are content sized, never squeezed: the items carry `overflow: hidden`,
+     so their automatic minimum size is 0 and plain `auto` tracks would shrink
+     the whole list to fit the well instead of letting the well scroll — which
+     is exactly what a short (stacked, 720px) task column does. */
+  grid-auto-rows: max-content;
+}
+
+.ctox-task-list.is-cards {
+  gap: 6px;
+}
+
+.ctox-task-list.is-compact-flow {
+  gap: 0;
 }
 
 .ctox-task-card,
@@ -177,14 +311,15 @@
   background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface));
 }
 
+/* Card selector: the generous one. Three stacked lines, roomy padding. */
 .ctox-task-selector {
   display: grid;
-  gap: 4px;
+  gap: 5px;
   min-width: 0;
   border: 0;
   background: transparent;
   color: var(--text);
-  padding: 9px 38px 9px 10px;
+  padding: 11px 40px 12px 12px;
   text-align: left;
   cursor: pointer;
 }
@@ -195,28 +330,56 @@
 }
 
 .ctox-task-selector > strong,
-.ctox-task-selector > small,
-.ctox-task-flow-copy > strong,
-.ctox-task-flow-copy > small {
+.ctox-task-selector > small {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ctox-task-selector > strong,
-.ctox-task-flow-copy > strong {
+.ctox-task-selector > strong {
   color: var(--text-strong);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 650;
-  line-height: 1.25;
+  line-height: 1.3;
 }
 
-.ctox-task-selector > small,
-.ctox-task-flow-copy > small {
+.ctox-task-selector > small {
   color: var(--muted);
-  font-size: 10.5px;
-  line-height: 1.2;
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+/* Card meta row: the detail fields the console already loads — status first,
+   then assignment/source and last change, dot separated. */
+.ctox-task-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ctox-task-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-task-meta > span + span::before {
+  content: "· ";
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
+}
+
+.ctox-task-meta-status {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.ctox-task-meta-status.is-problem {
+  color: var(--danger);
 }
 
 .ctox-task-actions {
@@ -281,26 +444,70 @@
   background: var(--danger);
 }
 
+/* ---------------------------------------------------------------------------
+   List view: exactly ONE line per entry — title left, a single short meta
+   (the four-stage micro bar) right. Rows sit edge to edge on a hairline, so
+   the well shows the maximum number of tasks per screen.
+   -------------------------------------------------------------------------- */
+.ctox-task-flow-row {
+  border-bottom: 1px solid var(--hairline, var(--line));
+}
+
+.ctox-task-flow-row:last-child {
+  border-bottom: 0;
+}
+
 .ctox-task-flow-row .ctox-task-selector {
-  grid-template-columns: minmax(110px, 0.9fr) minmax(180px, 1.4fr);
+  grid-template-columns: minmax(0, 1fr) auto;
   gap: 10px;
   align-items: center;
-  min-height: 38px;
-  padding-block: 5px;
+  min-height: 0;
+  padding: 4px 30px 4px 10px;
 }
 
-.ctox-task-flow-copy {
-  display: grid;
-  gap: 1px;
-  min-width: 0;
+.ctox-task-flow-row .ctox-task-selector > strong {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
 }
 
+/* Micro pipeline: four segments, no visible captions. The stage names stay in
+   the accessibility tree (and the wrapper keeps its aria-label naming the
+   current stage), so the dense row loses no information. */
 .ctox-task-pipeline.is-compact {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  width: auto;
   margin: 0;
 }
 
+.ctox-task-pipeline.is-compact > span {
+  display: block;
+  width: 12px;
+  min-width: 12px;
+}
+
 .ctox-task-pipeline.is-compact em {
-  font-size: 8.5px;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The pin action has to fit the one-line row instead of a 30px card corner. */
+.ctox-task-flow-row .ctox-task-actions {
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+}
+
+.ctox-task-flow-row .ctox-task-actions .ctox-pane-icon {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
 }
 
 .ctox-task-list > p {
@@ -1279,8 +1486,14 @@
   }
 }
 
-@container business-app-window (max-width: 1180px) {
-  /* custom: the flow console needs more width than the kit's 760px collapse */
+/* ---------------------------------------------------------------------------
+   The console keeps its two columns (tasks | live flow) down to the shell's
+   own 768px boundary and stacks below it — the window is the container, not
+   the screen, and 768px is the shell-owned 2-to-1 breakpoint. This block also
+   carries the phone geometry for the compact flow row, the metric strip, the
+   timeline detail and the web-stack popover.
+   -------------------------------------------------------------------------- */
+@container business-app-window (max-width: 768px) {
   .ctox-harness-app {
     grid-template-columns: minmax(0, 1fr);
     overflow: auto;
@@ -1295,12 +1508,21 @@
     grid-column: 1;
     min-height: 360px;
   }
-}
 
-@container business-app-window (max-width: 560px) {
-  .ctox-task-flow-row .ctox-task-selector {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 5px;
+  /* Stacked: the task column is the only column, so its head is the only head
+     of the top row and has to keep the window controls free as well. The
+     controls are 74px tall — two header rows — so the filterbar underneath is
+     still inside their zone and has to stay clear of them too. */
+  .shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-filterbar {
+    padding-right: 70px;
+  }
+
+  /* The one-line list row stays one line here too — stacking title and stage
+     bar would turn the dense view back into a small card. Only the roomier
+     card padding gives way. */
+  .ctox-task-selector {
+    padding: 10px 38px 10px 12px;
   }
 
   .ctox-metrics-strip {
@@ -1314,6 +1536,70 @@
 
   .ctox-metric-card:nth-child(4) {
     border-top: 1px solid var(--line);
+  }
+
+  /* Timeline detail row: label / text / meta stack instead of squeezing. The
+     panel is fixed 118px on desktop; on the sheet it must grow with its
+     content so the scrubber and detail never get clipped (the canvas well
+     above keeps the remaining 1fr). */
+  .ctox-timeline-panel {
+    height: auto;
+    min-height: 118px;
+    overflow: visible;
+  }
+
+  .ctox-timeline-detail {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .ctox-web-stack-panel {
+    top: 8px;
+    right: 8px;
+    width: calc(100% - 16px);
+    max-height: 78%;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum; the 28px canvas zoom buttons, the timeline scale
+   entries and the drawer stepper rows are custom components the kit's generic
+   rules do not cover. */
+@media (pointer: coarse) {
+  .ctox-harness-app button,
+  .ctox-harness-app input,
+  .ctox-harness-app select,
+  .ctox-harness-app textarea {
+    min-height: 44px;
+  }
+
+  .ctox-harness-app .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .ctox-harness-app .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .ctox-flow-toolbar button {
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .ctox-timeline-scale button {
+    min-height: 44px;
+  }
+
+  /* Taller grab area for the scrubber thumb. */
+  .ctox-timeline-panel input[type="range"] {
+    height: 32px;
+  }
+
+  /* The drawer stepper lives in the shell drawer (full-width sheet on phones);
+     its generic 44px form rule does not cover these custom grid buttons. */
+  .ctox-drawer-steps button {
+    min-height: 44px;
   }
 }
 

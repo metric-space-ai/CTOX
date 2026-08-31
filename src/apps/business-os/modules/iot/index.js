@@ -11,7 +11,7 @@
 // human writes prompts (Wenn/Dann + signal); CTOX programs the watcher. All
 // command flows and collection schemas are unchanged from the previous IA.
 import { createContextMenu } from '../../shared/context-menu.js';
-import { showBusinessPrompt, showBusinessConfirm, showBusinessAlert } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessPrompt, showBusinessConfirm, showBusinessAlert } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 
 const BUILD = '20260727-canonical-readiness';
 const COLLECTIONS = [
@@ -130,7 +130,21 @@ function iconSvg(paths) {
 const ICON = {
   spark: '<path d="M13 2L3 14h7l-1 8 10-12h-7z"/>',
   webhook: '<circle cx="12" cy="5" r="2.4"/><path d="M12 7.4v4l-3.4 5.9"/><circle cx="6.2" cy="19" r="2.4"/><path d="M8.6 19h6.8"/><circle cx="17.8" cy="19" r="2.4"/><path d="M15.4 17.7L12 11.4"/>',
+  // View-toggle glyphs: the icon always names the view the click switches TO.
+  cards: '<rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/>',
+  list: '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>',
 };
+
+// One-button view toggle (Betreiber-Direktive 31.08.2026). `view` is the view
+// currently shown; the control offers the OTHER one, so it is an action, never
+// a state — no aria-pressed anywhere.
+function viewToggleTarget(view) { return view === 'list' ? 'cards' : 'list'; }
+function viewToggleLabel(view) {
+  return viewToggleTarget(view) === 'list'
+    ? t('view.showList', 'Als Liste anzeigen')
+    : t('view.showCards', 'Als Karten anzeigen');
+}
+function viewToggleIcon(view) { return iconSvg(ICON[viewToggleTarget(view)]); }
 
 // Map a widget status-dot key onto the base.css badge states.
 function statusBadgeClass(dot) {
@@ -256,6 +270,7 @@ function applyStaticLabels() {
   });
   const search = el.querySelector('[data-pg-search]');
   if (search) search.placeholder = t('search', 'Suchen...');
+  syncLeftViewToggle();
 }
 
 // Seed the cached grammar state from the DOM before the shell fires its first
@@ -264,17 +279,48 @@ function seedGrammarState() {
   const el = rootEl();
   if (!el) return;
   state.search = (el.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase();
-  state.view = el.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards';
+  // The single view toggle carries the CURRENT view in data-pg-view.
+  state.view = el.querySelector('[data-iot-view-toggle]')?.dataset.pgView === 'list' ? 'list' : 'cards';
   state.band = el.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'all';
   state.realm = el.querySelector('[data-pg-filter][data-pg-name="realm"]')?.value || 'all';
+}
+
+// Paint the single LEFT view toggle for the current state.view: data-pg-view
+// keeps the CURRENT view (the shell's pane grammar falls back to it on every
+// search/tray/band emit), while icon + labels announce the TARGET view. The
+// shell stamps aria-pressed on click; strip it — this control has no state.
+function syncLeftViewToggle() {
+  const button = rootEl()?.querySelector('[data-iot-view-toggle]');
+  if (!button) return;
+  button.dataset.pgView = state.view === 'list' ? 'list' : 'cards';
+  button.removeAttribute('aria-pressed');
+  const label = viewToggleLabel(state.view);
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  // Swap the glyph ONLY when the target view actually changed. The shell emits
+  // a grammar change while the click is still bubbling toward this module's
+  // root listener; replacing innerHTML there would detach the very <line> the
+  // user clicked, and event.target.closest() would then walk a detached tree.
+  const target = viewToggleTarget(state.view);
+  if (button.dataset.iotViewIcon !== target) {
+    button.dataset.iotViewIcon = target;
+    button.innerHTML = viewToggleIcon(state.view);
+  }
+}
+
+function toggleLeftView() {
+  state.view = viewToggleTarget(state.view);
+  syncLeftViewToggle();
+  renderTree();
 }
 
 function onGrammarChange(event) {
   const detail = event?.detail || {};
   state.search = String(detail.search ?? state.search ?? '').trim().toLowerCase();
-  state.view = detail.view || state.view || 'cards';
+  state.view = (detail.view ?? state.view) === 'list' ? 'list' : 'cards';
   state.band = detail.band || 'all';
   state.realm = (detail.filters && detail.filters.realm) || 'all';
+  syncLeftViewToggle();
   syncSelectionToVisible();
   render();
 }
@@ -487,12 +533,21 @@ function renderNode(asset, depth, keep) {
     return `<div class="iot-signal${ssel ? ' is-selected' : ''}" role="button" tabindex="0" aria-selected="${ssel}" data-sel-kind="signal" data-sel-key="${esc(key)}" data-asset-id="${esc(asset.id)}" data-attr="${esc(name)}" data-context-record-id="${esc(key)}" data-context-record-type="iot_signal" data-context-label="${esc(`${asset.name || asset.id} · ${name}`)}" style="padding-left:${8 + (depth + 1) * 16}px">
       <span class="iot-signal-glyph">∿</span><span class="iot-signal-name">${esc(name)}</span><span class="iot-signal-val">${esc(val)}</span></div>`;
   }).join('') : '';
+  // SHARD (cards) view: two lines per entry — bold title over a meta line with
+  // the fields that matter here (type · signal count · open alarm).
+  const meta = [
+    asset.asset_type,
+    signals.length ? `${signals.length} ${t('signalsWord', 'Signale')}` : '',
+    warn ? t('alarmWord', 'Alarm offen') : '',
+  ].filter(Boolean).join(' · ');
   return `
     <div class="iot-node${sel ? ' is-selected' : ''}" role="button" tabindex="0" data-sel-kind="asset" data-sel-key="${esc(asset.id)}" data-asset-id="${esc(asset.id)}" aria-selected="${sel}" data-context-record-id="${esc(asset.id)}" data-context-record-type="iot_asset" data-context-label="${esc(asset.name || asset.id)}" style="padding-left:${8 + depth * 16}px">
       <span class="iot-twisty" data-act="toggle" data-asset-id="${esc(asset.id)}">${twisty}</span>
       <span class="iot-status-dot ${dot}"></span>
-      <span class="iot-node-name">${esc(asset.name)}</span>
-      <span class="ctox-badge">${esc(asset.asset_type)}</span>
+      <span class="iot-node-body">
+        <span class="iot-node-name">${esc(asset.name)}</span>
+        <span class="iot-node-meta">${esc(meta)}</span>
+      </span>
       <button class="ctox-icon-button ctox-icon-button--sm iot-node-add" type="button" title="${esc(t('node.addChild', 'Untergeordnetes Asset'))}" aria-label="${esc(t('node.addChild', 'Untergeordnetes Asset'))}" data-act="new-asset" data-parent="${esc(asset.id)}">+</button>
     </div>
     ${childForm}
@@ -500,15 +555,18 @@ function renderNode(asset, depth, keep) {
     ${open ? kids.map((k) => renderNode(k, depth + 1, keep)).join('') : ''}`;
 }
 
+// LIST view: exactly ONE dense line per asset — title plus a single short meta
+// on the right. Deliberately no path, no badge, no second line (that density is
+// what the shard view is for).
 function flatRowHtml(row) {
   const sel = state.selection.kind === 'asset' && state.selection.assetId === row.id;
   const asset = assetById(row.id);
-  const path = assetPath(row.id);
   const dot = row.alarmOpen ? 'warn' : row.signalCount ? 'ok' : '';
-  const meta = [path, row.signalCount ? `${row.signalCount} ${t('signalsWord', 'Signale')}` : ''].filter(Boolean).join(' · ');
+  const meta = row.alarmOpen
+    ? t('alarmWord', 'Alarm offen')
+    : (row.signalCount ? `${row.signalCount} ${t('signalsWord', 'Signale')}` : (asset?.asset_type || ''));
   return `<div class="ctox-list-item iot-flat-row${sel ? ' is-selected' : ''}" role="button" tabindex="0" aria-selected="${sel}" data-sel-kind="asset" data-sel-key="${esc(row.id)}" data-asset-id="${esc(row.id)}" data-context-record-id="${esc(row.id)}" data-context-record-type="iot_asset" data-context-label="${esc(row.name)}">
-    <div class="iot-flat-head"><span class="iot-status-dot ${dot}"></span><span class="iot-node-name">${esc(row.name)}</span><span class="ctox-badge">${esc(asset?.asset_type || '')}</span></div>
-    ${meta ? `<div class="iot-flat-meta">${esc(meta)}</div>` : ''}
+    <span class="iot-status-dot ${dot}"></span><span class="iot-node-name">${esc(row.name)}</span>${meta ? `<span class="iot-flat-meta">${esc(meta)}</span>` : ''}
   </div>`;
 }
 
@@ -570,12 +628,30 @@ function renderMain() {
   if (resolveMainState(hasSelection()) === 'select' || !allAssets().length) {
     // No assets + collection not live yet → sync state, not the selection
     // prompt (there may be assets inbound). Selection-empty stays ungated.
-    center.innerHTML = (!allAssets().length && collectionSyncing('iot_assets')) ? syncingShell() : mainEmptyState();
+    center.innerHTML = centerRestHeader()
+      + `<div class="ctox-pane-body">${(!allAssets().length && collectionSyncing('iot_assets')) ? syncingShell() : mainEmptyState()}</div>`;
     return;
   }
   const widgets = displayedWidgets();
   center.innerHTML = mainHeader() + (state.mainView === 'list' ? renderList(widgets) : renderCards(widgets));
   mountRenderIframes(center);
+}
+
+/* Static column head for the rest states (no selection / syncing): mirrors the
+   markup shipped in index.html so the pane NEVER loses its head. Head markup
+   only — no actions, no logic. */
+function centerRestHeader() {
+  return `
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker">${esc(t('main.kicker', 'CTOX IoT'))}</span>
+          <h2 class="ctox-pane-title">${esc(t('center.title', 'Dashboard'))}</h2>
+        </div>
+        <div class="ctox-pane-actions"></div>
+      </div>
+      <div class="ctox-filterbar iot-main-tools"></div>
+    </header>`;
 }
 
 function mainEmptyState() {
@@ -605,9 +681,8 @@ function mainHeader() {
         </div>
       </div>
       <div class="ctox-filterbar iot-main-tools">
-        <div class="ctox-view-toggle" role="group" aria-label="${esc(t('center.viewLabel', 'Ansicht'))}">
-          <button type="button" class="ctox-pane-icon" data-act="view" data-view="cards" aria-pressed="${state.mainView === 'cards'}" aria-label="${esc(t('view.cards', 'Karten'))}" title="${esc(t('view.cards', 'Karten'))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-act="view" data-view="list" aria-pressed="${state.mainView === 'list'}" aria-label="${esc(t('view.list', 'Liste'))}" title="${esc(t('view.list', 'Liste'))}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+        <div class="ctox-view-toggle">
+          <button type="button" class="ctox-pane-icon" data-act="view" aria-label="${esc(viewToggleLabel(state.mainView))}" title="${esc(viewToggleLabel(state.mainView))}">${viewToggleIcon(state.mainView)}</button>
         </div>
       </div>
     </header>`;
@@ -643,6 +718,10 @@ function renderWidgetCard(w) {
         <span class="iot-widget-title">${esc(signalLabel(w.signal_ref))}</span>
         <button class="ctox-pane-icon iot-widget-more" type="button" data-act="widget-menu" data-id="${esc(w.id)}" aria-label="${esc(t('card.actions', 'Aktionen'))}" title="${esc(t('card.actions', 'Aktionen'))}">⋯</button>
       </div>
+      <div class="iot-widget-meta">
+        <span class="ctox-badge${statusBadgeClass(st.dot)} iot-widget-status">${esc(st.label)}</span>
+        <span class="iot-widget-scope">${esc([assetPath(aid), a?.attribute_name || a?.name || attr].filter(Boolean).join(' / '))}</span>
+      </div>
       <div class="iot-widget-viz">
         <div class="iot-render-host" data-render-widget="${esc(w.id)}">${w.render_code ? '' : (series.length > 1 ? sparkSvg(series, 'iot-spark') : `<div class="iot-viz-empty">${esc(t('card.noData', 'noch keine Messwerte'))}</div>`)}</div>
         <span class="iot-widget-last">${esc(last)}</span>
@@ -656,21 +735,23 @@ function renderWidgetCard(w) {
     </div>`;
 }
 
+// LIST view: exactly ONE dense line per standing order — title plus a single
+// short meta (the status) on the right. The Wenn/Dann prose, the sparkline and
+// the inline edit buttons belong to the shard view.
 function renderList(widgets) {
   if (!widgets.length) return renderCards(widgets);
   const rows = widgets.map((w) => {
     const st = statusOf(w);
-    return `<tr data-id="${esc(w.id)}" data-widget="${esc(w.id)}" data-context-record-id="${esc(w.id)}" data-context-record-type="iot_widget" data-context-label="${esc(w.name || w.title || w.id)}">
-      <td><span class="iot-status-dot ${st.dot}"></span> ${esc(signalLabel(w.signal_ref))}</td>
-      <td>${esc(w.cond_text || '—')}</td>
-      <td>${esc(w.action_prompt || '—')}</td>
-      <td><span class="ctox-badge${statusBadgeClass(st.dot)} iot-widget-status">${esc(st.label)}</span></td>
-      <td class="is-num"><button class="ctox-pane-icon iot-widget-more" type="button" data-act="widget-menu" data-id="${esc(w.id)}" aria-label="${esc(t('card.actions', 'Aktionen'))}">⋯</button></td>
-    </tr>`;
+    return `<div class="ctox-list-item iot-row" data-id="${esc(w.id)}" data-widget="${esc(w.id)}" data-context-record-id="${esc(w.id)}" data-context-record-type="iot_widget" data-context-label="${esc(w.name || w.title || w.id)}">
+      <span class="iot-status-dot ${st.dot}" title="${esc(st.label)}"></span>
+      <span class="iot-row-title">${esc(signalLabel(w.signal_ref))}</span>
+      <span class="iot-row-meta iot-widget-status">${esc(st.label)}</span>
+      <button class="ctox-pane-icon iot-widget-more" type="button" data-act="widget-menu" data-id="${esc(w.id)}" aria-label="${esc(t('card.actions', 'Aktionen'))}" title="${esc(t('card.actions', 'Aktionen'))}">⋯</button>
+    </div>`;
   }).join('');
-  return `<div class="iot-dash-grid list"><table class="ctox-table">
-    <thead><tr><th>${esc(t('list.colAuftrag', 'Auftrag · Signal'))}</th><th>${esc(t('tag.when', 'Wenn'))}</th><th>${esc(t('tag.then', 'Dann'))}</th><th>${esc(t('list.colStatus', 'Status'))}</th><th></th></tr></thead>
-    <tbody>${rows}</tbody></table>
+  // `is-list`, never a bare `list`: app.css carries a generic `.list button
+  // { width: 100% }` that would blow every row control up to full width.
+  return `<div class="iot-dash-grid is-list">${rows}
     <div class="iot-list-foot"><button class="ctox-button" type="button" data-act="new-auftrag">${esc(t('cards.newAuftrag', 'Auftrag anlegen'))}</button></div>
   </div>`;
 }
@@ -756,13 +837,19 @@ function onClick(e) {
   const headerAction = e.target.closest('[data-action]');
   if (headerAction && rootEl()?.contains(headerAction)) { onHeaderAction(headerAction.dataset.action); return; }
 
+  // LEFT one-button view toggle. This root listener runs AFTER the shell's own
+  // listener on the button, so the module has the last word on state.view even
+  // when the pane grammar is wired — and it still works when it is not.
+  const viewToggle = e.target.closest('[data-iot-view-toggle]');
+  if (viewToggle && rootEl()?.contains(viewToggle)) { toggleLeftView(); return; }
+
   const el = e.target.closest('[data-act]');
   if (el) {
     const act = el.dataset.act;
     if (act === 'toggle') { e.stopPropagation(); const id = el.dataset.assetId; state.expanded.has(id) ? state.expanded.delete(id) : state.expanded.add(id); renderTree(); return; }
     if (act === 'new-asset') { e.stopPropagation(); const p = el.dataset.parent || null; state.creating = { parentId: p }; if (p) state.expanded.add(p); renderTree(); return; }
     if (act === 'cancel-create') { state.creating = null; renderTree(); return; }
-    if (act === 'view') { state.mainView = el.dataset.view; renderMain(); return; }
+    if (act === 'view') { state.mainView = viewToggleTarget(state.mainView); renderMain(); return; }
     if (act === 'new-auftrag') { mainNewAuftrag(); return; }
     if (act === 'signal-webhook') { if (state.selection.kind === 'signal') registerWebhook(signalRef(state.selection.assetId, state.selection.attr)); return; }
     if (act === 'widget-menu') { e.preventDefault(); openWidgetMenu(el.dataset.id, e); return; }

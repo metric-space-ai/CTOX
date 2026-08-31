@@ -1,6 +1,6 @@
-import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260811-fremde-collection-mitladen-v106';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
 
 const CSV_MIME = 'text/csv';
 const TSV_MIME = 'text/tab-separated-values';
@@ -673,7 +673,7 @@ function validateSpreadsheetLineage(ingestion = {}) {
   if (ingestion.kind !== RESEARCH_GENERATED_KIND) return { valid: true, message: '' };
   return {
     valid: false,
-    message: 'Research-derived spreadsheets must be admitted by the native Business OS command path before they can be opened as evidence.',
+    message: 'This spreadsheet needs confirmed provenance before it can be opened as evidence.',
   };
 }
 
@@ -888,10 +888,13 @@ function renderLeft(state) {
           <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('exportSelected', 'Ausgewählte Tabelle exportieren'))}" title="${escapeHtml(state.t('exportSelected', 'Ausgewählte Tabelle exportieren'))}" data-spreadsheets-export ${selected ? '' : 'disabled'}>${actionIcon(state, 'export')}</button>
         </div>
       </div>
-      <div class="ctox-pane-tools">
+    </header>
+    <!-- Shell V2: the pane head is exactly one shell header row tall, so the
+         search and filter strips are siblings below it, not header rows. -->
+    <div class="ctox-pane-tools spreadsheets-search-bar">
         <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Tabelle suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Tabellen suchen'))}" data-spreadsheets-search value="${escapeHtml(state.searchQuery)}">
-      </div>
-      <div class="ctox-pane-tools spreadsheets-filter-bar">
+    </div>
+    <div class="ctox-pane-tools spreadsheets-filter-bar">
         <select class="ctox-pane-filter" aria-label="${escapeHtml(state.t('sortLabel', 'Tabellen sortieren'))}" data-spreadsheets-sort>
           <option value="updated_desc" ${state.sortBy === 'updated_desc' ? 'selected' : ''}>${escapeHtml(state.t('sortByNewest', 'Neueste zuerst'))}</option>
           <option value="updated_asc" ${state.sortBy === 'updated_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByOldest', 'Älteste zuerst'))}</option>
@@ -908,8 +911,7 @@ function renderLeft(state) {
         <select class="ctox-pane-filter" aria-label="${escapeHtml(state.t('tagFilterLabel', 'Tabellen-Tags filtern'))}" data-spreadsheets-tag>
           ${tagFilterOptions(state)}
         </select>
-      </div>
-    </header>
+    </div>
   `;
 
   const list = document.createElement('div');
@@ -1184,7 +1186,18 @@ async function renderCenter(state) {
 
   if (!record) {
     const hasFilters = hasActiveListFilters(state);
+    // The pane head stays even without a selection: shell V2 hangs the version
+    // menu on `.ctox-pane-header .ctox-pane-title` of the module host, so the
+    // empty state must not drop the head or the app loses version history and
+    // source access.
     shell.innerHTML = `
+      <header class="ctox-pane-header ctox-pane-band spreadsheets-editor-header">
+        <div class="ctox-pane-title-row">
+          <div class="ctox-pane-titles">
+            <h2 class="ctox-pane-title">${escapeHtml(state.t('spreadsheetsTitle', 'CTOX Spreadsheets'))}</h2>
+          </div>
+        </div>
+      </header>
       <div class="ctox-empty">
         <strong>${escapeHtml(hasFilters ? state.t('noMatches', 'Keine Treffer') : state.t('noDocumentSelected', 'Keine Tabelle ausgewählt.'))}</strong>
         <span>${escapeHtml(hasFilters ? state.t('adjustSearchFilter', 'Suche oder Filter anpassen.') : state.t('noDocumentSelectedPrompt', 'Links eine Tabelle importieren oder auswählen.'))}</span>
@@ -1861,10 +1874,12 @@ async function openManageDrawer(state, id) {
 
 function initSpreadsheetsContextMenu(state) {
   state.contextMenu?.remove();
+  const moduleHost = state.ctx?.host;
+  if (!moduleHost) return () => {};
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu spreadsheets-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  moduleHost.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {
@@ -1978,6 +1993,11 @@ async function dispatchSpreadsheetsContextChat(state, context, message, mode = '
     if (status) status.textContent = state.t('chatNotReady', 'Chat ist noch nicht bereit.');
     return;
   }
+  const openBusinessChat = state.ctx?.openBusinessChat || state.ctx?.businessChat?.open;
+  if (typeof openBusinessChat !== 'function') {
+    if (status) status.textContent = state.t('chatNotReady', 'Chat ist noch nicht bereit.');
+    return;
+  }
   if (status) status.textContent = state.t('chatOpening', 'Öffne Chat...');
   const titlePrefix = safeMode === 'app'
     ? 'Spreadsheets App modifizieren'
@@ -1991,36 +2011,41 @@ async function dispatchSpreadsheetsContextChat(state, context, message, mode = '
       ? `Beantworte die folgende Frage ausschließlich lesend. Nutze nur vorhandene Daten und Kontext; führe keine Änderungen an Daten, Records, Dateien oder der App aus. Antworte knapp und direkt.\n\n${trimmed}`
       : trimmed;
 
-  window.dispatchEvent(new CustomEvent('ctox-business-os-chat-submit', {
-    detail: {
-      text: trimmed,
-      module: 'spreadsheets',
-      source_title: 'Spreadsheets',
-      command_type: safeMode === 'app' ? 'ctox.business_os.app.modify' : 'business_os.chat.task',
-      record_id: safeMode === 'app' ? 'spreadsheets' : (record?.id || 'spreadsheets'),
+  openBusinessChat({
+    text: trimmed,
+    draft: trimmed,
+    module: 'spreadsheets',
+    source_module: 'spreadsheets',
+    source_title: 'Spreadsheets',
+    action: 'context-chat',
+    reuseActive: false,
+    command_type: safeMode === 'app' ? 'ctox.business_os.app.modify' : 'business_os.chat.task',
+    record_id: safeMode === 'app' ? 'spreadsheets' : (record?.id || 'spreadsheets'),
+    title,
+    command_title: title,
+    instruction,
+    mode: safeMode,
+    target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
+    payload: {
       title,
       instruction,
-      payload: {
-        title,
-        instruction,
-        prompt: trimmed,
-        user_message: trimmed,
-        mode: safeMode,
-        target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
-        selected_spreadsheet: record,
-        context,
-        thread_key: 'business-os/spreadsheets',
-      },
-      client_context: {
-        action: 'context-chat',
-        mode: safeMode,
-        column: context.column,
-        record_type: context.record_type,
-        spreadsheet_id: record?.id || '',
-        filename: record?.filename || '',
-      },
+      prompt: trimmed,
+      user_message: trimmed,
+      mode: safeMode,
+      target: safeMode === 'app' ? 'app' : (safeMode === 'ask' ? 'read' : 'data'),
+      selected_spreadsheet: record,
+      context,
+      thread_key: 'business-os/spreadsheets',
     },
-  }));
+    client_context: {
+      action: 'context-chat',
+      mode: safeMode,
+      column: context.column,
+      record_type: context.record_type,
+      spreadsheet_id: record?.id || '',
+      filename: record?.filename || '',
+    },
+  });
   hideSpreadsheetsContextMenu(state);
 }
 

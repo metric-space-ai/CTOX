@@ -10,7 +10,6 @@ const systemAppsPath = path.join(repoRoot, 'src/apps/business-os/system-apps.jso
 
 export const COMPATIBILITY_DESKTOP_APPS = Object.freeze([
   Object.freeze({ id: 'explorer', title: 'Files', kind: 'desktop-app', cohort: 'compatibility' }),
-  Object.freeze({ id: 'code-editor', title: 'Source Editor', kind: 'desktop-app', cohort: 'compatibility' }),
 ]);
 
 export function loadBusinessOsAppInventory() {
@@ -42,11 +41,11 @@ export function loadBusinessOsAppInventory() {
   const coreApps = sourceApps.filter((app) => app.installScope === 'core');
   assertExactIds(systemAppIds, coreApps.map((app) => app.id), 'system-apps.json', 'core module manifests');
 
-  if (sourceApps.length !== 35) {
-    throw new Error(`Business OS source inventory must contain exactly 35 apps; found ${sourceApps.length}`);
+  if (sourceApps.length !== 36) {
+    throw new Error(`Business OS source inventory must contain exactly 36 apps; found ${sourceApps.length}`);
   }
-  if (coreApps.length !== 13) {
-    throw new Error(`Business OS system inventory must contain exactly 13 apps; found ${coreApps.length}`);
+  if (coreApps.length !== 18) {
+    throw new Error(`Business OS system inventory must contain exactly 18 apps; found ${coreApps.length}`);
   }
 
   return Object.freeze({

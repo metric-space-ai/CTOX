@@ -32,13 +32,72 @@ test('CTOX proxy model options follow the discovered proxy catalog', () => {
   );
 });
 
-test('runtime settings render independent Kimi subscription and MiniMax coding-plan accounts', () => {
+test('OpenAI model options prefer the CLIProxy-discovered 5.6 inference catalog', () => {
+  assert.deepEqual(
+    hooks.runtimeModelOptions('openai', '', [
+      { id: 'gpt-5.5' },
+      { id: 'gpt-image-2' },
+      { id: 'gpt-5.6-luna' },
+      { id: 'codex-auto-review' },
+      { id: 'gpt-5.6-sol' },
+      { id: 'gpt-5.6-terra' },
+    ]),
+    [
+      ['', 'Nicht gesetzt'],
+      ['gpt-5.6-sol', 'gpt-5.6-sol'],
+      ['gpt-5.6-terra', 'gpt-5.6-terra'],
+      ['gpt-5.6-luna', 'gpt-5.6-luna'],
+      ['gpt-5.5', 'gpt-5.5'],
+    ],
+  );
+  assert.deepEqual(
+    hooks.runtimeModelOptions('openai', '', []),
+    [
+      ['', 'Nicht gesetzt'],
+      ['gpt-5.6-sol', 'gpt-5.6-sol'],
+      ['gpt-5.6-terra', 'gpt-5.6-terra'],
+      ['gpt-5.6-luna', 'gpt-5.6-luna'],
+      ['gpt-5.4', 'gpt-5.4'],
+      ['gpt-5.4-mini', 'gpt-5.4-mini'],
+    ],
+  );
+});
+
+test('subscription provider switches render their discovered model catalog before saving', () => {
   const html = baseTemplate({
     tab: 'runtime',
     runtimeSettings: {
       can_manage: true,
-      runtime: { provider: 'local', chat_model: '' },
-      auth: { mode: 'local', configured: true },
+      runtime: {
+        provider: 'openai', chat_model: '', reasoning_effort: '', available_models: [],
+        available_models_by_provider: {
+          openai: [
+            { id: 'gpt-5.6-sol', reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+            { id: 'gpt-5.6-terra', reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+            { id: 'gpt-5.6-luna', reasoning_levels: ['low', 'medium', 'high', 'xhigh', 'max'] },
+          ],
+        },
+      },
+      auth: { mode: 'subscription', subscription_session_configured: true },
+      diagnostics: {},
+    },
+  });
+  assert.match(html, /data-value="gpt-5\.6-sol"/);
+  assert.match(html, /data-value="gpt-5\.6-terra"/);
+  assert.match(html, /data-value="gpt-5\.6-luna"/);
+  assert.doesNotMatch(html, /data-value="gpt-5\.5"/);
+});
+
+test('runtime settings follow the Workjet provider-access-model-reasoning flow', () => {
+  const html = baseTemplate({
+    tab: 'runtime',
+    runtimeSettings: {
+      can_manage: true,
+      runtime: {
+        provider: 'kimi', chat_model: 'kimi-k3[1m]', reasoning_effort: 'high',
+        available_models: ['kimi-k3[1m]'],
+      },
+      auth: { mode: 'subscription', configured: true, subscription_session_configured: true },
       diagnostics: {},
       provider_subscriptions: {
         schema: 'ctox.provider-subscriptions.v1',
@@ -65,26 +124,17 @@ test('runtime settings render independent Kimi subscription and MiniMax coding-p
       },
     },
   });
-  assert.match(html, /Provider Subscriptions/);
-  assert.match(html, /data-provider-logo="kimi" data-logo-state="artwork"/);
-  assert.match(html, /assets\/provider-logos\/kimi\.svg/);
-  assert.match(html, /data-provider-logo="kimi_coding" data-logo-state="artwork"/);
-  assert.match(html, /data-provider-logo="minimax" data-logo-state="artwork"/);
-  assert.match(html, /assets\/provider-logos\/minimax\.svg/);
-  assert.match(html, /claude-primary/);
-  assert.match(html, /data-runtime-authorize-subscription="codex"/);
-  assert.match(html, /data-runtime-authorize-subscription="claude"/);
-  assert.match(html, /data-runtime-authorize-subscription="antigravity"/);
+  assert.doesNotMatch(html, /Provider Subscriptions/);
+  assert.match(html, /Anbieter, Zugang und Modell/);
+  assert.match(html, /data-runtime-choice="data-runtime-provider"/);
+  assert.match(html, /data-runtime-choice="data-runtime-auth-mode"/);
+  assert.match(html, /data-runtime-choice="data-runtime-model"/);
+  assert.match(html, /data-runtime-choice="data-runtime-reasoning"/);
+  assert.match(html, /data-value="high"[^>]*aria-pressed="true"/);
+  assert.doesNotMatch(html, /Queue Policy|Preset|Context/);
   assert.match(html, /data-runtime-authorize-subscription="kimi"/);
-  assert.match(html, /data-runtime-authorize-subscription="kimi_coding"/);
-  assert.match(html, /data-runtime-authorize-subscription="minimax"/);
-  assert.match(html, /Kimi Coding Plan/);
-  assert.match(html, /kimi-primary/);
-  assert.match(html, /minimax-coding-primary/);
-  assert.match(html, /Coding Plan/);
-  assert.match(html, /kimi-subscription-kimi-k3/);
-  assert.match(html, /data-provider-subscription-action="rotate"/);
-  assert.match(html, /data-provider-subscription-action="disconnect"/);
+  assert.match(html, /kimi-k3\[1m\]/);
+  assert.doesNotMatch(html, /Neue Account-ID|von dieser CTOX Instanz noch nicht angeboten/);
   assert.doesNotMatch(html, /must-never-render|also-secret|access_token|refresh_token/);
 });
 
@@ -169,6 +219,198 @@ test('provider account commands carry only typed non-secret selectors', () => {
   );
 });
 
+test('subscription login starts through the typed business command bus', async () => {
+  const calls = [];
+  const payload = await hooks.startSubscriptionAuth('codex', 'codex-primary', {
+    commandBus: {
+      dispatch: async (command, options) => {
+        calls.push({ command, options });
+        return { result: {
+          status: 'device_code',
+          user_code: 'ABCD-EFGH',
+          verification_url: 'https://auth.example/device',
+        } };
+      },
+    },
+    db: { collection: (name) => (name === 'business_commands' ? {} : null) },
+    session: { user: { id: 'owner', role: 'chef', is_admin: true } },
+    sync: { startCollection: async () => {} },
+  });
+  assert.equal(payload.status, 'device_code');
+  assert.equal(payload.source, 'business_commands');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].command.type, 'ctox.subscription_auth.start');
+  assert.deepEqual(calls[0].command.payload, { provider: 'codex', account_id: 'codex-primary' });
+  assert.equal(calls[0].options.until, 'terminal');
+  assert.doesNotMatch(JSON.stringify(calls[0].command), /token|secret|api[_-]?key/i);
+});
+
+test('runtime refresh preserves the selected subscription provider while device login is pending', () => {
+  const loaded = {
+    runtime: {
+      provider: 'ctox_proxy',
+      chat_model: 'MiniMax-M3',
+      preset: 'Quality',
+      context: '256k',
+      max_run_secs: 1800,
+      available_models: ['MiniMax-M3'],
+    },
+    auth: { mode: 'api_key', api_key_configured: true },
+    diagnostics: { service_message: 'CTOX Service läuft.' },
+  };
+  const draft = {
+    ...loaded,
+    runtime: {
+      ...loaded.runtime,
+      provider: 'openai',
+      chat_model: '',
+      available_models: [],
+    },
+    auth: { mode: 'subscription', subscription_selected: true },
+  };
+  const result = hooks.runtimeSettingsPreservingPendingSubscription(loaded, draft, {
+    status: 'device_code',
+    provider: 'codex',
+    userCode: 'ABCD-EFGHI',
+  });
+  assert.equal(result.runtime.provider, 'openai');
+  assert.equal(result.auth.mode, 'subscription');
+  assert.equal(result.auth.subscription_selected, true);
+  assert.equal(result.auth.subscription_session_configured, false);
+  assert.deepEqual(result.diagnostics, loaded.diagnostics);
+});
+
+test('runtime refresh uses the persisted runtime when no subscription login is pending', () => {
+  const loaded = {
+    runtime: { provider: 'ctox_proxy', chat_model: 'MiniMax-M3' },
+    auth: { mode: 'api_key', api_key_configured: true },
+  };
+  const result = hooks.runtimeSettingsPreservingPendingSubscription(
+    loaded,
+    { runtime: { provider: 'openai' }, auth: { mode: 'subscription' } },
+    null,
+  );
+  assert.equal(result, loaded);
+});
+
+test('pending OpenAI device login renders code and provider link in the runtime menu', () => {
+  const html = baseTemplate({
+    tab: 'runtime',
+    runtimeSettings: {
+      can_manage: true,
+      runtime: { provider: 'openai', chat_model: '', available_models: [] },
+      auth: { mode: 'subscription', subscription_session_configured: false },
+      diagnostics: {},
+    },
+    subscriptionAuth: {
+      status: 'device_code',
+      provider: 'codex',
+      userCode: 'ABCD-EFGHI',
+      verificationUrl: 'https://auth.openai.com/codex/device',
+    },
+  });
+  assert.match(html, /ABCD-EFGHI/);
+  assert.match(html, /href="https:\/\/auth\.openai\.com\/codex\/device"/);
+  assert.match(html, />OpenAI öffnen<\/a>/);
+  assert.match(html, /data-runtime-copy-code="ABCD-EFGHI"/);
+  assert.match(html, /Geräte-Code kopieren/);
+});
+
+test('projected subscription status is authoritative', () => {
+  const projection = {
+    schema: 'ctox.provider-subscriptions.v1',
+    providers: [{ id: 'codex', label: 'ChatGPT / Codex' }],
+    accounts: [{ id: 'codex-primary', provider: 'codex', enabled: true, status: 'ready' }],
+  };
+  assert.equal(hooks.subscriptionProviderConnected(projection, 'codex'), true);
+  assert.equal(hooks.subscriptionProviderConnected(projection, 'claude'), false);
+});
+
+test('runtime settings save uses the typed business command bus', async () => {
+  const calls = [];
+  const request = {
+    provider: 'openai',
+    auth_mode: 'subscription',
+    chat_model: 'gpt-5.5',
+    reasoning_effort: 'high',
+    preset: 'Quality',
+    context: '256k',
+    max_run_secs: 1800,
+    api_key: '',
+  };
+  const result = await hooks.saveRuntimeSettings(request, {
+    commandBus: {
+      dispatch: async (command, options) => {
+        calls.push({ command, options });
+        return { result: { ok: true } };
+      },
+    },
+    db: { collection: (name) => (name === 'business_commands' ? {} : null) },
+    session: { user: { id: 'owner', role: 'chef', is_admin: true } },
+    sync: { startCollection: async () => {} },
+    waitForProjection: false,
+  });
+  assert.equal(calls[0].command.type, 'ctox.runtime_settings.save');
+  assert.deepEqual(calls[0].command.payload, request);
+  assert.equal(calls[0].options.until, 'accepted');
+  assert.deepEqual(result, { ok: true });
+});
+
+test('runtime settings reload reads the authoritative RxDB projection', async () => {
+  const projected = {
+    runtime: { provider: 'openai', chat_model: 'gpt-5.5', reasoning_effort: 'high' },
+    auth: { mode: 'subscription', subscription_session_configured: true },
+  };
+  const runtimeSettings = await hooks.loadRuntimeSettings({
+    db: {
+      collection: (name) => name === 'ctox_runtime_settings' ? {
+        findOne: () => ({ exec: async () => ({ toJSON: () => projected }) }),
+      } : null,
+    },
+  });
+  assert.equal(runtimeSettings.runtime.provider, 'openai');
+  assert.equal(runtimeSettings.runtime.reasoning_effort, 'high');
+});
+
+test('ready subscription projection renders one consistent connected state', () => {
+  const html = baseTemplate({
+    tab: 'runtime',
+    runtimeSettings: {
+      can_manage: true,
+      runtime: { provider: 'openai', chat_model: 'gpt-5.5', available_models: ['gpt-5.5'] },
+      auth: { mode: 'subscription', subscription_session_configured: false },
+      diagnostics: { service_message: 'CTOX Service läuft.' },
+      provider_subscriptions: {
+        schema: 'ctox.provider-subscriptions.v1',
+        providers: [{ id: 'codex', label: 'ChatGPT / Codex' }],
+        accounts: [{ id: 'codex-primary', provider: 'codex', enabled: true, status: 'ready' }],
+      },
+    },
+  });
+  assert.match(html, /Subscription verbunden/);
+  assert.match(html, /ChatGPT \/ Codex ist verbunden und einsatzbereit/);
+  assert.doesNotMatch(html, /Subscription nicht verbunden|CTOX-Harness zur Verfügung/);
+});
+
+test('reasoning choices track the selected model capability', () => {
+  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.5'), ['low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-luna'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(hooks.runtimeReasoningOptions('openai', 'gpt-5.6-sol'), ['low', 'medium', 'high', 'xhigh', 'max']);
+  assert.deepEqual(
+    hooks.runtimeReasoningOptions('openai', 'future-model', [
+      { id: 'future-model', reasoning_levels: ['low', 'high', 'max'] },
+    ]),
+    ['low', 'high', 'max'],
+  );
+});
+
+test('subscription auth always opens a fresh same-origin code window', () => {
+  const first = hooks.nextSubscriptionAuthWindowName('codex');
+  const second = hooks.nextSubscriptionAuthWindowName('codex');
+  assert.match(first, /^ctox-codex-subscription-\d+-\d+$/);
+  assert.notEqual(second, first);
+});
+
 test('all subscription providers expose one secret-free connect/status/rotate/disconnect story', () => {
   const accounts = {
     codex: 'codex-instance-primary',
@@ -216,28 +458,12 @@ test('coding-plan credential guidance is allowlisted and never renders native se
     /ungültige Credential-Anforderung/,
   );
 
-  const html = baseTemplate({
-    tab: 'runtime',
-    subscriptionAuth: {
-      status: 'credential_required', provider: 'kimi_coding', accountId: 'kimi-coding-primary',
-      credentialName: 'KIMI_API_KEY',
-    },
-    runtimeSettings: {
-      can_manage: true,
-      runtime: { provider: 'local', chat_model: '' },
-      auth: { mode: 'local', configured: true },
-      diagnostics: {},
-      provider_subscriptions: {
-        schema: 'ctox.provider-subscriptions.v1',
-        providers: [{ id: 'kimi_coding', label: 'Kimi Coding Plan', access_mode: 'Coding Plan' }],
-        accounts: [],
-      },
-    },
-  });
-  assert.match(html, /KIMI_API_KEY erforderlich/);
-  assert.match(html, /verschlüsselten CTOX Credential-Bereich/);
-  assert.match(html, /nicht in dieses Browser-Formular eingegeben/);
-  assert.doesNotMatch(html, /secret\.invalid|token=abc|OTHER_SECRET/);
+  const rendered = JSON.stringify(hooks.providerCredentialRequirement({
+    status: 'credential_required', credential_name: 'KIMI_API_KEY',
+    message: 'ignore native text https://secret.invalid token=abc', token: 'abc',
+  }, 'kimi_coding'));
+  assert.match(rendered, /verschlüsselten CTOX Credential-Bereich/);
+  assert.doesNotMatch(rendered, /secret\.invalid|token=abc|OTHER_SECRET/);
 });
 
 test('provider account command validation fails closed', () => {
@@ -334,9 +560,141 @@ function baseTemplate(overrides = {}) {
   });
 }
 
+test('sync settings render only signaling server, room, password, QR code, and link', () => {
+  const html = baseTemplate({
+    tab: 'sync',
+    syncConfig: {
+      app_hosting: 'ctox_dev_web_deploy',
+      sync_mode: 'p2p-first',
+      transport: 'webrtc',
+      peer_role: 'browser',
+      instance_id: 'biz_test',
+      native_peer_id: 'ctox-core-test',
+      sync_room: 'ctox-business-os:biz_test:room',
+      signaling_room_password: 'room-password-test',
+      signaling_auth_version: 'ctox-role-bound-v1',
+      signaling_urls: [
+        'wss://signaling.ctox.dev/v2?token=secret&token_exp=32503680000',
+      ],
+    },
+    workjetPairing: { loading: false, invite: null, error: '' },
+  });
+  assert.match(html, /Signaling-Server/);
+  assert.match(html, />Raum</);
+  assert.match(html, />Passwort</);
+  assert.match(html, />QR-Code</);
+  assert.match(html, />Link</);
+  assert.match(html, /ctox-business-os:biz_test:room/);
+  assert.match(html, /••••••••••••/);
+  assert.doesNotMatch(html, /room-password-test/);
+  assert.match(html, /wss:\/\/signaling\.ctox\.dev\/v2/);
+  assert.match(html, /data-sync-copy="signaling"/);
+  assert.match(html, /data-sync-copy="room"/);
+  assert.match(html, /data-sync-copy="password"/);
+  assert.match(html, /data-sync-password-toggle/);
+  assert.match(html, /data-workjet-pairing-generate/);
+  assert.doesNotMatch(html, /data-workjet-pairing-ready|workjet:\/\/pair\?payload=/);
+  assert.doesNotMatch(html, /Business-OS-Hosting|Workjet verbinden|Technische Verbindung/);
+  assert.doesNotMatch(html, /App-Hosting|Sync-Modus|Transport|Peer-Rolle|Instanz/);
+  assert.doesNotMatch(html, /Zugang|Gültig bis|Ziel-Peer|Verbindungsraum/);
+  assert.doesNotMatch(html, /Gerätename|QR-Code erstellen|Neuen QR-Code|Sync Konfiguration/);
+  assert.doesNotMatch(html, /Klartext-Passwort|Kurzzeit-Token|Token ist im QR/);
+});
+
+test('sync settings use the role-bound signaling token when no room password is exposed', () => {
+  const html = baseTemplate({
+    tab: 'sync',
+    syncConfig: {
+      sync_room: 'ctox-business-os:biz_test:room',
+      signaling_browser_token: 'role-bound-browser-token',
+      signaling_urls: ['wss://signaling.ctox.dev/v2'],
+    },
+    workjetPairing: { loading: false, invite: null, error: '' },
+  });
+  assert.match(html, /••••••••••••/);
+  assert.doesNotMatch(html, /role-bound-browser-token/);
+  assert.doesNotMatch(html, /<dt>Passwort<\/dt><dd>-<\/dd>/);
+  assert.equal(hooks.syncCopyValue('password', {
+    signaling_browser_token: 'role-bound-browser-token',
+  }), 'role-bound-browser-token');
+
+  const revealed = baseTemplate({
+    tab: 'sync',
+    syncConfig: { signaling_browser_token: 'role-bound-browser-token' },
+    workjetPairing: { loading: false, invite: null, error: '', passwordVisible: true },
+  });
+  assert.match(revealed, /role-bound-browser-token/);
+});
+
+test('Workjet pairing response is validated and rendered as an inert SVG image', async () => {
+  const response = {
+    pairingUri: `workjet://pair?payload=${'A'.repeat(64)}`,
+    qrSvg: '<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1H0V0"/></svg>',
+    expiresAt: '2999-01-01T00:00:00.000Z',
+  };
+  const calls = [];
+  const invite = await hooks.createWorkjetPairingInvite({
+    requestNative: async (...args) => {
+      calls.push(args);
+      return response;
+    },
+  }, 'Fold 8');
+  assert.deepEqual(invite, response);
+  assert.equal(calls[0][0], 'ctox.workjet.device.v1');
+  assert.deepEqual(calls[0][1], {
+    action: 'invite.create', ttlSeconds: 300, displayName: 'Fold 8',
+  });
+  assert.equal(calls[0][2].requiredCapability, 'ctox-workjet-device-control-v1');
+  assert.match(hooks.workjetPairingSvgDataUrl(response.qrSvg), /^data:image\/svg\+xml/);
+
+  const html = baseTemplate({
+    tab: 'sync',
+    syncConfig: {},
+    workjetPairing: { loading: false, invite, error: '' },
+  });
+  assert.match(html, /data-workjet-pairing-ready/);
+  assert.match(html, /alt="Workjet Pairing QR-Code"/);
+  assert.match(html, /data-workjet-pairing-link/);
+  assert.match(html, /data-sync-copy="link"/);
+  assert.match(html, /href="workjet:\/\/pair\?payload=/);
+  assert.match(html, /Gültig für/);
+  assert.doesNotMatch(html, /QR-Code mit Workjet scannen|In Workjet öffnen|Gültig bis/);
+  assert.doesNotMatch(html, /<script/i);
+});
+
+test('Workjet pairing countdown reports the remaining validity window', () => {
+  const now = Date.parse('2026-08-29T12:00:00.000Z');
+  assert.equal(
+    hooks.workjetPairingRemainingLabel('2026-08-29T12:05:00.000Z', now),
+    'Gültig für 5:00',
+  );
+  assert.equal(
+    hooks.workjetPairingRemainingLabel('2026-08-29T11:59:00.000Z', now),
+    'Gültig für 0:00',
+  );
+});
+
+test('Workjet pairing retries while the native WebRTC peer is still negotiating', async () => {
+  const response = {
+    pairingUri: `workjet://pair?payload=${'B'.repeat(64)}`,
+    qrSvg: '<svg xmlns="http://www.w3.org/2000/svg"><path d="M0 0h1v1H0V0"/></svg>',
+    expiresAt: '2999-01-01T00:00:00.000Z',
+  };
+  let attempts = 0;
+  const invite = await hooks.createWorkjetPairingInvite({
+    requestNative: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('WebRTC peer is closed: protocol-incompatible');
+      return response;
+    },
+  }, 'Phone', [0, 0]);
+  assert.equal(attempts, 2);
+  assert.deepEqual(invite, response);
+});
+
 test('settings user tab renders business-facing role labels', () => {
   const html = baseTemplate();
-  assert.match(html, /Team & Zugaenge/);
+  assert.match(html, /Team & Zugänge/);
   assert.match(html, /Teammitglied/);
   assert.match(html, /App-Verantwortliche:r/);
   assert.match(html, /Owner/);
@@ -367,11 +725,11 @@ test('compact settings tabs expose their complete labels on hover and to assisti
   const html = baseTemplate({ tab: 'runtime' });
   const expectedTabs = [
     ['runtime', 'Runtime'],
-    ['channels', 'Channels'],
+    ['channels', 'Kanäle'],
     ['sync', 'Sync'],
     ['appearance', 'Design'],
     ['mcp', 'MCP'],
-    ['users', 'Nutzer'],
+    ['users', 'Team'],
     ['activity', 'Aktivität'],
     ['admin', 'Module'],
   ];

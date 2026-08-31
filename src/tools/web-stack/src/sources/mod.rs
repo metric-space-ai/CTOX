@@ -30,6 +30,7 @@ pub mod leadfeeder;
 pub mod linkedin;
 pub mod northdata;
 pub mod person_discovery;
+pub mod runtime_targets;
 pub mod scrape_bridge;
 pub mod xing;
 pub mod zefix;
@@ -135,12 +136,23 @@ pub enum Tier {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum FieldKey {
     FirmaName,
+    FirmaFruehereNamen,
+    FirmaAktivitaetsstatus,
     FirmaAnschrift,
+    FirmaBesucheranschrift,
+    FirmaPostanschrift,
+    FirmaPostfach,
     FirmaPlz,
     FirmaOrt,
+    FirmaLand,
     FirmaEmail,
     FirmaDomain,
     FirmaTelefon,
+    FirmaFax,
+    FirmaGeschaeftstaetigkeit,
+    FirmaHomepageFactSheet,
+    FirmaGeschaeftsfuehrung,
+    FirmaProkura,
     WzCode,
     Umsatz,
     Mitarbeiter,
@@ -158,16 +170,62 @@ pub enum FieldKey {
     PersonXing,
 }
 
+pub const OUTBOUND_RESEARCH_FIELDS: &[FieldKey] = &[
+    FieldKey::FirmaName,
+    FieldKey::FirmaFruehereNamen,
+    FieldKey::FirmaAktivitaetsstatus,
+    FieldKey::FirmaAnschrift,
+    FieldKey::FirmaBesucheranschrift,
+    FieldKey::FirmaPostanschrift,
+    FieldKey::FirmaPostfach,
+    FieldKey::FirmaPlz,
+    FieldKey::FirmaOrt,
+    FieldKey::FirmaLand,
+    FieldKey::FirmaEmail,
+    FieldKey::FirmaDomain,
+    FieldKey::FirmaTelefon,
+    FieldKey::FirmaFax,
+    FieldKey::FirmaGeschaeftstaetigkeit,
+    FieldKey::FirmaHomepageFactSheet,
+    FieldKey::FirmaGeschaeftsfuehrung,
+    FieldKey::FirmaProkura,
+    FieldKey::WzCode,
+    FieldKey::Umsatz,
+    FieldKey::Mitarbeiter,
+    FieldKey::PersonGeschlecht,
+    FieldKey::PersonTitel,
+    FieldKey::PersonVorname,
+    FieldKey::PersonNachname,
+    FieldKey::PersonFunktion,
+    FieldKey::PersonPosition,
+    FieldKey::PersonEmail,
+    FieldKey::PersonEmailValidation,
+    FieldKey::PersonTelefon,
+    FieldKey::PersonLinkedin,
+    FieldKey::PersonXing,
+];
+
 impl FieldKey {
     pub fn as_str(self) -> &'static str {
         match self {
             FieldKey::FirmaName => "firma_name",
+            FieldKey::FirmaFruehereNamen => "firma_fruehere_namen",
+            FieldKey::FirmaAktivitaetsstatus => "firma_aktivitaetsstatus",
             FieldKey::FirmaAnschrift => "firma_anschrift",
+            FieldKey::FirmaBesucheranschrift => "firma_besucheranschrift",
+            FieldKey::FirmaPostanschrift => "firma_postanschrift",
+            FieldKey::FirmaPostfach => "firma_postfach",
             FieldKey::FirmaPlz => "firma_plz",
             FieldKey::FirmaOrt => "firma_ort",
+            FieldKey::FirmaLand => "firma_land",
             FieldKey::FirmaEmail => "firma_email",
             FieldKey::FirmaDomain => "firma_domain",
             FieldKey::FirmaTelefon => "firma_telefon",
+            FieldKey::FirmaFax => "firma_fax",
+            FieldKey::FirmaGeschaeftstaetigkeit => "firma_geschaeftstaetigkeit",
+            FieldKey::FirmaHomepageFactSheet => "firma_homepage_fact_sheet",
+            FieldKey::FirmaGeschaeftsfuehrung => "firma_geschaeftsfuehrung",
+            FieldKey::FirmaProkura => "firma_prokura",
             FieldKey::WzCode => "wz_code",
             FieldKey::Umsatz => "umsatz",
             FieldKey::Mitarbeiter => "mitarbeiter",
@@ -189,12 +247,33 @@ impl FieldKey {
     pub fn from_str(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "firma_name" | "firmierung" => Some(Self::FirmaName),
+            "firma_fruehere_namen" | "fruehere_namen" | "frühere_namen" => {
+                Some(Self::FirmaFruehereNamen)
+            }
+            "firma_aktivitaetsstatus" | "aktivitaetsstatus" | "aktivitätsstatus" => {
+                Some(Self::FirmaAktivitaetsstatus)
+            }
             "firma_anschrift" | "anschrift" => Some(Self::FirmaAnschrift),
+            "firma_besucheranschrift" | "besucheranschrift" => Some(Self::FirmaBesucheranschrift),
+            "firma_postanschrift" | "postanschrift" => Some(Self::FirmaPostanschrift),
+            "firma_postfach" | "postfach" => Some(Self::FirmaPostfach),
             "firma_plz" | "plz" => Some(Self::FirmaPlz),
             "firma_ort" | "ort" => Some(Self::FirmaOrt),
+            "firma_land" | "land" => Some(Self::FirmaLand),
             "firma_email" | "firmen_email" => Some(Self::FirmaEmail),
             "firma_domain" | "domain" => Some(Self::FirmaDomain),
             "firma_telefon" | "firmen_telefon" => Some(Self::FirmaTelefon),
+            "firma_fax" | "fax" => Some(Self::FirmaFax),
+            "firma_geschaeftstaetigkeit" | "geschaeftstaetigkeit" | "geschäftstätigkeit" => {
+                Some(Self::FirmaGeschaeftstaetigkeit)
+            }
+            "firma_homepage_fact_sheet" | "homepage_fact_sheet" => {
+                Some(Self::FirmaHomepageFactSheet)
+            }
+            "firma_geschaeftsfuehrung" | "geschaeftsfuehrung" | "geschäftsführung" => {
+                Some(Self::FirmaGeschaeftsfuehrung)
+            }
+            "firma_prokura" | "prokura" => Some(Self::FirmaProkura),
             "wz_code" | "wz" => Some(Self::WzCode),
             "umsatz" => Some(Self::Umsatz),
             "mitarbeiter" | "anzahl_mitarbeiter" => Some(Self::Mitarbeiter),
@@ -570,6 +649,10 @@ pub static REGISTRY: &[fn() -> &'static dyn SourceModule] = &[
     directory::google_maps,
     handelsregister::module,
     impressum::module,
+    runtime_targets::evi,
+    runtime_targets::justizonline,
+    runtime_targets::mailtester,
+    runtime_targets::shab,
     leadfeeder::module,
     linkedin::module,
     directory::moneyhouse,
@@ -650,7 +733,7 @@ mod tests {
     #[test]
     fn registry_has_all_expected_sources() {
         let ids: Vec<_> = list().map(|m| m.id()).collect();
-        assert_eq!(ids.len(), 17, "expected exactly 17 registered sources");
+        assert_eq!(ids.len(), 21, "expected exactly 21 registered sources");
         for expected in [
             "bundesanzeiger.de",
             "companyhouse.de",
@@ -661,6 +744,10 @@ mod tests {
             "maps.google.com",
             "handelsregister.de",
             "impressum",
+            "evi.gv.at",
+            "justizonline.gv.at",
+            "mailtester.com",
+            "shab.ch",
             "leadfeeder.com",
             "linkedin.com",
             "moneyhouse.ch",
@@ -721,15 +808,20 @@ mod tests {
 
     #[test]
     fn field_key_round_trip() {
-        for key in [
-            FieldKey::FirmaName,
-            FieldKey::FirmaTelefon,
-            FieldKey::Umsatz,
-            FieldKey::PersonFunktion,
-            FieldKey::PersonEmailValidation,
-            FieldKey::PersonLinkedin,
-        ] {
-            assert_eq!(FieldKey::from_str(key.as_str()), Some(key));
+        for key in OUTBOUND_RESEARCH_FIELDS {
+            assert_eq!(FieldKey::from_str(key.as_str()), Some(*key));
+        }
+    }
+
+    #[test]
+    fn every_outbound_research_field_has_an_authoritative_source() {
+        assert_eq!(OUTBOUND_RESEARCH_FIELDS.len(), 32);
+        for field in OUTBOUND_RESEARCH_FIELDS {
+            assert!(
+                !sources_for_field(*field).is_empty(),
+                "Outbound field `{}` has no authoritative source",
+                field.as_str()
+            );
         }
     }
 }

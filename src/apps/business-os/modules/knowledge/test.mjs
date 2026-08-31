@@ -43,6 +43,7 @@ const {
   formatCell,
   normalizeColumns,
   normalizeStoredKnowledgeRecord,
+  knowledgeResourcesForEntries,
   sourceScopeFor,
   sortKnowledgeRecords,
   valueForColumn,
@@ -203,6 +204,60 @@ test('groups linked SKF skillbooks, runbooks, resources, and tables into one dom
   ]));
   assert.ok(hub.runbookIds.includes('runbook:verification'));
   assert.equal(groups.some((group) => group.id === 'bundle/drone-bearing-design-verified-v1'), false);
+});
+
+test('associates ordinary persisted runbooks by id, skillbook id, domain, and source path exactly once', () => {
+  const groups = buildKnowledgeBundles([
+    {
+      id: 'skillbook:alpha-ops',
+      kind: 'skillbook',
+      title: 'Alpha Operations',
+      linked_runbook_ids: ['runbook:explicit-alpha'],
+    },
+    {
+      id: 'skillbook:finance-book',
+      kind: 'skillbook',
+      title: 'Finance Book',
+      domain: 'finance-controls',
+      source_path: '/packs/finance-book/SKILL.md',
+    },
+    {
+      id: 'skillbook:shared-domain-book',
+      kind: 'skillbook',
+      title: 'Shared Domain Book',
+      domain: 'finance-controls',
+    },
+  ], [
+    { id: 'runbook:explicit-alpha', title: 'Explicit Alpha' },
+    { id: 'runbook:alpha-by-id', skillbook_id: 'alpha-ops', title: 'Alpha by ID' },
+    { id: 'runbook:finance-domain', domain: 'finance-controls', title: 'Finance by domain' },
+    { id: 'runbook:finance-path', source_path: '/packs/finance-book/runbooks/month-close.md', title: 'Finance by path' },
+    { id: 'runbook:finance-path', source_path: '/packs/finance-book/runbooks/duplicate.md', title: 'Duplicate record' },
+    { id: 'runbook:specific-owner', skillbook_id: 'shared-domain-book', domain: 'finance-controls', title: 'Specific owner wins' },
+  ], []);
+
+  const alpha = groups.find((group) => group.title === 'Alpha Operations');
+  const finance = groups.find((group) => group.title === 'Finance Book');
+  const sharedDomain = groups.find((group) => group.title === 'Shared Domain Book');
+  assert.deepEqual(new Set(alpha.runbookIds), new Set(['runbook:explicit-alpha', 'runbook:alpha-by-id']));
+  assert.deepEqual(new Set(finance.runbookIds), new Set(['runbook:finance-domain', 'runbook:finance-path']));
+  assert.deepEqual(sharedDomain.runbookIds, ['runbook:specific-owner']);
+
+  const assignments = groups.flatMap((group) => group.runbookIds);
+  for (const id of new Set(assignments)) {
+    assert.equal(assignments.filter((candidate) => candidate === id).length, 1, `${id} is assigned once`);
+  }
+});
+
+test('treats source_path records as visible sources without duplicating explicit resources', () => {
+  const resources = knowledgeResourcesForEntries([
+    { id: 'skillbook:with-source', kind: 'skillbook', source_path: '/packs/with-source/SKILL.md' },
+    { id: 'resource:manual', kind: 'resource', source_path: '/docs/manual.pdf' },
+    { id: 'note:no-source', kind: 'note' },
+    { id: 'resource:manual', kind: 'resource', source_path: '/docs/duplicate.pdf' },
+  ]);
+
+  assert.deepEqual(resources.map((entry) => entry.id), ['skillbook:with-source', 'resource:manual']);
 });
 
 test('normalizes RxDB payload records without dropping table rows or schema', () => {
@@ -436,6 +491,8 @@ test('action dialogs require non-empty required fields before submit', () => {
 test('presentation follows compact Business OS knowledge contract', async () => {
   const css = await readFile(fileURLToPath(new URL('./index.css', import.meta.url)), 'utf8');
   const html = await readFile(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
+  const js = await readFile(fileURLToPath(new URL('./index.js', import.meta.url)), 'utf8');
+  const manifest = JSON.parse(await readFile(fileURLToPath(new URL('./module.json', import.meta.url)), 'utf8'));
 
   assert.doesNotMatch(html, /ctox-pane--glass/);
   assert.doesNotMatch(css, /border-(?:left|right):\s*(?:[2-9]|[0-9]{2,})px/);
@@ -444,10 +501,29 @@ test('presentation follows compact Business OS knowledge contract', async () => 
   assert.match(css, /--knowledge-shadow:\s*none;/);
   assert.match(css, /--knowledge-panel-radius:\s*var\(--surface-radius\)/);
   assert.match(css, /--knowledge-control-radius:\s*var\(--control-radius\)/);
+  // Der 128px-Pilot wurde am 31.08.2026 nach visueller Abnahme verworfen:
+  // Knowledge folgt der geteilten 80px/37px-Geometrie und definiert keine
+  // eigenen Shell-Tokens mehr.
+  assert.doesNotMatch(css, /--shell-v2-icon-size:\s*128px/);
+  assert.doesNotMatch(css, /--shell-v2-header-row-size:\s*64px/);
+  // Pilot-Steuerungsgroesse (64px) mit dem 128px-Icon verworfen (31.08.2026).
+  assert.doesNotMatch(css, /shell-window-control--close\s*\{[\s\S]*?width:\s*64px;/);
+  assert.match(css, /knowledge-left > \.ctox-pane-header\s*\{[\s\S]*?padding-left:\s*calc\(var\(--shell-v2-icon-size, 80px\) \+ 8px\);/);
+  assert.match(css, /\.knowledge-filterbar\s*\{[\s\S]*?padding-left:\s*calc\(var\(--shell-v2-icon-size, 80px\) \+ 8px\);/);
+  assert.match(css, /\.ctox-column-resizer::before\s*\{[\s\S]*?width:\s*2px;[\s\S]*?height:\s*100%;/);
+  assert.match(css, /\.ctox-column-resizer\.is-active::before\s*\{[\s\S]*?width:\s*6px;/);
   // Shards are pure selectors: no inline expansion machinery — the content
   // pane's tabs + second-level switcher are the only navigation into a group.
   assert.doesNotMatch(css, /bundle-caret|knowledge-bundle-items/);
   assert.match(css, /\.bundle-meta\s*\{/);
+  assert.match(css, /\.ctox-column-resizer::before[\s\S]*?left:\s*50%;[\s\S]*?top:\s*50%/);
+  assert.match(css, /@container business-app-window \(max-width:\s*559px\)/);
+  assert.match(css, /\.knowledge-app-overlay\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0/);
+  assert.match(js, /function openKnowledgeOverlay/);
+  assert.doesNotMatch(js, /state\.ctx\.open(?:Left|Right|Bottom)Drawer/);
+  assert.match(js, /knowledge-detail-empty/);
+  assert.equal(manifest.layout.min_width, 360);
+  assert.equal(manifest.presentation.minimum_size.width, 360);
 });
 
 test('pane chrome follows the canonical data-pg-* grammar contract', async () => {
@@ -455,11 +531,19 @@ test('pane chrome follows the canonical data-pg-* grammar contract', async () =>
   const html = await readFile(fileURLToPath(new URL('./index.html', import.meta.url)), 'utf8');
   const css = await readFile(fileURLToPath(new URL('./index.css', import.meta.url)), 'utf8');
 
-  // The shell wires search / view / tray / reset / band / counts / footer from
+  // The shell wires search / tray / reset / band / counts / footer from
   // the markup (autoWirePaneGrammar); the module never re-codes that chrome.
-  for (const attr of ['data-pg-search', 'data-pg-view', 'data-pg-tray-toggle', 'data-pg-tray', 'data-pg-reset', 'data-pg-filter', 'data-pg-band', 'data-pg-count', 'data-pg-footer']) {
+  for (const attr of ['data-pg-search', 'data-pg-tray-toggle', 'data-pg-tray', 'data-pg-reset', 'data-pg-filter', 'data-pg-band', 'data-pg-count', 'data-pg-footer']) {
     assert.match(html, new RegExp(attr), `index.html carries ${attr}`);
   }
+  // Standardansicht seit 31.08.2026: Karten (Detail-Shards); Liste ist die
+  // kompakte Alternative.
+  assert.match(html, /data-pg-default-view="cards"/);
+  // knowledge-view-toggle ist seit 31.08.2026 der EINE modul-verdrahtete
+  // Umschalt-Knopf (Betreiber-Direktive); verboten bleiben Kicker und das
+  // alte shell-verdrahtete Knopfpaar.
+  assert.doesNotMatch(html, /ctox-pane-kicker|data-pg-view=/);
+  assert.equal((html.match(/<button[^>]*data-knowledge-view-toggle/g) || []).length, 1);
   // The module consumes the grammar through the bubbling change event and the
   // null-guarded pane handle — not through hand-rolled search/tray wiring.
   assert.match(js, /ctox-pane-grammar-change/);
@@ -467,6 +551,9 @@ test('pane chrome follows the canonical data-pg-* grammar contract', async () =>
   assert.doesNotMatch(js, /data-action="toggle-filters"|data-action="reset-filters"|\[data-view-mode\]|\[data-tab\]/);
   // Import/Export stay collected header actions (top-right icons).
   assert.match(html, /ctox-pane-actions[\s\S]*data-action="import-knowledge-book"[\s\S]*data-action="export-knowledge-book"/);
+  for (const action of ['create-knowledge-book', 'import-knowledge-book', 'export-knowledge-book']) {
+    assert.match(js, new RegExp(`querySelector\\('\\[data-action="${action}"\\]\\'\\)\\?\\.addEventListener\\('click'`));
+  }
   // Selection is signaled canonically and flipped in place, never via a list
   // rebuild: aria-selected + is-selected on existing rows.
   assert.match(js, /applyKnowledgeSelection/);

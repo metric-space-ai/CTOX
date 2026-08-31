@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import {
+  persistLocalBusinessReport,
+  resolveBusinessReporterModule,
+  saveBusinessReportLocally,
+} from './business-reporter.js';
+
 function makeElement(tagName) {
   const children = [];
   return {
@@ -55,7 +61,6 @@ test('Business reporter keeps desktop idle free of RAF animation timers', async 
     initBusinessReporter({
       session: { authenticated: true },
       getActiveModule: () => ({ id: 'ctox', title: 'CTOX' }),
-      commandBus: {},
     });
 
     assert.equal(documentStub.body.children.length, 1);
@@ -69,4 +74,173 @@ test('Business reporter keeps desktop idle free of RAF animation timers', async 
     globalThis.clearTimeout = previousClearTimeout;
     globalThis.requestAnimationFrame = previousRequestAnimationFrame;
   }
+});
+
+test('Business reporter persists a report locally without waiting for WebRTC readiness', async () => {
+  const inserted = new Map();
+  const collection = (name) => ({
+    async insert(doc) {
+      inserted.set(name, structuredClone(doc));
+    },
+    findOne() {
+      return { async exec() { return null; } };
+    },
+  });
+  let syncStarts = 0;
+  const neverReady = new Promise(() => {});
+  const sync = {
+    startCollection() {
+      syncStarts += 1;
+      return neverReady;
+    },
+  };
+
+  await Promise.race([
+    persistLocalBusinessReport({
+      db: {
+        raw: {
+          business_module_reports: collection('business_module_reports'),
+          ctox_bug_reports: collection('ctox_bug_reports'),
+        },
+      },
+      sync,
+      session: { user: { id: 'owner-1' } },
+      report: {
+        result: {
+          report_id: 'report-local-first',
+          command_id: '',
+          task_id: '',
+          report_status: 'open',
+          delivery_status: 'not_delegated',
+        },
+        module: { id: 'desktop' },
+        kind: 'bug',
+        severity: 'high',
+        title: 'Reporter remains visible',
+        summary: 'The command bridge is offline.',
+        expected: 'The report is still listed.',
+        clientContext: { source: 'business-os-reporter' },
+        now: 1234,
+      },
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('local report write waited for sync')), 100)),
+  ]);
+
+  assert.equal(syncStarts, 2);
+  assert.deepEqual(inserted.get('business_module_reports'), {
+    id: 'report-local-first',
+    report_id: 'report-local-first',
+    module_id: 'desktop',
+    kind: 'bug',
+    severity: 'high',
+    title: 'Reporter remains visible',
+    summary: 'The command bridge is offline.',
+    expected: 'The report is still listed.',
+    status: 'open',
+    reporter_id: 'owner-1',
+    ctox_command_id: '',
+    task_id: '',
+    inbound_channel: 'desktop',
+    client_context: {
+      source: 'business-os-reporter',
+      report_delivery: {
+        status: 'not_delegated',
+        command_id: '',
+        task_id: '',
+      },
+    },
+    created_at_ms: 1234,
+    updated_at_ms: 1234,
+  });
+  assert.equal(inserted.get('ctox_bug_reports').payload.delivery_status, 'not_delegated');
+  assert.equal(inserted.get('ctox_bug_reports').status, 'open');
+});
+
+test('Business reporter never claims a cold-start write when report collections are missing', async () => {
+  await assert.rejects(
+    persistLocalBusinessReport({
+      db: { raw: {} },
+      report: {
+        result: { report_id: 'report-missing' },
+        module: { id: 'desktop' },
+        title: 'Missing collections',
+        now: 1234,
+      },
+    }),
+    /Bugs & Features ist noch nicht bereit/,
+  );
+});
+
+test('Business reporter saves an app record without creating a CTOX command or task', async () => {
+  const inserted = new Map();
+  const collection = (name) => ({
+    async insert(doc) { inserted.set(name, structuredClone(doc)); },
+    findOne() { return { async exec() { return null; } }; },
+  });
+  const result = await saveBusinessReportLocally({
+    db: {
+      raw: {
+        business_module_reports: collection('business_module_reports'),
+        ctox_bug_reports: collection('ctox_bug_reports'),
+      },
+    },
+    session: { user: { id: 'owner-1' } },
+    module: { id: 'desktop' },
+    kind: 'feature',
+    title: 'Stable local identity',
+    reportId: 'report-pending',
+    now: 1234,
+  });
+
+  assert.equal(result.report_id, 'report-pending');
+  assert.equal(result.command_id, '');
+  assert.equal(result.task_id, '');
+  assert.equal(result.task_status, 'not_delegated');
+  assert.equal(result.status, 'open');
+  assert.equal(result.delivery_status, 'not_delegated');
+  assert.equal(inserted.get('business_module_reports').ctox_command_id, '');
+  assert.equal(inserted.get('ctox_bug_reports').payload.delivery_status, 'not_delegated');
+});
+
+test('Business reporter attributes the report to the focused app window', () => {
+  const reports = { id: 'reports', title: 'Bugs & Features' };
+  const resolved = resolveBusinessReporterModule({
+    activeModule: { id: 'desktop', title: 'Desktop' },
+    modules: [reports],
+    windowManager: {
+      listWindows: () => [
+        { id: 'one', ownerId: 'desktop-app:desktop', isFocused: false, state: 'normal' },
+        { id: 'two', ownerId: 'desktop-app:reports', isFocused: true, state: 'normal' },
+      ],
+    },
+  });
+
+  assert.equal(resolved, reports);
+});
+
+test('Business reporter keeps focused shell apps attributable even before catalog hydration', () => {
+  const resolved = resolveBusinessReporterModule({
+    activeModule: { id: 'desktop', title: 'Desktop' },
+    modules: [],
+    windowManager: {
+      listWindows: () => [{
+        id: 'settings-window',
+        ownerId: 'desktop-app:settings',
+        title: 'Einstellungen',
+        isFocused: true,
+        state: 'normal',
+      }],
+    },
+  });
+
+  assert.deepEqual(resolved, { id: 'settings', title: 'Einstellungen' });
+});
+
+test('Business reporter falls back to the active module without a focused app window', () => {
+  const activeModule = { id: 'desktop', title: 'Desktop' };
+  assert.equal(resolveBusinessReporterModule({
+    activeModule,
+    modules: [],
+    windowManager: { listWindows: () => [] },
+  }), activeModule);
 });

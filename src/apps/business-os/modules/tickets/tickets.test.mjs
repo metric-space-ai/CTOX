@@ -81,21 +81,67 @@ test('tickets: IA-Karte — left selector, center timeline, on-demand ops pane',
   // Grid pins + resizers.
   assert.match(css, /--ctox-left-width: 340px/);
   assert.match(css, /--ctox-right-width: 360px/);
-  assert.match(css, /@container business-app-window \(max-width: 1160px\)/);
-  assert.match(css, /@container business-app-window \(max-width: 640px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 1024px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 768px\)/);
   assert.match(html, /data-resizer-var="--ctox-left-width"/);
   assert.match(html, /data-resizer-var="--ctox-right-width"/);
 });
 
 test('tickets: left column carries the canonical grammar markup pins', () => {
   assert.match(html, /data-pg-search/, 'grammar search input');
-  assert.match(html, /data-pg-view="cards"/, 'shard view toggle');
-  assert.match(html, /data-pg-view="list"/, 'list view toggle');
+  assert.match(html, /data-pg-view="cards"/, 'view toggle seeds the cards view');
   assert.match(html, /data-pg-tray-toggle/, 'filter tray toggle');
   assert.match(html, /data-pg-tray\b/, 'collapsed tray');
   assert.match(html, /data-pg-reset/, 'tray reset control');
   assert.match(html, /data-pg-footer/, 'one-line footer target');
   assert.match(html, /class="ctox-well"|ctox-well/, 'recessed well');
+});
+
+// Betreiber-Direktive 31.08.: the shard/list switch is ONE button that toggles
+// the view. Icon and label name the view the click switches TO, so it carries
+// no aria-pressed — it is an action, not a state. `data-pg-view` stays on it as
+// the CURRENT view so the shell-wired grammar keeps reading a truthful value.
+test('tickets: the shard/list switch is one action button, not a pressed pair', () => {
+  const htmlNoComments = html.replace(/<!--[\s\S]*?-->/g, '');
+  assert.equal((htmlNoComments.match(/data-pg-view=/g) || []).length, 1, 'exactly one view control');
+  assert.doesNotMatch(htmlNoComments, /<button[^>]*data-pg-view[^>]*aria-pressed/, 'an action carries no state');
+  assert.doesNotMatch(htmlNoComments, /ctox-view-toggle/, 'no two-button toggle group left');
+  assert.match(htmlNoComments, /data-tickets-view-toggle[^>]*data-pg-view="cards"/, 'seeded with the cards view');
+  assert.match(htmlNoComments, /data-view-icon="list"/, 'carries the list glyph');
+  assert.match(htmlNoComments, /data-view-icon="cards"/, 'carries the cards glyph');
+  // CSS paints exactly the glyph of the view the click switches TO.
+  assert.match(css, /\.tickets-view-toggle\[data-pg-view="cards"\] > \[data-view-icon="list"\]/);
+  assert.match(css, /\.tickets-view-toggle\[data-pg-view="list"\] > \[data-view-icon="cards"\]/);
+  // JS flips it in the capture phase and strips the grammar's aria-pressed.
+  assert.match(indexJs, /addEventListener\('click', onViewToggleCapture, true\)/, 'capture-phase flip');
+  assert.match(indexJs, /button\.dataset\.pgView = button\.dataset\.pgView === 'list' \? 'cards' : 'list'/);
+  assert.match(indexJs, /button\.removeAttribute\('aria-pressed'\)/);
+  assert.match(indexJs, /showAsList/, 'label for the switch to list');
+  assert.match(indexJs, /showAsCards/, 'label for the switch to cards');
+});
+
+test('tickets: cards and list are two densities, not two paddings', () => {
+  const row = {
+    id: 'a1', key: 'SUP-1', title: 'Login broken', status: 'open',
+    source: 'email', subtitle: 'high', updated: '30. Aug. 2026, 09:12',
+  };
+  const cards = ticketRowHtml(row, { view: 'cards' });
+  const list = ticketRowHtml(row, { view: 'list' });
+
+  // KARTEN: title line + two meta lines carrying the real detail fields.
+  assert.match(cards, /ticket-row--cards/);
+  assert.equal((cards.match(/ticket-row-meta/g) || []).length, 3, 'two meta lines (one carries two classes)');
+  assert.match(cards, /SUP-1 · email/, 'key + source meta line');
+  assert.match(cards, /high · 30\. Aug\. 2026, 09:12/, 'assignment + updated meta line');
+
+  // LISTE: exactly one line — title plus the badge as the single short meta.
+  assert.match(list, /ticket-row--list/);
+  assert.doesNotMatch(list, /ticket-row-meta/, 'no meta lines in the dense list row');
+  assert.doesNotMatch(list, /ticket-row-head/, 'no nested head row in the dense list row');
+  assert.equal((list.match(/<div/g) || []).length, 1, 'a list row is a single flat row');
+
+  assert.match(css, /\.ticket-row--list[\s\S]*?min-height: 26px/, 'list row is pinned tight');
+  assert.match(css, /\.ticket-row--cards[\s\S]*?padding-top: 11px/, 'card row pads generously');
 });
 
 test('tickets: counted band has >= 2 real views, each with a count target', () => {

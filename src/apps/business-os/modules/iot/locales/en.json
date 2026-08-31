@@ -36,7 +36,7 @@
   "asset.formUnder": "Asset under “{0}”",
   "asset.formNew": "New asset",
   "field.name": "Name",
-  "asset.namePlaceholder": "e.g. Server room",
+  "asset.namePlaceholder": "e.g. Server location",
   "field.type": "Type",
   "btn.cancel": "Cancel",
   "btn.create": "Create",
@@ -109,5 +109,8 @@
   "left.newAssetLabel": "Create asset",
   "center.title": "Dashboards",
   "center.viewLabel": "View",
-  "ed.title": "Edit widget"
+  "ed.title": "Edit widget",
+  "view.showList": "Show as list",
+  "view.showCards": "Show as cards",
+  "alarmWord": "open alarm"
 }

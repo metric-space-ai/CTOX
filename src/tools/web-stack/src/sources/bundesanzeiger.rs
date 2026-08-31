@@ -92,7 +92,13 @@ impl SourceModule for Bundesanzeiger {
     fn authoritative_for(&self) -> &'static [FieldKey] {
         // Aus EXCEL_MATRIX.md: `bundesanzeiger.de` ist DE-only und in
         // `NewRecord` autoritativ für `firma_name`, `umsatz`, `mitarbeiter`.
-        &[FieldKey::FirmaName, FieldKey::Umsatz, FieldKey::Mitarbeiter]
+        &[
+            FieldKey::FirmaName,
+            FieldKey::FirmaGeschaeftstaetigkeit,
+            FieldKey::FirmaGeschaeftsfuehrung,
+            FieldKey::Umsatz,
+            FieldKey::Mitarbeiter,
+        ]
     }
 
     /// Crawl-Pfad: Query wird mit dem Schlüsselwort „Jahresabschluss"

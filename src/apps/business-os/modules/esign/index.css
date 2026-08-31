@@ -13,10 +13,22 @@
   --ctox-left-width: 320px;
 }
 
+/* Linke Spur (Shell-v2-Zeilen): Titel · Filterleiste · Filterablage ·
+   gezaehltes Band · Well (fuellt) · Footer. Die Zeilen sind explizit
+   zugewiesen, weil die Filterablage [hidden] (display:none) ist und die
+   automatische Platzierung sonst alle nachfolgenden Kinder eine Spur nach
+   oben zoege. */
 .esign-left {
   grid-column: 1;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
 }
+
+.esign-left > .ctox-pane-header { grid-row: 1; }
+.esign-left > .ctox-filterbar { grid-row: 2; }
+.esign-left > .ctox-filter-tray { grid-row: 3; }
+.esign-left > .ctox-view-switch { grid-row: 4; }
+.esign-left > .ctox-pane-body { grid-row: 5; }
+.esign-left > .ctox-pane-footer { grid-row: 6; }
 
 .esign-module > [data-resizer="left"] {
   grid-column: 2;
@@ -27,6 +39,72 @@
   grid-template-rows: auto minmax(0, 1fr) auto;
 }
 
+/* ---- Shell-v2-Kopfgeometrie. Die Shell legt drei Zonen UEBER den App-Inhalt
+   (`.shell-window-content` bekommt `inset: 0` und wird NICHT eingerueckt):
+   App-Icon 80x80 oben links, Header-Band 37px ueber die volle Breite,
+   Fenstersteuerung 74x74 oben rechts. Referenz ist Knowledge. Beide Koepfe der
+   obersten Zeile sind exakt eine Header-Zeile hoch; der linke Kopf haelt die
+   Icon-Spalte frei, der rechte die Fenstersteuerung. Die zweite Zeile liegt
+   noch in der Icon-Zone (2 x 37px = 74px = 80px - 6px Rahmen) und wird deshalb
+   gleich eingerueckt. ---- */
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+/* In 37px passt kein gestapelter Kicker + Titel: beide teilen sich eine
+   Grundlinie (identisch zur Knowledge-Referenz). Der Titel traegt das
+   Versionsmenue der Shell und darf deshalb nicht zerquetscht werden. */
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+/* Der Titel traegt das Versionsmenue (Vertrag §4): er darf NICHT als erster
+   weichen. Der Kicker schrumpft und verschwindet zuerst, der Titel behaelt eine
+   Trefferflaeche von mindestens 44px Breite. */
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-kicker {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-title {
+  flex: 1 1 auto;
+  min-width: 44px;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Linke Spalte: Icon-Zone (80px) freihalten — Titelzeile UND Filterleiste. */
+.shell-window[data-shell-contract="v2"] .esign-module .esign-left > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .esign-module .esign-left > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: 14px;
+}
+
+/* Rechte Spalte: Fenstersteuerung (74x74) freihalten. */
+.shell-window[data-shell-contract="v2"] .esign-module .esign-center > .ctox-pane-header {
+  padding-right: 70px;
+}
+
 .esign-workbench-scroll {
   display: flex;
   flex-direction: column;
@@ -34,17 +112,37 @@
   padding: 14px;
 }
 
-/* ---- Left column shard rows (cards + compact). A shard is a pure selector:
-   title + one muted meta line. Selection styling comes from .ctox-list-item. -- */
+/* ---- Ein-Knopf-Ansichtsumschalter: der Knopf traegt beide Icons, sichtbar ist
+   immer das der ZIEL-Ansicht. Gesteuert allein ueber `data-pg-view` (die
+   aktuelle Ansicht), damit JS nur ein Attribut umlegt. ---- */
+.esign-view-toggle .esign-view-icon {
+  display: none;
+}
+
+.esign-view-toggle[data-pg-view="cards"] [data-esign-view-icon="list"],
+.esign-view-toggle[data-pg-view="list"] [data-esign-view-icon="cards"] {
+  display: block;
+}
+
+/* ---- Left column rows. Die beiden Ansichten sind bewusst verschieden
+   (Betreiber-Direktive 31.08.): KARTE = 2-3 Zeilen mit fettem Titel und
+   Metazeilen, grosszuegiges Padding. LISTE = genau eine dichte Zeile.
+   Auswahl-Styling kommt weiterhin von .ctox-list-item. ---- */
+.esign-row--card {
+  padding: 10px 14px;
+}
+
 .esign-shard {
   display: grid;
-  gap: 4px;
+  gap: 3px;
+  min-width: 0;
 }
 
 .esign-shard-title {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -53,18 +151,43 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: var(--fs-base);
+  font-weight: 660;
+}
+
+.esign-shard-title .ctox-badge {
+  flex: 0 0 auto;
 }
 
 .esign-shard-meta {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
+  font-size: var(--fs-sm);
+  line-height: 1.35;
+}
+
+.esign-shard-meta--secondary {
+  color: color-mix(in srgb, var(--muted) 82%, transparent);
+  font-size: var(--fs-meta, 11px);
+}
+
+/* Dichte Listenzeile: eine Zeile, enge Zeilenhoehe, kein zweites Meta. */
+.esign-row--list {
+  padding: 3px 14px;
 }
 
 .esign-row-compact {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: 10px;
   min-width: 0;
+  min-height: 21px;
+  line-height: 1.25;
 }
 
 .esign-compact-title {
@@ -72,7 +195,12 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
+  font-size: var(--fs-sm);
+  font-weight: 560;
+}
+
+.esign-row--list .ctox-badge {
+  flex: 0 0 auto;
 }
 
 /* ---- Workbench detail (auto-revealed on selection) + signer flow. ---- */
@@ -142,14 +270,32 @@
   margin: 2px 0;
 }
 
-/* ---- Narrow windows: stack the two panes, drop the resizer. ---- */
-@container business-app-window (max-width: 760px) {
+/* ---- Der Shell-Haltepunkt 1024px (drei Spalten -> zwei) hat fuer diese App
+   keine eigene Regel: esign ist bereits zweispaltig, die Listenspalte ist mit
+   --ctox-left-width fest breit, und der Workbench nimmt den Rest. Die
+   Zwei-Spalten-Form und beide Kopfregeln gelten damit unveraendert bis
+   hinunter zur 768px-Marke. Eine Verengung der Listenspalte an dieser Stelle
+   waere schaedlich: sie zerquetscht den Titel, der das Versionsmenue traegt
+   (Vertrag §4). Die App definiert deshalb genau EINEN eigenen Haltepunkt. ---- */
+
+/* ---- Einspaltige Stufe (Shell-Haltepunkt 768px): die beiden Panes stapeln,
+   der Resizer entfaellt. Jede sichtbare Sektion behaelt ihren eigenen Kopf,
+   und BEIDE reservierten Shell-Zonen liegen jetzt uebereinander im selben
+   ersten Kopf: Icon 80x80 links UND Fenstersteuerung 74x74 rechts. Deshalb
+   bekommt hier auch der erste Kopf (und die Filterleiste, die noch in der
+   74px-Icon-/Steuerungszeile liegt) die rechte Freihaltung. Das Raster ist
+   explizit zugewiesen, damit keine leere Spur entsteht. ---- */
+@container business-app-window (max-width: 768px) {
   .esign-module {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(180px, 34vh) minmax(320px, 1fr);
+    grid-template-rows: minmax(240px, 42vh) minmax(320px, 1fr);
     height: auto;
     min-height: 100%;
     overflow-y: auto;
+    /* Die Kit-Regel duennt das Polster bei <=768px auf 6px aus; dann reicht der
+       gemalte Pane-Hintergrund bis unter die aeusserste Kante des App-Icons.
+       Der Gutter bleibt deshalb auf allen Breiten gleich. */
+    padding: 12px;
     gap: 8px;
   }
 
@@ -157,8 +303,98 @@
     display: none !important;
   }
 
-  .esign-left,
+  .esign-left {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
   .esign-center {
     grid-column: 1;
+    grid-row: 2;
   }
+
+  /* Einspaltig ist der linke Kopf zugleich der letzte Kopf der obersten Zeile:
+     er traegt jetzt beide Freihaltungen. */
+  .shell-window[data-shell-contract="v2"] .esign-module .esign-left > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .esign-module .esign-left > .ctox-filterbar {
+    padding-right: 70px;
+  }
+}
+
+/* ---- Touch-Bedienung auf groben Zeigern (Telefon/Tablet): jedes
+   interaktive Control erreicht das 44px-Minimum, Icon-Buttons in beiden
+   Dimensionen, Listenzeilen und Signer-Rows bekommen fingerhohe
+   Tap-Flaechen. Das Spalten-Stacking steuert die @container-Regel oben
+   (768px). ---- */
+@media (pointer: coarse) {
+  .esign-module button,
+  .esign-module input,
+  .esign-module select,
+  .esign-module textarea {
+    min-height: 44px;
+  }
+
+  .esign-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .esign-module .ctox-pane-tab,
+  .esign-module .ctox-sort-dir {
+    min-height: 44px;
+  }
+
+  .esign-module .ctox-sort-dir {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .esign-module .ctox-list-item,
+  .esign-module .esign-shard,
+  .esign-module .esign-row-compact,
+  .esign-module .esign-signer {
+    min-height: 44px;
+  }
+}
+
+/* Shell-v2 keeps one shared app frame. The pane title remains semantic, while
+   the module kicker is suppressed where it only repeats the shell title. */
+.shell-window[data-shell-contract="v2"] .esign-module {
+  padding: 0;
+  background: var(--shell-v2-surface, var(--bg));
+}
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane {
+  border: 0;
+  border-radius: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+  box-shadow: none;
+}
+.shell-window[data-shell-contract="v2"] .esign-left > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .esign-center > .ctox-pane-header {
+  padding: 0;
+  background: var(--shell-v2-surface-alt, var(--surface));
+}
+.shell-window[data-shell-contract="v2"] .esign-left > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+}
+.shell-window[data-shell-contract="v2"] .esign-center > .ctox-pane-header > [data-shell-v2-header-row="1"] {
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 62px 0 8px;
+}
+.shell-window[data-shell-contract="v2"] .esign-module [data-shell-v2-header-row="2"] {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+.shell-window[data-shell-contract="v2"] .esign-left .ctox-pane-kicker { display: none; }
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-title-row { height: 100%; }
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-title { margin-top: 0; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .esign-module .ctox-pane-icon {
+  width: min(26px, var(--shell-v2-header-row-size, 37px));
+  height: min(26px, var(--shell-v2-header-row-size, 37px));
 }

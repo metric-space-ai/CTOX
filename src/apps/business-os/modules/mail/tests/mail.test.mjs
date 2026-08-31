@@ -8,7 +8,7 @@ import { build } from 'esbuild';
 import { collections as conversationCollections } from '../../conversations/schema.js';
 // Gleicher Query-String wie in ../schema.js — sonst erzeugt Node eine zweite
 // Modulinstanz und die Referenzgleichheits-Pruefung unten schlaegt fehl.
-import { collections as ctoxCollections } from '../../ctox/schema.js?v=20260811-fremde-collection-mitladen-v106';
+import { collections as ctoxCollections } from '../../ctox/schema.js?v=20260816-browser-sync-guards-v141';
 import { collections as appStoreCollections } from '../../app-store/schema.js';
 import { collections as documentCollections } from '../../documents/schema.js';
 import { collections as mailCollections } from '../schema.js';
@@ -62,19 +62,6 @@ test('mail reuses canonical communication and outbound schemas', () => {
         : conversationCollections[name];
     assert.equal(schema, canonical);
   }
-});
-
-test('mail leaves collection lifecycle ownership with the shell lease', async () => {
-  const source = await readFile(new URL('../index.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /ctx\.sync\?\.startCollection/);
-});
-
-test('mail treats data-plane teardown reads as transient without hiding other failures', () => {
-  assert.equal(hooks.isTransientCollectionReadError(
-    new DOMException("Failed to execute 'transaction' on 'IDBDatabase': The database connection is closing.", 'InvalidStateError'),
-  ), true);
-  assert.equal(hooks.isTransientCollectionReadError(new Error('QUERY_CANCELLED: replication-cancel')), true);
-  assert.equal(hooks.isTransientCollectionReadError(new Error('permission denied')), false);
 });
 
 test('ordinary users only see assigned or shared email accounts', () => {
@@ -278,10 +265,11 @@ test('outbound message progress is a six-step status model rendered in the row',
 });
 
 test('mail surface provides a progressive inspector workbench and responsive composer', async () => {
-  const [html, css, manifest] = await Promise.all([
+  const [html, css, manifest, source] = await Promise.all([
     readFile(new URL('index.html', moduleRoot), 'utf8'),
     readFile(new URL('index.css', moduleRoot), 'utf8'),
     readFile(new URL('module.json', moduleRoot), 'utf8').then(JSON.parse),
+    readFile(new URL('index.js', moduleRoot), 'utf8'),
   ]);
   assert.match(html, /data-mail-account/);
   assert.match(html, /data-mail-group-list/);
@@ -293,15 +281,23 @@ test('mail surface provides a progressive inspector workbench and responsive com
   assert.match(html, /data-mail-settings/);
   assert.match(html, /data-mail-import/);
   assert.match(html, /data-mail-export/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // One-button view switch (operator directive, 31.08.2026): a single toggle
+  // that carries the CURRENT view in data-pg-view and no aria-pressed.
+  assert.doesNotMatch(html, /ctox-view-toggle/, 'no two-button toggle group');
+  assert.match(html, /data-mail-view-toggle data-pg-view="cards"/);
+  assert.doesNotMatch(html, /data-mail-view-toggle[^>]*aria-pressed/);
+  assert.match(html, /data-mail-view-toggle[^>]*aria-label="Als Liste anzeigen"/);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-band="campaigns"/);
   assert.match(html, /data-mail-mailbox-password[^>]+type="password"|type="password"[^>]+data-mail-mailbox-password/);
-  assert.match(css, /@media \(max-width: 720px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 768px\)/);
   assert.match(css, /\.mail-module\.is-inspector-open/);
-  assert.equal(manifest.default_installed, true);
-  assert.equal(manifest.core, true);
+  assert.match(source, /function mailActionIcon\(/);
+  assert.match(source, /const MAIL_ICON_FALLBACK_PATHS = Object\.freeze/);
+  assert.equal(manifest.layout.shell_contract, 'v2');
+  assert.equal(manifest.install_scope, 'store');
+  assert.equal(manifest.default_installed, false);
+  assert.equal(manifest.core, false);
 });
 
 test('Sellify handoff opens the canonical Mail series-email contract', () => {

@@ -404,6 +404,7 @@ pub fn api_provider_supports_model(provider: &str, model: &str) -> bool {
         "anthropic" => is_anthropic_api_chat_model(model),
         "minimax" => is_minimax_api_chat_model(model),
         "ctox_proxy" => !model.trim().is_empty(),
+        "ctox_subscription" => !model.trim().is_empty(),
         "azure_foundry" => is_azure_foundry_api_chat_model(model),
         "openai" => is_openai_api_chat_model(model),
         _ => false,

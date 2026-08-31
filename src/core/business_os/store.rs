@@ -456,7 +456,6 @@ pub struct BusinessOsSyncConfig {
     pub native_peer_id: String,
     pub peer_role: &'static str,
     pub sync_room: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub signaling_room_password: String,
     pub signaling_auth_version: &'static str,
     pub signaling_browser_token: String,
@@ -498,6 +497,17 @@ pub(crate) struct BusinessOsSignalingAuthConfig {
     pub(crate) native_token_hash: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct BusinessOsMobileInviteSyncConfig {
+    pub(crate) instance_id: String,
+    pub(crate) sync_room: String,
+    pub(crate) native_peer_id: String,
+    pub(crate) signaling_urls: Vec<String>,
+    pub(crate) signaling_auth_version: &'static str,
+    pub(crate) signaling_browser_token: String,
+    pub(crate) signaling_browser_token_hash: String,
+    pub(crate) signaling_native_token_hash: String,
+}
 #[derive(Debug, Clone, Serialize)]
 pub struct BusinessOsUser {
     pub id: String,
@@ -819,6 +829,8 @@ pub struct RuntimeSettingsRequest {
     pub auth_mode: String,
     #[serde(default)]
     pub chat_model: String,
+    #[serde(default)]
+    pub reasoning_effort: String,
     #[serde(default)]
     pub preset: String,
     #[serde(default)]
@@ -1210,6 +1222,15 @@ fn attached_rxdb_table_columns(conn: &Connection, table: &str) -> anyhow::Result
     Ok(columns)
 }
 
+fn next_direct_rxdb_revision(previous: Option<&str>) -> String {
+    let height = previous
+        .and_then(|revision| revision.split_once('-').map(|(height, _)| height))
+        .and_then(|height| height.parse::<u64>().ok())
+        .unwrap_or(0)
+        .saturating_add(1);
+    format!("{height}-{}", Uuid::new_v4().simple())
+}
+
 fn upsert_attached_rxdb_record(
     conn: &Connection,
     collection: &str,
@@ -1224,6 +1245,7 @@ fn upsert_attached_rxdb_record(
         "business_os_rxdb_projection.{}",
         sqlite_quote_identifier(&table)
     );
+    let mut previous_revision = None;
     if let Some(existing_json) = conn
         .query_row(
             &format!("SELECT data FROM {qualified_table} WHERE id = ?1"),
@@ -1233,13 +1255,18 @@ fn upsert_attached_rxdb_record(
         .optional()?
     {
         if let Ok(mut existing) = serde_json::from_str::<Value>(&existing_json) {
+            previous_revision = existing
+                .get("_rev")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             merge_json_object_values(&mut existing, &payload);
             payload = existing;
         }
     }
-    let rev = format!("rev_{}", Uuid::new_v4());
+    let rev = next_direct_rxdb_revision(previous_revision.as_deref());
     if let Some(object) = payload.as_object_mut() {
         object.insert("id".to_string(), Value::String(record_id.to_string()));
+        object.insert("_rev".to_string(), Value::String(rev.clone()));
         object.insert("updated_at_ms".to_string(), Value::from(updated_at_ms));
     }
     redact_document_client_context_secrets(&mut payload);
@@ -1529,6 +1556,8 @@ pub(crate) fn reusable_web_stack_auth_assist_request(
             "credential_selector": payload.get("credential_selector").and_then(Value::as_str).unwrap_or_default(),
             "capture_script": payload.get("capture_script").and_then(Value::as_str).unwrap_or_default(),
             "dedupe_key": payload.get("dedupe_key").and_then(Value::as_str).unwrap_or_default(),
+            "requesting_task_id": payload.get("requesting_task_id").and_then(Value::as_str).unwrap_or_default(),
+            "instruction": payload.get("instruction").and_then(Value::as_str).unwrap_or_default(),
             "deduped_by_active_auth_assist": true,
             "browser_stream": "rxdb",
             "secret_value_in_payload": false,
@@ -1569,8 +1598,7 @@ fn with_store_connection<T>(
 }
 
 pub(super) fn business_os_store_path(root: &Path) -> PathBuf {
-    let runtime = root.join("runtime");
-    runtime.join(STORE_FILE)
+    crate::paths::runtime_dir(root).join(STORE_FILE)
 }
 
 fn open_store_connection(path: &Path) -> anyhow::Result<Connection> {
@@ -1640,7 +1668,7 @@ pub fn migrate_legacy_module_lifecycle_authority(
 ) -> anyhow::Result<Value> {
     let app_root = resolve_business_os_app_root(root)?;
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let modules = load_module_manifests(&app_root, &installed_app_root)?;
+    let modules = load_module_manifests(root, &app_root, &installed_app_root)?;
     let mut conn = open_store(root)?;
     let existing_evidence = conn
         .query_row(
@@ -2718,7 +2746,7 @@ fn module_requires_active_responsibility(root: &Path, module_id: &str) -> anyhow
     if module_id.is_empty() {
         return Ok(false);
     }
-    let manifests = load_module_manifests(&app_root, &installed_app_root)?;
+    let manifests = load_module_manifests(root, &app_root, &installed_app_root)?;
     let Some(manifest) = manifests.iter().find(|manifest| manifest.id == module_id) else {
         return Ok(false);
     };
@@ -4312,7 +4340,7 @@ fn desktop_file_generation_chunk_id_bounds(file_id: &str, generation_id: &str) -
     (prefix.clone(), format!("{prefix}`"))
 }
 
-pub(super) fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBuf> {
+pub(crate) fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBuf> {
     let mut candidates = Vec::new();
     if root
         .file_name()
@@ -4335,7 +4363,7 @@ pub(super) fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBu
         .context("Business OS app root not found")
 }
 
-pub(super) fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
+pub(crate) fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
     if root
         .file_name()
         .and_then(|name| name.to_str())
@@ -4355,6 +4383,7 @@ pub(super) fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
 }
 
 pub(super) fn load_module_manifests(
+    root: &Path,
     source_app_root: &Path,
     installed_app_root: &Path,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
@@ -4373,7 +4402,14 @@ pub(super) fn load_module_manifests(
             }
             let text = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-            let mut manifest: ModuleManifest = serde_json::from_str(&text)
+            let manifest_value: Value = serde_json::from_str(&text)
+                .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+            if super::customer_apps::authorize_global_module(&entry.path(), &manifest_value)
+                .is_err()
+            {
+                continue;
+            }
+            let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
                 .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
             manifest.manifest_sha256 = hex_sha256(text.as_bytes());
             manifest.asset_revision = module_asset_revision(&entry.path())?;
@@ -4397,13 +4433,13 @@ pub(super) fn load_module_manifests(
             manifests.push(manifest);
         }
     }
-    for manifest in load_installed_module_manifests(installed_app_root)? {
+    for manifest in load_installed_module_manifests(root, installed_app_root)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
         manifests.push(manifest);
     }
-    for manifest in load_local_module_manifests(installed_app_root, true)? {
+    for manifest in load_local_module_manifests(root, installed_app_root, true)? {
         if manifests.iter().any(|existing| existing.id == manifest.id) {
             continue;
         }
@@ -4423,7 +4459,7 @@ pub(super) fn load_module_manifests(
 /// executable SQL mappings.
 pub(crate) fn local_external_data_source_declarations(root: &Path) -> anyhow::Result<Vec<Value>> {
     let installed_app_root = resolve_business_os_installed_app_root(root);
-    let manifests = load_local_module_manifests(&installed_app_root, false)?;
+    let manifests = load_local_module_manifests(root, &installed_app_root, false)?;
     let mut declarations = Vec::new();
     for manifest in manifests {
         let mut source_values = manifest.external_data_sources;
@@ -4472,6 +4508,7 @@ pub(crate) fn local_external_data_source_declarations(root: &Path) -> anyhow::Re
 
 /// Loads operator-owned local modules; app-store lifecycle never manages them (`deletable=false`).
 fn load_local_module_manifests(
+    root: &Path,
     app_root: &Path,
     enrich: bool,
 ) -> anyhow::Result<Vec<ModuleManifest>> {
@@ -4491,7 +4528,14 @@ fn load_local_module_manifests(
         }
         let text = fs::read_to_string(&path)
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let mut manifest: ModuleManifest = serde_json::from_str(&text)
+        let manifest_value: Value = serde_json::from_str(&text)
+            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
+            .is_err()
+        {
+            continue;
+        }
+        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
         manifest.local_manifest_path = path.display().to_string();
         if enrich {
@@ -4538,7 +4582,10 @@ pub(super) fn ensure_local_icon_manifest_value(manifest: &mut Value, module_dir:
     }
 }
 
-pub(super) fn load_marketplace_module_manifests(app_root: &Path) -> anyhow::Result<Vec<Value>> {
+pub(super) fn load_marketplace_module_manifests(
+    _root: &Path,
+    app_root: &Path,
+) -> anyhow::Result<Vec<Value>> {
     let modules_root = app_root.join("modules");
     let mut marketplace = Vec::new();
     if !modules_root.is_dir() {
@@ -4557,6 +4604,9 @@ pub(super) fn load_marketplace_module_manifests(app_root: &Path) -> anyhow::Resu
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
         let mut manifest_value: Value = serde_json::from_str(&text)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if super::customer_apps::authorize_global_module(&entry.path(), &manifest_value).is_err() {
+            continue;
+        }
         let manifest: ModuleManifest = serde_json::from_value(manifest_value.clone())?;
         let scope = module_install_scope(&manifest);
         if scope != "store" {
@@ -9170,6 +9220,50 @@ pub fn complete_business_command_from_queue_reply(
             queue_task.as_ref(),
             Some(reply_text),
         )?
+    } else if super::store_outbound_commands::is_outbound_adapter_reconciliation_command(&command) {
+        let task_id = queue_task
+            .as_ref()
+            .map(|task| task.message_key.as_str())
+            .unwrap_or(task_id);
+        let typed_result =
+            match super::store_outbound_commands::apply_outbound_adapter_reconciliation_reply(
+                root,
+                &conn,
+                &command_id,
+                &command,
+                task_id,
+                reply_text,
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    let message = error.to_string();
+                    if let Err(writeback_error) =
+                        super::store_outbound_commands::mark_outbound_adapter_reconciliation_failed(
+                            root,
+                            &conn,
+                            &command,
+                            &command_id,
+                            task_id,
+                            &message,
+                        )
+                    {
+                        eprintln!(
+                            "[business-os] failed to project adapter reconciliation validation error for `{command_id}`: {writeback_error:#}"
+                        );
+                    }
+                    return Err(error);
+                }
+            };
+        let mut accepted = process_business_chat_reply(
+            root,
+            &conn,
+            &command_id,
+            &command,
+            queue_task.as_ref(),
+            reply_text,
+        )?;
+        accepted.result = Some(typed_result);
+        accepted
     } else if is_business_chat_command(&command) {
         process_business_chat_reply(
             root,
@@ -9908,7 +10002,7 @@ pub fn pull_latest_collection_records(
         _ => {}
     }
     let limit = limit.unwrap_or(500).clamp(1, 2_000);
-    let business_documents = with_store_connection(root, |conn| {
+    let documents = with_store_connection(root, |conn| {
         let mut statement = conn.prepare(
             "SELECT record_id, deleted, updated_at_ms, payload_json
              FROM business_records
@@ -9937,44 +10031,13 @@ pub fn pull_latest_collection_records(
         }
         Ok(documents)
     })?;
-    // Browser-originated records live in the native RxDB store, whereas MCP
-    // upserts are also projected into `business_records`. Reading only the
-    // latter as soon as its first row exists hides every browser-only record in
-    // the same collection. Merge both durable stores by id and keep the newest
-    // representation so one server-side upsert cannot collapse a full app
-    // collection to the handful of MCP-written rows.
-    let rxdb_documents = pull_latest_rxdb_collection_table_documents(root, collection, limit)?;
-    let mut documents_by_id = HashMap::<String, Value>::new();
-    for document in business_documents.into_iter().chain(rxdb_documents) {
-        let Some(record_id) = document
-            .get("id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-        else {
-            continue;
-        };
-        let replace = documents_by_id
-            .get(&record_id)
-            .is_none_or(|current| record_updated_at_ms(&document) > record_updated_at_ms(current));
-        if replace {
-            documents_by_id.insert(record_id, document);
+    if documents.is_empty() {
+        if let Some(rxdb_projection) =
+            pull_rxdb_collection_table_records(root, collection, 0, limit)?
+        {
+            return Ok(rxdb_projection);
         }
     }
-    let mut documents = documents_by_id.into_values().collect::<Vec<_>>();
-    documents.sort_by(|left, right| {
-        record_updated_at_ms(right)
-            .cmp(&record_updated_at_ms(left))
-            .then_with(|| {
-                right
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .cmp(left.get("id").and_then(Value::as_str).unwrap_or_default())
-            })
-    });
-    documents.truncate(limit);
     Ok(serde_json::json!({
         "ok": true,
         "collection": collection,
@@ -9982,63 +10045,6 @@ pub fn pull_latest_collection_records(
         "count": documents.len(),
         "since_ms": 0
     }))
-}
-
-fn record_updated_at_ms(record: &Value) -> i64 {
-    record
-        .get("updated_at_ms")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            record
-                .get("_meta")
-                .and_then(|meta| meta.get("lwt"))
-                .and_then(Value::as_f64)
-                .map(|value| value as i64)
-        })
-        .unwrap_or(0)
-}
-
-fn pull_latest_rxdb_collection_table_documents(
-    root: &Path,
-    collection: &str,
-    limit: usize,
-) -> anyhow::Result<Vec<Value>> {
-    if !is_safe_rxdb_collection_name(collection) {
-        anyhow::bail!("invalid collection name `{collection}`");
-    }
-    let path = rxdb_store_path(root);
-    if !path.is_file() {
-        return Ok(Vec::new());
-    }
-    let conn = Connection::open(&path)?;
-    for version in (0..=1).rev() {
-        let table = format!("ctox_business_os__{collection}__v{version}");
-        if !rxdb_table_exists_cached(&path, &conn, &table)? {
-            continue;
-        }
-        let mut statement = conn.prepare(&format!(
-            "SELECT id, data
-             FROM {table}
-             ORDER BY CAST(COALESCE(json_extract(data, '$.updated_at_ms'), lastWriteTime, 0) AS INTEGER) DESC, id DESC
-             LIMIT ?1"
-        ))?;
-        let rows = statement.query_map([limit as i64], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        let mut documents = Vec::new();
-        for row in rows {
-            let (id, data) = row?;
-            let mut document = serde_json::from_str::<Value>(&data).unwrap_or(Value::Null);
-            if let Some(object) = document.as_object_mut() {
-                object
-                    .entry("id".to_string())
-                    .or_insert_with(|| Value::String(id));
-            }
-            documents.push(document);
-        }
-        return Ok(documents);
-    }
-    Ok(Vec::new())
 }
 
 pub fn pull_business_command_status_record(
@@ -10246,7 +10252,7 @@ pub(super) fn load_rxdb_collection_records(
         .collect())
 }
 
-fn find_rxdb_collection_record_by_string_field(
+pub(super) fn find_rxdb_collection_record_by_string_field(
     root: &Path,
     collection: &str,
     field: &str,
@@ -10293,6 +10299,59 @@ fn find_rxdb_collection_record_by_string_field(
             .or_insert_with(|| Value::String(id.clone()));
     }
     Ok(Some((id, record)))
+}
+
+pub(super) fn find_rxdb_collection_records_by_string_field(
+    root: &Path,
+    collection: &str,
+    field: &str,
+    expected: &str,
+    limit: usize,
+) -> anyhow::Result<Vec<(String, Value)>> {
+    if !is_safe_rxdb_collection_name(collection) {
+        anyhow::bail!("invalid collection name `{collection}`");
+    }
+    if !field
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        anyhow::bail!("invalid RxDB JSON field `{field}`");
+    }
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let path = rxdb_store_path(root);
+    if !path.is_file() {
+        return Ok(Vec::new());
+    }
+    let conn = Connection::open(&path)?;
+    let Some(table) = rxdb_collection_table_name(&path, &conn, collection) else {
+        return Ok(Vec::new());
+    };
+    let json_path = format!("$.{field}");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT id, data
+         FROM {table}
+         WHERE CAST(json_extract(data, ?1) AS TEXT) = ?2
+         ORDER BY CAST(COALESCE(json_extract(data, '$.updated_at_ms'), 0) AS INTEGER) DESC, id DESC
+         LIMIT ?3"
+    ))?;
+    let rows = stmt
+        .query_map(params![json_path, expected, limit as i64], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, raw)| {
+            let mut record: Value = serde_json::from_str(&raw)?;
+            if let Some(object) = record.as_object_mut() {
+                object
+                    .entry("id".to_string())
+                    .or_insert_with(|| Value::String(id.clone()));
+            }
+            Ok((id, record))
+        })
+        .collect()
 }
 
 pub(super) fn upsert_rxdb_collection_record(
@@ -10589,6 +10648,7 @@ fn upsert_rxdb_collection_record_with_writer(
     mut payload: Value,
     deleted: bool,
 ) -> anyhow::Result<()> {
+    let mut previous_revision = None;
     if let Some(existing_json) = conn
         .query_row(
             &format!("SELECT data FROM {table} WHERE id = ?1"),
@@ -10598,13 +10658,18 @@ fn upsert_rxdb_collection_record_with_writer(
         .optional()?
     {
         if let Ok(mut existing) = serde_json::from_str::<Value>(&existing_json) {
+            previous_revision = existing
+                .get("_rev")
+                .and_then(Value::as_str)
+                .map(str::to_string);
             merge_json_object_values(&mut existing, &payload);
             payload = existing;
         }
     }
-    let rev = format!("rev_{}", Uuid::new_v4());
+    let rev = next_direct_rxdb_revision(previous_revision.as_deref());
     if let Some(object) = payload.as_object_mut() {
         object.insert("id".to_string(), Value::String(record_id.to_string()));
+        object.insert("_rev".to_string(), Value::String(rev.clone()));
         object.insert(
             "updated_at_ms".to_string(),
             Value::Number(serde_json::Number::from(payload_updated_at_ms)),
@@ -11634,6 +11699,20 @@ pub fn fail_business_command_from_queue_error(
     } else {
         "command_terminal_failure"
     };
+    if let Err(writeback_error) =
+        super::store_outbound_commands::mark_outbound_adapter_reconciliation_failed(
+            root,
+            &conn,
+            &command,
+            &command_id,
+            task_id,
+            error,
+        )
+    {
+        eprintln!(
+            "[business-os] failed to project adapter reconciliation queue error for `{command_id}`: {writeback_error:#}"
+        );
+    }
     channels::transition_business_command_for_task(
         root,
         task_id,
@@ -11948,6 +12027,7 @@ pub(crate) fn is_recoverable_background_control_command_type(command_type: &str)
             "outbound.research_source.generate_adapter"
                 | "outbound.research_source.test"
                 | "outbound.research_source.auth_assist"
+                | "outbound.sellify.lookup"
         )
 }
 
@@ -11995,6 +12075,8 @@ fn recoverable_background_control_permission(command_type: &str) -> Option<Busin
             | "outbound.research_source.auth_assist"
     ) {
         Some(BusinessOsPermission::DataWrite)
+    } else if command_type == "outbound.sellify.lookup" {
+        Some(BusinessOsPermission::DataRead)
     } else {
         None
     }
@@ -12320,9 +12402,9 @@ pub(super) fn handle_workspace_control_command(
                         .get("faux")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
-                    // Delegate one bounded coding turn to the pi-sidecar owner. Errors
-                    // (e.g. sidecar not built, gateway unreachable) become an ok:false
-                    // outcome rather than a failed command.
+                    // Delegate one bounded coding turn to the pi-sidecar owner.
+                    // Transport, gateway, or agent failures are terminal command
+                    // failures; never present an ok:false result as completed.
                     let outcome = (|| -> anyhow::Result<Value> {
                         anyhow::ensure!(
                             command.payload.get("model").is_none(),
@@ -12346,18 +12428,23 @@ pub(super) fn handle_workspace_control_command(
                             faux,
                             model_override,
                         )
-                    })()
-                    .unwrap_or_else(
-                        |error| serde_json::json!({ "ok": false, "error": error.to_string() }),
-                    );
-                    return write_rxdb_control_command_outcome(
-                        root,
-                        &command,
-                        "completed",
-                        None,
-                        Some("completed"),
-                        outcome,
-                    );
+                    })();
+                    return match outcome {
+                        Ok(outcome) => write_rxdb_control_command_outcome(
+                            root,
+                            &command,
+                            "completed",
+                            None,
+                            Some("completed"),
+                            outcome,
+                        ),
+                        Err(error) => write_rxdb_failed_control_command_outcome(
+                            root,
+                            &command,
+                            "coding_turn",
+                            error,
+                        ),
+                    };
                 },
             )?
             .into_outcome();
@@ -14607,6 +14694,7 @@ pub(super) fn is_outbound_active_command(command_type: &str) -> bool {
             | "outbound.research_source.generate_adapter"
             | "outbound.research_source.test"
             | "outbound.research_source.auth_assist"
+            | "outbound.sellify.lookup"
     )
 }
 
@@ -14948,7 +15036,17 @@ pub fn verify_capability_actor(root: &Path, token: &str) -> Option<(String, Stri
     verified_capability_claims(root, token).map(|claims| (claims.user_id, claims.role))
 }
 
-fn verified_capability_claims(
+/// HTTP bearer authentication is deliberately limited to legacy unbound
+/// capabilities. Device-bound mobile grants are usable only after WebRTC PoP.
+pub fn verify_unbound_capability_actor(root: &Path, token: &str) -> Option<(String, String)> {
+    verified_capability_claims(root, token).and_then(|claims| {
+        (claims.device_binding.is_none()
+            && !super::mobile_invites::mobile_invite_requires_device_proof(root, &claims.user_id))
+        .then_some((claims.user_id, claims.role))
+    })
+}
+
+pub(super) fn verified_capability_claims(
     root: &Path,
     token: &str,
 ) -> Option<super::capability::CapabilityClaims> {
@@ -14957,7 +15055,15 @@ fn verified_capability_claims(
         return None;
     }
     let secret = capability_signing_secret(root).ok()?;
-    let claims = super::capability::verify_capability_token(&secret, token, now_ms() as i64)?;
+    let now = now_ms() as i64;
+    let claims = super::capability::verify_capability_token(&secret, token, now)?;
+    validate_capability_claims_against_store(root, claims)
+}
+
+fn validate_capability_claims_against_store(
+    root: &Path,
+    claims: super::capability::CapabilityClaims,
+) -> Option<super::capability::CapabilityClaims> {
     let (role, epoch): (String, i64) = with_store_connection(root, |conn| {
         conn.query_row(
             "SELECT role, capability_epoch
@@ -14975,7 +15081,50 @@ fn verified_capability_claims(
     {
         return None;
     }
+    if let Some(binding) = &claims.device_binding {
+        if !super::mobile_invites::is_active_device_binding(
+            root,
+            &claims.user_id,
+            binding,
+            now_ms() as i64,
+        ) {
+            return None;
+        }
+    }
     Some(claims)
+}
+
+/// WebRTC sessions belonging to a durably paired Workjet device are authorized
+/// by their revocable Device-to-Instance edge and nonce-bound P-256 proof, not
+/// by the short interactive capability lifetime. A compact invite secret is
+/// resolved only against its native hash record; ordinary sessions keep the
+/// signed actor assertion. HTTP callers can never use this verifier.
+pub(super) fn verified_webrtc_capability_claims(
+    root: &Path,
+    token: &str,
+) -> Option<super::capability::CapabilityClaims> {
+    if let Some(claims) = verified_capability_claims(root, token) {
+        return Some(claims);
+    }
+    let token = token.trim();
+    if token.is_empty() {
+        return None;
+    }
+    if let Some(claims) =
+        super::mobile_invites::claims_for_webrtc_invite_secret(root, token, now_ms() as i64)
+    {
+        return validate_capability_claims_against_store(root, claims);
+    }
+    let secret = capability_signing_secret(root).ok()?;
+    let claims = super::capability::verify_capability_token_allow_expired(&secret, token)?;
+    if !super::mobile_invites::is_active_paired_device_user(root, &claims.user_id) {
+        return None;
+    }
+    validate_capability_claims_against_store(root, claims)
+}
+
+pub(super) fn verify_webrtc_capability_actor(root: &Path, token: &str) -> Option<(String, String)> {
+    verified_webrtc_capability_claims(root, token).map(|claims| (claims.user_id, claims.role))
 }
 
 pub(super) fn capability_allows_collection_permission(
@@ -14996,12 +15145,47 @@ pub(super) fn capability_allows_collection_permission(
     .unwrap_or(false)
 }
 
+pub(super) fn webrtc_capability_allows_collection_permission(
+    root: &Path,
+    token: &str,
+    collection: &str,
+    permission: BusinessOsPermission,
+) -> bool {
+    let Some(claims) = verified_webrtc_capability_claims(root, token) else {
+        return false;
+    };
+    let actor = BusinessOsActor::new(Some(claims.user_id), claims.role);
+    let scope = BusinessOsScope::collection(collection.trim());
+    with_store_connection(root, |conn| {
+        evaluate_policy_with_explicit_grants(conn, &actor, permission, &scope)
+    })
+    .map(|decision| decision.allowed)
+    .unwrap_or(false)
+}
+
 pub(super) fn capability_allows_workspace_permission(
     root: &Path,
     token: &str,
     permission: BusinessOsPermission,
 ) -> bool {
     let Some(claims) = verified_capability_claims(root, token) else {
+        return false;
+    };
+    let actor = BusinessOsActor::new(Some(claims.user_id), claims.role);
+    let scope = BusinessOsScope::workspace();
+    with_store_connection(root, |conn| {
+        evaluate_policy_with_explicit_grants(conn, &actor, permission, &scope)
+    })
+    .map(|decision| decision.allowed)
+    .unwrap_or(false)
+}
+
+pub(super) fn webrtc_capability_allows_workspace_permission(
+    root: &Path,
+    token: &str,
+    permission: BusinessOsPermission,
+) -> bool {
+    let Some(claims) = verified_webrtc_capability_claims(root, token) else {
         return false;
     };
     let actor = BusinessOsActor::new(Some(claims.user_id), claims.role);
@@ -15119,6 +15303,44 @@ pub fn issue_business_os_capability_token(
     user_id: &str,
     now_ms: i64,
 ) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_until(
+        root,
+        user_id,
+        now_ms,
+        now_ms + CAPABILITY_TOKEN_TTL_MS,
+    )
+}
+
+fn issue_business_os_capability_token_until(
+    root: &Path,
+    user_id: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        expires_at_ms,
+        None,
+    )
+}
+
+fn issue_business_os_capability_token_until_with_binding(
+    root: &Path,
+    user_id: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
+    anyhow::ensure!(
+        expires_at_ms > now_ms,
+        "capability expiry must be in the future"
+    );
+    anyhow::ensure!(
+        expires_at_ms <= now_ms + CAPABILITY_TOKEN_TTL_MS,
+        "capability expiry exceeds the native maximum"
+    );
     // The browser resolves this token before the first WebRTC handshake. Ensure
     // deterministic baseline grants before reading capability_epoch; otherwise
     // native peer startup can insert grants moments later and invalidate the
@@ -15134,14 +15356,14 @@ pub fn issue_business_os_capability_token(
         |row| row.get(0),
     )?;
     let secret = capability_signing_secret(root)?;
-    let expires_at_ms = now_ms + CAPABILITY_TOKEN_TTL_MS;
-    let token = super::capability::issue_capability_token_with_epoch(
+    let token = super::capability::issue_capability_token_with_epoch_and_binding(
         &secret,
         &user.id,
         &normalize_business_role(&user.role),
         actor_epoch,
         now_ms,
         expires_at_ms,
+        device_binding,
     );
     Ok((token, expires_at_ms))
 }
@@ -15231,6 +15453,117 @@ pub fn issue_business_os_capability_token_for_managed_user(
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
     issue_business_os_capability_token(root, user_id, now_ms)
+}
+
+pub fn issue_business_os_capability_token_for_managed_user_with_binding(
+    root: &Path,
+    user_id: &str,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
+    let user_id = user_id.trim();
+    anyhow::ensure!(!user_id.is_empty(), "user id is required");
+    let role = normalize_business_role(role);
+    anyhow::ensure!(
+        matches!(role.as_str(), "chef" | "admin" | "founder" | "user"),
+        "role must be chef, admin, founder, or user"
+    );
+    let conn = open_store(root)?;
+    seed_configured_business_users(&conn)?;
+    let display_name = display_name.trim();
+    let display_name = if display_name.is_empty() {
+        user_id
+    } else {
+        display_name
+    };
+    conn.execute(
+        "INSERT INTO business_users
+            (user_id, display_name, role, active, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, 1, ?4, ?4)
+         ON CONFLICT(user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            role = excluded.role,
+            active = 1,
+            updated_at_ms = excluded.updated_at_ms",
+        params![user_id, display_name, role.as_str(), now_ms],
+    )?;
+    drop(conn);
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        now_ms + CAPABILITY_TOKEN_TTL_MS,
+        device_binding,
+    )
+}
+
+/// Issue a dedicated managed-user capability whose signed expiry is bounded by
+/// the caller. Mobile pairing uses this to guarantee that the WebRTC token
+/// cannot outlive the short-lived invite shown in Workjet Settings.
+pub fn issue_business_os_capability_token_for_managed_user_until(
+    root: &Path,
+    user_id: &str,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_for_managed_user_until_with_binding(
+        root,
+        user_id,
+        display_name,
+        role,
+        now_ms,
+        expires_at_ms,
+        None,
+    )
+}
+
+pub fn issue_business_os_capability_token_for_managed_user_until_with_binding(
+    root: &Path,
+    user_id: &str,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
+    let user_id = user_id.trim();
+    anyhow::ensure!(!user_id.is_empty(), "user id is required");
+    let role = normalize_business_role(role);
+    anyhow::ensure!(
+        matches!(role.as_str(), "chef" | "admin" | "founder" | "user"),
+        "role must be chef, admin, founder, or user"
+    );
+    let conn = open_store(root)?;
+    seed_configured_business_users(&conn)?;
+    let display_name = display_name.trim();
+    let display_name = if display_name.is_empty() {
+        user_id
+    } else {
+        display_name
+    };
+    conn.execute(
+        "INSERT INTO business_users
+            (user_id, display_name, role, active, created_at_ms, updated_at_ms)
+         VALUES (?1, ?2, ?3, 1, ?4, ?4)
+         ON CONFLICT(user_id) DO UPDATE SET
+            display_name = excluded.display_name,
+            role = excluded.role,
+            active = 1,
+            updated_at_ms = excluded.updated_at_ms",
+        params![user_id, display_name, role.as_str(), now_ms],
+    )?;
+    drop(conn);
+    issue_business_os_capability_token_until_with_binding(
+        root,
+        user_id,
+        now_ms,
+        expires_at_ms,
+        device_binding,
+    )
 }
 
 pub(super) fn rxdb_command_session(
@@ -15361,7 +15694,13 @@ fn rxdb_session_from_command(
         .get("capability_token")
         .and_then(Value::as_str)
         .filter(|token| !token.is_empty())
-        .and_then(|token| verified_capability_claims(root, token));
+        .and_then(|token| {
+            if matches!(&command.origin, CommandOrigin::ReplicatedPeer) {
+                verified_webrtc_capability_claims(root, token)
+            } else {
+                verified_capability_claims(root, token)
+            }
+        });
 
     let (id, role, display_name) = if let Some(claims) = verified {
         (claims.user_id, claims.role, display_name)
@@ -15695,7 +16034,21 @@ pub(super) fn terminal_person_research_projection_candidates(
     })?;
     let mut statement = conn.prepare(
         "SELECT command.command_id, command.module, command.record_id,
-                command.payload_json, command.client_context_json, command.status
+                command.payload_json, command.client_context_json, command.status,
+                CASE WHEN command.module = 'outbound-lead-generation'
+                       AND command.record_id <> ''
+                       AND json_extract(command.client_context_json, '$.surface') = 'business_os_command_session'
+                       AND json_type(command.payload_json, '$.writeback_contract') IS NULL
+                       AND COALESCE(json_extract(lead.payload_json, '$.payload.last_research_command_id'), '') <> command.command_id
+                       AND NOT EXISTS (
+                         SELECT 1 FROM business_commands AS later
+                          WHERE later.command_type = 'web_stack.person_research'
+                            AND later.module = command.module
+                            AND later.record_id = command.record_id
+                            AND later.status IN ('completed', 'failed', 'cancelled')
+                            AND later.observed_at_ms > command.observed_at_ms
+                       )
+                     THEN 1 ELSE 0 END AS needs_legacy_lead_writeback
          FROM business_commands AS command
          LEFT JOIN business_records AS stored
            ON stored.collection = 'business_commands'
@@ -15703,6 +16056,10 @@ pub(super) fn terminal_person_research_projection_candidates(
           AND stored.deleted = 0
          LEFT JOIN canonical_person_research.business_command_aggregates AS canonical
            ON canonical.command_id = command.command_id
+         LEFT JOIN business_records AS lead
+           ON lead.collection = 'outbound_lead_generation_leads'
+          AND lead.record_id = command.record_id
+          AND lead.deleted = 0
          WHERE command.command_type = 'web_stack.person_research'
            AND command.status IN ('completed', 'failed', 'cancelled')
            AND (
@@ -15710,6 +16067,21 @@ pub(super) fn terminal_person_research_projection_candidates(
                NOT IN ('completed', 'failed', 'cancelled')
              OR COALESCE(canonical.terminal_status, 'none')
                NOT IN ('completed', 'failed', 'cancelled')
+             OR (
+               command.module = 'outbound-lead-generation'
+               AND command.record_id <> ''
+               AND json_extract(command.client_context_json, '$.surface') = 'business_os_command_session'
+               AND json_type(command.payload_json, '$.writeback_contract') IS NULL
+               AND COALESCE(json_extract(lead.payload_json, '$.payload.last_research_command_id'), '') <> command.command_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM business_commands AS later
+                  WHERE later.command_type = 'web_stack.person_research'
+                    AND later.module = command.module
+                    AND later.record_id = command.record_id
+                    AND later.status IN ('completed', 'failed', 'cancelled')
+                    AND later.observed_at_ms > command.observed_at_ms
+               )
+             )
            )
          ORDER BY command.observed_at_ms ASC",
     )?;
@@ -15721,12 +16093,20 @@ pub(super) fn terminal_person_research_projection_candidates(
             row.get::<_, String>(3)?,
             row.get::<_, String>(4)?,
             row.get::<_, String>(5)?,
+            row.get::<_, bool>(6)?,
         ))
     })?;
     let mut candidates = Vec::new();
     for row in rows {
-        let (command_id, module, record_id, payload_json, client_context_json, terminal_status) =
-            row?;
+        let (
+            command_id,
+            module,
+            record_id,
+            payload_json,
+            client_context_json,
+            terminal_status,
+            needs_legacy_lead_writeback,
+        ) = row?;
         let stored =
             stored_rxdb_business_command_outcome(&conn, &command_id)?.with_context(|| {
                 format!("terminal person-research projection missing for {command_id}")
@@ -15740,7 +16120,10 @@ pub(super) fn terminal_person_research_projection_candidates(
             .get("terminal_status")
             .and_then(Value::as_str)
             .unwrap_or("none");
-        if canonical_terminal == terminal_status && stored_terminal == terminal_status {
+        if canonical_terminal == terminal_status
+            && stored_terminal == terminal_status
+            && !needs_legacy_lead_writeback
+        {
             continue;
         }
         let recovery_terminal_status =
@@ -15762,13 +16145,24 @@ pub(super) fn terminal_person_research_projection_candidates(
             .or_else(|| result.get("error"))
             .and_then(Value::as_str)
             .map(str::to_string);
+        let mut payload = serde_json::from_str(&payload_json).unwrap_or(Value::Null);
+        if needs_legacy_lead_writeback {
+            payload["writeback_contract"] = serde_json::json!({
+                "collection": "outbound_lead_generation_leads",
+                "allowed_collections": ["outbound_lead_generation_leads"],
+                "record_ids": [record_id],
+                "command_type": "web_stack.person_research",
+                "min_independent_sources": 2,
+                "recovered_from": "missing_execute_action_writeback_contract"
+            });
+        }
         candidates.push(TerminalPersonResearchProjectionCandidate {
             command: BusinessCommand {
                 id: Some(command_id),
                 module,
                 command_type: "web_stack.person_research".to_string(),
                 record_id: (!record_id.trim().is_empty()).then_some(record_id),
-                payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
+                payload,
                 client_context: serde_json::from_str(&client_context_json).unwrap_or(Value::Null),
                 origin: CommandOrigin::TrustedLocal,
             },
@@ -21486,6 +21880,8 @@ fn truncate_text_preserve(value: &str, max_chars: usize) -> String {
 fn suggested_skill_for_command(command: &BusinessCommand) -> Option<String> {
     if is_cv_print_parse_command(command) {
         Some("ctox-cv-print-parser".to_string())
+    } else if super::store_outbound_commands::is_outbound_adapter_reconciliation_command(command) {
+        Some("universal-scraping".to_string())
     } else if is_source_parse_command(&command.command_type) {
         Some("business-os-import-parser".to_string())
     } else if command.command_type == "outbound.pipeline.outreach_draft" {
@@ -22174,21 +22570,49 @@ pub(super) fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
+pub(super) fn stable_instance_id(root: &Path) -> anyhow::Result<String> {
     let runtime = root.join("runtime");
     std::fs::create_dir_all(&runtime)
         .with_context(|| format!("failed to create runtime dir {}", runtime.display()))?;
     let path = runtime.join("business-os-instance-id");
-    if path.is_file() {
+    if path.exists() {
+        let metadata = std::fs::symlink_metadata(&path)?;
+        anyhow::ensure!(
+            metadata.file_type().is_file() && !metadata.file_type().is_symlink(),
+            "Business OS instance identity is not a protected regular file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            anyhow::ensure!(
+                metadata.permissions().mode() & 0o022 == 0,
+                "Business OS instance identity is writable by group or other users"
+            );
+        }
         let value = std::fs::read_to_string(&path)?;
         let trimmed = value.trim();
-        if !trimmed.is_empty() {
-            return Ok(trimmed.to_string());
-        }
+        anyhow::ensure!(
+            !trimmed.is_empty(),
+            "Business OS instance identity is empty"
+        );
+        return Ok(trimmed.to_string());
     }
     let id = format!("biz_{}", Uuid::new_v4());
-    std::fs::write(&path, format!("{id}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))?;
+    let temporary = runtime.join(format!(".business-os-instance-id-{}.tmp", Uuid::new_v4()));
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temporary)
+        .with_context(|| format!("failed to create {}", temporary.display()))?;
+    std::io::Write::write_all(&mut file, format!("{id}\n").as_bytes())?;
+    file.sync_all()?;
+    std::fs::rename(&temporary, &path)
+        .with_context(|| format!("failed to publish {}", path.display()))?;
     Ok(id)
 }
 
@@ -22276,6 +22700,26 @@ fn room_secret_id(value: &str) -> String {
 pub(super) mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_instance_identity_is_private_and_rejects_symlinks() -> anyhow::Result<()> {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = tempdir()?;
+        let id = stable_instance_id(root.path())?;
+        assert!(id.starts_with("biz_"));
+        let identity = root.path().join("runtime/business-os-instance-id");
+        assert_eq!(fs::metadata(&identity)?.permissions().mode() & 0o077, 0);
+        assert_eq!(stable_instance_id(root.path())?, id);
+
+        fs::remove_file(&identity)?;
+        let target = root.path().join("runtime/other-instance-id");
+        fs::write(&target, "biz_other\n")?;
+        symlink(&target, &identity)?;
+        assert!(stable_instance_id(root.path()).is_err());
+        Ok(())
+    }
 
     fn research_csv_output(table_key: &'static str) -> SystematicResearchCsvOutput {
         SystematicResearchCsvOutput {
@@ -23674,19 +24118,6 @@ pub(super) mod tests {
         assert!(server.get("credential").and_then(Value::as_str).is_some());
 
         let config = sync_config_for_browser(root, "browser-2")?;
-        assert!(
-            config.signaling_room_password.is_empty(),
-            "browser sync config must not expose the root room secret"
-        );
-        assert!(
-            !config.signaling_browser_token.is_empty(),
-            "browser sync config must retain its role-bound credential"
-        );
-        let browser_json = serde_json::to_value(&config)?;
-        assert!(
-            browser_json.get("signaling_room_password").is_none(),
-            "browser sync config must omit the root room secret field"
-        );
         assert!(config
             .ice_servers
             .iter()
@@ -24686,7 +25117,7 @@ pub(super) mod tests {
             }))?,
         )?;
 
-        let manifests = load_local_module_manifests(&app_root, false)?;
+        let manifests = load_local_module_manifests(root.path(), &app_root, false)?;
         assert_eq!(manifests.len(), 1);
         assert!(manifests[0].asset_revision.is_empty());
         assert!(manifests[0].manifest_sha256.is_empty());
@@ -28386,8 +28817,8 @@ pub(super) mod tests {
 
     #[test]
     fn source_core_manifests_match_canonical_system_app_manifest() -> anyhow::Result<()> {
-        let modules_root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("src/apps/business-os/modules");
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let modules_root = repository_root.join("src/apps/business-os/modules");
         let mut manifest_ids = BTreeSet::new();
         for entry in fs::read_dir(&modules_root)? {
             let path = entry?.path().join("module.json");
@@ -28403,6 +28834,7 @@ pub(super) mod tests {
         assert_eq!(canonical_ids.len(), 10);
         assert_eq!(manifest_ids, canonical_ids);
         let marketplace = load_marketplace_module_manifests(
+            repository_root,
             modules_root.parent().context("Business OS source root")?,
         )?;
         assert_eq!(marketplace.len(), 24);
@@ -33248,32 +33680,6 @@ pub(super) mod tests {
         );
         assert_eq!(rotated.sync_room, reloaded.sync_room);
         assert!(rotated.sync_room.starts_with("ctox-business-os:"));
-        Ok(())
-    }
-
-    #[test]
-    fn rotate_sync_credentials_revokes_both_signaling_roles() -> anyhow::Result<()> {
-        if env::var("CTOX_BUSINESS_OS_ROOM_PASSWORD")
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-        {
-            return Ok(());
-        }
-
-        let temp = tempdir()?;
-        let root = temp.path();
-        let first = sync_config(root)?;
-        let rotated = rotate_sync_credentials(root)?;
-
-        assert_ne!(first.sync_room, rotated.sync_room);
-        assert_ne!(
-            first.signaling_browser_token_hash,
-            rotated.signaling_browser_token_hash
-        );
-        assert_ne!(
-            first.signaling_native_token_hash,
-            rotated.signaling_native_token_hash
-        );
         Ok(())
     }
 

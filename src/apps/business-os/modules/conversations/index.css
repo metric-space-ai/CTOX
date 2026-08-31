@@ -9,6 +9,19 @@
    timeline, thread-row content grid, right-pane fact rows).
    The width aliases keep the persisted resizer layout working — the shell
    resizer writes --conversations-*-width onto the frame element. */
+
+/* Shell V2 compact pane headers: conversation filters and channel strips stay
+   single-line with local overflow instead of wrapping the pane title. */
+.shell-window[data-shell-contract="v2"] .conv-module { position: relative; padding: 0; overflow: hidden; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .conv-module > .ctox-context-menu { max-width: calc(100% - 16px); }
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
+.shell-window[data-shell-contract="v2"] .conv-module .conv-channel-tabs { flex-wrap: nowrap; overflow-x: auto; }
 .conv-module {
   --ctox-left-width: var(--conversations-left-width, 320px);
   --ctox-right-width: var(--conversations-right-width, 320px);
@@ -21,6 +34,15 @@
     minmax(300px, 1fr)
     12px
     var(--conversations-right-width, 320px);
+}
+
+/* The kit's .ctox-pane sets grid-template-rows but no columns, so its implicit
+   column is max-content sized. The channel band (.ctox-pane-tabs, min-width:
+   max-content, 13 tabs) blew that column up to ~1090px inside a 320px pane and
+   pushed the filterbar's view/filter controls out of the clipped pane at EVERY
+   width. One explicit 0-floor column keeps every head inside its column. */
+.conv-pane {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .conv-pane.conv-left { grid-column: 1; }
@@ -48,8 +70,11 @@
 }
 
 .conv-pane.conv-right {
-  grid-template-rows: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
 }
+
+.conv-pane.conv-right > .ctox-pane-header { grid-row: 1; }
+.conv-right-body { grid-row: 2; }
 
 /* Left pane channel band + message meta use brand-colored channel dots. */
 /* custom: channel brand dots (deliberately hardcoded brand colors) */
@@ -90,9 +115,22 @@
   color: var(--danger);
 }
 
-/* Channel band tabs carry a brand dot before their label. */
+/* Channel band tabs carry a brand dot before their label. Thirteen channels
+   never fit a 320px column, so the band scrolls sideways inside its own row
+   instead of being clipped at the pane edge. */
 .conv-pane.conv-left [data-conv-channel-band] .ctox-pane-tab {
   gap: 5px;
+}
+
+.conv-pane.conv-left > [data-conv-channel-band] {
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+}
+
+.conv-pane.conv-left > [data-conv-channel-band]::-webkit-scrollbar {
+  display: none;
 }
 
 /* Thread list: kit .ctox-list rows; the module class only adds the
@@ -103,6 +141,11 @@
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   gap: 8px;
+  /* The kit's .ctox-list is a flex column, so its rows shrink below their
+     content once the well is shorter than the list — in the stacked form the
+     rows visibly overlapped each other. Rows keep their height; the well
+     scrolls (it already has overflow: auto). */
+  flex: 0 0 auto;
 }
 
 .conv-thread-item .ctox-avatar {
@@ -125,6 +168,7 @@
 }
 
 .conv-thread-name {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -174,11 +218,41 @@
   color: var(--accent);
 }
 
+/* Third line of a shard: channel dots + the facts the module already holds
+   (message count, CTOX account). */
+.conv-thread-meta {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 3px 8px;
+  margin-top: 3px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* `display: flex` above out-specifies the UA's [hidden] rule, so the JS's
+   `metaRow.hidden = true` (bucket with neither facts nor channels) needs this. */
+.conv-thread-meta[hidden] {
+  display: none;
+}
+
+.conv-thread-meta-fact {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .conv-thread-channels {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  margin-top: 2px;
+  flex: 0 0 auto;
+}
+
+.conv-thread-channels:empty {
+  display: none;
 }
 
 .conv-thread-channels .conv-channel-dot {
@@ -186,25 +260,49 @@
   height: 6px;
 }
 
-/* Compact "list" view of the shard column (shard/list toggle): one dense row
-   per conversation — drop the channel-dot row and the avatar to a smaller
-   footprint. Where there are shards there is a list view. */
+/* ---- SHARDS: two to three lines, generous padding ---------------------- */
+.conv-thread-list:not(.is-list-view) .conv-thread-item {
+  padding: 12px 14px;
+}
+
+/* ---- LIST: exactly one dense line — title plus one short meta on the right.
+   Same markup, no second render path: the preview and meta lines drop out. */
 .conv-thread-list.is-list-view .conv-thread-item {
   grid-template-columns: minmax(0, 1fr);
-  gap: 2px;
+  gap: 0;
+  padding: 4px 14px;
 }
 
 .conv-thread-list.is-list-view .conv-thread-item .ctox-avatar,
-.conv-thread-list.is-list-view .conv-thread-channels {
+.conv-thread-list.is-list-view .conv-thread-preview,
+.conv-thread-list.is-list-view .conv-thread-meta {
   display: none;
 }
 
-.conv-thread-list.is-list-view .conv-thread-preview {
-  font-size: 11px;
+.conv-thread-list.is-list-view .conv-thread-body {
+  gap: 0;
+}
+
+.conv-thread-list.is-list-view .conv-thread-top {
+  gap: 6px;
+  line-height: 1.35;
+}
+
+.conv-thread-list.is-list-view .conv-thread-name {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* One-button card/list switch (operator directive 31.08.2026): the button
+   carries both glyphs and shows the one for the view it switches TO. It is an
+   action, so it never takes the aria-pressed accent fill of a state control. */
+.conv-view-toggle .conv-view-icon[hidden] {
+  display: none;
 }
 
 /* custom: accent unread counter — an attention marker, not a status badge */
 .conv-thread-item .conv-unread-badge {
+  flex: 0 0 auto;
   display: inline-grid;
   place-items: center;
   min-width: 16px;
@@ -221,10 +319,13 @@
    custom: chat header = contact identity row inside the standard pane band
    (.ctox-pane-header/.ctox-pane-band supply padding and hairline). */
 .conv-center-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
+  /* Static title row on top (always present, shell V2 §7 h5); the contact
+     identity row below is toggled by JS with a selection. */
+  display: block;
+}
+
+.conv-center-header .conv-detail-identity {
+  margin-top: 6px;
 }
 
 .conv-detail-identity {
@@ -758,41 +859,77 @@ details[open] > .conv-message-details-summary::before {
   background: var(--accent-soft);
 }
 
-@container business-app-window (max-width: 1080px) {
-  .conv-module,
+/* 3 -> 2 at the breakpoint the shell owns (see app.css
+   [data-shell-columns="3"]): the context pane leaves the column grid and
+   becomes a band under list + timeline. Two columns, not a stack — the app
+   invents no breakpoint of its own. */
+@container business-app-window (max-width: 1024px) {
+  .conv-module {
+    grid-template-columns: var(--conversations-left-width, 320px) 12px minmax(260px, 1fr);
+    /* Fractions, not vh: inside a window the screen height means nothing
+       (contract §6). The context band takes at most a third of the frame. */
+    grid-template-rows: minmax(0, 1fr) minmax(180px, 0.5fr);
+  }
+
+  /* With the context pane collapsed — this app's DEFAULT state — the second
+     row must disappear with it. Leaving it declared is exactly the empty,
+     reserved track the contract calls out in §6. */
   .conv-module.is-context-hidden {
+    grid-template-columns: var(--conversations-left-width, 320px) 12px minmax(260px, 1fr);
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .conv-pane.conv-right {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .conv-module > [data-resizer="right"] {
+    display: none;
+  }
+}
+
+/* 2 -> 1 at the shell's second breakpoint: everything stacks, no resizer
+   stays operable. Track counts follow the number of VISIBLE panes in both
+   states, so the stack never reserves a track for a hidden pane. */
+@container business-app-window (max-width: 768px) {
+  .conv-module {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(200px, 32vh) minmax(320px, 1fr) minmax(220px, 34vh);
-    height: auto;
-    min-height: 100%;
+    /* Track minimums are the pane's own chrome plus a usable well: head (74) +
+       channel band (37) + footer (25) already eat ~140px of the left column,
+       so a 190px track left it with one clipped row. The list is this app's
+       navigation and keeps the largest share. */
+    grid-template-rows: minmax(300px, 1.2fr) minmax(280px, 1.1fr) minmax(220px, 0.7fr);
+    /* Bounded, not content-driven: with `height: auto` the fr tracks grew to
+       the list's full content height and pushed the timeline out of the frame.
+       The stack fills the window, each section scrolls in its own well, and the
+       module only scrolls when even the track minimums no longer fit. */
+    height: 100%;
+    min-height: 0;
+    overflow-x: hidden;
     overflow-y: auto;
     gap: 8px;
     padding: 8px;
   }
-  /* Stacked single-column: panes flow by source order, not the wide grid pins. */
+
+  .conv-module.is-context-hidden {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(300px, 1fr) minmax(300px, 1.2fr);
+  }
+
+  /* Stacked single-column: panes flow by source order, not the wide grid pins.
+     No `display: grid !important` here — that forced the context pane visible
+     even while collapsed, which both reserved a dead track and made the
+     context toggle a no-op in the stacked form. */
   .conv-pane.conv-left,
   .conv-pane.conv-center,
   .conv-pane.conv-right {
     grid-column: auto;
-  }
-  .conv-pane.conv-left,
-  .conv-pane.conv-center,
-  .conv-pane.conv-right {
-    display: grid !important;
-    min-height: 220px;
+    grid-row: auto;
+    min-height: 190px;
   }
   .conv-module [data-resizer] {
     display: none !important;
-  }
-}
-
-@container business-app-window (max-width: 760px) {
-  .conv-module {
-    grid-template-rows: minmax(190px, 34vh) minmax(320px, 1fr) minmax(220px, 36vh);
-  }
-
-  .conv-pane.conv-left {
-    display: grid !important;
   }
 
   .conv-message {
@@ -800,6 +937,152 @@ details[open] > .conv-message-details-summary::before {
   }
 
   .conv-thread-item {
-    min-height: 42px;
+    min-height: 44px;
+  }
+}
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum, icon-only pane buttons in both dimensions, plus
+   the horizontally scrolling channel tab band and the thread rows. */
+@media (pointer: coarse) {
+  .conv-module button,
+  .conv-module input,
+  .conv-module select,
+  .conv-module textarea {
+    min-height: 44px;
+  }
+
+  .conv-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .conv-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .conv-module .conv-thread-item {
+    min-height: 44px;
+  }
+
+  /* The details/summary disclosure inside messages is the only way to reach
+     the technical metadata — full finger-height hit area. */
+  .conv-module .conv-message-details-summary {
+    min-height: 44px;
+    display: flex;
+    align-items: center;
+  }
+}
+
+/* ============================================================================
+   Shell V2 header geometry — reference: modules/knowledge/index.css
+
+   `.shell-window-content` is `inset: 0` and is never indented, so the v2 shell
+   paints three chrome zones straight over this app:
+     · app icon      `--shell-v2-icon-size` (80px) square, top left, z-index 35
+     · header band   `--shell-v2-header-row-size` (37px) tall, full width
+     · close button  74px square (two header rows) top right
+   The left column therefore keeps its first TWO head rows one shell header row
+   high each — together exactly the icon's height — and starts them behind the
+   icon. The detail head keeps the close button's block clear on the right.
+   ========================================================================== */
+.shell-window[data-shell-contract="v2"] .conv-module .conv-left > .ctox-pane-header {
+  /* The icon indent lives on the HEADER itself (contract §7 h2 measures the
+     first head's own padding-left), not on the inner rows. */
+  padding: 0 0 0 calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .conv-module .conv-left > .ctox-pane-header > .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .conv-module .conv-left > .ctox-pane-header > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  align-items: center;
+  padding-block: 0;
+  padding-left: 0;
+  padding-right: 14px;
+}
+
+/* Kicker + title must fit the 37px row without being crushed: the titles
+   column keeps `min-width: 0` (app.css) and clips instead of pushing the
+   action block, which stays `flex: 0 0 auto` and never claims `flex: 1`. */
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-titles {
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-kicker,
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-title {
+  margin-top: 0;
+}
+
+/* The tray opens below both icon rows, so it uses the plain column inset —
+   the negative margin undoes the header's icon indent for this row only. */
+.shell-window[data-shell-contract="v2"] .conv-module .conv-left > .ctox-pane-header > .ctox-filter-tray {
+  margin-left: calc(-1 * (var(--shell-v2-icon-size, 80px) + 14px));
+  padding: 8px 14px;
+}
+
+.shell-window[data-shell-contract="v2"] .conv-module .ctox-pane-search {
+  min-height: 30px;
+  height: 30px;
+  padding-block: 0;
+}
+
+/* Centre + context heads: every visible column carries its own head (contract
+   §7 h5), all the same height as the left head — two shell header rows plus
+   the band hairline. 70px stay free on the right for the close button; the
+   centre column is the right-most one whenever the context pane is collapsed,
+   which is this app's default state (`is-context-hidden`). */
+.shell-window[data-shell-contract="v2"] .conv-module .conv-center > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .conv-module .conv-right > .ctox-pane-header {
+  box-sizing: border-box;
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2 + 1px);
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2 + 1px);
+  padding: 0 70px 0 14px;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .conv-module .conv-center > .ctox-pane-header > .ctox-pane-title-row,
+.shell-window[data-shell-contract="v2"] .conv-module .conv-right > .ctox-pane-header > .ctox-pane-title-row {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  align-items: center;
+}
+
+.shell-window[data-shell-contract="v2"] .conv-module .conv-center-header .conv-detail-identity {
+  box-sizing: border-box;
+  min-width: 0;
+  height: var(--shell-v2-header-row-size, 37px);
+  margin-top: 0;
+}
+
+/* Stacked form (shell breakpoint 768): the left column is no longer merely the
+   left-most column, it is the ONLY column of the top row — so the same head
+   that starts behind the 80px icon must now also keep the 74px window control
+   free on its right (contract §7 h2 AND h3 on one element). The centre and
+   context heads move out of the top row and give their 70px reserve back. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] .conv-module .conv-left > .ctox-pane-header {
+    padding-right: 70px;
+  }
+
+  /* The tray opens below the control zone, so it reclaims both reserves. */
+  .shell-window[data-shell-contract="v2"] .conv-module .conv-left > .ctox-pane-header > .ctox-filter-tray {
+    margin-right: -70px;
+  }
+
+  .shell-window[data-shell-contract="v2"] .conv-module .conv-center > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .conv-module .conv-right > .ctox-pane-header {
+    padding-right: 14px;
   }
 }

@@ -109,5 +109,7 @@
   "trustMedium": "Medium",
   "trustLow": "Low",
   "trustUnknown": "Unknown",
-  "copiedToast": "Copied to clipboard"
+  "copiedToast": "Copied to clipboard",
+  "viewShowList": "Show as list",
+  "viewShowCards": "Show as cards"
 }

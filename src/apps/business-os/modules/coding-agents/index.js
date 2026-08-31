@@ -86,6 +86,8 @@ const labels = {
     sessionActive: 'aktiv',
     sessionTurns: 'Turns',
     sessionNone: 'Noch keine Session — der erste Turn startet sie.',
+    viewShowList: 'Als Liste anzeigen',
+    viewShowCards: 'Als Karten anzeigen',
   },
   en: {
     leftKicker: 'pi Coding Agent',
@@ -122,6 +124,8 @@ const labels = {
     sessionActive: 'active',
     sessionTurns: 'turns',
     sessionNone: 'No session yet — the first turn starts it.',
+    viewShowList: 'Show as list',
+    viewShowCards: 'Show as cards',
   },
 };
 
@@ -158,6 +162,15 @@ export async function mount(ctx) {
   applyStaticTexts();
   renderModelSelect();
   wireEvents();
+  const handleDesktopAppLaunch = (event) => {
+    const detail = event?.detail || {};
+    if (detail.appId && detail.appId !== 'coding-agents') return;
+    const moduleId = String(detail.args?.moduleId || '').trim();
+    if (!moduleId) return;
+    if (focusRequestedApp(moduleId)) return;
+    void loadApps().then(() => focusRequestedApp(moduleId));
+  };
+  ctx.host?.addEventListener?.('ctox-business-os-app-launch', handleDesktopAppLaunch);
   await initChatView();
   const projectionSubscriptions = subscribeProjectionUpdates();
   const readinessUnsubscribers = subscribeReadinessUpdates();
@@ -177,6 +190,7 @@ export async function mount(ctx) {
     readinessUnsubscribers.forEach((unsubscribe) => {
       try { unsubscribe?.(); } catch (err) { console.warn('[coding-agents] readiness unsubscribe failed', err); }
     });
+    ctx.host?.removeEventListener?.('ctox-business-os-app-launch', handleDesktopAppLaunch);
     try { chatView?.destroy?.(); } catch (err) { console.warn('[coding-agents] chat-ui destroy failed', err); }
     chatView = null;
     railChip?.remove();
@@ -237,8 +251,14 @@ function bindElements(root) {
   // the pane chrome (search / view / tray / reset / band / counts / footer)
   // is shell-wired from the data-pg-* markup (autoWirePaneGrammar).
   els.appSortDir = els.leftPane?.querySelector('[data-app-sort-dir]');
+  // Card/list switch: ONE button per column, module-owned. The grammar helper
+  // models a two-button radio pair (aria-pressed); a single action button has
+  // no state to press, so the module keeps the mode itself.
+  els.appViewToggle = els.leftPane?.querySelector('[data-ca-view-toggle]');
+  els.chatViewToggle = els.centerPane?.querySelector('[data-ca-view-toggle]');
   els.centerFooter = root.querySelector('#ca-center-footer');
   els.artifactFooter = root.querySelector('#ca-artifact-footer');
+  els.artifactHost = root.querySelector('#ca-artifact-host');
   if (els.root) els.root.className = ROOT_CLASSES;
 }
 
@@ -274,6 +294,29 @@ function applyStaticTexts() {
       || '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11M12 3 8 7M12 3l4 4M5 12v7h14v-7"></path></svg>';
   }
   if (els.taskInput) els.taskInput.placeholder = t('taskPlaceholder');
+  syncViewToggle(els.appViewToggle, state.appViewMode);
+  syncViewToggle(els.chatViewToggle, state.chatViewMode);
+}
+
+// Icons for the card/list switch. The button always SHOWS the view it will
+// switch to, so `cards` mode renders the list glyph and vice versa.
+const VIEW_ICONS = {
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+};
+
+// One control, one meaning: the button is an ACTION ("show as list"), never a
+// state. No aria-pressed — there is nothing to be pressed into.
+function syncViewToggle(button, mode) {
+  if (!button) return;
+  const current = mode === 'list' ? 'list' : 'cards';
+  const next = current === 'cards' ? 'list' : 'cards';
+  const label = next === 'list' ? t('viewShowList') : t('viewShowCards');
+  button.dataset.caView = current;
+  button.innerHTML = VIEW_ICONS[next];
+  button.title = label;
+  button.setAttribute('aria-label', label);
+  button.removeAttribute('aria-pressed');
 }
 
 function wireEvents() {
@@ -310,6 +353,18 @@ function wireEvents() {
   els.leftPane?.addEventListener('ctox-pane-grammar-change', onAppGrammarChange);
   els.centerPane?.addEventListener('ctox-pane-grammar-change', onChatGrammarChange);
 
+  // Card/list switch: one button, one action — flip the mode and re-render.
+  els.appViewToggle?.addEventListener('click', () => {
+    state.appViewMode = state.appViewMode === 'list' ? 'cards' : 'list';
+    syncViewToggle(els.appViewToggle, state.appViewMode);
+    renderAppList();
+  });
+  els.chatViewToggle?.addEventListener('click', () => {
+    state.chatViewMode = state.chatViewMode === 'list' ? 'cards' : 'list';
+    syncViewToggle(els.chatViewToggle, state.chatViewMode);
+    renderRecentTurns();
+  });
+
   // Domain-specific leftover: the sort-direction toggle inside the left tray
   // has no grammar equivalent (the grammar owns values, not direction).
   els.appSortDir?.addEventListener('click', () => {
@@ -324,7 +379,8 @@ function wireEvents() {
 function onAppGrammarChange(event) {
   const detail = event?.detail || {};
   state.appSearch = String(detail.search ?? '');
-  state.appViewMode = detail.view === 'list' ? 'list' : 'cards';
+  // View mode is module-owned (single-button switch) — the grammar detail only
+  // carries search / tray filters here.
   state.appSort = detail.filters?.sort || 'title';
   renderAppList();
 }
@@ -332,7 +388,6 @@ function onAppGrammarChange(event) {
 function onChatGrammarChange(event) {
   const detail = event?.detail || {};
   state.chatSearch = String(detail.search ?? '');
-  state.chatViewMode = detail.view === 'list' ? 'list' : 'cards';
   state.chatRoleFilter = detail.filters?.role || 'all';
   state.centerTab = detail.band === 'turns' ? 'turns' : 'chat';
   renderRecentTurns();
@@ -370,6 +425,13 @@ async function loadApps() {
     updateFormState();
     renderRecentTurns();
   }
+}
+
+function focusRequestedApp(moduleId) {
+  const targetId = String(moduleId || '').trim();
+  if (!targetId || !state.modules.some((mod) => mod.id === targetId)) return false;
+  selectApp(targetId);
+  return true;
 }
 
 function normalizeCatalogModules(modules) {
@@ -425,8 +487,11 @@ function renderAppList() {
     item.type = 'button';
     // Kit list row; `is-selected` drives the kit selection styling. The rail
     // shows the app icon only; the title lives in the hover chip (and inline
-    // once the operator drags the rail wide enough for labels). List mode is
-    // the compact one-line rendering (canonical shard/list toggle).
+    // once the operator drags the rail wide enough for labels).
+    //
+    // The two view modes are genuinely different renderings, not two paddings:
+    //   cards — icon tile + bold title + its own meta line (module id)
+    //   list  — one dense line, title left and the id as the single short meta
     item.className = `ctox-list-item coding-agents-app-item ${state.activeModuleId === mod.id ? 'is-selected' : ''}`;
     item.dataset.moduleId = mod.id;
     // Canonical context-record trio: the shell's right-click context resolves
@@ -438,17 +503,21 @@ function renderAppList() {
     item.setAttribute('aria-label', mod.title);
     item.setAttribute('aria-selected', String(state.activeModuleId === mod.id));
     const initial = (mod.title.trim().charAt(0) || '?').toUpperCase();
-    item.innerHTML = `
-      <span class="coding-agents-app-icon"><img src="${escapeHtml(moduleIconUrl(mod.id))}" alt="" loading="lazy"><span class="coding-agents-app-monogram" hidden>${escapeHtml(initial)}</span></span>
+    item.innerHTML = listMode
+      ? `<span class="coding-agents-app-row">
+        <span class="coding-agents-app-title">${escapeHtml(mod.title)}</span>
+        <span class="coding-agents-app-id">${escapeHtml(mod.id)}</span>
+      </span>`
+      : `<span class="coding-agents-app-icon"><img src="${escapeHtml(moduleIconUrl(mod.id))}" alt="" loading="lazy"><span class="coding-agents-app-monogram" hidden>${escapeHtml(initial)}</span></span>
       <span class="coding-agents-app-row">
         <span class="coding-agents-app-title">${escapeHtml(mod.title)}</span>
         <span class="coding-agents-app-id">${escapeHtml(mod.id)}</span>
-      </span>
-    `;
+      </span>`;
     const img = item.querySelector('img');
-    img.addEventListener('error', () => {
+    img?.addEventListener('error', () => {
       img.remove();
-      item.querySelector('.coding-agents-app-monogram').hidden = false;
+      const monogram = item.querySelector('.coding-agents-app-monogram');
+      if (monogram) monogram.hidden = false;
     });
     item.addEventListener('click', () => selectApp(mod.id));
     item.addEventListener('mouseenter', () => showRailChip(item, mod.title));
@@ -1032,14 +1101,29 @@ function renderTurnsList() {
     box.innerHTML = `<div class="ctox-empty"><strong>Noch keine Delegationen.</strong></div>`;
     return;
   }
+  // Same two renderings as the transcript: cards carry title + meta line(s),
+  // the list is exactly one dense line with a single short meta on the right.
+  const listMode = state.chatViewMode === 'list';
+  box.classList.toggle('is-list-view', listMode);
   for (const turn of state.recentTurns) {
-    const label = String(turn.prompt || '').replace(/\s+/g, ' ').slice(0, 120) || '—';
+    const label = String(turn.prompt || '').replace(/\s+/g, ' ').slice(0, listMode ? 120 : 220) || '—';
+    const shortMeta = [turn.status, turn.timeMs ? relativeTime(turn.timeMs) : ''].filter(Boolean).join(' · ');
+    const fullMeta = [
+      turn.status,
+      turn.timeMs ? relativeTime(turn.timeMs) : '',
+      turn.appliedCount ? `${turn.appliedCount} ${turn.appliedCount === 1 ? t('fileChanged') : t('filesChanged')}` : '',
+      turn.error,
+    ].filter(Boolean).join(' · ');
+    const body = listMode
+      ? `<span class="coding-agents-turn-row-main">
+          <span class="coding-agents-turn-row-prompt">${escapeHtml(label)}</span>
+          <span class="coding-agents-turn-row-meta">${escapeHtml(shortMeta)}</span>
+        </span>`
+      : `<span class="coding-agents-turn-row-prompt">${escapeHtml(label)}</span>
+        <span class="coding-agents-turn-row-meta">${escapeHtml(fullMeta)}</span>`;
     box.insertAdjacentHTML('beforeend', `
       <div class="ctox-list-item coding-agents-turn-row" data-context-record-id="${escapeHtml(turn.id)}" data-context-record-type="business_command" data-context-label="${escapeHtml(label)}">
-        <span class="coding-agents-app-row">
-          <span class="coding-agents-app-title">${escapeHtml(label)}</span>
-          <span class="coding-agents-app-id">${escapeHtml(turn.status || '')}${turn.timeMs ? ` · ${escapeHtml(relativeTime(turn.timeMs))}` : ''}</span>
-        </span>
+        ${body}
       </div>
     `);
   }
@@ -1208,29 +1292,52 @@ function renderTranscriptInline(box, events, emptyText) {
 // Column 3: the agent's free HTML artifact — a live page the agent maintains
 // about its task (contract: session.metadata.artifact_html). Sandboxed.
 function renderArtifact() {
-  const frame = els.root?.querySelector('#ca-artifact');
+  const host = els.artifactHost || els.root?.querySelector('#ca-artifact-host');
   const empty = els.root?.querySelector('#ca-artifact-empty');
-  if (!frame || !empty) return;
+  if (!host || !empty) return;
   let metadata = state.activeSession?.metadata;
   if (typeof metadata === 'string') { try { metadata = JSON.parse(metadata); } catch { metadata = null; } }
   const html = metadata && typeof metadata === 'object' ? String(metadata.artifact_html || '') : '';
   if (html.trim()) {
+    let frame = host.querySelector('#ca-artifact');
+    if (!frame) {
+      frame = document.createElement('iframe');
+      frame.id = 'ca-artifact';
+      frame.className = 'coding-agents-artifact';
+      frame.setAttribute('sandbox', '');
+      frame.setAttribute('title', 'Task-Artefakt');
+      host.replaceChildren(frame);
+    }
     if (state.artifactHtml !== html) {
       state.artifactHtml = html;
-      applyArtifactSrcdoc(frame, html);
+      applyArtifactSrcdoc(frame, sanitizeArtifactHtml(html));
     }
     frame.hidden = false;
     empty.hidden = true;
   } else {
     state.artifactHtml = '';
-    frame.removeAttribute('srcdoc');
-    frame.hidden = true;
+    host.replaceChildren();
     empty.hidden = false;
   }
   if (els.artifactFooter) {
     const updatedMs = Number(state.activeSession?.updated_at_ms || 0);
     els.artifactFooter.textContent = html.trim() && updatedMs ? `Aktualisiert ${relativeTime(updatedMs)}` : '';
   }
+}
+
+function sanitizeArtifactHtml(html) {
+  const doc = new DOMParser().parseFromString(String(html || ''), 'text/html');
+  doc.querySelectorAll('script, iframe, object, embed, base, meta[http-equiv]').forEach((node) => node.remove());
+  for (const element of doc.querySelectorAll('*')) {
+    for (const attribute of [...element.attributes]) {
+      const name = attribute.name.toLowerCase();
+      const value = attribute.value.trim();
+      if (name.startsWith('on') || ((name === 'href' || name === 'src') && /^javascript:/i.test(value))) {
+        element.removeAttribute(attribute.name);
+      }
+    }
+  }
+  return `<!doctype html><html><head>${doc.head.innerHTML}</head><body>${doc.body.innerHTML}</body></html>`;
 }
 
 // Chromium can swallow the very first srcdoc assignment while the module

@@ -1,5 +1,5 @@
 <main class="ctox-workspace matching-app is-objects-hidden" data-matching-workspace data-resize-frame>
-  <aside class="ctox-pane matching-left" id="left" data-left-content aria-label="Anforderungen">
+  <aside class="ctox-pane matching-left" id="left" data-left-content data-pg-default-view="cards" aria-label="Anforderungen">
     <header class="ctox-pane-header ctox-pane-band">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
@@ -14,10 +14,7 @@
       </div>
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" id="sourceSearch" type="search" data-pg-search placeholder="Anforderungen suchen…" aria-label="Anforderungen suchen">
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <button type="button" class="ctox-pane-icon matching-view-toggle" data-matching-view-toggle data-matching-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg data-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg data-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -53,7 +50,7 @@
 
   <button class="ctox-column-resizer" type="button" data-resizer="left" data-resizer-var="--ctox-left-width" data-resizer-min="240" data-resizer-max="480" aria-label="Spaltenbreite links anpassen"></button>
 
-  <section class="ctox-pane matching-main" id="center" aria-label="Match Workbench">
+  <section class="ctox-pane matching-main" id="center" data-pg-default-view="cards" aria-label="Match Workbench">
     <header class="ctox-pane-header ctox-pane-band">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
@@ -67,10 +64,7 @@
       </div>
       <div class="ctox-filterbar" id="listTools">
         <input class="ctox-pane-search" id="requirementSearch" type="search" data-pg-search placeholder="Kandidaten und Nachweise suchen…" aria-label="Matches durchsuchen">
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Karten-Ansicht" title="Karten-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <button type="button" class="ctox-pane-icon matching-view-toggle" data-matching-view-toggle data-matching-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg data-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg data-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Match-Filter" title="Match-Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -151,25 +145,37 @@
 
   <!-- Objekt Slide-over (rechts) -->
   <aside class="object" id="objectPanel" aria-hidden="true">
-    <div class="object-header">
-      <strong id="objectTitle">Objekt</strong>
-      <div class="space"></div>
-      <button class="icon-btn ctox-pane-icon" id="objectClose" title="Schließen">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-      </button>
-    </div>
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker">Matching</span>
+          <h2 class="ctox-pane-title column-title" id="objectTitle">Objekt</h2>
+        </div>
+        <div class="ctox-pane-actions">
+          <button class="ctox-pane-icon" type="button" id="objectClose" aria-label="Schließen" title="Schließen">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
     <div class="object-body" id="objectBody"></div>
   </aside>
   <!-- Anforderung Slide-over (links) -->
   <aside class="jp" id="requirementPanel" aria-hidden="true">
-    <div class="jp-header">
-      <button class="icon-btn ctox-pane-icon" id="jpClose" title="Schließen">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
-      </button>
-      <strong id="jpTitle" style="margin-left:6px">Anforderung</strong>
-      <div class="space"></div>
-      <span class="ctox-badge" id="jpMeta"></span>
-    </div>
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker">Matching</span>
+          <h2 class="ctox-pane-title column-title" id="jpTitle">Anforderung</h2>
+        </div>
+        <div class="ctox-pane-actions">
+          <span class="ctox-badge" id="jpMeta"></span>
+          <button class="ctox-pane-icon" type="button" id="jpClose" aria-label="Schließen" title="Schließen">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>
+          </button>
+        </div>
+      </div>
+    </header>
     <div class="jp-body" id="jpBody"></div>
   </aside>
 

@@ -27,8 +27,6 @@ test('interviews: left column carries the full canonical grammar markup', () => 
   const html = read('index.html');
   // Shell-wired grammar pins.
   assert.match(html, /data-pg-search/, 'search pin');
-  assert.match(html, /data-pg-view="cards"/, 'shard view toggle');
-  assert.match(html, /data-pg-view="list"/, 'list view toggle');
   assert.match(html, /data-pg-tray-toggle/, 'tray toggle');
   assert.match(html, /data-pg-tray\b/, 'tray');
   assert.match(html, /data-pg-reset/, 'reset');
@@ -36,6 +34,60 @@ test('interviews: left column carries the full canonical grammar markup', () => 
   // Recessed well + one-line footer + view-switch band from the kit.
   assert.match(html, /ctox-well/, 'recessed well');
   assert.match(html, /ctox-pane-footer/, 'pane footer');
+});
+
+// Operator directive 31.08.2026: the shard/list switch is ONE button that
+// toggles the view, not a two-button state pair. The button is an action, so it
+// carries a label and no aria-pressed, and the app owns the wiring.
+test('interviews: the view switch is a single toggling action button', () => {
+  const html = read('index.html');
+  const filterbar = html.match(/<div class="ctox-filterbar">[\s\S]*?<\/div>/);
+  assert.ok(filterbar, 'filterbar present');
+  assert.doesNotMatch(html, /data-pg-view=/, 'no two-button pane-grammar view pair');
+  assert.doesNotMatch(html, /ctox-view-toggle/, 'no two-button toggle group');
+  const toggles = html.match(/<button[^>]*data-ats-view-toggle="[^"]*"[^>]*>/g) || [];
+  assert.equal(toggles.length, 1, 'exactly one view control');
+  assert.match(toggles[0], /data-ats-view-toggle="cards"/, 'starts in card view');
+  assert.match(toggles[0], /aria-label=/, 'view control has an aria-label');
+  assert.match(toggles[0], /title=/, 'view control has a title');
+  assert.doesNotMatch(toggles[0], /aria-pressed/, 'an action carries no pressed state');
+  const js = read('index.js');
+  assert.match(js, /function toggleView/, 'app owns the toggle wiring');
+  assert.match(js, /viewAsList/, 'label names the view switched TO');
+  assert.match(js, /viewAsCards/, 'label names the view switched TO');
+});
+
+// Operator directive 31.08.2026: cards and list must be different shapes.
+test('interviews: card and list rows are rendered differently', () => {
+  const now = 1_700_000_000_000;
+  const row = {
+    id: 'imeet_1', candidate_id: 'cand-a', vacancy_id: 'vac-1', state: 'confirmed',
+    parties: [{ name: 'x' }, { name: 'y' }], start: now, end: now + 3_600_000,
+    location_mode: 'video', video_link: 'https://example.test/x',
+  };
+  const t = (k) => k;
+  const cards = meetingShard(row, { t, locale: 'de', nowMs: now, view: 'cards' });
+  const list = meetingShard(row, { t, locale: 'de', nowMs: now, view: 'list' });
+  assert.notEqual(cards, list, 'the two views render different markup');
+  // Cards: bold title + state badge, then TWO meta lines with the detail fields.
+  assert.match(cards, /ats-shard-head/);
+  assert.match(cards, /ctox-badge/);
+  assert.equal((cards.match(/class="ats-shard-meta"/g) || []).length, 2, 'two meta lines');
+  assert.match(cards, /60 minutesShort/, 'duration derived from start/end');
+  assert.match(cards, /2 parties/, 'party count');
+  // List: exactly ONE line — title plus a single short trailing meta, and the
+  // state reduced to a dot that still carries its word for screen readers.
+  assert.equal((list.match(/class="ats-shard-line"/g) || []).length, 1, 'one line');
+  assert.equal((list.match(/class="ats-shard-meta"/g) || []).length, 0, 'no meta lines');
+  assert.equal((list.match(/class="ats-shard-trail"/g) || []).length, 1, 'one short trailing meta');
+  assert.doesNotMatch(list, /ctox-badge/, 'no badge in the dense row');
+  assert.match(list, /ats-shard-dot" data-status="confirmed"/);
+  assert.match(list, /ats-sr">stateConfirmed/);
+  // The selector shell is identical in both views.
+  for (const html of [cards, list]) {
+    assert.match(html, /class="ats-shard" data-ats-select="imeet_1"/);
+    assert.match(html, /data-context-record-type="interview_meeting"/);
+  }
 });
 
 test('interviews: view band has >= 2 real counted views', () => {

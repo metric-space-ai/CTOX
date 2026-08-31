@@ -3,10 +3,14 @@
        grammar (data-pg-*). The shell auto-wires search/tray/reset/active-dot/
        view-toggle/band; this module writes only markup + counts/footer. -->
   <aside class="ctox-pane esign-left" aria-label="Signatur-Anfragen" data-esign-list-pane data-left-content>
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
+        <!-- Kein Kicker im ERSTEN Kopf: das App-Icon steht direkt daneben und
+             sagt dasselbe, und in den 212px, die neben Icon-Zone und
+             Aktionsblock bleiben, verdraengt er genau den Titel, der das
+             Versionsmenue der Shell traegt (Vertrag §4). Knowledge, die
+             abgenommene Referenz, fuehrt aus demselben Grund keinen Kicker. -->
         <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker" data-copy="kicker">E-SIGNATUR</span>
           <h2 class="ctox-pane-title" data-copy="listTitle">Anfragen</h2>
         </div>
         <div class="ctox-pane-actions">
@@ -15,26 +19,28 @@
           <button type="button" class="ctox-pane-icon" data-action="export" aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
         </div>
       </div>
-      <div class="ctox-filterbar">
-        <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." aria-label="Anfragen suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
-        <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
-      </div>
-      <div class="ctox-filter-tray" data-pg-tray hidden>
-        <div class="ctox-filter-row">
-          <select class="ctox-select" data-pg-filter data-pg-name="subject_kind" data-pg-default="all" aria-label="Vertragstyp filtern">
-            <option value="all" data-copy="allKinds">Alle Typen</option>
-            <option value="arbeitsvertrag" data-copy="employment">Arbeitsvertrag</option>
-            <option value="vermittlungsvertrag" data-copy="placement">Vermittlungsvertrag</option>
-            <option value="ueberlassungsvertrag" data-copy="staffing">Überlassungsvertrag</option>
-          </select>
-          <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
-        </div>
-      </div>
     </header>
+    <div class="ctox-filterbar" data-shell-v2-header-row="2">
+      <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." aria-label="Anfragen suchen" />
+      <!-- EIN Umschalter, kein Zustandspaar (Betreiber-Direktive 31.08.): das
+           Icon zeigt die Ansicht, in die gewechselt wird; data-pg-view traegt
+           die AKTUELLE Ansicht und ist damit weiterhin der Wert, den die
+           Shell-Grammatik (shared/pane-grammar.js) liest. Kein aria-pressed —
+           der Knopf ist eine Aktion, kein Zustand. -->
+      <button type="button" class="ctox-pane-icon esign-view-toggle" data-pg-view="cards" data-esign-view-toggle aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg class="esign-view-icon" data-esign-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg class="esign-view-icon" data-esign-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
+      <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
+    </div>
+    <div class="ctox-filter-tray" data-pg-tray data-shell-v2-header-row="3" hidden>
+      <div class="ctox-filter-row">
+        <select class="ctox-select" data-pg-filter data-pg-name="subject_kind" data-pg-default="all" aria-label="Vertragstyp filtern">
+          <option value="all" data-copy="allKinds">Alle Typen</option>
+          <option value="arbeitsvertrag" data-copy="employment">Arbeitsvertrag</option>
+          <option value="vermittlungsvertrag" data-copy="placement">Vermittlungsvertrag</option>
+          <option value="ueberlassungsvertrag" data-copy="staffing">Überlassungsvertrag</option>
+        </select>
+        <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
+      </div>
+    </div>
     <nav class="ctox-view-switch" aria-label="Ansichten">
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-copy="viewAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
@@ -53,7 +59,7 @@
   <!-- MAIN: record-bound workbench. The create composer stays as-is; selecting
        a request prefills it and auto-reveals the record detail + signer flow. -->
   <section class="ctox-pane esign-center" aria-label="Workbench" data-esign-workbench>
-    <header class="ctox-pane-header ctox-pane-band">
+    <header class="ctox-pane-header ctox-pane-band" data-shell-v2-header-row="1">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker" data-esign-wb-kicker data-copy="composerKicker">NEUE ANFRAGE</span>

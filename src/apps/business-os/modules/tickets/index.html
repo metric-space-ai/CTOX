@@ -13,15 +13,19 @@
         <div class="ctox-pane-actions">
           <button class="ctox-pane-icon is-primary" type="button" data-action="new" aria-label="Ticket anlegen" title="Ticket anlegen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
           <button class="ctox-pane-icon" type="button" data-action="import" aria-label="Importieren" title="Importieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M12 15l-4-4M12 15l4-4M5 21h14"/></svg></button>
-          <button class="ctox-pane-icon" type="button" data-action="export" aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
+          <button class="ctox-pane-icon" type="button" data-action="export" disabled data-empty-disabled aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
         </div>
       </div>
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Suchen..." aria-label="Tickets suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- ONE control, one action (Betreiber-Direktive 31.08.): the shard/list
+             switch is a single button, not a pressed pair. `data-pg-view` carries
+             the CURRENT view so the shell-wired grammar keeps reading a truthful
+             value; index.js flips it in the capture phase before the grammar
+             listener runs. Icon, aria-label and title always name the view the
+             click switches TO, so the button carries no aria-pressed — it is an
+             action, not a state. -->
+        <button type="button" class="ctox-pane-icon tickets-view-toggle" data-tickets-view-toggle data-pg-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg data-view-icon="list" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg><svg data-view-icon="cards" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -29,7 +33,7 @@
           <select class="ctox-select" data-pg-filter data-pg-name="status" data-pg-default="all" aria-label="Status filtern">
             <option value="all" data-copy="allStatus">Alle Status</option>
             <option value="open" data-copy="open">Offen</option>
-            <option value="pending" data-copy="pending">Pending</option>
+            <option value="pending" data-copy="pending">Wartend</option>
             <option value="blocked" data-copy="blocked">Blockiert</option>
             <option value="closed" data-copy="closed">Geschlossen</option>
           </select>
@@ -42,26 +46,52 @@
       <div class="ctox-pane-tabs">
         <button type="button" class="ctox-pane-tab is-active" role="tab" data-pg-band="all" aria-selected="true"><span data-copy="bandAll">Alle</span><span class="view-count" data-pg-count="all"></span></button>
         <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="open" aria-selected="false"><span data-copy="bandOpen">Offen</span><span class="view-count" data-pg-count="open"></span></button>
-        <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="pending" aria-selected="false"><span data-copy="bandPending">Pending</span><span class="view-count" data-pg-count="pending"></span></button>
+        <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="pending" aria-selected="false"><span data-copy="bandPending">Wartend</span><span class="view-count" data-pg-count="pending"></span></button>
         <button type="button" class="ctox-pane-tab" role="tab" data-pg-band="closed" aria-selected="false"><span data-copy="bandClosed">Geschlossen</span><span class="view-count" data-pg-count="closed"></span></button>
       </div>
     </nav>
     <div class="ctox-pane-body ctox-well">
-      <div class="ctox-list os-scrollbar" data-ticket-list></div>
+      <div class="ctox-list os-scrollbar" data-ticket-list><p class="ctox-empty" data-copy="noTickets">Noch keine Tickets verfügbar.</p></div>
     </div>
     <footer class="ctox-pane-footer"><span data-pg-footer></span></footer>
   </aside>
 
   <button class="ctox-column-resizer" type="button" data-resizer="left" data-resizer-var="--ctox-left-width" data-resizer-min="260" data-resizer-max="520" aria-label="Spaltenbreite anpassen"></button>
 
-  <!-- MAIN: the ticket's timeline + evidence — the unique work surface. Its
-       header collects the real ctox.ticket.* lifecycle actions as icons and the
-       on-demand operations-pane toggle. Filled by index.js on selection. -->
-  <section class="ctox-pane tickets-pane tickets-center" aria-label="Ticket-Verlauf" data-ticket-detail></section>
+  <!-- MAIN: the ticket's timeline + evidence — the unique work surface. The
+       pane head is STATIC markup and exists in every state (empty, loading,
+       selected); index.js only refines its texts/actions and renders the body
+       into [data-ticket-detail-body]. The header collects the real
+       ctox.ticket.* lifecycle actions as icons and the on-demand
+       operations-pane toggle. -->
+  <section class="ctox-pane tickets-pane tickets-center" aria-label="Ticket-Verlauf" data-ticket-detail>
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-detail-kicker>CTOX</span>
+          <h2 class="ctox-pane-title" data-detail-title>Ticket</h2>
+        </div>
+        <div class="ctox-pane-actions" data-detail-actions></div>
+      </div>
+    </header>
+    <div class="tickets-pane-body" data-ticket-detail-body><p class="ctox-empty" data-copy="selectTicket">Wähle links ein Ticket aus.</p></div>
+  </section>
 
   <!-- THIRD: operations pane — ON-DEMAND ONLY. Hidden by default, opened from
        the MAIN header icon, auto-revealed when an operation flow needs it, and
-       collapsible again. Filled by index.js. -->
+       collapsible again. Static head like the center pane; body filled by
+       index.js into [data-ticket-ops-body]. -->
   <button class="ctox-column-resizer" type="button" data-resizer="right" data-resizer-var="--ctox-right-width" data-resizer-min="280" data-resizer-max="560" aria-label="Rechte Spaltenbreite anpassen"></button>
-  <aside class="ctox-pane tickets-pane tickets-right" aria-label="Ticket-Operationen" data-right-content data-ticket-ops></aside>
+  <aside class="ctox-pane tickets-pane tickets-right" aria-label="Ticket-Operationen" data-right-content data-ticket-ops>
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-ops-kicker data-copy="operations">Operationen</span>
+          <h2 class="ctox-pane-title" data-ops-title>Ticket</h2>
+        </div>
+        <div class="ctox-pane-actions" data-ops-actions></div>
+      </div>
+    </header>
+    <div class="tickets-pane-body" data-ticket-ops-body></div>
+  </aside>
 </main>

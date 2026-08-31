@@ -3,7 +3,7 @@
        and SHELL-wired through data-pg-*; the module only reacts to the bubbling
        ctox-pane-grammar-change event and writes counts/footer through the
        null-guarded pane.__ctoxPaneGrammar handle. -->
-  <aside class="ctox-pane customers-left" aria-label="Kundenkonten" data-left-content>
+  <aside class="ctox-pane customers-left" aria-label="Kundenkonten" data-left-content data-pg-default-view="cards">
     <header class="ctox-pane-header ctox-pane-band">
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
@@ -20,10 +20,15 @@
       </div>
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search placeholder="Kunden suchen..." aria-label="Kunden suchen" />
-        <div class="ctox-view-toggle" role="group" aria-label="Darstellung">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="true" aria-label="Shard-Ansicht" title="Shard-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="false" aria-label="Listen-Ansicht" title="Listen-Ansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
-        </div>
+        <!-- ONE control, not two: the toggle is an ACTION, not a state. The
+             icon shows the view it switches TO, label/title say so, and there
+             is deliberately no aria-pressed (Betreiber-Direktive 31.08.2026).
+             It is module-wired (data-customers-view-toggle), not shell-wired:
+             shared/pane-grammar.js derives `view` from aria-pressed across
+             several [data-pg-view] buttons, which a single action button
+             cannot express. index.js keeps the pane's data-pg-default-view in
+             sync so the grammar event still reports the true view. -->
+        <button type="button" class="ctox-pane-icon customers-view-toggle" data-customers-view-toggle data-customers-view="cards" aria-label="Als Liste anzeigen" title="Als Liste anzeigen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
       </div>
       <div class="ctox-filter-tray" data-pg-tray hidden>
@@ -89,6 +94,37 @@
        notes, linked files/apps and existing handoff/dedupe command flows stay
        inside this single primary surface; there is deliberately no third pane. -->
   <section class="ctox-pane customers-main" aria-label="Kunden Arbeitsbereich">
-    <div data-customers-main></div>
+    <!-- Static initial head: the workbench head exists ALWAYS, also before the
+         first JS render and without a selection (no display:none in the empty
+         state). Like the left head it is one element with two shell bands
+         (title row + tabs row), so both pane heads measure the same height.
+         renderMain() replaces the whole [data-customers-main] innerHTML with
+         markup that starts with the same two-band .ctox-pane-header, so this
+         head is superseded, never removed early or duplicated. -->
+    <div data-customers-main>
+      <header class="ctox-pane-header ctox-pane-band">
+        <div class="ctox-pane-title-row">
+          <div class="ctox-pane-titles">
+            <span class="ctox-pane-kicker">CRM</span>
+            <h2 class="ctox-pane-title">Arbeitsbereich</h2>
+          </div>
+          <div class="ctox-pane-actions"></div>
+        </div>
+        <nav class="ctox-pane-band customers-workbench-tabs" aria-label="Arbeitsbereich">
+          <div class="ctox-pane-tabs" role="tablist">
+            <button class="ctox-pane-tab is-active" type="button" role="tab" aria-selected="true" data-customers-detail-tab="overview">Übersicht</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="contacts">Kontakte</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="opportunities">Opportunities</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="timeline">Aktivitäten</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="tasks">Aufgaben</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="notes">Notizen</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="files">Dateien</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="apps">Apps</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="handoff">Übergabe</button>
+            <button class="ctox-pane-tab" type="button" role="tab" aria-selected="false" data-customers-detail-tab="dedupe">Dubletten</button>
+          </div>
+        </nav>
+      </header>
+    </div>
   </section>
 </main>

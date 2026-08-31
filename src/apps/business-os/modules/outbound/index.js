@@ -355,7 +355,7 @@ const CAMPAIGN_IDEA_TEMPLATES = Object.freeze({
     {
       id: 'en-mail-property-management',
       title: 'Property managers for owner portal',
-      text: 'I want to email property management companies with 500 to 5,000 units in Germany and sell an owner and tenant portal. Please focus on firms with many service requests, document workflows, or visible modernization initiatives.',
+      text: 'I want to email property management companies with 500 to 5,000 units in Germany and sell an owner and resident portal. Please focus on firms with many service requests, document workflows, or visible modernization initiatives.',
     },
     {
       id: 'en-mail-manufacturing-qm',
@@ -415,7 +415,7 @@ const CAMPAIGN_IDEA_TEMPLATES = Object.freeze({
     {
       id: 'en-letter-hotels',
       title: 'Hotels by letter',
-      text: 'I want to send physical letters to owner-managed hotels and introduce a solution for guest communication, upselling, and review management. Please prepare printable letters and let the user manually mark which hotels were actually mailed.',
+      text: 'I want to send physical letters to owner-managed hotels and introduce a solution for visitor communication, upselling, and review management. Please prepare printable letters and let the user manually mark which hotels were actually mailed.',
     },
     {
       id: 'en-mail-consulting-partners',
@@ -968,7 +968,7 @@ function slugId(value) {
 
 async function knowledgeCommand(args) {
   if (!state.ctx?.commandBus?.dispatch) {
-    throw new Error('RxDB command bus is not available');
+    throw new Error('The local command service is not available.');
   }
   const commandId = `cmd_knowledge_${crypto.randomUUID()}`;
   const dispatched = await state.ctx.commandBus.dispatch({
@@ -2806,11 +2806,13 @@ function campaignColumnMarkup() {
           <input type="file" accept="application/json,.json" data-campaign-record-import hidden />
         </div>
       </div>
+    </header>
+    <div class="outbound-pane-toolbelt">
       <div class="ctox-filterbar">
         <input class="ctox-pane-search" type="search" data-pg-search value="${escapeHtml(state.campaignSearch)}" placeholder="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}" aria-label="${escapeHtml(t('campaignSearch', 'Campaign oder Sequenz suchen'))}">
         <div class="ctox-view-toggle" role="group" aria-label="${escapeHtml(t('view', 'Darstellung'))}">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="${cards}" aria-label="${escapeHtml(t('cardsView', 'Shard-Ansicht'))}" title="${escapeHtml(t('cardsView', 'Shard-Ansicht'))}">${cardsViewIcon()}</button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="${!cards}" aria-label="${escapeHtml(t('listView', 'Listen-Ansicht'))}" title="${escapeHtml(t('listView', 'Listen-Ansicht'))}">${listViewIcon()}</button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="${cards}" aria-label="${escapeHtml(t('cardsView', 'Kachelansicht'))}" title="${escapeHtml(t('cardsView', 'Kachelansicht'))}">${cardsViewIcon()}</button>
+          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="${!cards}" aria-label="${escapeHtml(t('listView', 'Listenansicht'))}" title="${escapeHtml(t('listView', 'Listenansicht'))}">${listViewIcon()}</button>
         </div>
         <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="${escapeHtml(t('filter', 'Filter'))}" title="${escapeHtml(t('filter', 'Filter'))}">${filterIcon()}</button>
       </div>
@@ -2833,12 +2835,12 @@ function campaignColumnMarkup() {
           <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="${escapeHtml(t('resetFilters', 'Filter zurücksetzen'))}" title="${escapeHtml(t('resetFilters', 'Filter zurücksetzen'))}">${resetIcon()}</button>
         </div>
       </div>
-    </header>
-    <nav class="ctox-view-switch" aria-label="${escapeHtml(t('campaignStatusViews', 'Campaign-Status'))}">
-      <div class="ctox-pane-tabs" role="tablist">
-        ${['all', 'active', 'planning', 'done'].map((key) => `<button type="button" class="ctox-pane-tab${state.campaignBand === key ? ' is-active' : ''}" role="tab" data-pg-band="${key}" aria-selected="${state.campaignBand === key}">${escapeHtml(campaignBandLabel(key))}<span class="view-count" data-pg-count="${key}"> (${counts[key]})</span></button>`).join('')}
-      </div>
-    </nav>
+      <nav class="ctox-view-switch" aria-label="${escapeHtml(t('campaignStatusViews', 'Campaign-Status'))}">
+        <div class="ctox-pane-tabs" role="tablist">
+          ${['all', 'active', 'planning', 'done'].map((key) => `<button type="button" class="ctox-pane-tab${state.campaignBand === key ? ' is-active' : ''}" role="tab" data-pg-band="${key}" aria-selected="${state.campaignBand === key}">${escapeHtml(campaignBandLabel(key))}<span class="view-count" data-pg-count="${key}"> (${counts[key]})</span></button>`).join('')}
+        </div>
+      </nav>
+    </div>
     <div class="ctox-pane-body ctox-well">
       <div class="ctox-list outbound-campaign-list${cards ? ' is-cards' : ' is-list'}" role="listbox" data-campaign-list></div>
     </div>
@@ -3182,9 +3184,13 @@ function renderOutreachCenterShell(campaign) {
           <button class="ctox-pane-icon" type="button" data-action="ao-audit-export" title="${escapeHtml(t('auditExport', 'Audit-Export'))}" aria-label="${escapeHtml(t('auditExport', 'Audit-Export'))}">${actionIcon('export')}</button>
         </div>
       </div>
-      ${renderWorkbenchModeSwitch()}
     </header>
-    <div class="ctox-pane-body outbound-outreach-host" data-outbound-outreach-host>${renderActiveOutreachShell(campaign)}</div>
+    <div class="outbound-center-stack">
+      <div class="outbound-pane-toolbelt">
+        ${renderWorkbenchModeSwitch()}
+      </div>
+      <div class="ctox-pane-body outbound-outreach-host" data-outbound-outreach-host>${renderActiveOutreachShell(campaign)}</div>
+    </div>
   `;
 }
 
@@ -3366,6 +3372,9 @@ function renderCenter(force = false) {
           >${actionIcon('settings')}</button>
         </div>
       </div>
+    </header>
+    <div class="outbound-center-stack">
+      <div class="outbound-pane-toolbelt">
       ${renderWorkbenchModeSwitch()}
       <div class="ctox-pane-tools outbound-center-tools">
         <div class="ctox-pane-tabs outbound-funnel-tabs" role="tablist" aria-label="${escapeHtml(t('campaignFunnel', 'Campaign-Funnel'))}">
@@ -3403,8 +3412,9 @@ function renderCenter(force = false) {
           <span>${hiddenCount}</span>
         </button>
       </div>
-    </header>
-    <div class="outbound-center-content">${renderQualificationCenterContent(campaign)}</div>
+      </div>
+      <div class="outbound-center-content">${renderQualificationCenterContent(campaign)}</div>
+    </div>
   `;
 
   // Restore scroll & focus states
@@ -5419,7 +5429,12 @@ function browserAuthAssistLaunchArgs(authAssist) {
       ? authAssist.allowed_domains.map((entry) => String(entry || '').trim()).filter(Boolean)
       : [],
     capture_script: String(authAssist.capture_script || '').trim(),
+    verify_selector: String(authAssist.verify_selector || '').trim(),
     secret_name: String(authAssist.required_secret_name || '').trim(),
+    auth_assist_command_id: String(authAssist.command_id || '').trim(),
+    auth_assist_task_id: String(authAssist.task_id || authAssist.execution_task_id || '').trim(),
+    requesting_task_id: String(authAssist.requesting_task_id || '').trim(),
+    instruction: String(authAssist.instruction || '').trim(),
     auth_assist_status: 'pending',
     profile_mode: 'persistent',
     secret_value_in_rxdb: false,
@@ -6660,7 +6675,7 @@ function campaignSetupPrompt(campaign, commandId, template) {
     'Nicht verhandelbar:',
     '- Keine Nachricht senden.',
     '- Keine E-Mail, keinen Brief und keine externe HTTP-Integration ausloesen.',
-    '- Alle Daten- und App-Aenderungen nur ueber CTOX Business OS Commands/RxDB zurueckschreiben.',
+    '- Alle Daten- und App-Aenderungen nur ueber den CTOX Business-OS-Befehlspfad zurueckschreiben.',
     '- Outbound-Kommunikation bleibt approval-gated.',
     '- Wenn ein Wunsch nicht durch vorhandene Outbound-Settings abbildbar ist, schreibe ihn als konkreten App-Extension-Request in den Writeback.',
     '',
@@ -8448,12 +8463,16 @@ function closeMultiSelectOverlay() {
 function showMultiSelectOverlay(hostCell, { currentValues, allOptions, labelSingular, onSave }) {
   closeMultiSelectOverlay();
 
+  const moduleHost = state.ctx?.host || hostCell?.closest?.('[data-outbound-root]');
+  if (!moduleHost) return;
   const rect = hostCell.getBoundingClientRect();
   const overlay = document.createElement('div');
   overlay.className = 'multi-editor-overlay';
 
-  overlay.style.top = `${window.scrollY + rect.bottom + 4}px`;
-  overlay.style.left = `${window.scrollX + rect.left}px`;
+  // The overlay is position:fixed; keep it in viewport coordinates and inside
+  // this module host so a second Business OS window cannot see or close it.
+  overlay.style.top = `${rect.bottom + 4}px`;
+  overlay.style.left = `${rect.left}px`;
 
   const selectedSet = new Set(currentValues);
 
@@ -8484,7 +8503,7 @@ function showMultiSelectOverlay(hostCell, { currentValues, allOptions, labelSing
     </div>
   `;
 
-  document.body.appendChild(overlay);
+  moduleHost.appendChild(overlay);
   activeOverlay = overlay;
 
   const addInput = overlay.querySelector('.multi-editor-input');
@@ -8840,7 +8859,7 @@ export function toggleHiddenCompaniesPanel() {
 }
 
 export function closeHiddenCompaniesPanel() {
-  const panel = document.querySelector('.hidden-company-panel');
+  const panel = state.ctx?.host?.querySelector?.('.hidden-company-panel');
   if (panel) {
     panel.remove();
   }
@@ -8850,8 +8869,12 @@ export function closeHiddenCompaniesPanel() {
 export function buildHiddenCompaniesPanel() {
   closeHiddenCompaniesPanel();
 
+  const moduleHost = state.ctx?.host;
+  if (!moduleHost) return;
   const panel = document.createElement('div');
   panel.className = 'hidden-company-panel';
+  panel.setAttribute('role', 'dialog');
+  panel.setAttribute('aria-label', t('hiddenCompanies', 'Versteckte Firmen'));
 
   const header = document.createElement('div');
   header.className = 'hidden-company-header';
@@ -8926,7 +8949,7 @@ export function buildHiddenCompaniesPanel() {
     panel.appendChild(bulkRow);
   }
 
-  document.body.appendChild(panel);
+  moduleHost.appendChild(panel);
   hiddenCompaniesPanelOpen = true;
 }
 

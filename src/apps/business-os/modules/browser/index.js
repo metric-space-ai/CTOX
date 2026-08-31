@@ -24,9 +24,9 @@ const BROWSER_SYNC_COLLECTIONS = [
 const SCRAPING_ADAPTER_COLLECTIONS = Object.freeze([
   // Core Outbound campaigns.
   'outbound_research_adapters',
-  // Tenant-local THESEN campaigns. The THESEN module owns this collection;
+  // Tenant-local customer tenant campaigns. The customer tenant module owns this collection;
   // reading only the core collection made its complete adapter list disappear.
-  'thesen_outbound_adapters',
+  'outbound_lead_generation_adapters',
 ]);
 
 export async function mount(ctx) {
@@ -49,7 +49,7 @@ export async function mount(ctx) {
     sessionCard: root.querySelector('[data-browser-session-card]'),
     sessionList: root.querySelector('[data-browser-session-list]'),
     sessionsPane: root.querySelector('.browser-sessions'),
-    sessionsToggle: root.querySelector('[data-browser-sessions-toggle]'),
+    viewToggle: root.querySelector('[data-browser-view-toggle]'),
     sessions: root.querySelector('[data-browser-sessions]'),
     sessionsEmpty: root.querySelector('[data-browser-sessions-empty]'),
     sessionsImport: root.querySelector('[data-action="import"]'),
@@ -207,27 +207,7 @@ export async function mount(ctx) {
       });
   }
 
-  // Befund aus dem UX-Review: Ist das Browser-Fenster bereits offen, feuert
-  // die Shell fuer einen erneuten App-Start `ctox-business-os-app-launch` auf
-  // das Fenster -- und niemand hoerte zu. Der Bediener klickte in der
-  // Outbound-App auf "Im CTOX-Browser anmelden", das Fenster kam nach vorn
-  // und zeigte die alte Ansicht: das Icon wirkte tot. Der Listener reicht die
-  // Launch-Args an denselben Pfad weiter, den der Erstoeffnungsfall nimmt.
-  const onAppLaunch = (event) => {
-    const args = event?.detail?.args || event?.detail || {};
-    if (!browserSessionIdFromArgs(args)) return;
-    openRequestedBrowserSession(args);
-  };
-  ctx.host?.addEventListener?.('ctox-business-os-app-launch', onAppLaunch);
-  cleanups.push(() => ctx.host?.removeEventListener?.('ctox-business-os-app-launch', onAppLaunch));
-
-  // Die Adapter-Leiste wird ausserhalb dieses Scopes gebaut und braucht denselben
-  // Weg in eine Anmeldesitzung -- ohne diese Bruecke lief ihr Klick in einen
-  // ReferenceError und tat sichtbar nichts.
-  state.openAuthSession = openRequestedBrowserSession;
-  cleanups.push(() => { state.openAuthSession = null; });
-
-  const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', (detail = {}) => {
+  function selectRequestedBrowserSession(detail = {}) {
     const sessionId = browserSessionIdFromArgs(detail);
     if (!sessionId) return;
     if (sessionId !== state.selectedSessionId) state.controllerLeaseId = '';
@@ -236,10 +216,26 @@ export async function mount(ctx) {
     state.requestedSessionId = sessionId;
     scheduleRefresh();
     openRequestedBrowserSession(detail);
-  });
+  }
+
+  const sessionSelectionToken = ctx.eventBus?.on?.('browser:select-session', selectRequestedBrowserSession);
   if (sessionSelectionToken && ctx.eventBus?.off) {
     cleanups.push(() => ctx.eventBus.off('browser:select-session', sessionSelectionToken));
   }
+  // `openDesktopApp('browser', { args })` focuses an already open Browser and
+  // delivers the new launch request as this DOM event. The Browser previously
+  // consumed only the initial `ctx.args`; a later auth handoff therefore kept
+  // showing whichever ended session happened to be selected and never sent
+  // `browser.session.start`. Consume every launch so protected-source buttons
+  // work whether the Browser was closed, open, or pre-opened as immediate
+  // feedback while the server prepares the authoritative session arguments.
+  const handleDesktopAppLaunch = (event) => {
+    const detail = event?.detail || {};
+    if (detail.appId && detail.appId !== 'browser') return;
+    selectRequestedBrowserSession(detail.args || {});
+  };
+  ctx.host?.addEventListener?.('ctox-business-os-app-launch', handleDesktopAppLaunch);
+  cleanups.push(() => ctx.host?.removeEventListener?.('ctox-business-os-app-launch', handleDesktopAppLaunch));
   const handleFocusRefresh = () => {
     scheduleRefresh();
     renewControllerLeaseIfNeeded();
@@ -284,6 +280,10 @@ export async function mount(ctx) {
       band: detail.band || 'all',
       filters: detail.filters || {},
     };
+    // Der Umschalter ist eine AKTION: die Shell stempelt aria-pressed auf jeden
+    // [data-pg-view]-Knopf und emittiert danach dieses Ereignis — hier faellt
+    // das Attribut wieder weg, und Symbol/Beschriftung folgen der Ansicht.
+    syncViewToggle(refs, state.leftView.view);
     renderLeftRail(ctx, refs, state);
     renderTabstrip(ctx, refs, state);
   };
@@ -297,12 +297,20 @@ export async function mount(ctx) {
   });
   refs.sessionsImport?.addEventListener('click', () => importBrowserSessions(ctx, state, refs));
   refs.sessionsExport?.addEventListener('click', () => exportBrowserSessions(state, refs));
-  refs.sessionsToggle?.addEventListener('click', () => {
-    const open = refs.root.classList.toggle('is-sessions-open');
-    refs.sessionsToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
-    refs.sessionsToggle.setAttribute('aria-label', open ? 'Sitzungen ausblenden' : 'Sitzungen anzeigen');
-    refs.sessionsToggle.title = open ? 'Sitzungen ausblenden' : 'Sitzungen anzeigen';
+  // EIN Umschalter Karten/Liste (Betreiber-Direktive 31.08.2026). Der Knopf
+  // dreht data-pg-view auf sich selbst; die Shell-Grammatik liest daraus
+  // weiterhin die AKTUELLE Ansicht (viewButtons[0].dataset.pgView) und meldet
+  // sie ueber ctox-pane-grammar-change zurueck. mount() laeuft vor
+  // autoWirePaneGrammar, dieser Listener also vor dem der Shell — sie sieht
+  // beim Emittieren schon den gedrehten Wert. Das eigene Rendern hier haelt den
+  // Umschalter auch dann funktionsfaehig, wenn die Shell nicht verdrahtet ist.
+  refs.viewToggle?.addEventListener('click', () => {
+    const next = refs.viewToggle.dataset.pgView === 'list' ? 'cards' : 'list';
+    syncViewToggle(refs, next);
+    state.leftView = { ...state.leftView, view: next };
+    renderLeftRail(ctx, refs, state);
   });
+  syncViewToggle(refs, state.leftView.view);
   refs.toggleAdvanced?.addEventListener('click', () => {
     if (!refs.advanced) return;
     const hidden = refs.advanced.classList.toggle('is-advanced-hidden');
@@ -358,7 +366,7 @@ export async function mount(ctx) {
       if (typeof ctx.sync?.requestNative !== 'function') return command();
       try {
         // requestNative respektiert sein timeoutMs nicht zuverlaessig: auf
-        // thesen.ctox.dev am 20.08.2026 gemessen blieb das Promise ewig offen,
+        // managed production tenant am 20.08.2026 gemessen blieb das Promise ewig offen,
         // der Rueckfall auf den dauerhaften Befehlsweg wurde nie erreicht,
         // finally lief nie, die Start-Sperre blieb gesetzt — der Los-Knopf war
         // dauerhaft tot, ohne Meldung. Ein eigenes Zeitlimit erzwingt nach
@@ -593,8 +601,6 @@ export async function mount(ctx) {
     state.latestFrame = null;
     state.latestDirectFrame = null;
     state.latestTab = null;
-    refs.root.classList.remove('is-sessions-open');
-    refs.sessionsToggle?.setAttribute('aria-expanded', 'false');
     markActiveSession(refs, sessionId);
     safeLoadAndRender();
   });
@@ -1305,22 +1311,6 @@ function userSessionPrefix(session) {
   return `browser_session_${safe || 'user'}`;
 }
 
-function rxdbIdSlug(value) {
-  const slug = String(value || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]/g, '_')
-    .replace(/^_+|_+$/g, '');
-  return slug || 'source';
-}
-
-// The native auth-assist command uses the same stable source/user identity.
-// A timestamp here creates a new persistent Chromium profile on every click
-// and forces the user to log in again for each scrape.
-function webStackAuthSessionId(sourceId, session) {
-  const owner = browserActorIds(session)[0] || 'browser-user';
-  return `browser_session_web_stack_auth_${rxdbIdSlug(sourceId)}_${rxdbIdSlug(owner)}`;
-}
-
 function selectedViewport(select) {
   const [width, height] = String(select?.value || '1280x720').split('x').map(Number);
   return {
@@ -1588,7 +1578,7 @@ async function startBrowserRuntimeSync(ctx, collections = [
   }
   // startCollection kann nach einem Dienst-Neustart ewig haengen: die Bruecke
   // wartet auf ein Ready-Ereignis, das nie kommt. Gemessen am 20.08.2026 auf
-  // thesen.ctox.dev: jeder Sitzungsstart blieb VOR dem Dispatch stumm stehen —
+  // managed production tenant: jeder Sitzungsstart blieb VOR dem Dispatch stumm stehen —
   // kein Fehler, kein Protokoll, kein Chromium. Der Befehlsbus prueft seine
   // Bereitschaft selbst; nach 8 s wird deshalb abgebrochen statt gewartet,
   // und der Aufrufer faehrt ueber seinen Fehlerpfad fort.
@@ -2402,25 +2392,7 @@ async function readDocument(collection, id) {
 }
 
 function mergeRequestedSession(sessions, requestedSession) {
-  if (!requestedSession?.id) return sessions;
-  const existing = sessions.find((session) => session.id === requestedSession.id);
-  if (!existing) return [requestedSession, ...sessions];
-
-  // The direct session list, the local RxDB projection, and the optimistic
-  // live response converge independently. A reduced/older summary must never
-  // replace canonical fields (especially payload.purpose/auth_assist_status)
-  // that another path already delivered. Prefer the newest top-level values
-  // while merging payload objects so an otherwise fresh summary cannot erase
-  // authentication metadata merely because it omits `payload` entirely.
-  const requestedIsNewer = Number(requestedSession.updated_at_ms || 0)
-    >= Number(existing.updated_at_ms || 0);
-  const older = requestedIsNewer ? existing : requestedSession;
-  const newer = requestedIsNewer ? requestedSession : existing;
-  const merged = { ...older, ...newer };
-  const olderPayload = older.payload && typeof older.payload === 'object' ? older.payload : null;
-  const newerPayload = newer.payload && typeof newer.payload === 'object' ? newer.payload : null;
-  if (olderPayload || newerPayload) merged.payload = { ...(olderPayload || {}), ...(newerPayload || {}) };
-  return [merged, ...sessions.filter((session) => session.id !== requestedSession.id)];
+  return mergeRequestedDocument(sessions, requestedSession);
 }
 
 function mergeRequestedDocument(documents, requestedDocument) {
@@ -2542,16 +2514,11 @@ async function ladeScrapingAdapter(ctx, state) {
     state.adapterLeases ||= [];
     for (const collectionName of SCRAPING_ADAPTER_COLLECTIONS) {
       try {
-        const collection = browserCollection(ctx, collectionName);
-        if (!collection) throw new Error('Sammlung ist für das Browser-Modul nicht freigegeben');
         if (typeof ctx.sync?.leaseCollection === 'function') {
-          const lease = await ctx.sync.leaseCollection(
-            collectionName,
-            `browser:scraping-adapters:${collectionName}`,
-          );
+          const lease = await ctx.sync.leaseCollection(collectionName, `browser:scraping-adapters:${collectionName}`);
           if (lease) state.adapterLeases.push(lease);
         }
-        const collectionRows = await readCollection(collection, {
+        const collectionRows = await readCollection(browserCollection(ctx, collectionName), {
           limit: 200,
           sort: [{ updated_at_ms: 'desc' }],
         });
@@ -2574,46 +2541,17 @@ async function ladeScrapingAdapter(ctx, state) {
   return state.adapterLadedauer;
 }
 
-// Zwei GETRENNTE Wahrheiten pro Adapter -- der Kern der Verstaendlichkeit:
-// "Zugang" (gibt es gueltige Anmeldedaten?) und "Funktion" (lief die letzte
-// Pruefung durch?). Beide in einen Topf zu werfen hiess vorher: "Zugang fehlt"
-// stand auch da, wenn der Zugang existierte und nur die Pruefung scheiterte.
-function adapterZugang(adapter) {
-  if (adapter.requires_credential === false) {
-    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
-  }
-  // Exakte Statuslisten -- Substring-Muster matchten `required` auch in
-  // `not_required`, und jeder Adapter ohne Anmeldepflicht stand auf
-  // "Zugang fehlt" (Review-Befund; der Server schreibt `not_required`).
+function adapterZustand(adapter) {
   const auth = String(adapter.auth_status || '').toLowerCase();
-  if (auth === 'not_required') {
-    return { klasse: 'is-neutral', text: t('chipAuthNone', 'Kein Zugang nötig') };
-  }
-  if (['ok', 'valid', 'ready', 'active', 'signed_in', 'authenticated',
-    'session_authenticated', 'credential_available', 'authorized'].includes(auth)) {
-    return { klasse: 'is-ok', text: t('chipAuthOk', 'Zugang OK') };
-  }
-  if (['missing', 'required', 'auth_required', 'credential_missing', 'expired',
-    'invalid', 'denied', 'logged_out'].includes(auth)) {
-    return { klasse: 'is-error', text: t('chipAuthMissing', 'Zugang fehlt') };
-  }
-  if (['auth_requested', 'browser_session_requested'].includes(auth)) {
-    return { klasse: 'is-warn', text: t('chipAuthPending', 'Anmeldung angefordert') };
-  }
-  return { klasse: 'is-neutral', text: t('chipAuthUnknown', 'Zugang ungeprüft') };
-}
-
-function adapterFunktion(adapter) {
-  if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
   const status = String(adapter.status || adapter.last_test?.status || '').toLowerCase();
-  if (/(unreachable|fail|error|blocked|captcha|timeout)/.test(status) || adapter.last_error) {
-    const grund = String(adapter.last_error || status).slice(0, 60);
-    return { klasse: 'is-warn', text: t('chipFnFail', 'Prüfung fehlgeschlagen') + (grund ? ` (${grund})` : '') };
+  if (adapter.enabled === false) return { klasse: 'is-off', text: t('adapterOff', 'Deaktiviert') };
+  if (auth.includes('missing') || auth.includes('required') || status.includes('auth')) {
+    return { klasse: 'is-error', text: t('adapterAuthMissing', 'Zugang fehlt') };
   }
-  if (/(ok|ready|passed|success)/.test(status)) {
-    return { klasse: 'is-ok', text: t('chipFnOk', 'Funktion geprüft') };
+  if (status.includes('unreachable') || status.includes('fail') || adapter.last_error) {
+    return { klasse: 'is-warn', text: t('adapterUnreachable', 'Letzte Prüfung fehlgeschlagen') };
   }
-  return { klasse: 'is-neutral', text: t('chipFnUntested', 'Ungeprüft') };
+  return { klasse: 'is-ok', text: t('adapterReady', 'Bereit') };
 }
 
 // Eine Schiene, zwei Inhalte: Sitzungen oder Scraping-Adapter, je nach Band.
@@ -2659,91 +2597,27 @@ function renderAdapterRail(ctx, refs, state) {
   for (const adapter of state.adapters) {
     const label = String(adapter.label || adapter.source_id || adapter.id || '');
     if (suche && !label.toLowerCase().includes(suche)) continue;
-    const zugang = adapterZugang(adapter);
-    const funktion = adapterFunktion(adapter);
+    const zustand = adapterZustand(adapter);
     const karte = document.createElement('div');
     karte.className = 'browser-adapter-card';
     const kopf = document.createElement('div');
     kopf.className = 'browser-adapter-head';
     const punkt = document.createElement('span');
-    punkt.className = `browser-adapter-dot ${zugang.klasse === 'is-error' ? 'is-error' : funktion.klasse}`;
+    punkt.className = `browser-adapter-dot ${zustand.klasse}`;
     const name = document.createElement('strong');
     name.textContent = label;
     kopf.append(punkt, name);
-    const chips = document.createElement('div');
-    chips.className = 'browser-adapter-chips';
-    for (const c of [zugang, funktion]) {
-      const chip = document.createElement('span');
-      chip.className = `browser-adapter-chip ${c.klasse}`;
-      chip.textContent = c.text;
-      chips.appendChild(chip);
-    }
     const meta = document.createElement('div');
     meta.className = 'browser-adapter-meta';
     const getestet = Number(adapter.last_test?.at_ms || adapter.updated_at_ms || 0);
     const latenz = Number(adapter.latency_ms || adapter.last_test?.latency_ms || 0);
     meta.textContent = [
       String(adapter.source_id || ''),
+      zustand.text,
       getestet ? new Date(getestet).toLocaleString() : '',
       latenz ? `${latenz} ms` : '',
     ].filter(Boolean).join(' · ');
-    const aktionen = document.createElement('div');
-    aktionen.className = 'browser-adapter-actions';
-    // "Direkt im Browser erledigen": Sitzung auf der Quelle starten, dort
-    // anmelden. source_id ist eine Domain, also traegt sie als Start-URL.
-    if (adapter.requires_credential !== false) {
-      const anmelden = document.createElement('button');
-      anmelden.type = 'button';
-      anmelden.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
-      anmelden.textContent = t('btnAdapterLogin', 'Im Browser anmelden');
-      anmelden.addEventListener('click', () => {
-        // Eine ANMELDE-Sitzung, keine gewoehnliche: nur mit
-        // purpose=web_stack_auth erkennt die Buehne den Vorgang und zeigt
-        // "Zugangsdaten einsetzen" und "Ich bin angemeldet" -- und nur der
-        // Sitzungspraefix browser_session_web_stack_auth_ gibt der Quelle ihr
-        // eigenes, dauerhaftes Browserprofil, in dem die Anmeldung bestehen
-        // bleibt. Ohne beides startete zwar ein Fenster, aber der Kreis liess
-        // sich nicht schliessen.
-        const quelle = String(adapter.source_id || '').trim();
-        const url = String(adapter.url || adapter.payload?.url || (quelle ? `https://${quelle}` : ''));
-        if (!url) {
-          state.notice = t('adapterNoUrl', 'Für diese Quelle ist keine Adresse hinterlegt.');
-          state.refresh?.();
-          return;
-        }
-        const sessionId = webStackAuthSessionId(quelle, ctx.session);
-        if (typeof state.openAuthSession !== 'function') {
-          state.notice = t('adapterLoginUnavailable', 'Anmeldesitzung ist gerade nicht verfügbar.');
-          state.refresh?.();
-          return;
-        }
-        state.openAuthSession({
-          session_id: sessionId,
-          tab_id: `browser_tab_${sessionId}`,
-          purpose: 'web_stack_auth',
-          target_url: url,
-          source_id: quelle,
-          allowed_domains: [quelle].filter(Boolean),
-          secret_name: String(adapter.credential_secret_name || ''),
-        });
-        ctx.notifications?.show?.({
-          type: 'info',
-          title: 'Browser',
-          message: t('adapterLoginStarted', 'Anmeldesitzung geöffnet — dort anmelden und "Ich bin angemeldet" bestätigen.'),
-        });
-      });
-      aktionen.appendChild(anmelden);
-    }
-    if (typeof ctx.openDesktopApp === 'function') {
-      const pruefen = document.createElement('button');
-      pruefen.type = 'button';
-      pruefen.className = 'ctox-btn ctox-btn-ghost browser-adapter-action';
-      pruefen.textContent = t('btnAdapterCheck', 'Prüfen (Outbound)');
-      pruefen.addEventListener('click', () => ctx.openDesktopApp('thesen-outbound'));
-      aktionen.appendChild(pruefen);
-    }
-    karte.append(kopf, chips, meta);
-    if (aktionen.childElementCount) karte.appendChild(aktionen);
+    karte.append(kopf, meta);
     if (adapter.last_error) {
       const fehlerzeile = document.createElement('div');
       fehlerzeile.className = 'browser-adapter-error';
@@ -2789,7 +2663,7 @@ function renderSessions(refs, sessions, activeSession, view = {}, tabCounts = {}
   if (refs.sessions.dataset.sig !== signature) {
     refs.sessions.dataset.sig = signature;
     refs.sessions.innerHTML = filtered
-      .map((session) => sessionShardMarkup(session, tabCounts[session.id] || 0, ctx))
+      .map((session) => sessionShardMarkup(session, tabCounts[session.id] || 0, ctx, listView))
       .join('');
   }
   if (refs.sessionsEmpty) refs.sessionsEmpty.hidden = filtered.length > 0;
@@ -2815,15 +2689,19 @@ function markActiveSession(refs, sessionId) {
   }
 }
 
-function sessionShardMarkup(session, tabCount, ctx = null) {
+// Karten und Liste sind zwei verschiedene Dichten, keine zwei Innenabstaende
+// (Betreiber-Direktive 31.08.2026):
+//   KARTEN = fetter Titel + Betriebs-Meta + Detailzeile (drei Zeilen),
+//   LISTE  = genau eine Zeile, Titel links und EIN Kurz-Meta rechts.
+// Beide Formen leben von Feldern, die die App ohnehin geladen hat.
+function sessionShardMarkup(session, tabCount, ctx = null, listView = 'cards') {
   const url = session.current_url || session.payload?.target_url || '';
   const title = browserDisplayTitle(null, session, url);
-  const meta = browserSessionShardMeta(session, tabCount, ctx);
   const importedClass = session.__imported ? ' browser-session--imported' : '';
   // Das Symbol traegt den Zustand, nicht nur der Text: bei 34 Sitzungen findet
   // man "Eingriff noetig" sonst nicht, ohne jede Zeile zu lesen.
   const z = browserSitzungZustand(session, ctx);
-  return `
+  const open = `
     <div class="ctox-list-item browser-session${importedClass} ${z.klasse}" role="option" aria-selected="false" tabindex="0"
       data-browser-session-id="${escapeHtml(session.id)}"
       data-browser-zustand="${escapeHtml(z.klasse)}"
@@ -2831,8 +2709,18 @@ function sessionShardMarkup(session, tabCount, ctx = null) {
       data-context-record-type="browser_session"
       data-context-label="${escapeHtml(title)}">
       <span class="browser-session-zustand" title="${escapeHtml(z.text)}" aria-label="${escapeHtml(z.text)}">${z.symbol}</span>
-      <span class="browser-session-title">${escapeHtml(title)}</span>
+      <span class="browser-session-title">${escapeHtml(title)}</span>`;
+  if (listView === 'list') {
+    const brief = browserSessionListMeta(session, tabCount, ctx);
+    return `${open}
+      <span class="browser-session-brief" title="${escapeHtml(brief)}">${escapeHtml(brief)}</span>
+    </div>`;
+  }
+  const meta = browserSessionShardMeta(session, tabCount, ctx);
+  const detail = browserSessionShardDetail(session, url);
+  return `${open}
       <span class="browser-session-meta" title="${escapeHtml(meta)}">${escapeHtml(meta)}</span>
+      <span class="browser-session-detail" title="${escapeHtml(detail)}">${escapeHtml(detail)}</span>
     </div>`;
 }
 
@@ -2889,6 +2777,49 @@ function browserSessionShardMeta(session, tabCount = 0, ctx = null) {
   if (error) parts.push(error);
   if (session.__imported) parts.push('Import');
   return parts.join(' · ');
+}
+
+// Dritte Kartenzeile: wo die Sitzung steht und wann sie sich zuletzt gemeldet
+// hat. Reine Anzeige aus bereits geladenen Feldern — kein neuer Datenpfad.
+// `updated_at_ms` steht in sessionListSignature, die Zeile veraltet also nicht.
+function browserSessionShardDetail(session, url = '') {
+  const target = url || session?.current_url || session?.payload?.target_url || '';
+  const parts = [];
+  if (target) parts.push(browserUrlLabel(target));
+  const seen = Number(session?.updated_at_ms || session?.created_at_ms || 0);
+  if (seen > 0) {
+    parts.push(new Date(seen).toLocaleString(undefined, {
+      day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit',
+    }));
+  }
+  if (session?.__imported) parts.push(t('shardImported', 'Import'));
+  return parts.join(' · ');
+}
+
+// Listenzeile: EIN Kurz-Meta rechts. Der Betriebszustand ist das, wonach in
+// einer dichten Liste gesucht wird — Profil, Fehlertext und Adresse stehen in
+// der Kartenansicht und im Titel-Tooltip.
+function browserSessionListMeta(session, tabCount = 0, ctx = null) {
+  const zustand = browserSitzungZustand(session, ctx);
+  const count = Number(tabCount || 0);
+  return count > 0 ? `${zustand.text} · ${count}` : zustand.text;
+}
+
+// EIN Umschalter Karten/Liste. `data-pg-view` traegt die AKTUELLE Ansicht (die
+// Shell-Grammatik liest sie dort), Symbol und Beschriftung benennen die ZIEL-
+// Ansicht. aria-pressed entfaellt: der Knopf ist eine Aktion, kein Zustand —
+// die Shell stempelt es auf [data-pg-view], hier faellt es wieder weg.
+function syncViewToggle(refs, view) {
+  const button = refs?.viewToggle;
+  if (!button) return;
+  const current = view === 'list' ? 'list' : 'cards';
+  button.dataset.pgView = current;
+  const label = current === 'list'
+    ? t('viewShowCards', 'Als Karten anzeigen')
+    : t('viewShowList', 'Als Liste anzeigen');
+  button.setAttribute('aria-label', label);
+  button.title = label;
+  button.removeAttribute('aria-pressed');
 }
 
 function browserSessionBand(session) {
@@ -3544,7 +3475,7 @@ function setzeEingabeHinweis(ctx, state, text) {
   state.eingabeHinweis = text;
   // eingabeHinweis wurde gesetzt und NIRGENDS gerendert — es gab nur die zwei
   // Zuweisungen in dieser Funktion. Der Nutzer sah deshalb exakt nichts: kein
-  // Klick wirkte, keine Meldung erschien. Am 19.08.2026 auf thesen.ctox.dev
+  // Klick wirkte, keine Meldung erschien. Am 19.08.2026 auf managed production tenant
   // gemessen: jede Eingabe endete in "Die Steuerung wurde an ein anderes
   // Fenster uebergeben", sichtbar allein in der Browserkonsole. Der Grund
   // gehoert dorthin, wo der Nutzer hinsieht — in die Statuszeile.
@@ -3821,8 +3752,6 @@ export const __browserTestHooks = {
   formatBytes,
   titleCase,
   userSessionPrefix,
-  rxdbIdSlug,
-  webStackAuthSessionId,
   selectedViewport,
   browserAuthRequestFromArgs,
   shouldRenewControllerLease,
@@ -3851,6 +3780,10 @@ export const __browserTestHooks = {
   sessionListSignature,
   browserWorkbenchVisible,
   browserSessionShardMeta,
+  browserSessionShardDetail,
+  browserSessionListMeta,
+  sessionShardMarkup,
+  syncViewToggle,
   buildBrowserSessionsExport,
   parseBrowserSessionsImport,
   sessionRenderList,

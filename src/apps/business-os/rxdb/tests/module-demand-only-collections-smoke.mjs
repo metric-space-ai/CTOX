@@ -19,10 +19,10 @@ const {
   let resolveBridge;
   let stopCalls = 0;
   const ready = new Promise((resolve) => { resolveBridge = resolve; });
-  const pending = createPendingCollectionBridge('thesen_outbound_adapters', ready);
+  const pending = createPendingCollectionBridge('outbound_lead_generation_adapters', ready);
   assert.equal(pending.mode, 'pending');
   assert.equal(pending.reason, 'startup-in-progress');
-  assert.equal(pending.collection, 'thesen_outbound_adapters');
+  assert.equal(pending.collection, 'outbound_lead_generation_adapters');
   assert.equal(pending.ready, ready, 'the bounded handle retains the authoritative bridge promise');
   const stop = pending.stop();
   resolveBridge({ stop: async () => { stopCalls += 1; } });

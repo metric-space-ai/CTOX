@@ -11,6 +11,7 @@ const DEFAULT_MAX_PENDING_REQUESTS = 16;
 const DEFAULT_CONNECT_REPLAY_WINDOW_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_CONNECT_NONCES = 128;
 const GATEWAY_CONTEXT_HEADER = "x-ctox-mcp-gateway-context";
+const GATEWAY_RATE_LIMIT_HEADER = "x-ctox-mcp-rate-limit-per-minute";
 
 export default {
   async fetch(request, env) {
@@ -26,6 +27,7 @@ export class BusinessOsMcpSession {
     this.pending = new Map();
     this.connectNonces = new Map();
     this.commandStatuses = new Map();
+    this.managedRateBuckets = new Map();
     this.sessionInfo = null;
     this.stats = makeSessionStats();
   }
@@ -91,6 +93,14 @@ export class BusinessOsMcpSession {
         503,
         { code: "runtime_unavailable" }
       );
+    }
+    const managedRate = enforceManagedSessionRate(this.managedRateBuckets, request);
+    if (!managedRate.ok) {
+      recordRejected(this.stats);
+      return jsonRpcError(null, -32009, "Managed MCP rate limit exceeded", 429, {
+        code: "rate_limited",
+        limit: managedRate.limit
+      });
     }
     const pendingLimit = maxPendingRequests(this.env);
     if (this.pending.size >= pendingLimit) {
@@ -391,24 +401,31 @@ export async function handleManagedMcp(request, env = {}, instanceId) {
       { code: "sync_not_ready" }
     );
   }
-  return stub.fetch(withGatewayContext(new Request(`https://session.local${MCP_PATH}`, request), auth.context));
+  return stub.fetch(
+    withGatewayPolicy(
+      withGatewayContext(new Request(`https://session.local${MCP_PATH}`, request), auth.context),
+      auth.policy
+    )
+  );
 }
 
 export async function handleManagedConnect(request, env = {}, instanceId) {
-  const instanceAccess = authorizeInstanceId(instanceId, env);
-  if (!instanceAccess.ok) {
-    return jsonResponse(
-      {
-        ok: false,
-        error: "instance_not_allowed",
-        message: instanceAccess.message
-      },
-      403
-    );
-  }
-  const auth = authorizeInstanceConnect(request, env, instanceId);
+  const auth = await authorizeManagedInstanceConnect(request, env, instanceId);
   if (!auth.ok) {
     return jsonResponse({ ok: false, error: "not_authorized", message: auth.message }, 401);
+  }
+  if (auth.source !== "managed_connect_auth") {
+    const instanceAccess = authorizeInstanceId(instanceId, env);
+    if (!instanceAccess.ok) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "instance_not_allowed",
+          message: instanceAccess.message
+        },
+        403
+      );
+    }
   }
   const replay = validateConnectReplayHeaders(request, env);
   if (!replay.ok) {
@@ -439,22 +456,24 @@ export async function handleManagedStatus(request, env = {}, instanceId) {
   if (request.method !== "GET") {
     return jsonResponse({ ok: false, error: "method_not_allowed" }, 405);
   }
-  const auth = await authorizeManagedMcpClientForInstance(request, env, instanceId);
-  if (!auth.ok) {
-    if (auth.code === "instance_not_allowed") {
-      return jsonResponse(
-        {
-          ok: false,
-          error: "instance_not_allowed",
-          message: auth.message
-        },
-        403
-      );
+  if (!authorizeManagedStatusObserver(request, env)) {
+    const auth = await authorizeManagedMcpClientForInstance(request, env, instanceId);
+    if (!auth.ok) {
+      if (auth.code === "instance_not_allowed") {
+        return jsonResponse(
+          {
+            ok: false,
+            error: "instance_not_allowed",
+            message: auth.message
+          },
+          403
+        );
+      }
+      return jsonResponse({ ok: false, error: "not_authorized", message: auth.message }, 401);
     }
-    return jsonResponse({ ok: false, error: "not_authorized", message: auth.message }, 401);
-  }
-  if (auth.policy && auth.policy.allowReads === false) {
-    return jsonResponse({ ok: false, error: "permission_denied", message: "Managed MCP token does not allow reads" }, 403);
+    if (auth.policy && auth.policy.allowReads === false) {
+      return jsonResponse({ ok: false, error: "permission_denied", message: "Managed MCP token does not allow reads" }, 403);
+    }
   }
   const stub = sessionStub(env, instanceId);
   if (!stub) {
@@ -468,6 +487,12 @@ export async function handleManagedStatus(request, env = {}, instanceId) {
     );
   }
   return stub.fetch(new Request(`https://session.local${STATUS_PATH}`, request));
+}
+
+export function authorizeManagedStatusObserver(request, env = {}) {
+  const expected = (env.CTOX_MANAGED_MCP_AUTH_TOKEN || "").trim();
+  const actual = request.headers.get("x-ctox-managed-mcp-auth") || "";
+  return Boolean(expected) && actual === expected;
 }
 
 export async function handleMcpRelay(request, env = {}) {
@@ -747,6 +772,48 @@ export function authorizeInstanceConnect(request, env = {}, instanceId = null) {
   };
 }
 
+export async function authorizeManagedInstanceConnect(request, env = {}, instanceId = null) {
+  const configuredToken = connectTokenForInstance(env, instanceId);
+  const staticAuth = authorizeInstanceConnect(request, env, instanceId);
+  if (configuredToken && staticAuth.ok) {
+    return { ok: true, source: "static_connect_token" };
+  }
+
+  const authUrl = managedConnectAuthUrl(env);
+  if (authUrl && instanceId) {
+    const authorization = request.headers.get("authorization") || "";
+    if (!authorization) {
+      return { ok: false, message: "Invalid or missing CTOX instance authorization" };
+    }
+    try {
+      const headers = new Headers({
+        accept: "application/json",
+        authorization,
+        "content-type": "application/json"
+      });
+      const sharedSecret = (env.CTOX_MANAGED_MCP_AUTH_TOKEN || "").trim();
+      if (sharedSecret) {
+        headers.set("x-ctox-managed-mcp-auth", sharedSecret);
+      }
+      const response = await fetch(authUrl, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ instanceId })
+      });
+      const payload = await response.json().catch(() => null);
+      if (response.ok && payload?.ok === true) {
+        return { ok: true, source: "managed_connect_auth" };
+      }
+    } catch {}
+    return { ok: false, message: "Invalid or inactive managed CTOX instance credential" };
+  }
+
+  if (configuredToken) {
+    return staticAuth;
+  }
+  return { ok: true, source: "unconfigured" };
+}
+
 function normalizeMcpClientEntry(token, value) {
   if (!token || typeof token !== "string" || token.trim().length < 12) {
     return null;
@@ -814,6 +881,31 @@ function withGatewayContext(request, context) {
   const headers = new Headers(request.headers);
   headers.set(GATEWAY_CONTEXT_HEADER, JSON.stringify(context));
   return new Request(request, { headers });
+}
+
+function withGatewayPolicy(request, policy) {
+  if (!policy) return request;
+  const headers = new Headers(request.headers);
+  headers.set(GATEWAY_RATE_LIMIT_HEADER, String(policy.rateLimitPerMinute));
+  return new Request(request, { headers });
+}
+
+function enforceManagedSessionRate(buckets, request, now = Date.now()) {
+  const rawLimit = request.headers.get(GATEWAY_RATE_LIMIT_HEADER);
+  if (rawLimit === null) return { ok: true };
+  const limit = Number.parseInt(rawLimit, 10);
+  const clientId = gatewayContextFromHeader(request)?.client_id;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 600 || !clientId) {
+    return { ok: false, limit: 0 };
+  }
+  const window = Math.floor(now / 60_000);
+  const key = `${clientId}:${window}`;
+  for (const bucketKey of buckets.keys()) {
+    if (!bucketKey.endsWith(`:${window}`)) buckets.delete(bucketKey);
+  }
+  const count = (buckets.get(key) || 0) + 1;
+  buckets.set(key, count);
+  return count <= limit ? { ok: true } : { ok: false, limit };
 }
 
 function gatewayContextFromHeader(request) {
@@ -966,7 +1058,8 @@ const READ_TOOLS = new Set([
   "business_os.list_app_files",
   "business_os.read_app_file",
   "business_os.search_app_source",
-  "business_os.get_command_status"
+  "business_os.get_command_status",
+  "decision_hub.get_decision"
 ]);
 
 const WRITE_TOOLS = new Set([
@@ -980,7 +1073,8 @@ const WRITE_TOOLS = new Set([
   "business_os.validate_app",
   "business_os.smoke_app",
   "business_os.e2e_app",
-  "business_os.execute_action"
+  "business_os.execute_action",
+  "decision_hub.request_decision"
 ]);
 
 const APPROVAL_TOOLS = new Set([
@@ -996,6 +1090,7 @@ function normalizeManagedMcpPolicy(value) {
     allowWrites: booleanOr(source.allowWrites, false),
     allowApprovals: booleanOr(source.allowApprovals, false),
     allowExternalEffects: booleanOr(source.allowExternalEffects, false),
+    rateLimitPerMinute: integerBetween(source.rateLimitPerMinute, 1, 600, 60),
     allowedTools: stringList(source.allowedTools).slice(0, 50),
     deniedTools: stringList(source.deniedTools).slice(0, 50)
   };
@@ -1003,6 +1098,10 @@ function normalizeManagedMcpPolicy(value) {
 
 function booleanOr(value, fallback) {
   return typeof value === "boolean" ? value : fallback;
+}
+
+function integerBetween(value, minimum, maximum, fallback) {
+  return Number.isSafeInteger(value) && value >= minimum && value <= maximum ? value : fallback;
 }
 
 function stringOr(value, fallback) {
@@ -1035,11 +1134,40 @@ function isValidContextValue(value) {
 }
 
 export function connectTokenForInstance(env = {}, instanceId = null) {
+  const direct = instanceId ? directInstanceConnectToken(env, instanceId) : "";
+  if (direct) {
+    return direct;
+  }
   const scoped = instanceId ? instanceConnectTokens(env).get(instanceId) : null;
   if (scoped) {
     return scoped;
   }
   return (env.INSTANCE_CONNECT_TOKEN || "").trim();
+}
+
+export function instanceConnectSecretName(instanceId) {
+  if (!isValidInstanceId(instanceId)) {
+    return "";
+  }
+  const encoded = Array.from(new TextEncoder().encode(instanceId), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+  return `INSTANCE_CONNECT_TOKEN_${encoded}`;
+}
+
+function directInstanceConnectToken(env = {}, instanceId = null) {
+  const secretName = instanceId ? instanceConnectSecretName(instanceId) : "";
+  const token = secretName ? env[secretName] : "";
+  return typeof token === "string" ? token.trim() : "";
+}
+
+function hasDirectInstanceConnectToken(env = {}) {
+  return Object.entries(env).some(
+    ([name, value]) =>
+      name.startsWith("INSTANCE_CONNECT_TOKEN_") &&
+      typeof value === "string" &&
+      Boolean(value.trim())
+  );
 }
 
 export function instanceConnectTokens(env = {}) {
@@ -1134,7 +1262,12 @@ function connectReplayRequired(env = {}) {
   if (truthyEnv(env.REQUIRE_CONNECT_REPLAY_GUARD)) {
     return true;
   }
-  return Boolean((env.INSTANCE_CONNECT_TOKEN || "").trim() || (env.INSTANCE_CONNECT_TOKENS || "").trim());
+  return Boolean(
+      (env.INSTANCE_CONNECT_TOKEN || "").trim() ||
+      (env.INSTANCE_CONNECT_TOKENS || "").trim() ||
+      hasDirectInstanceConnectToken(env) ||
+      managedConnectAuthUrl(env)
+  );
 }
 
 function connectReplayWindowMs(env = {}) {
@@ -1155,6 +1288,9 @@ function pruneConnectNonces(nonceStore, windowMs) {
 }
 
 export function authorizeInstanceId(instanceId, env = {}) {
+  if (directInstanceConnectToken(env, instanceId)) {
+    return { ok: true };
+  }
   const allowed = allowedInstanceIds(env);
   if (!allowed) {
     return { ok: true };
@@ -1187,8 +1323,12 @@ export function publicGatewayConfig(env = {}) {
     mcp_client_identity_required: truthyEnv(env.MCP_REQUIRE_CLIENT_IDENTITY),
     mcp_client_registry_configured: Boolean((env.MCP_CLIENT_TOKENS || "").trim()),
     managed_mcp_auth_configured: Boolean(managedMcpAuthUrl(env)),
+    managed_connect_auth_configured: Boolean(managedConnectAuthUrl(env)),
     instance_connect_auth_required: Boolean(
-      (env.INSTANCE_CONNECT_TOKEN || "").trim() || (env.INSTANCE_CONNECT_TOKENS || "").trim()
+      (env.INSTANCE_CONNECT_TOKEN || "").trim() ||
+        (env.INSTANCE_CONNECT_TOKENS || "").trim() ||
+        hasDirectInstanceConnectToken(env) ||
+        managedConnectAuthUrl(env)
     ),
     connect_replay_guard_required: connectReplayRequired(env),
     limits: {
@@ -1200,6 +1340,22 @@ export function publicGatewayConfig(env = {}) {
       max_connect_nonces: maxConnectNonces(env)
     }
   };
+}
+
+function managedConnectAuthUrl(env = {}) {
+  const value = (env.CTOX_MANAGED_MCP_CONNECT_AUTH_URL || "").trim();
+  if (!value) {
+    return null;
+  }
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
+      return null;
+    }
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
 
 export function normalizedUpstreamUrl(env = {}) {

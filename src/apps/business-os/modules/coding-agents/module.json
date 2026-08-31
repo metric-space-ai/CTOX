@@ -11,6 +11,8 @@
   ],
   "layout": {
     "shell": "windowed",
+    "shell_contract": "v2",
+    "shell_geometry_contract": "business-os-v2-global-1",
     "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-coding-agents\"><defs><linearGradient id=\"grad-coding-agents\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#3b82f6\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" ry=\"2\" fill=\"url(#grad-coding-agents)\" fill-opacity=\"0.12\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M9 16l-3-3 3-3M15 10l3 3-3 3\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"13\" y1=\"8\" x2=\"11\" y2=\"16\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\"></line></svg>",
     "left": "Projects: Business OS apps the agent can work on",
     "center": "Chat with the pi agent (transcript + composer)",

@@ -7,11 +7,14 @@ import {
   authorizeMcpClient,
   authorizeInstanceConnect,
   authorizeInstanceId,
+  authorizeManagedInstanceConnect,
+  authorizeManagedStatusObserver,
   authorizeMcpClientForRequest,
   gatewayMode,
   authorize,
   connectTokenForInstance,
   handleRequest,
+  instanceConnectSecretName,
   instanceConnectTokens,
   mcpClientTokens,
   normalizeJsonText,
@@ -273,6 +276,73 @@ test("managed ctox.dev read-only token blocks upsert_record at the gateway", asy
   assert.equal(routed, false);
 });
 
+test("decision hub tools obey managed read and write policy", async () => {
+  let routed = 0;
+  globalThis.fetch = async () => new Response(
+    JSON.stringify({
+      ok: true,
+      context: {
+        channel: "ctox_dev_managed_mcp",
+        surface: "business_os_mcp",
+        actor: "ctox-dev:user:user_1",
+        workspace: "tenant:tenant_1",
+        client_id: "ctox-dev:mcp-token:token_1",
+        instance_id: "ninja.ctox.dev",
+        auth_source: "ctox_dev_managed_mcp_token"
+      },
+      policy: {
+        allowReads: true,
+        allowWrites: false,
+        allowApprovals: false,
+        allowExternalEffects: false,
+        allowedTools: ["decision_hub.request_decision", "decision_hub.get_decision"],
+        deniedTools: []
+      }
+    }),
+    { headers: { "content-type": "application/json" } }
+  );
+  const env = {
+    CTOX_MANAGED_MCP_AUTH_URL: "https://ctox.dev/api/managed-mcp/client-auth",
+    CTOX_MANAGED_MCP_AUTH_TOKEN: "gateway-secret",
+    MCP_REQUIRE_CLIENT_IDENTITY: "true",
+    BUSINESS_OS_MCP_SESSIONS: fakeSessionsBinding(async () => {
+      routed += 1;
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { ok: true } }));
+    })
+  };
+
+  const read = await handleRequest(
+    new Request("https://mcp.ctox.dev/mcp/ninja.ctox.dev", {
+      method: "POST",
+      headers: { authorization: "Bearer ctox_mcp_live_token" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "decision_hub.get_decision", arguments: { decision_id: "dec_1" } }
+      })
+    }),
+    env
+  );
+  const write = await handleRequest(
+    new Request("https://mcp.ctox.dev/mcp/ninja.ctox.dev", {
+      method: "POST",
+      headers: { authorization: "Bearer ctox_mcp_live_token" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 2,
+        method: "tools/call",
+        params: { name: "decision_hub.request_decision", arguments: {} }
+      })
+    }),
+    env
+  );
+
+  assert.equal(read.status, 200);
+  assert.equal(write.status, 403);
+  assert.equal(routed, 1);
+});
+
 test("instance connect auth is optional unless INSTANCE_CONNECT_TOKEN is configured", () => {
   const request = new Request("https://mcp.ctox.dev/connect/desk_123");
 
@@ -314,6 +384,77 @@ test("instance connect auth supports instance-scoped tokens", () => {
     ).ok,
     false
   );
+});
+
+test("instance connect auth supports isolated per-instance secret bindings", () => {
+  const secretName = instanceConnectSecretName("welsch.ctox.dev");
+  const env = {
+    ALLOWED_INSTANCE_IDS: "desk_123",
+    INSTANCE_CONNECT_TOKEN: "fallback-secret",
+    [secretName]: "welsch-secret"
+  };
+
+  assert.equal(secretName, "INSTANCE_CONNECT_TOKEN_77656c7363682e63746f782e646576");
+  assert.equal(connectTokenForInstance(env, "welsch.ctox.dev"), "welsch-secret");
+  assert.equal(authorizeInstanceId("welsch.ctox.dev", env).ok, true);
+  assert.equal(authorizeInstanceId("other.ctox.dev", env).ok, false);
+  assert.equal(
+    authorizeInstanceConnect(
+      new Request("https://mcp.ctox.dev/connect/welsch.ctox.dev", {
+        headers: { authorization: "Bearer welsch-secret" }
+      }),
+      env,
+      "welsch.ctox.dev"
+    ).ok,
+    true
+  );
+  assert.equal(
+    authorizeInstanceConnect(
+      new Request("https://mcp.ctox.dev/connect/welsch.ctox.dev", {
+        headers: { authorization: "Bearer fallback-secret" }
+      }),
+      env,
+      "welsch.ctox.dev"
+    ).ok,
+    false
+  );
+});
+
+test("isolated per-instance secrets require connect replay protection", () => {
+  const secretName = instanceConnectSecretName("welsch.ctox.dev");
+  const env = { [secretName]: "welsch-secret" };
+  const missingReplayHeaders = new Request("https://mcp.ctox.dev/connect/welsch.ctox.dev", {
+    headers: { authorization: "Bearer welsch-secret" }
+  });
+
+  assert.equal(validateConnectReplayHeaders(missingReplayHeaders, env).ok, false);
+});
+
+test("managed instance auth admits a purpose-bound connector without changing the static allowlist", async () => {
+  let authRequest = null;
+  globalThis.fetch = async (url, options) => {
+    authRequest = new Request(url, options);
+    return new Response(JSON.stringify({ ok: true }), {
+      status: 200,
+      headers: { "content-type": "application/json" }
+    });
+  };
+  const env = {
+    CTOX_MANAGED_MCP_CONNECT_AUTH_URL: "https://ctox.dev/api/managed-mcp/connect-auth",
+    CTOX_MANAGED_MCP_AUTH_TOKEN: "gateway-secret",
+    ALLOWED_INSTANCE_IDS: "desk_123"
+  };
+  const request = new Request("https://mcp.ctox.dev/connect/welsch.ctox.dev", {
+    headers: { authorization: "Bearer connector-token" }
+  });
+
+  const result = await authorizeManagedInstanceConnect(request, env, "welsch.ctox.dev");
+  assert.equal(result.ok, true);
+  assert.equal(result.source, "managed_connect_auth");
+  assert.equal(authRequest.headers.get("x-ctox-managed-mcp-auth"), "gateway-secret");
+  assert.equal(authRequest.headers.get("authorization"), "Bearer connector-token");
+  assert.deepEqual(await authRequest.json(), { instanceId: "welsch.ctox.dev" });
+  assert.equal(publicGatewayConfig(env).connect_replay_guard_required, true);
 });
 
 test("connect replay guard requires fresh timestamp and nonce when connect token exists", () => {
@@ -570,6 +711,29 @@ test("managed status route reports a specific instance session", async () => {
   assert.equal(body.pending, 2);
 });
 
+test("managed control plane can observe connector status without a client token", async () => {
+  const response = await handleRequest(
+    new Request("https://mcp.ctox.dev/status/welsch.ctox.dev", {
+      headers: { "x-ctox-managed-mcp-auth": "gateway-secret" }
+    }),
+    {
+      CTOX_MANAGED_MCP_AUTH_TOKEN: "gateway-secret",
+      BUSINESS_OS_MCP_SESSIONS: fakeSessionsBinding(async () =>
+        new Response(JSON.stringify({ connected: true }), {
+          headers: { "content-type": "application/json" }
+        })
+      )
+    }
+  );
+
+  assert.equal(authorizeManagedStatusObserver(
+    new Request("https://mcp.ctox.dev/status/welsch.ctox.dev"),
+    { CTOX_MANAGED_MCP_AUTH_TOKEN: "gateway-secret" }
+  ), false);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).connected, true);
+});
+
 test("managed route parser accepts only bounded instance ids", () => {
   assert.deepEqual(parseManagedRoute("/mcp/desk_123"), {
     kind: "mcp",
@@ -641,6 +805,43 @@ test("session object relays request bodies through the connected CTOX socket", a
   assert.equal(statusBody.stats.failed_requests, 0);
   assert.ok(statusBody.stats.last_request_at_ms > 0);
   assert.ok(statusBody.stats.last_response_at_ms > 0);
+});
+
+test("session object enforces the effective managed token rate limit per client", async () => {
+  const session = new BusinessOsMcpSession({}, {});
+  const socket = new FakeSocket((message) => {
+    const envelope = JSON.parse(message);
+    socket.emit(
+      "message",
+      JSON.stringify({
+        type: "mcp_response",
+        request_id: envelope.request_id,
+        status: 200,
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 21, result: { ok: true } })
+      })
+    );
+  });
+  session.bindSocket(socket);
+  const request = () =>
+    new Request("https://session.local/mcp", {
+      method: "POST",
+      headers: {
+        "x-ctox-mcp-rate-limit-per-minute": "1",
+        "x-ctox-mcp-gateway-context": JSON.stringify({
+          actor: "ctox-dev:user:user_1",
+          workspace: "tenant:tenant_1",
+          client_id: "ctox-dev:mcp-token:token_1"
+        })
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 21, method: "tools/list" })
+    });
+
+  assert.equal((await session.fetch(request())).status, 200);
+  const limited = await session.fetch(request());
+  assert.equal(limited.status, 429);
+  assert.equal((await limited.json()).error.data.code, "rate_limited");
+  assert.equal(socket.sent.length, 1);
 });
 
 test("session object sends gateway-authenticated context in CTOX envelope", async () => {

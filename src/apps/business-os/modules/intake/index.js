@@ -1,6 +1,6 @@
 import { normalizeApplication, applicationDedupeKey } from './core/application.js';
 
-const MOD_BUILD = '20260721-intake-ia';
+const MOD_BUILD = '20260831-intake-shellv2';
 const MODULE_ID = 'intake';
 const PRIMARY = 'applications';
 const CAPTURE_COMMAND = 'ats.intake.capture';
@@ -23,6 +23,10 @@ const COPY = {
     statusAll: 'Alle Status', bandAll: 'Alle', bandOpen: 'Offen', bandClosed: 'Abgeschlossen',
     status_new: 'Neu', status_screening: 'Prüfung', status_hired: 'Eingestellt',
     status_rejected: 'Abgelehnt', status_duplicate: 'Duplikat',
+    viewToList: 'Als Liste anzeigen', viewToCards: 'Als Karten anzeigen',
+    channel_career_site: 'Karriereseite', channel_job_board: 'Jobbörse',
+    channel_easy_apply: 'Easy Apply', channel_email: 'E-Mail', channel_qr: 'QR',
+    channel_walk_in: 'Walk-in', channel_referral: 'Empfehlung',
   },
   en: {
     kicker: 'Application intake', listTitle: 'Applications', newTitle: 'New application',
@@ -38,8 +42,20 @@ const COPY = {
     statusAll: 'All statuses', bandAll: 'All', bandOpen: 'Open', bandClosed: 'Closed',
     status_new: 'New', status_screening: 'Screening', status_hired: 'Hired',
     status_rejected: 'Rejected', status_duplicate: 'Duplicate',
+    viewToList: 'Show as list', viewToCards: 'Show as cards',
+    channel_career_site: 'Careers page', channel_job_board: 'Job board',
+    channel_easy_apply: 'Easy Apply', channel_email: 'Email', channel_qr: 'QR',
+    channel_walk_in: 'Walk-in', channel_referral: 'Referral',
   },
 };
+
+// Ein-Knopf-Umschalter: das Icon zeigt IMMER die Ansicht, in die der Klick
+// wechselt, nie die aktuelle.
+const VIEW_ICON = {
+  cards: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg>',
+  list: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg>',
+};
+const VIEW_ACTION_KEY = { cards: 'viewToCards', list: 'viewToList' };
 let text = COPY.de;
 let locale = 'de';
 
@@ -62,6 +78,15 @@ export function candidateName(r) {
 export function statusLabel(status) {
   const key = 'status_' + String(status || 'new');
   return text[key] || String(status || 'new');
+}
+
+// Der Kanal steht im Datensatz als Schluessel (career_site, job_board, ...).
+// Beschriftungen sind uebersetzt; ein unbekannter Schluessel faellt auf seinen
+// Rohwert zurueck, statt die Zeile leer zu lassen.
+export function channelLabel(channel) {
+  const raw = String(channel || '').trim();
+  if (!raw) return '—';
+  return text['channel_' + raw] || raw;
 }
 
 // Which counted band a record belongs to.
@@ -97,16 +122,23 @@ export function filterRows(rows, { band = 'all', status = 'all', search = '' } =
   });
 }
 
-// A shard is a pure selector: title + ONE muted meta line. No inline expansion
-// inside the selection list (design-guide "Canonical Column Grammar").
+// A shard is a pure selector: no inline expansion inside the selection list
+// (design-guide "Canonical Column Grammar"). Karten und Liste unterscheiden
+// sich in der DICHTE, nicht nur im Detailgrad (Betreiber-Direktive 31.08.):
+//
+//   KARTE  drei Zeilen — fetter Name + Status, darunter die Zuordnung
+//          (Kanal · Vakanz · Kontakt) und die Eckdaten (Empfangen · Dok.);
+//          grosszuegiges Padding.
+//   LISTE  genau EINE Zeile — Name und rechts ein einziges Kurz-Meta (der
+//          Status); enge Zeilenhoehe, maximale Dichte.
+//
+// Beide lesen ausschliesslich Felder, die die App ohnehin laedt.
 export function applicationRow(r, opts = {}) {
   const view = opts.view === 'list' ? 'list' : 'cards';
   const selected = Boolean(opts.selected);
   const name = candidateName(r);
   const status = String(r.status || 'new');
-  const channel = r.channel || '—';
   const id = r.id || '';
-  const ts = Number(r.received_at_ms || r.created_at_ms || 0);
   const badge = '<span class="' + ('ctox-badge ' + statusBadgeClass(status)).trim()
     + '" data-status="' + esc(status) + '">' + esc(statusLabel(status)) + '</span>';
   const attrs = ' class="ctox-list-item intake-row intake-row--' + view + (selected ? ' is-selected' : '') + '"'
@@ -115,13 +147,24 @@ export function applicationRow(r, opts = {}) {
     + ' data-context-record-type="application"'
     + ' data-context-label="' + esc(name || id) + '"';
   if (view === 'list') {
-    return '<div' + attrs + '><span class="intake-row-title">' + esc(name) + '</span>' + badge + '</div>';
+    return '<div' + attrs + '>'
+      + '<span class="intake-row-title">' + esc(name) + '</span>'
+      + '<span class="intake-row-side">' + badge + '</span>'
+      + '</div>';
   }
-  const metaBits = [esc(text.kicker), esc(statusLabel(status)), esc(channel)];
-  if (ts) metaBits.push(esc(fmtDate(ts)));
+  const candidate = r && typeof r.candidate === 'object' && r.candidate ? r.candidate : {};
+  const assignment = [text.channel + ': ' + channelLabel(r.channel)];
+  if (r.vacancy_id) assignment.push(text.vacancyLabel + ': ' + r.vacancy_id);
+  const contact = candidate.email || r.email || candidate.phone || r.phone;
+  if (contact) assignment.push(String(contact));
+  const ts = Number(r.received_at_ms || r.created_at_ms || 0);
+  const facts = [text.received + ': ' + (ts ? fmtDay(ts) : '—')];
+  const docs = Array.isArray(r.documents) ? r.documents.length : 0;
+  if (docs) facts.push(text.documents + ': ' + docs);
   return '<div' + attrs + '>'
     + '<div class="intake-row-head"><span class="intake-row-title">' + esc(name) + '</span>' + badge + '</div>'
-    + '<div class="intake-row-meta">' + metaBits.join(' · ') + '</div>'
+    + '<div class="intake-row-meta">' + esc(assignment.join(' · ')) + '</div>'
+    + '<div class="intake-row-meta intake-row-meta--facts">' + esc(facts.join(' · ')) + '</div>'
     + '</div>';
 }
 
@@ -149,7 +192,7 @@ export function recordDetailHtml(r) {
   const candidate = r && typeof r.candidate === 'object' && r.candidate ? r.candidate : {};
   const rows = [];
   const contact = [candidate.email || r.email, candidate.phone || r.phone].filter(Boolean).map(esc).join(' · ');
-  rows.push(field(text.channel, esc(r.channel || '—')));
+  rows.push(field(text.channel, esc(channelLabel(r.channel))));
   if (contact) rows.push(field(text.email, contact));
   if (r.vacancy_id) rows.push(field(text.vacancyLabel, esc(r.vacancy_id)));
   const docs = Array.isArray(r.documents) ? r.documents.length : 0;
@@ -207,6 +250,7 @@ export async function mount(ctx) {
   const titleEl = root?.querySelector('[data-ats-title]');
   const subEl = root?.querySelector('[data-ats-sub]');
   const detailEl = root?.querySelector('[data-ats-detail]');
+  const viewToggleEl = rail?.querySelector('.intake-view-toggle');
   if (subEl) subEl.textContent = ctx.manifest?.description || '';
   applyStaticCopy(root);
 
@@ -238,7 +282,9 @@ export async function mount(ctx) {
   function readGrammar() {
     return {
       search: (rail?.querySelector('[data-pg-search]')?.value || '').trim().toLowerCase(),
-      view: rail?.querySelector('[data-pg-view][aria-pressed="true"]')?.dataset.pgView || 'cards',
+      // Die Ansicht steht auf dem EINEN Umschalter (data-pg-view = aktuelle
+      // Ansicht), nicht auf einem gedrueckten Knopf eines Zustandspaars.
+      view: rail?.querySelector('[data-pg-view]')?.dataset.pgView === 'list' ? 'list' : 'cards',
       band: rail?.querySelector('[data-pg-band][aria-selected="true"]')?.dataset.pgBand || 'all',
       status: rail?.querySelector('[data-pg-filter][data-pg-name="status"]')?.value || 'all',
     };
@@ -489,9 +535,41 @@ export async function mount(ctx) {
     render();
   }
 
+  // Ein-Knopf-Umschalter Karten <-> Liste. Der Knopf ist eine AKTION: Icon,
+  // aria-label und title benennen das Ziel des Klicks, einen Gedrueckt-Zustand
+  // gibt es nicht.
+  function syncViewToggle() {
+    if (!viewToggleEl) return;
+    const next = viewToggleEl.dataset.pgViewAlt === 'cards' ? 'cards' : 'list';
+    const label = text[VIEW_ACTION_KEY[next]];
+    viewToggleEl.innerHTML = VIEW_ICON[next];
+    viewToggleEl.setAttribute('aria-label', label);
+    viewToggleEl.setAttribute('title', label);
+    viewToggleEl.removeAttribute('aria-pressed');
+  }
+  function onViewToggle() {
+    if (!viewToggleEl) return;
+    const current = viewToggleEl.dataset.pgView === 'list' ? 'list' : 'cards';
+    viewToggleEl.dataset.pgView = current === 'list' ? 'cards' : 'list';
+    viewToggleEl.dataset.pgViewAlt = current;
+    syncViewToggle();
+    render();
+  }
+  // Die generische Shell-Verdrahtung (shared/pane-grammar.js) setzt auf JEDEN
+  // [data-pg-view]-Knopf ein aria-pressed="true". Fuer einen Aktionsknopf ist
+  // das die falsche Semantik. Dieser Listener haengt an der SPALTE, laeuft also
+  // in der Bubble-Phase garantiert nach beiden Knopf-Listenern, und raeumt es
+  // ab — ohne Timer und ohne Annahme ueber die Registrierungsreihenfolge.
+  function stripViewTogglePressed() {
+    viewToggleEl?.removeAttribute('aria-pressed');
+  }
+
   listEl?.addEventListener('click', onListClick);
   listEl?.addEventListener('keydown', onListKey);
   root?.addEventListener('click', onAction);
+  viewToggleEl?.addEventListener('click', onViewToggle);
+  rail?.addEventListener('click', stripViewTogglePressed);
+  syncViewToggle();
   formEl?.addEventListener('submit', onSubmit);
   // Re-render when the shell reports a grammar change (search / view / tray /
   // band). The event bubbles from the wired pane.
@@ -525,6 +603,8 @@ export async function mount(ctx) {
     listEl?.removeEventListener('click', onListClick);
     listEl?.removeEventListener('keydown', onListKey);
     root?.removeEventListener('click', onAction);
+    viewToggleEl?.removeEventListener('click', onViewToggle);
+    rail?.removeEventListener('click', stripViewTogglePressed);
     formEl?.removeEventListener('submit', onSubmit);
     rail?.removeEventListener('ctox-pane-grammar-change', onGrammarChange);
     ctx.host.replaceChildren();
@@ -544,6 +624,12 @@ function statusBadgeClass(status) {
 
 function fmtDate(ms) {
   try { return new Date(ms).toLocaleString(locale === 'en' ? 'en' : 'de'); } catch { return ''; }
+}
+
+// Kurzform fuer die Meta-Zeilen einer Karte: dort zaehlt der Tag, nicht die
+// Sekunde (die volle Zeitangabe bleibt im Detail-Readout).
+function fmtDay(ms) {
+  try { return new Date(ms).toLocaleDateString(locale === 'en' ? 'en' : 'de'); } catch { return ''; }
 }
 
 function applyStaticCopy(root) {

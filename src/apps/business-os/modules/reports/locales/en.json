@@ -4,6 +4,8 @@
   "exportJson": "Export filtered list as JSON",
   "searchPlaceholder": "Search...",
   "searchLabel": "Search bugs and features",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards",
   "kindFilterLabel": "Filter type",
   "statusFilterLabel": "Filter status",
   "allTypes": "All Types",

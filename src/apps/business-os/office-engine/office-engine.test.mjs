@@ -752,7 +752,7 @@ test('Office RPC budgets all storage-backed editor operations for live replicati
 });
 
 test('Office asset revision propagates through every iframe and runtime boundary', async () => {
-  const revision = '20260811-fremde-collection-mitladen-v106';
+  const revision = '20260816-browser-sync-guards-v141';
   const capsule = await readFile(new URL('./src/capsule.mjs', import.meta.url), 'utf8');
   const frameHtml = await readFile(new URL('./src/frame.html', import.meta.url), 'utf8');
   const frameRuntime = await readFile(new URL('./src/frame-runtime.mjs', import.meta.url), 'utf8');

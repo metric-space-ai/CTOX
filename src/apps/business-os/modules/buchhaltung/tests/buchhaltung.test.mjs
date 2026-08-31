@@ -18,8 +18,17 @@ test('existing accounting core suite remains green', () => {
 test('left booking selector uses the complete shell-owned pane grammar', () => {
   assert.match(html, /data-booking-pane/);
   assert.match(html, /data-pg-search/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // Betreiber-Direktive 31.08.2026: die Darstellung wird von EINEM Aktionsknopf
+  // umgeschaltet, nicht von einem aria-pressed-Paar. Der Wächter misst jetzt
+  // genau diesen Vertrag statt des abgeloesten Zwei-Knopf-Umschalters.
+  assert.doesNotMatch(html, /data-pg-view=/, 'kein Zwei-Knopf-Umschalter mehr');
+  assert.doesNotMatch(html, /ctox-view-toggle/, 'die Umschaltgruppe entfaellt');
+  assert.equal(html.match(/data-fibu-view-toggle/g)?.length, 1, 'genau ein Umschalt-Knopf');
+  assert.match(html, /data-fibu-view-toggle[^>]*data-fibu-view="cards"/);
+  assert.doesNotMatch(html, /data-fibu-view-toggle[^>]*aria-pressed/, 'der Knopf ist Aktion, kein Zustand');
+  assert.match(html, /data-fibu-view-toggle[^>]*aria-label="Als Liste anzeigen"[^>]*title="Als Liste anzeigen"/);
+  assert.match(js, /const label = view === 'list' \? 'Als Karten anzeigen' : 'Als Liste anzeigen'/);
+  assert.match(js, /setBookingView\(state\.bookingView === 'list' \? 'cards' : 'list'\)/);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-tray\b[^>]*hidden/);
   assert.match(html, /data-pg-reset/);
@@ -116,4 +125,10 @@ test('data-driven empty states are gated by canonical collection readiness', () 
   // Selection- and match-driven empties stay readiness-free.
   assert.match(js, /Keine Belegevidenz für diese Banktransaktion verknüpft\./);
   assert.match(js, /Keine Hauptbuchungen für dieses Sachkonto vorhanden\./);
+});
+
+test('v2 accounting overlays stay inside the module and context actions clamp locally', () => {
+  assert.match(css, /\.shell-window\[data-shell-contract="v2"\] \.fibu-module \{ position: relative;[\s\S]*overflow: hidden;/);
+  assert.match(js, /\(state\.els\.root \|\| state\.ctx\?\.host\)\?\.append\(menu\)/);
+  assert.match(js, /const rootRect = state\.els\.root\?\.getBoundingClientRect/);
 });

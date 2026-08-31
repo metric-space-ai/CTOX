@@ -38,11 +38,11 @@
       "target_field": "target_task_id/target_record_id; execution_task_id stays empty"
     },
     {
-      "file": "src/core/business_os/person_research_command.rs",
-      "function": "thesen_outbound_lead_state_document",
+      "file": "src/core/business_os/store_outbound_commands.rs",
+      "function": "apply_outbound_adapter_reconciliation_reply",
       "occurrence": 1,
-      "semantics": "compatibility_target",
-      "target_field": "task_id stays empty; command_id carries the lifecycle link"
+      "semantics": "compatibility_mixed",
+      "target_field": "execution_task_id"
     },
     {
       "file": "src/core/business_os/store_outbound_commands.rs",
@@ -190,41 +190,6 @@
       "occurrence": 1,
       "semantics": "execution_link",
       "target_field": "execution_task_id"
-    },
-    {
-      "file": "src/core/business_os/support.rs",
-      "function": "project_agent_suggestion",
-      "occurrence": 1,
-      "semantics": "domain_queue_reference",
-      "target_field": "support task reference"
-    },
-    {
-      "file": "src/core/business_os/threads.rs",
-      "function": "create_link",
-      "occurrence": 1,
-      "semantics": "domain_queue_reference",
-      "target_field": "thread-linked task reference"
-    },
-    {
-      "file": "src/core/business_os/threads.rs",
-      "function": "upsert_app_record_link",
-      "occurrence": 1,
-      "semantics": "domain_queue_reference",
-      "target_field": "thread-linked task reference"
-    },
-    {
-      "file": "src/core/business_os/threads.rs",
-      "function": "upsert_ctox_command_link",
-      "occurrence": 1,
-      "semantics": "domain_queue_reference",
-      "target_field": "thread-linked task reference"
-    },
-    {
-      "file": "src/core/business_os/threads.rs",
-      "function": "upsert_ctox_task_link",
-      "occurrence": 1,
-      "semantics": "target_task",
-      "target_field": "target_task_id"
     }
   ]
 }

@@ -232,9 +232,9 @@ async fn handle_browser_live_webrtc_request_inner(
 ) -> Result<Value, String> {
     let request = params.first().cloned().unwrap_or(Value::Null);
     let operation = request.get("op").and_then(Value::as_str).unwrap_or("live");
-    let (profile_owner, _) = store::verify_capability_actor(root, capability_token)
+    let (profile_owner, _) = store::verify_webrtc_capability_actor(root, capability_token)
         .ok_or_else(|| "browser live capability is invalid".to_string())?;
-    if !store::capability_allows_collection_permission(
+    if !store::webrtc_capability_allows_collection_permission(
         root,
         capability_token,
         "browser_sessions",
@@ -317,7 +317,7 @@ async fn handle_browser_live_webrtc_request_inner(
     // the owner/controller/lease checks below is the authority to operate this
     // user's ephemeral live session; no input-event document is persisted on
     // this path.
-    if !store::capability_allows_collection_permission(
+    if !store::webrtc_capability_allows_collection_permission(
         root,
         capability_token,
         "browser_sessions",
@@ -1018,7 +1018,7 @@ pub(super) async fn apply_browser_runtime_command(
         .and_then(|context| context.get("capability_token"))
         .and_then(Value::as_str)
         .context("browser command capability token is required")?;
-    let (profile_owner, _) = store::verify_capability_actor(root, capability_token)
+    let (profile_owner, _) = store::verify_webrtc_capability_actor(root, capability_token)
         .context("browser command capability token is invalid")?;
     let tenant_id = store::sync_config(root)
         .context("browser command tenant configuration is unavailable")?
@@ -1330,7 +1330,7 @@ pub(super) async fn apply_browser_runtime_command(
             "credential fill requires explicit confirmation"
         );
         anyhow::ensure!(
-            store::capability_allows_workspace_permission(
+            store::webrtc_capability_allows_workspace_permission(
                 root,
                 capability_token,
                 BusinessOsPermission::SecretsManage,
@@ -2093,7 +2093,7 @@ pub(super) async fn browser_runtime_maintenance_loop(
         // Die Aufraeumer muessen wie der Tombstone-Sweep UEBER dem Ausstieg
         // stehen. Sie hingen darunter und wurden damit genau dann uebersprungen,
         // wenn aufgeraeumt werden koennte: ohne laufende Sitzung. Auf der
-        // Thesen-Instanz am 19.08.2026 gemessen — 452 abgelaufene Bilder, 241
+        // Produktionsinstanz am 19.08.2026 gemessen — 452 abgelaufene Bilder, 241
         // verbrauchte Eingaben und 5525 erledigte Befehle lagen unberuehrt in
         // einem 930 MB grossen Speicher, waehrend beide Aufraeumer existierten
         // und keiner je lief.
@@ -2221,7 +2221,7 @@ fn browser_last_input_ms(session_id: &str) -> Option<u64> {
 /// Wird diese Sitzung ueberhaupt angesehen?
 ///
 /// Die Oberflaeche zeigt immer nur EINEN Bildschirm. Bilder von Sitzungen, die
-/// niemand betrachtet, sind reine Verschwendung: auf der Thesen-Instanz standen
+/// niemand betrachtet, sind reine Verschwendung: auf der Produktionsinstanz standen
 /// 111 Sitzungen, 110 davon tot, und die Aufnahmeschleife bediente sie weiter.
 ///
 /// Als betrachtet gilt eine Sitzung, wenn ein Direktbetrachter angehaengt ist,
@@ -2944,7 +2944,7 @@ async fn prune_browser_session_frames(
 /// Erledigte Befehle nach einer Aufbewahrungsfrist entfernen.
 ///
 /// `business_commands` war faktisch append-only: nichts hat je etwas daraus
-/// entfernt. Auf der Thesen-Instanz standen am 19.08.2026 6768 Zeilen darin,
+/// entfernt. Auf der Produktionsinstanz standen am 19.08.2026 6768 Zeilen darin,
 /// davon 6742 in einem Endzustand und 3688 volle 47 Tage alt, in einem 929 MB
 /// grossen Speicher. Jede Client-Aktion fragt diese Collection erneut ab;
 /// gemessen wurden dort 3,7 s, 5,0 s und 12,3 s fuer eine einzelne Abfrage.

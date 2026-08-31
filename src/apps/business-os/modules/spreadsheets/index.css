@@ -49,6 +49,122 @@
   overflow: hidden;
 }
 
+/* --------------------------------------------------------------------------
+   Shell V2 header geometry (reference: modules/knowledge).
+
+   The v2 window lays three chrome zones over the app: the 80px app icon at the
+   top left, a header band of one --shell-v2-header-row-size across the full
+   width, and the 74px window control at the top right. `.shell-window-content`
+   is `inset: 0` and is NOT indented, so the module has to keep those zones
+   free itself.
+
+   Every pane head of the top row is exactly one header row tall, the first
+   head (left pane) clears the icon, and the trailing heads (center editor and
+   right runbooks — the center is the last column while the runbook pane is
+   collapsed) clear the window control. The icon is 74px tall, i.e. two header
+   rows, so the search strip directly below the left head clears it as well.
+   -------------------------------------------------------------------------- */
+.shell-window[data-shell-contract="v2"]
+  :is(.spreadsheets-explorer, .spreadsheets-runbooks, .spreadsheets-editor)
+  > .ctox-pane-header {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .spreadsheets-search-bar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .spreadsheets-editor > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .spreadsheets-runbooks > .ctox-pane-header {
+  padding-right: 70px;
+}
+
+/* Head content centered in the single row; the title yields, the actions do
+   not grow. Without the min-width floors the title collapses to a few pixels
+   as soon as the pane gets narrow. */
+.shell-window[data-shell-contract="v2"]
+  :is(.spreadsheets-explorer, .spreadsheets-runbooks, .spreadsheets-editor)
+  > .ctox-pane-header .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
+}
+
+.shell-window[data-shell-contract="v2"]
+  :is(.spreadsheets-explorer, .spreadsheets-runbooks, .spreadsheets-editor)
+  > .ctox-pane-header .ctox-pane-titles {
+  min-width: 0;
+  padding-top: 0;
+}
+
+.shell-window[data-shell-contract="v2"]
+  :is(.spreadsheets-explorer, .spreadsheets-runbooks, .spreadsheets-editor)
+  > .ctox-pane-header .ctox-pane-kicker {
+  line-height: 1.2;
+}
+
+.shell-window[data-shell-contract="v2"]
+  :is(.spreadsheets-explorer, .spreadsheets-runbooks, .spreadsheets-editor)
+  > .ctox-pane-header .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The kit pins pane actions to `min-width: max-content`; in the editor head
+   the save-state badge would then push the document title out of the row. */
+.shell-window[data-shell-contract="v2"]
+  :is(.spreadsheets-explorer, .spreadsheets-runbooks, .spreadsheets-editor)
+  > .ctox-pane-header .ctox-pane-actions {
+  min-width: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .spreadsheets-dirty-badge {
+  min-width: 0;
+  overflow: hidden;
+}
+
+.shell-window[data-shell-contract="v2"] .spreadsheets-dirty-badge > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Search and filter strips below the left head: own rows, never squeezed by
+   the list. The search strip is the second header row (still under the icon). */
+.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .ctox-pane-tools {
+  box-sizing: border-box;
+  flex: 0 0 auto;
+  margin-top: 0;
+  padding: 6px 14px;
+}
+
+.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .spreadsheets-search-bar {
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .spreadsheets-filter-bar {
+  border-bottom: 1px solid var(--hairline, var(--line));
+}
+
+/* The empty/error state is the editor's only flex sibling below the head, so
+   it takes the remaining height instead of adding the head's height on top. */
+.spreadsheets-editor > .ctox-empty {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
 /* custom: the filter row packs three kit .ctox-pane-filter selects; they
    share the row width equally instead of sizing to content. */
 .spreadsheets-filter-bar .ctox-pane-filter {
@@ -459,8 +575,52 @@
   margin-right: auto;
 }
 
-@container business-app-window (max-width: 760px) {
+/* Shell-owned compact breakpoint (2 columns -> 1); the app does not own any
+   breakpoint of its own. */
+@container business-app-window (max-width: 768px) {
   .spreadsheets-editor-canvas {
     padding: 6px;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Touch-Bedienung auf groben Zeigern (Telefon/Tablet): alle Kit-Controls im
+   Modul erreichen das 44px-Minimum, Icon-Buttons in beiden Dimensionen, die
+   Record-/Runbook-Karten bekommen fingerhohe Zeilen. Das Drittanbieter-Grid
+   behaelt seine Zellgeometrie (die Bibliothek rechnet mit Inline-Groessen);
+   es scrollt ohnehin in .spreadsheets-editor-canvas (overflow: auto).
+   -------------------------------------------------------------------------- */
+@media (pointer: coarse) {
+  .spreadsheets-module button,
+  .spreadsheets-module input,
+  .spreadsheets-module select,
+  .spreadsheets-module textarea {
+    min-height: 44px;
+  }
+
+  .spreadsheets-module .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .spreadsheets-module .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .spreadsheets-module .spreadsheets-card,
+  .spreadsheets-module .spreadsheets-runbook-card,
+  .spreadsheets-module .ctox-list-item {
+    min-height: 44px;
+  }
+
+  /* Ueberlagerter Manage-Button auf den Record-Karten: volle 44px-Flaeche,
+     Karten-Inhalt weicht entsprechend weiter aus. */
+  .spreadsheets-card .spreadsheets-card-manage {
+    top: 0;
+    right: 0;
+  }
+
+  .spreadsheets-card-main {
+    padding-right: 48px;
   }
 }

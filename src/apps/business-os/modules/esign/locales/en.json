@@ -1,6 +1,6 @@
 {
-  "title": "E-Signatur",
-  "subtitle": "Generische Signatur-Anfragen: Dokument an Unterzeichner routen und Status verfolgen.",
+  "title": "E-Signature",
+  "subtitle": "Generic signature requests: route documents to signers and track status.",
   "add": "Create",
   "empty": "No entries yet.",
   "kicker": "E-SIGNATURE",
@@ -12,5 +12,7 @@
   "viewOpen": "Open",
   "viewDone": "Closed",
   "composerTitle": "Request signature",
-  "signersHead": "Signers"
+  "signersHead": "Signers",
+  "showAsList": "Show as list",
+  "showAsCards": "Show as cards"
 }

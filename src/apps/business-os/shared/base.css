@@ -490,7 +490,8 @@
   align-items: center;
   min-height: 100%;
   padding: 24px;
-  color: var(--muted);
+  /* 4.5:1 auch auf dem helleren Listen-Ton (UI-Review 31.08., Befund r2-2). */
+  color: color-mix(in srgb, var(--text) 22%, var(--muted));
   font-size: var(--fs-sm);
   line-height: 1.55;
   text-align: center;
@@ -661,7 +662,9 @@
 }
 
 .ctox-pane-icon:disabled {
-  opacity: 0.55;
+  /* 40%: unterscheidbar vom inaktiven (nicht gewaehlten) Umschalter-Zustand,
+     der bei 55% liegt (UI-Review 31.08., Beobachtung r2). */
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
@@ -724,7 +727,10 @@
   border: 1px solid transparent;
   border-radius: max(2px, calc(var(--control-radius) - 1px));
   background: transparent;
-  color: var(--muted);
+  /* Inaktive Tabs waren mit --muted auf dunklem Grund grenzwertig lesbar
+     (UI-Review 31.08.2026, Befund 9); eine Stufe Richtung --text hebt den
+     Kontrast, ohne mit dem aktiven Tab zu konkurrieren. */
+  color: color-mix(in srgb, var(--text) 55%, var(--muted));
   font: inherit;
   font-size: var(--fs-meta);
   font-weight: 700;
@@ -985,6 +991,16 @@
   padding: 4px 6px;
   border-bottom: 1px solid var(--hairline, var(--line));
   background: var(--surface);
+  /* The strip scrolls at every width rather than only below 760px. Between
+     roughly 700 and 900px the groups used to crush each other instead: labels
+     wrapped to two lines and the primary action overlapped the status text. */
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.ctox-action-strip::-webkit-scrollbar {
+  display: none;
 }
 
 .ctox-action-strip__group {
@@ -992,6 +1008,7 @@
   align-items: center;
   gap: 2px;
   min-width: 0;
+  flex: 0 0 auto;
   padding-right: 6px;
   margin-right: 2px;
   border-right: 1px solid var(--hairline, var(--line));
@@ -1191,21 +1208,20 @@
   min-height: 120px;
 }
 
-@container business-app-window (max-width: 760px) {
+@container business-app-window (max-width: 768px) {
   .ctox-workspace,
   .ctox-workspace--two-pane {
     grid-template-columns: minmax(0, 1fr);
     padding: 6px;
   }
 
+  .ctox-workspace > [data-resizer],
   .ctox-column-resizer {
     display: none;
   }
 
-  .ctox-action-strip {
-    overflow-x: auto;
-    flex-wrap: nowrap;
-  }
+  /* .ctox-action-strip already scrolls at every width; the narrow-only
+     duplicate of that rule is gone. */
 
   .ctox-record-workbench__header {
     min-height: 44px;

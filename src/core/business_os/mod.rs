@@ -9,6 +9,7 @@ mod browser_runtime;
 mod capability;
 mod command_plane;
 mod control_command_types;
+mod customer_apps;
 pub mod decision_hub;
 mod desktop_files;
 mod external_sql_sync;
@@ -18,6 +19,7 @@ mod inventory_drift_tests;
 mod invoices;
 mod iot_supervision;
 pub mod mcp_channel;
+pub mod mobile_invites;
 mod module_lifecycle;
 pub mod office_engine;
 mod person_research_command;
@@ -31,8 +33,10 @@ mod rxdb_peer_intake;
 mod rxdb_peer_intake_state;
 mod rxdb_peer_projections;
 mod rxdb_peer_tombstones;
+mod rxdb_peer_workjet_devices;
 pub mod server;
 mod session;
+pub mod shell_update;
 pub mod store;
 mod store_appsec_commands;
 mod store_ats_commands;
@@ -45,6 +49,7 @@ mod store_policy;
 mod store_policy_audit;
 mod store_projections;
 mod store_release_review;
+mod store_workjet_projects;
 mod support;
 mod threads;
 
@@ -53,6 +58,20 @@ pub use browser_control::browser_context_capture;
 pub(crate) use browser_control::browser_session_automation as run_browser_session_automation;
 pub use browser_control::browser_session_status;
 pub use browser_control::BrowserContextCaptureRequest;
+pub fn audit_customer_apps(root: &std::path::Path) -> anyhow::Result<serde_json::Value> {
+    let entries = customer_apps::audit_runtime_customer_apps(root)?;
+    let blocked = entries
+        .iter()
+        .filter(|entry| entry.status == "blocked")
+        .count();
+    Ok(serde_json::json!({
+        "type": "ctox.business-os.customer-app-audit.v1",
+        "ok": blocked == 0,
+        "read_only": true,
+        "blocked": blocked,
+        "entries": entries,
+    }))
+}
 pub(crate) use browser_runtime::BrowserSessionAutomationRequest;
 pub use rxdb_peer::enqueue_business_command_document;
 pub use rxdb_peer::native_peer_status;

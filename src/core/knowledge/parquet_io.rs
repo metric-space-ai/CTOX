@@ -223,17 +223,18 @@ pub(super) fn rows_to_df(rows: &[Value]) -> Result<DataFrame> {
 /// directly into the synced doc (no HTTP). Keeps all Polars usage contained in
 /// this helper module so callers do not have to depend on Polars types.
 pub(super) fn read_rows_capped(path: &Path, cap: usize) -> Result<(Vec<Value>, i64)> {
-    let full_df = scan_table(path)
+    // This projection runs every 15 seconds in the long-lived native peer.
+    // Polars' lazy `collect()` selects the new streaming executor in current
+    // releases and panics when the binary is intentionally built without the
+    // `new-streaming` feature. An eager ParquetReader uses the enabled parquet
+    // IO feature directly and returns ordinary errors instead of unwinding a
+    // runtime worker on every projection pass.
+    let file = File::open(path)
+        .with_context(|| format!("open parquet for projection {}", path.display()))?;
+    let full_df = ParquetReader::new(file)
+        .finish()
         .map_err(cerr)
-        .with_context(|| format!("scan parquet for projection {}", path.display()))?
-        .collect()
-        .map_err(cerr)
-        .with_context(|| {
-            format!(
-                "collect parquet row count for projection {}",
-                path.display()
-            )
-        })?;
+        .with_context(|| format!("read parquet for projection {}", path.display()))?;
     let count = full_df.height() as i64;
     let capped_df = full_df.head(Some(cap));
     let rows = df_to_rows(&capped_df)?;

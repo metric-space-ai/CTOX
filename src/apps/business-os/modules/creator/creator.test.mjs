@@ -197,8 +197,7 @@ test('presentation layer stays compact and shell-native', () => {
   // standard-class migration).
   assert.match(html, /class="ctox-workspace[^"]*"[^>]*data-resize-frame/);
   assert.match(html, /class="ctox-column-resizer"[^>]*data-resizer-var="--ctox-left-width"/);
-  assert.match(css, /@container business-app-window \(max-width: 760px\)/);
-  assert.match(css, /@container business-app-window \(max-width: 520px\)/);
+  assert.match(css, /@container business-app-window \(max-width: 768px\)/);
   assert.match(html, /data-example-prompts/);
   assert.match(html, /id="creator-inspiration-url"/);
 });
@@ -209,8 +208,13 @@ test('left column carries the shell-wired canonical grammar pins', () => {
   // Search + shard/list toggle + collapsed filter tray with a status filter and
   // reset — all shell-wired via data-pg-*, no module chrome JS/CSS.
   assert.match(html, /data-pg-search/);
-  assert.match(html, /data-pg-view="cards"/);
-  assert.match(html, /data-pg-view="list"/);
+  // Ein-Knopf-Umschalter (Betreiber-Direktive 31.08.): EIN Bedienelement, das
+  // die Ansicht togglet — kein Zustandspaar mit aria-pressed. data-pg-view
+  // traegt die aktuelle Ansicht, data-pg-view-alt die Gegenansicht.
+  assert.equal((html.match(/data-pg-view=/g) || []).length, 1);
+  assert.match(html, /data-creator-view-toggle[^>]*data-pg-view="cards"[^>]*data-pg-view-alt="list"/);
+  assert.doesNotMatch(html, /<button[^>]*data-pg-view[^>]*aria-pressed/);
+  assert.doesNotMatch(html, /ctox-view-toggle/);
   assert.match(html, /data-pg-tray-toggle/);
   assert.match(html, /data-pg-tray\b/);
   assert.match(html, /data-pg-reset/);

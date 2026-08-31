@@ -11,7 +11,7 @@ const targetsDir = path.dirname(testDir);
 const fixturesDir = path.join(testDir, "fixtures");
 const mockCtox = path.join(testDir, "mock-ctox.mjs");
 const sharedScript = path.join(targetsDir, "_shared", "generic-prospect-v1.js");
-const PROTECTED_TARGETS = ["dnbhoovers.com", "leadfeeder.com", "rocketreach.com"];
+const PROTECTED_TARGETS = ["dnbhoovers.com", "leadfeeder.com", "linkedin.com", "rocketreach.com", "xing.com"];
 const PUBLIC_UNLOCK_TARGETS = [
   "bundesanzeiger.de",
   "companyhouse.de",
@@ -21,7 +21,7 @@ const PUBLIC_UNLOCK_TARGETS = [
 
 const FIELD_KEYS = new Set([
   "firma_name", "firma_anschrift", "firma_plz", "firma_ort", "firma_email",
-  "firma_domain", "firma_telefon", "wz_code", "umsatz", "mitarbeiter",
+  "firma_domain", "firma_telefon", "firma_fax", "wz_code", "umsatz", "mitarbeiter",
   "crm_record_number", "person_geschlecht", "person_titel", "person_vorname",
   "person_nachname", "person_funktion", "person_position", "person_email",
   "person_email_validation", "person_telefon", "person_linkedin", "person_xing",
@@ -97,7 +97,7 @@ function containsForbiddenSecretKey(value) {
 
 test("all DACH research scrape targets pass production-like fixture gates", async (t) => {
   const targets = targetDirectories();
-  assert.equal(targets.length, 15, `expected 15 targets, found: ${targets.join(", ")}`);
+  assert.equal(targets.length, 16, `expected 16 targets, found: ${targets.join(", ")}`);
 
   const seenKeys = new Set();
   for (const targetName of targets) {
@@ -219,7 +219,7 @@ test("public sources without credentials never emit auth handoffs", async (t) =>
 });
 
 test("protected providers resume capture after secret-backed Browser-App login", async (t) => {
-  for (const targetName of ["dnbhoovers.com", "leadfeeder.com", "rocketreach.com"]) {
+  for (const targetName of ["dnbhoovers.com", "leadfeeder.com", "linkedin.com", "rocketreach.com", "xing.com"]) {
     await t.test(targetName, () => {
       const fixturePath = path.join(fixturesDir, `${targetName}.json`);
       const fixture = loadJson(fixturePath);

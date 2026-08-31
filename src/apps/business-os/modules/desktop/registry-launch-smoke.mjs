@@ -29,26 +29,36 @@ const launchableModuleIds = systemAppIds.filter((id) => id !== 'desktop');
 
 const desktopAppIds = [...appSource.matchAll(/id:\s*'([^']+)'/g)]
   .map((match) => match[1])
-  .filter((id) => ['explorer', 'code-editor', 'file-viewer', 'creator'].includes(id))
+  .filter((id) => ['explorer', 'file-viewer', 'creator'].includes(id))
   .filter((id) => id !== 'file-viewer' && !moduleIds.includes(id));
 
 const launchIds = [...launchableModuleIds, ...desktopAppIds];
 assert.equal(new Set(launchIds).size, launchIds.length, 'launch target ids must be unique');
 
-for (const requiredId of ['explorer', 'code-editor', 'ctox', 'tickets', 'threads', 'knowledge', 'browser', 'credentials', 'app-store', 'reports']) {
+for (const requiredId of ['explorer', 'ctox', 'tickets', 'threads', 'knowledge', 'browser', 'credentials', 'app-store', 'importer', 'reports']) {
   assert.ok(launchIds.includes(requiredId), `launch targets must include ${requiredId}`);
 }
 
-for (const storeOnlyId of ['conversations', 'outbound', 'research']) {
+for (const storeOnlyId of ['conversations', 'outbound', 'mail']) {
   assert.ok(!launchIds.includes(storeOnlyId), `uninstalled store app must not be a launch target: ${storeOnlyId}`);
 }
 
-for (const requiredId of ['explorer', 'code-editor']) {
+assert.equal(
+  launchIds.filter((id) => id === 'importer').length,
+  1,
+  'App Importer must have exactly one launch target'
+);
+
+for (const requiredId of ['explorer']) {
   assert.ok(
     appSource.includes(requiredId),
     `Start menu source must explicitly include or discover ${requiredId}`
   );
 }
+assert.ok(
+  !desktopAppIds.includes('code-editor'),
+  'Source Editor must stay embedded in each app and must not be a standalone launch target'
+);
 assert.ok(appSource.includes('uncategorized'), 'Start menu must render uncategorized launch targets');
 assert.ok(
   appSource.includes('nonWindowedModuleIds.has(app.id)'),

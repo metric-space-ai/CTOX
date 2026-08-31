@@ -349,9 +349,8 @@ documents is `runtime/business-os-rxdb.sqlite3` as above.
 - **Signaling URL, browser:** `sync.js::signalingUrlWithBrowserMetadata` sets
   `client=ctox-business-os-browser`, `role=browser`, `instance_id`,
   `protocol=ctox-rxdb-protocol-v1`, `cap=` for each browser capability, and a
-  separate browser-role token with `token_iat`/`token_exp` (24 h TTL). The
-  browser verifies that token against its SHA-256 commitment and fails closed
-  if the explicit token or either role commitment is absent.
+  a browser-only token = first 32 chars of base64url(SHA-256(room password))
+  with `token_iat`/`token_exp` (24 h TTL).
 - **Signaling URL, native:** `rxdb_peer.rs::signaling_url_with_native_metadata`
   uses the stable `ctox-core-{instance hash}` identity,
   `role=ctox_instance`, and a separate random credential persisted only in
@@ -363,14 +362,8 @@ documents is `runtime/business-os-rxdb.sqlite3` as above.
   role. Re-labeling a browser connection as `ctox_instance` therefore fails;
   changing a commitment moves the peer into another namespace. Missing or
   invalid bindings fail closed. Canonical `wss://signaling.ctox.dev` URLs are
-  migrated to the strict role-bound `/v2` endpoint. Browser bootstrap payloads
-  contain only the browser-role token, never the underlying room secret or the
-  native-role token. `ctox business-os peer rotate` rotates both role
-  credentials for incident response; the narrower `rotate-room` and
-  `rotate-native` commands are available for controlled maintenance. The
-  signaling worker root is retired with HTTP 410; role-bound CTOX clients use
-  `/v2`, while the separate Metric Space compatibility route remains scoped to
-  its own host/path and credential contract.
+  migrated to the strict role-bound `/v2` endpoint; the worker root remains a
+  temporary compatibility path for pre-v2 clients.
 - **Token freshness is re-stamped per connect attempt on BOTH sides.**
   Browser: `webrtc-native.mjs::buildSignalingUrl` rewrites
   `token_iat`/`token_exp` keeping the original TTL length on every connect.
@@ -729,7 +722,7 @@ that fails on the pre-fix code.
 | **Desktop file bytes are demand-fetched, not background-pulled or query-fetched.** `desktop_file_chunks` remains the native chunk store and browser upload push surface, but file viewing reads bytes via `rxdb.file.fetch` on `desktop_files`; the native source loads the active generation by deterministic chunk ids. | Opening a file or granting file access started normal `desktop_file_chunks` replication or `rxdb.query.fetch` over the chunk collection; native file fetches then used a Mango JSON full scan over the chunk table. Both paths could drive sustained SCTP/SQLite CPU while the daemon had no queued work. | `sync.js::isDemandOnlyPullCollection`, `replication-webrtc.mjs::shouldAttachQueryDemandLoader`, `file-viewer/app.js`, `file-demand-loader.mjs`, `rxdb_peer.rs::stream_demand_file_chunks` | `chunk-query-demand-disabled-smoke`; `demand_file_source_streams_active_desktop_file_generation` |
 | **The desktop-file idle scan must not re-check every chunk of a verified generation.** Newly written or once-verified eager file docs carry `chunk_count` and `generation_verified_at_ms`; unchanged rescans use that marker instead of rebuilding the expected chunk-id list every 15 s. | Materialised large files stayed sticky `available`, but the idle scan still checked every expected chunk id on every pass. Large files therefore created periodic CPU spikes even when no file changed. | `rxdb_peer.rs::desktop_file_generation_verified_by_metadata` / `mark_desktop_file_chunk_generation_verified` | `materialized_large_file_survives_lazy_rescan`; targeted `rxdb_peer.rs` tests |
 | **Active-collection gating must never lose events permanently.** Three sub-rules: (a) a peer that has never reported an active set is fail-open (all relays delivered) until its first report; (b) applying a new active set pushes one resync master-change per re-activated collection (closes the send→apply transit window); (c) the browser runs one checkpoint pull per newly-activated collection on every registry change. | Relays for "inactive" collections are dropped and browser pulls are purely event-driven — each hole left a collection permanently stale (viewer-restart soak mode: the browser file doc stayed `lazy` forever while the native doc was `available`). | `connection_handler_rs.rs::is_collection_active_for_peer` / `apply_active_collections` (+ the resync push in its message loop); relay drop point in `index_mod.rs`; `replication-webrtc.mjs` registry subscription | gating tests in `connection_handler_rs.rs`; `active-collections-catchup-smoke` (browser); viewer-restart soak mode |
-| **The native-master multiplex handshake carries per-collection checkpoints** (`collectionCheckpoints`, mirroring `collectionSchemas`; key absent for single-collection rooms). The symmetric browser response carries every `collectionSchemas` entry but omits browser checkpoints: CTOX always elects native master for a browser peer, so those checkpoints are not consumed and must not block authorization. | Collections deriving their protocol from the native room handshake advertised the REPRESENTATIVE collection's checkpoint epoch — wrong-collection checkpoint evidence after every native restart. Conversely, reading ~192 unused browser IndexedDB checkpoints before answering the native `ctoxProtocol` request exceeded its 60 s deadline, so native never sent `token` and the whole room reconnected forever. | Native payload: `index_mod.rs::collection_checkpoints_payload`; consumed by `replication-webrtc.mjs::remoteProtocolForCollection`. Browser response: `SharedRoomPeer.buildProtocolPayloadUncached` schema-only room map. | `handshake_payload_omits_collection_schemas_when_none`; `handshake-checkpoints-parallel-smoke.mjs` |
+| **The multiplex room handshake carries per-collection checkpoints** (`collectionCheckpoints`, mirroring `collectionSchemas`; key absent for single-collection rooms). | Collections deriving their protocol from the room handshake advertised the REPRESENTATIVE collection's checkpoint epoch — wrong-collection checkpoint evidence after every native restart. | `index_mod.rs::collection_checkpoints_payload`; consumed by `replication-webrtc.mjs::remoteProtocolForCollection` | `handshake_payload_omits_collection_schemas_when_none` |
 | **Native schema-version cleanup runs only after an additive migration copied and verified every source row.** Identity migrations are idempotent, preserve the newer destination row by `lastWriteTime`, and abort peer bring-up when any source id is absent or older in the destination. | Creating v1 metadata/table and crashing before the copy let the next startup classify the non-empty v0 table as stale and delete the only complete thread history. | `rxdb_peer.rs::migrate_additive_native_rxdb_collection_versions`, called after collection registration and before `repair_stale_rxdb_collection_schema_versions` | `additive_thread_schema_migration_copies_and_verifies_before_cleanup` |
 | **Runtime app migrations are declared in JSON and enforced natively.** The browser side mirrors declarations (guarded for parity by `assert-declarative-migrations.mjs`) but execution is native-only. Every runtime collection with `version > 0` must provide every intermediate `migration_strategies.<collection>.<targetVersion>` entry. The native peer supports the same `set_from_first_truthy` and `set_boolean` operations as the browser plus identity migrations (`operations: []`). Missing strategies with persisted source rows abort before cleanup. | Browser-only `schema.js` functions left the native v0 store stranded or tempted operators into destructive same-version cleanup; schema changes made in place could also produce DB6 forever. | `shared/declarative-migrations.js`, `module_static_check.mjs`, `rxdb_peer.rs::migrate_additive_native_rxdb_collection_versions` | `runtime_installed_declarative_migration_is_discovered_and_copied`, `native_declarative_migration_matches_browser_operations`, `runtime_migration_without_strategy_retains_old_table_and_fails_closed` |
 | **A terminal `completed` command ack without `task_id` is success.** Control commands (`ctox.file.materialize`, `ctox.module.*`, …) are executed directly and intentionally never get a queue-task projection. | The command bus waited 45 s for a task that never comes — every control command dispatched through it failed. | `command-bus.js::waitForAuthoritativeQueueProjection` | `command-bus-projection-smoke` |
@@ -879,6 +872,101 @@ success. `ctox.module.set_visible` is the first registered two-step saga
 (runtime visibility then RxDB catalog projection) and restores the original
 visibility if projection fails.
 
+### 9.1 Device-bound Workjet grants
+
+`ctox business-os mobile-invite create` remains backward-compatible when no
+device flags are supplied. A managed Workjet pairing supplies all three flags
+together: `--device-pairing-id`, `--device-id`, and
+`--proof-key-thumbprint` (the 43-character base64url RFC 7638 SHA-256
+thumbprint of a P-256 public JWK). Partial tuples are rejected. The issuer JSON
+echoes the adapter acknowledgement as `businessOsInstanceId`, `grantId`,
+`deviceId`, `proofKeyThumbprint`, `expiresAt`, and `invite`; it never contains
+the P-256 private key. Revocation accepts either the opaque invite id or,
+additively, `--device-pairing-id`.
+
+The tuple is persisted in nullable columns on `business_mobile_invites` and is
+also HMAC-bound into the capability (`device_pairing_id`, `device_id`, and
+`cnf.jkt`). Existing rows and ordinary Business OS capabilities remain
+unbound. A bound capability is never accepted as an HTTP Bearer session.
+
+The unified Workjet QR flow intentionally starts unbound because the desktop
+does not know the phone's key before it scans the code. The first native
+DataChannel handshake must complete the nonce-bound proof below before the
+peer captures the token. CTOX then atomically binds that invite's unique user
+to the P-256 thumbprint. The QR expiry limits this first use only. Reconnects
+are authorized by the still-active Device-to-Instance edge, the actor's native
+capability epoch, and a fresh proof; revoking either the edge or actor epoch
+fails closed. The interactive token's normal expiry is never relaxed for HTTP.
+
+On WebRTC, the native peer puts a fresh 32-byte base64url nonce in its outbound
+`ctoxProtocol.peerSession.deviceProofNonce`. The browser calls exactly this
+host boundary:
+
+```js
+Object.defineProperty(globalThis, 'ctoxWorkjetDeviceProofProvider', {
+  value: async (nonce) => ({
+    publicJwk: { kty: 'EC', crv: 'P-256', x, y },
+    signature,
+  }),
+  writable: false,
+  configurable: false,
+  enumerable: false,
+});
+```
+
+`signature` is base64url without padding of the 64-byte IEEE-P1363 P-256
+ECDSA/SHA-256 signature over the UTF-8 bytes of `nonce`. Workjet must keep the
+private key in its native key store; the callback exposes only the signature
+and public JWK. The shell sanitizes those two public values into
+`peerSession.deviceProof`. The callback is invoked once per native challenge,
+including every reconnect, and its result is never cached. A rejection or
+exception is treated like a missing proof. Missing provider, wrong key thumbprint, malformed
+signature, missing/stale nonce, revoked tuple, or partial claims fail closed
+before the native peer captures the capability or starts replication. An
+unbound legacy token needs no proof and keeps the existing path. This is an
+authentication extension inside the existing DataChannel handshake, not an
+HTTP data bridge.
+
+### 9.2 Workjet device control is an auxiliary WebRTC method
+
+Device invitation and binding management use the existing authenticated
+RxDB/WebRTC connection. The multiplexed native peer registers exactly one
+auxiliary method, `ctox.workjet.device.v1`. Its single parameter is an exact
+`WorkjetDeviceWebRtcRequestV1` object with one of these actions; unknown fields
+and actions are rejected. Native results are validated and serialized through
+the untagged `WorkjetDeviceWebRtcResponseV1` envelope before they cross the
+DataChannel:
+
+| action | fields | result |
+|---|---|---|
+| `invite.create` | `ttlSeconds?`, `displayName?` | the existing versioned Workjet/Business-OS invite envelope, returned only on the DataChannel |
+| `invite.revoke` | `inviteId` | `{ revoked: true }` |
+| `binding.list` | none | `ctox.workjet-device-bindings.v1` with non-secret device metadata and `inviteIdHash` |
+| `binding.revoke` | `bindingId` | `{ revoked: true }` |
+
+The shell exposes this method as
+`globalThis.workjetBusinessOsDeviceControl(request)` and the native
+mobile host forwards the same request through the bounded
+`device.control`/`device.control.result` lifecycle bridge. Invite secrets are
+never written to RxDB, HTTP, logs, reports, or the binding list. Cloudflare WSS
+is used only by the normal WebRTC signaling exchange; it does not implement
+this method and stores no device edge.
+
+Each binding summary includes `inviteIdHash`, the lowercase hexadecimal
+SHA-256 digest of the one-time `inviteId`. The inviting Workjet installation
+hashes its in-memory invite ID locally and closes the QR only after
+`binding.list` reports a paired edge with that exact digest. The raw invite ID
+is never returned by `binding.list`; accepting an arbitrary new device edge or
+comparing the device proof thumbprint to the invite ID is forbidden.
+
+`invite.create` places only a 32-byte base64url bootstrap secret in the invite's
+`session.capability_token`; CTOX stores only its SHA-256 hash. The secret is not
+an HTTP bearer. Before first-use expiry it resolves to the pending actor only
+inside the native WebRTC verifier. A successful nonce/P-256 proof atomically
+adds the device id and proof-key thumbprint to the invite row. Later reconnects
+require that exact active Device-to-Instance edge; revoke disables both the row
+and actor epoch. This keeps the QR compact without an online reference service.
+
 ## 10. Build & release
 
 `dist/ctox-rxdb-js.mjs` is **built** from `src/index.mjs` with a pinned
@@ -893,11 +981,11 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
   "--banner:js=// CTOX Sync Engine app-local bundle. Generated from src/apps/business-os/rxdb/src/index.mjs."
 ```
 
-**Cache-buster discipline.** The bundle is imported by three `?v=` expressions
-across two files, which must always carry the **identical** value:
+**Cache-buster discipline.** The bundle is imported with a `?v=` query in
+exactly three places, which must always carry the **identical** value:
 
 - `src/apps/business-os/shared/db.js` (`RXDB_BUNDLE_URL`)
-- `src/apps/business-os/shared/sync.js` (coordinator and replication fallback imports)
+- `src/apps/business-os/shared/sync.js` (two fallback dynamic imports)
 
 App modules do **not** import the bundle directly — they receive the database
 handle from the shell facade (`setBusinessOsDatabaseContext`). The matching
@@ -906,9 +994,9 @@ facade, so it carries no buster and is no longer checked by the guard.
 
 A mismatch makes the browser load a **second copy of the bundle** — two
 module graphs, two shared-room-peer registries, duplicate peers in the room.
-After any `src/` change: rebuild dist with the command above **and** bump the
-buster in both files (current value at the time of writing:
-`20260828-sync-security-v195`).
+After any `src/` change: rebuild dist with the command above **and** bump all
+three occurrences (current value at the time of writing:
+`20260827-device-proof-v185`).
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build
 anything: it verifies the manifest identity (name/public name,
@@ -944,6 +1032,7 @@ not noise — never delete or weaken a test to make the suite pass.*
 | `data-plane-guard-smoke` | **Guard (ratchet):** WebRTC-only, package-manager-free, env-toggle-free data plane; new forbidden occurrences fail, allowlist changes require an architecture decision recorded here. |
 | `demand-loader-smoke` | Window cache hit/miss, single remote fetch, dedup. |
 | `demand-loading-transport-smoke` | `replicateWebRTC` builds the demand transport; request/chunk correlation. |
+| `device-proof-smoke` | Native nonce-only Workjet callback boundary, public-only proof sanitizing, and no software-key fallback. |
 | `end-to-end-loop-smoke` | Full V1.5 demand-loading loop. |
 | `error-classification-corpus-smoke` | Shared corpus for the load-bearing error$ cascade order (control-plane → schema → IO → shutdown → lifecycle → blip → generic), incl. order-pin cases; the rxdb-rs twin keeps `ctox_rxdb_*` codes aligned with the generated contract. |
 | `eviction-scheduler-smoke` | Sidecar eviction over budget. |

@@ -1,4 +1,4 @@
-import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260811-fremde-collection-mitladen-v106';
+import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
 
@@ -175,8 +175,10 @@ const labels = {
     auxHide: 'Status & Quellen ausblenden',
     harnessKicker: 'Harness',
     taskSearch: 'Tasks suchen',
-    cardsView: 'Shard-Ansicht',
+    cardsView: 'Kachelansicht',
     compactFlowView: 'Kompakter Live Flow',
+    showAsList: 'Als Liste anzeigen',
+    showAsCards: 'Als Karten anzeigen',
     filters: 'Filter',
     resetFilters: 'Filter zurücksetzen',
     allSources: 'Alle Quellen',
@@ -353,8 +355,10 @@ const labels = {
     auxHide: 'Hide status & sources',
     harnessKicker: 'Harness',
     taskSearch: 'Search tasks',
-    cardsView: 'Shard view',
+    cardsView: 'Card view',
     compactFlowView: 'Compact live flow',
+    showAsList: 'Show as list',
+    showAsCards: 'Show as cards',
     filters: 'Filters',
     resetFilters: 'Reset filters',
     allSources: 'All sources',
@@ -936,6 +940,16 @@ function wireTaskColumn(state) {
       exportVisibleTasks(state);
       return;
     }
+    // One-button view switch: the shell's grammar listener has already run on
+    // the same click (target phase) and reported the UNCHANGED current view, so
+    // flipping here is the single source of the mode change.
+    const viewToggle = target.closest('[data-ctox-view-toggle]');
+    if (viewToggle) {
+      state.taskViewMode = state.taskViewMode === 'list' ? 'cards' : 'list';
+      syncViewToggleButton(state, viewToggle);
+      renderTaskList(state);
+      return;
+    }
     const direction = target.closest('[data-task-sort-direction]');
     if (direction) {
       state.taskSortDirection = state.taskSortDirection === 'asc' ? 'desc' : 'asc';
@@ -1190,6 +1204,32 @@ function wireTaskSourceReadiness(state) {
   };
 }
 
+// Betreiber-Direktive 31.08.2026: the shard/list switch is ONE control, not a
+// pressed pair. The icon and the label name the view the click switches TO, so
+// the button is an action and carries no aria-pressed state.
+//
+// `data-pg-view` stays on it (the shell's canonical grammar reads the pane's
+// view from there) but always holds the CURRENT view: an unrelated grammar emit
+// — a search keystroke, a tray filter, a band tab — recomputes `detail.view`
+// from this attribute and must never flip the mode as a side effect.
+function viewToggleLabel(state) {
+  const t = labels[state.lang];
+  return state.taskViewMode !== 'list' ? t.showAsList : t.showAsCards;
+}
+
+function syncViewToggleButton(state, button) {
+  if (!button) return;
+  const cards = state.taskViewMode !== 'list';
+  const label = viewToggleLabel(state);
+  button.setAttribute('data-pg-view', cards ? 'cards' : 'list');
+  // The shell's generic view-button wiring stamps aria-pressed on click; a
+  // single toggle is an action, so the state attribute is removed again.
+  button.removeAttribute('aria-pressed');
+  button.setAttribute('aria-label', label);
+  button.setAttribute('title', label);
+  button.innerHTML = cards ? listViewIcon() : cardsViewIcon();
+}
+
 function taskColumnMarkup(tasks, state, options = {}) {
   const t = labels[state.lang];
   const counts = taskPrimaryViewCounts(tasks, state);
@@ -1211,35 +1251,32 @@ function taskColumnMarkup(tasks, state, options = {}) {
           <button type="button" class="ctox-pane-icon" data-task-export aria-label="${escapeAttr(t.exportTasks)}" title="${escapeAttr(t.exportTasks)}">${actionIcon(state, 'export')}</button>
         </div>
       </div>
-      <div class="ctox-filterbar">
-        <input class="ctox-pane-search" type="search" data-pg-search value="${escapeAttr(state.taskSearch || '')}" placeholder="${escapeAttr(t.taskSearch)}" aria-label="${escapeAttr(t.taskSearch)}">
-        <div class="ctox-view-toggle" role="group" aria-label="${escapeAttr(t.mode)}">
-          <button type="button" class="ctox-pane-icon" data-pg-view="cards" aria-pressed="${cards}" aria-label="${escapeAttr(t.cardsView)}" title="${escapeAttr(t.cardsView)}">${cardsViewIcon()}</button>
-          <button type="button" class="ctox-pane-icon" data-pg-view="list" aria-pressed="${!cards}" aria-label="${escapeAttr(t.compactFlowView)}" title="${escapeAttr(t.compactFlowView)}">${listViewIcon()}</button>
-        </div>
-        <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="${escapeAttr(t.filters)}" title="${escapeAttr(t.filters)}">${actionIcon(state, 'filter')}</button>
-      </div>
-      <div class="ctox-filter-tray" data-pg-tray hidden>
-        <div class="ctox-filter-row">
-          <select class="ctox-select" data-pg-filter data-pg-name="source" data-pg-default="all" aria-label="${escapeAttr(t.source)}">
-            <option value="all">${escapeHtml(t.allSources)}</option>
-            ${sourceOptions.map((item) => `<option value="${escapeAttr(item.value)}" ${state.taskSourceFilter === item.value ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('')}
-          </select>
-          <select class="ctox-select" data-pg-filter data-pg-name="pin" data-pg-default="all" aria-label="${escapeAttr(t.pinned)}">
-            <option value="all" ${state.taskPinFilter !== 'pinned' ? 'selected' : ''}>${escapeHtml(t.allTasks)}</option>
-            <option value="pinned" ${state.taskPinFilter === 'pinned' ? 'selected' : ''}>${escapeHtml(t.pinnedOnly)}</option>
-          </select>
-          <select class="ctox-select" data-pg-filter data-pg-name="sort" data-pg-default="updated" aria-label="${escapeAttr(t.newestFirst)}">
-            <option value="updated" ${state.taskSort === 'updated' ? 'selected' : ''}>${escapeHtml(t.sortUpdated)}</option>
-            <option value="title" ${state.taskSort === 'title' ? 'selected' : ''}>${escapeHtml(t.sortTitle)}</option>
-            <option value="source" ${state.taskSort === 'source' ? 'selected' : ''}>${escapeHtml(t.sortSource)}</option>
-            <option value="status" ${state.taskSort === 'status' ? 'selected' : ''}>${escapeHtml(t.sortStatus)}</option>
-          </select>
-          <button type="button" class="ctox-sort-dir" data-task-sort-direction aria-label="${escapeAttr(t.sortDirection)}" title="${escapeAttr(t.sortDirection)}">${actionIcon(state, state.taskSortDirection === 'asc' ? 'chevronUp' : 'chevronDown')}</button>
-          <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="${escapeAttr(t.resetFilters)}" title="${escapeAttr(t.resetFilters)}">${resetIcon()}</button>
-        </div>
-      </div>
     </header>
+    <div class="ctox-filterbar">
+      <input class="ctox-pane-search" type="search" data-pg-search value="${escapeAttr(state.taskSearch || '')}" placeholder="${escapeAttr(t.taskSearch)}" aria-label="${escapeAttr(t.taskSearch)}">
+      <button type="button" class="ctox-pane-icon ctox-view-mode-toggle" data-ctox-view-toggle data-pg-view="${cards ? 'cards' : 'list'}" aria-label="${escapeAttr(viewToggleLabel(state))}" title="${escapeAttr(viewToggleLabel(state))}">${cards ? listViewIcon() : cardsViewIcon()}</button>
+      <button type="button" class="ctox-pane-icon ctox-filter-toggle" data-pg-tray-toggle aria-expanded="false" aria-label="${escapeAttr(t.filters)}" title="${escapeAttr(t.filters)}">${actionIcon(state, 'filter')}</button>
+    </div>
+    <div class="ctox-filter-tray" data-pg-tray hidden>
+      <div class="ctox-filter-row">
+        <select class="ctox-select" data-pg-filter data-pg-name="source" data-pg-default="all" aria-label="${escapeAttr(t.source)}">
+          <option value="all">${escapeHtml(t.allSources)}</option>
+          ${sourceOptions.map((item) => `<option value="${escapeAttr(item.value)}" ${state.taskSourceFilter === item.value ? 'selected' : ''}>${escapeHtml(item.label)}</option>`).join('')}
+        </select>
+        <select class="ctox-select" data-pg-filter data-pg-name="pin" data-pg-default="all" aria-label="${escapeAttr(t.pinned)}">
+          <option value="all" ${state.taskPinFilter !== 'pinned' ? 'selected' : ''}>${escapeHtml(t.allTasks)}</option>
+          <option value="pinned" ${state.taskPinFilter === 'pinned' ? 'selected' : ''}>${escapeHtml(t.pinnedOnly)}</option>
+        </select>
+        <select class="ctox-select" data-pg-filter data-pg-name="sort" data-pg-default="updated" aria-label="${escapeAttr(t.newestFirst)}">
+          <option value="updated" ${state.taskSort === 'updated' ? 'selected' : ''}>${escapeHtml(t.sortUpdated)}</option>
+          <option value="title" ${state.taskSort === 'title' ? 'selected' : ''}>${escapeHtml(t.sortTitle)}</option>
+          <option value="source" ${state.taskSort === 'source' ? 'selected' : ''}>${escapeHtml(t.sortSource)}</option>
+          <option value="status" ${state.taskSort === 'status' ? 'selected' : ''}>${escapeHtml(t.sortStatus)}</option>
+        </select>
+        <button type="button" class="ctox-sort-dir" data-task-sort-direction aria-label="${escapeAttr(t.sortDirection)}" title="${escapeAttr(t.sortDirection)}">${actionIcon(state, state.taskSortDirection === 'asc' ? 'chevronUp' : 'chevronDown')}</button>
+        <button type="button" class="ctox-sort-dir" data-pg-reset aria-label="${escapeAttr(t.resetFilters)}" title="${escapeAttr(t.resetFilters)}">${resetIcon()}</button>
+      </div>
+    </div>
     <nav class="ctox-view-switch" aria-label="${escapeAttr(t.tasks)}">
       <div class="ctox-pane-tabs" role="tablist">
         ${taskViewTab('all', t.viewAll, counts.all, state)}
@@ -1260,19 +1297,26 @@ function taskViewTab(view, label, count, state) {
   return `<button type="button" class="ctox-pane-tab ${selected ? 'is-active' : ''}" role="tab" data-pg-band="${escapeAttr(view)}" aria-selected="${selected}">${escapeHtml(label)}<span class="view-count" data-pg-count="${escapeAttr(view)}"> (${count})</span></button>`;
 }
 
+// Card view (Betreiber-Direktive 31.08.2026): the roomy shard — bold title,
+// one meta row carrying the detail fields the console already loads (status,
+// assignment/source, last change) and the labelled four-stage pipeline.
 function taskCardMarkup(task, state) {
   const t = labels[state.lang];
   const selected = task.id === state.selectedTaskId;
   const pinned = state.pinnedTaskIds.has(task.id);
   const title = taskDisplayTitle(task, state);
   const source = task.channelLabel || displayWorkSource(task.channel || task.source || task.moduleId || 'ctox');
-  const meta = [source, displayStatus(task.routeStatus || task.status, state.lang), formatShortTimestamp(task.updatedAt || task.createdAt || task.timestamp)].filter(Boolean).join(' · ');
+  const status = displayStatus(task.routeStatus || task.status, state.lang);
+  const changed = formatShortTimestamp(task.updatedAt || task.createdAt || task.timestamp);
+  const problem = ['blocked', 'failed', 'cancelled'].includes(normalizeCommandStatus(task.routeStatus || task.status));
+  const detail = [source, changed].filter(Boolean)
+    .map((value) => `<span>${escapeHtml(value)}</span>`).join('');
   return `
     <article class="ctox-list-item ctox-task-card ${selected ? 'is-selected' : ''} ${pinned ? 'is-pinned' : ''}"
       data-task-id="${escapeAttr(task.id)}" data-context-record-id="${escapeAttr(task.id)}" data-context-record-type="ctox_task" data-context-label="${escapeAttr(title)}">
       <button type="button" class="ctox-task-selector" data-select-task-id="${escapeAttr(task.id)}" aria-label="${escapeAttr(`${t.openTaskDetail}: ${title}`)}">
         <strong>${escapeHtml(title)}</strong>
-        <small>${escapeHtml(meta)}</small>
+        <small class="ctox-task-meta">${status ? `<span class="ctox-task-meta-status ${problem ? 'is-problem' : ''}">${escapeHtml(status)}</span>` : ''}${detail}</small>
         ${taskPipelineMarkup(task, state)}
       </button>
       <div class="ctox-task-actions">
@@ -1282,17 +1326,21 @@ function taskCardMarkup(task, state) {
   `;
 }
 
+// List view (Betreiber-Direktive 31.08.2026): EXACTLY one dense line per entry
+// — title plus a single short meta on the right. The four-stage pipeline stays
+// in the markup as a 4-segment micro bar (its stage labels are screen-reader
+// text in list mode, see index.css); every other detail field belongs to the
+// card view.
 function compactTaskFlowRow(task, state) {
   const t = labels[state.lang];
   const selected = task.id === state.selectedTaskId;
   const pinned = state.pinnedTaskIds.has(task.id);
   const title = taskDisplayTitle(task, state);
-  const source = task.channelLabel || displayWorkSource(task.channel || task.source || task.moduleId || 'ctox');
   return `
     <article class="ctox-list-item ctox-task-flow-row ${selected ? 'is-selected' : ''} ${pinned ? 'is-pinned' : ''}"
       data-compact-flow data-task-id="${escapeAttr(task.id)}" data-context-record-id="${escapeAttr(task.id)}" data-context-record-type="ctox_task" data-context-label="${escapeAttr(title)}">
       <button type="button" class="ctox-task-selector" data-select-task-id="${escapeAttr(task.id)}" aria-label="${escapeAttr(`${t.openTaskDetail}: ${title}`)}">
-        <span class="ctox-task-flow-copy"><strong>${escapeHtml(title)}</strong><small>${escapeHtml(source)}</small></span>
+        <strong>${escapeHtml(title)}</strong>
         ${taskPipelineMarkup(task, state, { compact: true })}
       </button>
       <div class="ctox-task-actions">

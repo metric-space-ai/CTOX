@@ -12,5 +12,7 @@
   "viewActive": "Aktiv",
   "viewEnded": "Beendet",
   "composerTitle": "Vermittlung anlegen",
-  "earlyLeave": "Frühausstieg"
+  "earlyLeave": "Frühausstieg",
+  "showAsList": "Als Liste anzeigen",
+  "showAsCards": "Als Karten anzeigen"
 }
