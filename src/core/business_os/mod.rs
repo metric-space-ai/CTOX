@@ -21,6 +21,7 @@ mod iot_supervision;
 pub mod mcp_channel;
 pub mod mobile_invites;
 mod module_lifecycle;
+mod module_manifest_loader;
 pub mod office_engine;
 mod person_research_command;
 pub mod policy;

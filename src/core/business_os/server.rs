@@ -36,6 +36,7 @@ use tiny_http::Server;
 use url::Url;
 use uuid::Uuid;
 
+use super::module_manifest_loader::{load_module_manifests, upsert_module_manifest};
 use super::policy;
 use super::store;
 
@@ -59,58 +60,6 @@ struct PendingChatgptSubscriptionLogin {
 #[derive(Debug, Clone)]
 pub struct BusinessOsServeOptions {
     pub addr: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModuleManifest {
-    id: String,
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    category: String,
-    #[serde(default)]
-    version: String,
-    #[serde(default)]
-    developer: String,
-    #[serde(default)]
-    license: String,
-    #[serde(default)]
-    tags: Vec<String>,
-    #[serde(default)]
-    store: Value,
-    #[serde(default)]
-    install_scope: String,
-    #[serde(default)]
-    default_installed: bool,
-    #[serde(default)]
-    entry: String,
-    #[serde(default)]
-    collections: Vec<String>,
-    #[serde(default)]
-    layout: Value,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    launch_kind: String,
-    #[serde(default, skip_serializing_if = "Value::is_null")]
-    presentation: Value,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    icon: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    icon_path: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    icon_svg: String,
-    #[serde(default)]
-    source: String,
-    #[serde(default)]
-    core: bool,
-    #[serde(default)]
-    editable: bool,
-    #[serde(default)]
-    deletable: bool,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    manifest_sha256: String,
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    local_manifest_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,20 +122,6 @@ const MAX_DESIGN_TEMPLATE_CSS_BYTES: usize = 256 * 1024;
 #[derive(Debug, Clone, Deserialize)]
 struct KnowledgeCommandRequest {
     args: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct UpsertModuleRequest {
-    id: String,
-    title: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    entry: String,
-    #[serde(default)]
-    collections: Vec<String>,
-    #[serde(default)]
-    layout: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -698,7 +633,7 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 request,
                 &serde_json::json!({
                     "ok": true,
-                    "modules": load_module_manifests(root, app_root, &installed_app_root)?,
+                    "modules": load_module_manifests(root, app_root, &installed_app_root)?.manifests,
                     "governance": store::module_governance_map(root, &session)?
                 }),
             )?;
@@ -717,7 +652,7 @@ fn handle_request(root: &Path, app_root: &Path, mut request: Request) -> anyhow:
                 respond_status(request, 401, "login required")?;
             } else {
                 let body = read_json(&mut request)?;
-                let mutation: UpsertModuleRequest = serde_json::from_value(body)?;
+                let mutation: store::ModuleUpsertRequest = serde_json::from_value(body)?;
                 if !store::session_can_modify_module(root, &session, &mutation.id)? {
                     respond_status(request, 403, "module modification rights required")?;
                     return Ok(());
@@ -2281,195 +2216,6 @@ fn respond_redirect_with_cookie(
     Ok(())
 }
 
-fn load_module_manifests(
-    root: &Path,
-    source_app_root: &Path,
-    installed_app_root: &Path,
-) -> anyhow::Result<Vec<ModuleManifest>> {
-    let app_root = source_app_root;
-    let modules_root = app_root.join("modules");
-    let mut manifests = Vec::new();
-    if modules_root.is_dir() {
-        for entry in fs::read_dir(&modules_root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let path = entry.path().join("module.json");
-            if !path.is_file() {
-                continue;
-            }
-            let text = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-            let manifest_value: Value = serde_json::from_str(&text)
-                .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
-            if super::customer_apps::authorize_global_module(&entry.path(), &manifest_value)
-                .is_err()
-            {
-                continue;
-            }
-            let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
-                .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
-            manifest.manifest_sha256 = hex_sha256(text.as_bytes());
-            manifest.local_manifest_path = path.display().to_string();
-            backfill_local_module_icon(&mut manifest, &entry.path());
-            if manifest.entry.is_empty() {
-                manifest.entry = format!("modules/{}/index.html", manifest.id);
-            }
-            let declared_scope = manifest.install_scope.trim().to_ascii_lowercase();
-            let scope = match (store::is_core_module(&manifest.id), declared_scope.as_str()) {
-                (true, _) => "core",
-                (false, "internal") => "internal",
-                // `starter` is retired; old manifests remain marketplace apps.
-                _ => continue,
-            };
-            let core = scope == "core";
-            manifest.install_scope = scope.to_owned();
-            manifest.default_installed = true;
-            manifest.source = scope.to_owned();
-            manifest.core = core;
-            manifest.editable = true;
-            manifest.deletable = !core;
-            manifests.push(manifest);
-        }
-    }
-    for manifest in load_installed_module_manifests(root, installed_app_root)? {
-        if manifests.iter().any(|existing| existing.id == manifest.id) {
-            continue;
-        }
-        manifests.push(manifest);
-    }
-    for manifest in load_local_module_manifests(root, installed_app_root)? {
-        if manifests.iter().any(|existing| existing.id == manifest.id) {
-            continue;
-        }
-        manifests.push(manifest);
-    }
-    manifests.sort_by(|a, b| match (a.id.as_str(), b.id.as_str()) {
-        ("ctox", "ctox") => std::cmp::Ordering::Equal,
-        ("ctox", _) => std::cmp::Ordering::Less,
-        (_, "ctox") => std::cmp::Ordering::Greater,
-        _ => a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)),
-    });
-    Ok(manifests)
-}
-
-fn load_installed_module_manifests(
-    root: &Path,
-    app_root: &Path,
-) -> anyhow::Result<Vec<ModuleManifest>> {
-    let modules_root = app_root.join("installed-modules");
-    let mut manifests = Vec::new();
-    if !modules_root.is_dir() {
-        return Ok(manifests);
-    }
-    for entry in fs::read_dir(&modules_root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let path = entry.path().join("module.json");
-        if !path.is_file() {
-            continue;
-        }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let manifest_value: Value = serde_json::from_str(&text)
-            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
-        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
-            .is_err()
-        {
-            continue;
-        }
-        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
-            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
-        manifest.manifest_sha256 = hex_sha256(text.as_bytes());
-        manifest.local_manifest_path = path.display().to_string();
-        backfill_local_module_icon(&mut manifest, &entry.path());
-        if store::is_core_module(&manifest.id) {
-            continue;
-        }
-        if manifest.entry.is_empty() {
-            manifest.entry = format!("installed-modules/{}/index.html", manifest.id);
-        }
-        manifest.source = "installed".to_owned();
-        manifest.install_scope = "installed".to_owned();
-        manifest.default_installed = false;
-        manifest.core = false;
-        manifest.editable = true;
-        manifest.deletable = true;
-        manifests.push(manifest);
-    }
-    Ok(manifests)
-}
-
-fn load_local_module_manifests(
-    root: &Path,
-    app_root: &Path,
-) -> anyhow::Result<Vec<ModuleManifest>> {
-    let modules_root = app_root.join("local-modules");
-    let mut manifests = Vec::new();
-    if !modules_root.is_dir() {
-        return Ok(manifests);
-    }
-    for entry in fs::read_dir(&modules_root)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let path = entry.path().join("module.json");
-        if !path.is_file() {
-            continue;
-        }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read module manifest {}", path.display()))?;
-        let manifest_value: Value = serde_json::from_str(&text)
-            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
-        if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
-            .is_err()
-        {
-            continue;
-        }
-        let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)
-            .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
-        manifest.manifest_sha256 = hex_sha256(text.as_bytes());
-        manifest.local_manifest_path = path.display().to_string();
-        backfill_local_module_icon(&mut manifest, &entry.path());
-        if store::is_core_module(&manifest.id) {
-            continue;
-        }
-        manifest.entry = format!("local-modules/{}/index.html", manifest.id);
-        manifest.source = "local".to_owned();
-        manifest.install_scope = "local".to_owned();
-        manifest.default_installed = false;
-        manifest.core = false;
-        manifest.editable = true;
-        manifest.deletable = false;
-        manifests.push(manifest);
-    }
-    Ok(manifests)
-}
-
-fn backfill_local_module_icon(manifest: &mut ModuleManifest, module_dir: &Path) {
-    if manifest.icon.trim().is_empty()
-        && manifest.icon_path.trim().is_empty()
-        && module_dir.join("icon.svg").is_file()
-    {
-        manifest.icon = "icon.svg".to_owned();
-    }
-}
-
-fn ensure_local_icon_manifest_value(manifest: &mut Value, module_dir: &Path) {
-    let existing_icon = manifest
-        .get("icon")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
-    if existing_icon.is_empty() && module_dir.join("icon.svg").is_file() {
-        manifest["icon"] = Value::String("icon.svg".to_owned());
-    }
-}
-
 fn load_template_manifests(app_root: &Path) -> anyhow::Result<Vec<TemplateManifest>> {
     let templates_root = app_root.join("template-store");
     let mut templates = Vec::new();
@@ -2799,74 +2545,6 @@ fn save_module_layout(root: &Path, layout: &Value) -> anyhow::Result<()> {
     fs::write(&path, serde_json::to_vec_pretty(&clean)?)
         .with_context(|| format!("failed to write module layout {}", path.display()))?;
     Ok(())
-}
-
-fn upsert_module_manifest(
-    source_app_root: &Path,
-    installed_app_root: &Path,
-    request: UpsertModuleRequest,
-) -> anyhow::Result<ModuleManifest> {
-    let module_id = sanitize_slug(&request.id);
-    if module_id.is_empty() {
-        anyhow::bail!("module id is required");
-    }
-    let title = request.title.trim();
-    if title.is_empty() {
-        anyhow::bail!("module title is required");
-    }
-    let is_core = store::is_core_module(&module_id);
-    let target = if is_core {
-        source_app_root.join("modules").join(&module_id)
-    } else {
-        installed_app_root
-            .join("installed-modules")
-            .join(&module_id)
-    };
-    let manifest_path = target.join("module.json");
-    if !manifest_path.is_file() {
-        anyhow::bail!(
-            "module `{module_id}` does not exist. Create new Business OS apps through the App Creator (`ctox.business_os.app.create`) or install a shipped template; `ctox.module.save` only updates existing module manifests."
-        );
-    }
-    let mut manifest_value: Value = serde_json::from_str(
-        &fs::read_to_string(&manifest_path)
-            .with_context(|| format!("failed to read {}", manifest_path.display()))?,
-    )?;
-    manifest_value["id"] = Value::String(module_id.clone());
-    manifest_value["title"] = Value::String(title.to_owned());
-    manifest_value["description"] = Value::String(request.description.trim().to_owned());
-    let entry = if is_core {
-        format!("modules/{module_id}/index.html")
-    } else if request.entry.trim().is_empty() {
-        format!("installed-modules/{module_id}/index.html")
-    } else {
-        request.entry.trim().to_owned()
-    };
-    manifest_value["entry"] = Value::String(entry);
-    manifest_value["collections"] = Value::Array(
-        request
-            .collections
-            .into_iter()
-            .map(|item| item.trim().to_owned())
-            .filter(|item| !item.is_empty())
-            .map(Value::String)
-            .collect(),
-    );
-    if !request.layout.is_null() {
-        manifest_value["layout"] = request.layout;
-    }
-    if !is_core {
-        ensure_local_icon_manifest_value(&mut manifest_value, &target);
-    }
-    fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest_value)?)
-        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
-
-    let mut manifest: ModuleManifest = serde_json::from_value(manifest_value)?;
-    manifest.source = if is_core { "core" } else { "installed" }.to_owned();
-    manifest.core = is_core;
-    manifest.editable = true;
-    manifest.deletable = !is_core;
-    Ok(manifest)
 }
 
 fn delete_installed_module(
