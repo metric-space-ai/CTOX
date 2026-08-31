@@ -131,7 +131,7 @@ test('crew creatures sleep when not working and use X eyes only for failures', (
   assert.doesNotMatch(failed, /ctox-crew-eyes-sleeping/);
 });
 
-test('review progress selects a distinct creature mode with deterministic motion phases', () => {
+test('review progress selects a distinct creature mode with durable activity telemetry', () => {
   const reviewChat = {
     id: 'chat-review',
     title: 'Prüfen',
@@ -144,7 +144,8 @@ test('review progress selects a distinct creature mode with deterministic motion
         percent: 82,
         steps: [{ position: 1, label: 'Prüfen', status: 'completed', activity_turns: 4 }],
         review: { status: 'in_progress' },
-        activity_turns: { total: 6, last_kind: 'thinking' },
+        activity_turns: { total: 6, thinking: 4, tools: 2, last_kind: 'thinking' },
+        updated_at_ms: 1720000000000,
       },
     }],
   };
@@ -152,7 +153,9 @@ test('review progress selects a distinct creature mode with deterministic motion
   const review = __businessChatTestInternals.crewCreatureHtml(reviewChat, 'running', 'window');
   assert.match(review, /is-running is-review/);
   assert.match(review, /data-crew-mode="review"/);
-  assert.match(review, /--crew-review-drift:/);
+  assert.match(review, /data-activity-turns="6"/);
+  assert.match(review, /data-activity-kind="thinking"/);
+  assert.match(review, /data-activity-updated-at="1720000000000"/);
   assert.doesNotMatch(review, /ctox-crew-eyes-sleeping|ctox-crew-eyes-x/);
 
   const workChat = { ...reviewChat, id: 'chat-working' };
@@ -162,18 +165,20 @@ test('review progress selects a distinct creature mode with deterministic motion
   }];
   const work = __businessChatTestInternals.crewCreatureHtml(workChat, 'running', 'window');
   assert.match(work, /is-running is-working/);
-  assert.match(work, /--crew-work-drift:/);
   assert.doesNotMatch(work, /is-review/);
-  assert.equal(review.match(/--crew-review-drift:[^;]+/)[0], work.match(/--crew-review-drift:[^;]+/)[0]);
   assert.equal(review, __businessChatTestInternals.crewCreatureHtml(reviewChat, 'running', 'window'));
 });
 
-test('crew motion CSS is work-only, review-specific, finite on failure, and reduced-motion safe', () => {
+test('crew motion is triggered only by durable turns, finite, and reduced-motion safe', () => {
   assert.match(businessChatSource, /function syncCrewProceduralMotion/);
   assert.match(businessChatSource, /now - state\.lastFrameAt < 33/);
   assert.match(businessChatSource, /\.slice\(0, 36\)/);
   assert.match(businessChatSource, /document\.visibilityState === 'hidden'/);
-  assert.match(businessChatSource, /frequencyB: .*Math\.SQRT2/);
+  assert.match(businessChatSource, /total > \(previousTotal \?\? total\)/);
+  assert.match(businessChatSource, /!freshInitialEvent && !modeChanged/);
+  assert.match(businessChatSource, /nowMs - updatedAt <= 8000/);
+  assert.match(businessChatSource, /duration = mode === 'review' \? 2200 : kind === 'thinking' \? 1800 : 1400/);
+  assert.doesNotMatch(businessChatSource, /frequencyB: .*Math\.SQRT2/);
   assert.match(businessChatSource, /\.ctox-crew-creature\.is-working[\s\S]*?animation: none/);
   assert.match(businessChatSource, /\.ctox-crew-creature\.is-review[\s\S]*?animation: none/);
   assert.match(businessChatSource, /\.ctox-crew-creature\.is-failed[\s\S]*?animation: ctoxCrewOops 860ms[^;]* 1 both/);
@@ -194,6 +199,15 @@ test('routine status updates cannot restart dock or window entry animations', ()
   );
   assert.match(businessChatSource, /forceDock:\s*false,\s*forceMessages:\s*true/);
   assert.match(businessChatSource, /previousStripScrollLeft/);
+});
+
+test('progress instruments render only durable evidence and keep task links delegated', () => {
+  assert.match(businessChatSource, /\.ctox-progress-track::before \{[\s\S]*?var\(--crew-color/);
+  assert.match(businessChatSource, /\.ctox-progress-planning-line \{\s*width: 0;[\s\S]*?animation: none;/);
+  assert.match(businessChatSource, /\.ctox-progress-segment\.is-in_progress,[\s\S]*?animation: none;/);
+  assert.match(businessChatSource, /function ensureTaskTrackingDelegation\(root\)/);
+  assert.match(businessChatSource, /event\.target\?\.closest\?\.\('\[data-track-task\]'\)/);
+  assert.doesNotMatch(businessChatSource, /node\.querySelectorAll\('\[data-track-task\]'\)/);
 });
 
 test('business chat does not restore terminal task windows over app content', () => {
@@ -660,6 +674,7 @@ test('business chat projects durable execution progress into the tracked crew me
   assert.match(card, /Daten prüfen/);
   assert.match(card, /→ Ergebnis schreiben/);
   assert.match(card, /Plan v2/);
+  assert.match(card, /Denkblöcke 3 · Tools 4/);
   assert.match(card, /ctox-progress-activity/);
   assert.match(card, /--ctox-turn-angle:24deg/);
   assert.doesNotMatch(card, /ctox-progress-summary/);

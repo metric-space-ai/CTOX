@@ -772,7 +772,26 @@ function stageWindowChats(expandedChats, activeExpandedChat) {
   return selectVisibleChats(expandedChats, activeExpandedChat);
 }
 
+function ensureTaskTrackingDelegation(root) {
+  if (!root || root.__ctoxTaskTrackingDelegated) return;
+  root.__ctoxTaskTrackingDelegated = true;
+  root.addEventListener('click', (event) => {
+    const button = event.target?.closest?.('[data-track-task]');
+    if (!button || !root.contains(button)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openCtoxTask(
+      button.dataset.taskId || '',
+      button.dataset.commandId || '',
+      button.dataset.taskStatus || '',
+    ).catch((error) => {
+      console.warn('[business-chat] failed to open CTOX task', error);
+    });
+  });
+}
+
 function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
+  ensureTaskTrackingDelegation(root);
   const syncFacade = root.__ctoxChatSync || null;
   initSchedulerLoop({
     root,
@@ -918,9 +937,15 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
           if (!markHasCorrectState || !markHasCorrectMode) {
             markEl.outerHTML = chatChipMarkHtml(chat, taskState);
             inPlaceDomChanged = true;
+          } else if (markCreature && syncCrewTelemetryNode(markCreature, chat)) {
+            inPlaceDomChanged = true;
           }
         }
       }
+    });
+    root.querySelectorAll('.ctox-chat-fab-creatures .ctox-crew-creature').forEach((creature, index) => {
+      const chat = (openChats.length ? openChats : [{ id: 'ctox-crew', title: 'CTOX' }])[index];
+      if (chat && syncCrewTelemetryNode(creature, chat)) inPlaceDomChanged = true;
     });
 
     // 3. Update active states, 3D relation tags, maximized and minimized classes on windows
@@ -998,6 +1023,8 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       const creature = win.querySelector('.ctox-crew-creature');
       if (creature && creature.dataset?.crewMode !== creatureMode) {
         creature.outerHTML = crewCreatureHtml(chat, taskState, 'window');
+        inPlaceDomChanged = true;
+      } else if (creature && syncCrewTelemetryNode(creature, chat)) {
         inPlaceDomChanged = true;
       }
 
@@ -1315,14 +1342,6 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       event.preventDefault();
       event.stopPropagation();
       await deleteChatFromTarget({ root, state, commandBus, db, getActiveModule, target: event.currentTarget });
-    });
-
-    node.querySelectorAll('[data-track-task]').forEach((button) => {
-      button.addEventListener('click', () => {
-        openCtoxTask(button.dataset.taskId || '', button.dataset.commandId || '', button.dataset.taskStatus || '').catch((error) => {
-          console.warn('[business-chat] failed to open CTOX task', error);
-        });
-      });
     });
 
     node.querySelector('[data-chat-cancel-schedule]')?.addEventListener('click', async () => {
@@ -2036,6 +2055,32 @@ function stopCrewProceduralMotion(root, { reset = true } = {}) {
   if (root) root.__ctoxCrewProceduralMotion = null;
 }
 
+function executionActivityTelemetry(chat) {
+  const progress = executionProgressForChat(chat);
+  return {
+    total: Math.max(0, Number(progress?.activity_turns?.total) || 0),
+    thinking: Math.max(0, Number(progress?.activity_turns?.thinking) || 0),
+    tools: Math.max(0, Number(progress?.activity_turns?.tools) || 0),
+    lastKind: ['thinking', 'tool'].includes(progress?.activity_turns?.last_kind)
+      ? progress.activity_turns.last_kind
+      : '',
+    updatedAt: Math.max(0, Number(progress?.updated_at_ms) || 0),
+  };
+}
+
+function syncCrewTelemetryNode(node, chat) {
+  if (!node) return false;
+  const telemetry = executionActivityTelemetry(chat);
+  const progress = executionProgressForChat(chat);
+  const progressAngle = Math.max(0, Math.min(360, Number(progress?.percent || 0) * 3.6));
+  let changed = false;
+  changed = setDatasetIfChanged(node, 'activityTurns', telemetry.total) || changed;
+  changed = setDatasetIfChanged(node, 'activityKind', telemetry.lastKind) || changed;
+  changed = setDatasetIfChanged(node, 'activityUpdatedAt', telemetry.updatedAt) || changed;
+  changed = setStyleIfChanged(node, '--ctox-progress-angle', `${progressAngle}deg`) || changed;
+  return changed;
+}
+
 export function syncCrewProceduralMotion(root) {
   if (!root || typeof window === 'undefined') return;
   if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
@@ -2043,33 +2088,54 @@ export function syncCrewProceduralMotion(root) {
     return;
   }
 
-  const profiles = Array.from(root.querySelectorAll('.ctox-crew-creature.is-working, .ctox-crew-creature.is-review'))
-    .filter((node) => !node.getClientRects || node.getClientRects().length > 0)
-    .slice(0, 36)
-    .map((node) => {
-      const seed = Number(node.dataset.crewSeed || 0) >>> 0;
-      const normalized = (offset) => ((seed >>> offset) & 1023) / 1023;
-      return {
-        node,
-        body: node.querySelector('.ctox-crew-body'),
-        eyes: node.querySelector('.ctox-crew-eyes'),
-        mode: node.dataset.crewMode,
-        phaseA: normalized(0) * Math.PI * 2,
-        phaseB: normalized(10) * Math.PI * 2,
-        frequencyA: .78 + normalized(6) * .42,
-        frequencyB: (.76 + normalized(14) * .4) * Math.SQRT2,
-        direction: normalized(20) > .5 ? 1 : -1,
-      };
-    })
-    .filter((profile) => profile.body && profile.eyes);
-
   let state = root.__ctoxCrewProceduralMotion;
   if (!state) {
-    state = { frame: 0, lastFrameAt: 0, profiles: [] };
+    state = { frame: 0, lastFrameAt: 0, profiles: [], seenTurns: new Map() };
     root.__ctoxCrewProceduralMotion = state;
   }
-  state.profiles = profiles;
-  if (state.frame || profiles.length === 0) return;
+
+  const nowMs = Date.now();
+  const nextProfiles = Array.from(root.querySelectorAll('.ctox-crew-creature.is-working, .ctox-crew-creature.is-review'))
+    .filter((node) => node.closest?.('.ctox-flow-creature-slot') || !node.getClientRects || node.getClientRects().length > 0)
+    .slice(0, 36)
+    .flatMap((node) => {
+      const total = Math.max(0, Number(node.dataset.activityTurns) || 0);
+      const key = String(node.dataset.crewKey || node.dataset.crewSeed || 'ctox-crew');
+      const previous = state.seenTurns.get(key);
+      const previousTotal = typeof previous === 'object' ? previous.total : previous;
+      const mode = node.dataset.crewMode || 'working';
+      const modeChanged = Boolean(previous && typeof previous === 'object' && previous.mode !== mode);
+      state.seenTurns.set(key, { total, mode });
+      const updatedAt = Math.max(0, Number(node.dataset.activityUpdatedAt) || 0);
+      const freshInitialEvent = previous === undefined && total > 0 && nowMs - updatedAt <= 8000;
+      if (!(total > (previousTotal ?? total)) && !freshInitialEvent && !modeChanged) return [];
+      const body = node.querySelector('.ctox-crew-body');
+      const eyes = node.querySelector('.ctox-crew-eyes');
+      if (!body || !eyes) return [];
+      const seed = (Number(node.dataset.crewSeed || 0) ^ Math.imul(total || 1, 2654435761)) >>> 0;
+      const unit = (offset) => ((seed >>> offset) & 1023) / 1023;
+      const kind = node.dataset.activityKind || 'tool';
+      const duration = mode === 'review' ? 2200 : kind === 'thinking' ? 1800 : 1400;
+      return [{
+        key,
+        node,
+        body,
+        eyes,
+        mode,
+        kind,
+        startAt: 0,
+        duration,
+        direction: unit(12) > .5 ? 1 : -1,
+        amplitude: .88 + unit(2) * .28,
+      }];
+    });
+
+  if (nextProfiles.length) {
+    const restartedKeys = new Set(nextProfiles.map((profile) => profile.key));
+    state.profiles = state.profiles.filter((profile) => !restartedKeys.has(profile.key));
+    state.profiles.push(...nextProfiles);
+  }
+  if (state.frame || state.profiles.length === 0) return;
 
   const tick = (now) => {
     if (!root.isConnected || root.__ctoxCrewProceduralMotion !== state) return;
@@ -2082,28 +2148,46 @@ export function syncCrewProceduralMotion(root) {
       return;
     }
     state.lastFrameAt = now;
-    const time = now / 1000;
     state.profiles = state.profiles.filter(({ node }) => node.isConnected);
     state.profiles.forEach((profile) => {
-      const phaseA = time * profile.frequencyA + profile.phaseA;
-      const phaseB = time * profile.frequencyB + profile.phaseB;
+      if (!profile.startAt) profile.startAt = now;
+      const elapsed = now - profile.startAt;
+      const progress = Math.min(1, elapsed / profile.duration);
+      const envelope = Math.sin(progress * Math.PI);
+      const bounce = Math.sin(progress * Math.PI * 2);
       if (profile.mode === 'review') {
-        const x = Math.sin(phaseA * .88) * 8;
-        const y = -3 + Math.cos(phaseB * .7) * 5;
-        const rotation = Math.sin(phaseA * .57 + phaseB * .29) * 6.2;
-        const flow = Math.sin(phaseA) * .075 + Math.sin(phaseB) * .03;
+        const x = profile.direction * envelope * 7.5 * profile.amplitude;
+        const y = -envelope * 2.5;
+        const rotation = profile.direction * bounce * 8 * envelope;
+        const flow = envelope * .09;
         profile.node.style.transform = `translate(${x.toFixed(3)}px, ${y.toFixed(3)}px) rotate(${rotation.toFixed(3)}deg)`;
-        profile.body.style.transform = `scale(${(1 + flow).toFixed(4)}, ${(1 - flow * .8).toFixed(4)}) skewX(${(Math.sin(phaseB) * 3.5).toFixed(3)}deg)`;
-        profile.eyes.style.transform = `translateX(${(Math.sin(phaseA * .73) * 4).toFixed(3)}px) rotate(${(Math.sin(phaseB * .41) * 3.8).toFixed(3)}deg)`;
+        profile.body.style.transform = `scale(${(1 + flow).toFixed(4)}, ${(1 - flow * .72).toFixed(4)}) skewX(${(profile.direction * envelope * 5).toFixed(3)}deg)`;
+        profile.eyes.style.transform = `translateX(${(profile.direction * envelope * 5.5).toFixed(3)}px) rotate(${(profile.direction * bounce * 4).toFixed(3)}deg)`;
+      } else if (profile.kind === 'thinking') {
+        const rotation = profile.direction * envelope * 10.5 * profile.amplitude;
+        const y = -envelope * 3;
+        const flow = envelope * .07;
+        profile.node.style.transform = `translateY(${y.toFixed(3)}px) rotate(${rotation.toFixed(3)}deg)`;
+        profile.body.style.transform = `scale(${(1 - flow * .45).toFixed(4)}, ${(1 + flow).toFixed(4)}) skewX(${(-profile.direction * envelope * 4).toFixed(3)}deg)`;
+        profile.eyes.style.transform = `translateX(${(profile.direction * bounce * 5.5).toFixed(3)}px) rotate(${(-rotation * .34).toFixed(3)}deg)`;
       } else {
-        const x = Math.sin(phaseB) * 2.5;
-        const y = -5.5 + Math.sin(phaseA) * 7.3 + Math.sin(phaseB) * 2;
-        const rotation = Math.sin(phaseA * .79) * 4.5;
-        const squash = Math.sin(phaseA) * .095 + Math.sin(phaseB) * .028;
+        const impact = Math.sin(progress * Math.PI);
+        const recoil = Math.sin(progress * Math.PI * 3) * envelope;
+        const x = profile.direction * recoil * 2.8;
+        const y = -impact * 7.5 * profile.amplitude;
+        const rotation = profile.direction * recoil * 5.5;
+        const squash = impact * .14;
         profile.node.style.transform = `translate(${x.toFixed(3)}px, ${y.toFixed(3)}px) rotate(${rotation.toFixed(3)}deg)`;
-        profile.body.style.transform = `scale(${(1 + squash).toFixed(4)}, ${(1 - squash * 1.12).toFixed(4)}) skewX(${(Math.sin(phaseB) * 2.6).toFixed(3)}deg)`;
-        profile.eyes.style.transform = `translateX(${(Math.sin(phaseB * .67) * 3.2).toFixed(3)}px) rotate(${(Math.sin(phaseA * .43) * 3.2).toFixed(3)}deg)`;
+        profile.body.style.transform = `scale(${(1 + squash).toFixed(4)}, ${(1 - squash * .92).toFixed(4)}) skewX(${(profile.direction * recoil * 4).toFixed(3)}deg)`;
+        profile.eyes.style.transform = `translateY(${(-impact * 2.4).toFixed(3)}px) rotate(${(-rotation * .45).toFixed(3)}deg)`;
       }
+    });
+    state.profiles = state.profiles.filter((profile) => {
+      if (now - profile.startAt < profile.duration) return true;
+      profile.node.style.transform = '';
+      profile.body.style.transform = '';
+      profile.eyes.style.transform = '';
+      return false;
     });
     if (state.profiles.length > 0) state.frame = window.requestAnimationFrame(tick);
     else state.frame = 0;
@@ -2116,9 +2200,10 @@ export function crewCreatureHtml(chat, taskState = getTaskState(chat), placement
   const mode = crewCreatureMode(chat, taskState);
   const progress = executionProgressForChat(chat);
   const progressAngle = Math.max(0, Math.min(360, Number(progress?.percent || 0) * 3.6));
+  const telemetry = executionActivityTelemetry(chat);
   const motionSeed = crewHash(`${crewIdentityKey(chat)}:${placement}`);
   return `
-    <span class="ctox-crew-creature is-${escapeAttr(taskState)} is-${escapeAttr(mode)} is-${escapeAttr(crew.shape)} is-${escapeAttr(placement)}" data-crew-mode="${escapeAttr(mode)}" data-crew-seed="${motionSeed}" style="--crew-color:${escapeAttr(crew.color)};--ctox-progress-angle:${progressAngle}deg;${crewMotionStyle(chat)}" aria-hidden="true">
+    <span class="ctox-crew-creature is-${escapeAttr(taskState)} is-${escapeAttr(mode)} is-${escapeAttr(crew.shape)} is-${escapeAttr(placement)}" data-crew-mode="${escapeAttr(mode)}" data-crew-seed="${motionSeed}" data-crew-key="${escapeAttr(`${crewIdentityKey(chat)}:${placement}`)}" data-activity-turns="${telemetry.total}" data-activity-kind="${escapeAttr(telemetry.lastKind)}" data-activity-updated-at="${telemetry.updatedAt}" style="--crew-color:${escapeAttr(crew.color)};--ctox-progress-angle:${progressAngle}deg;${crewMotionStyle(chat)}" aria-hidden="true">
       <svg viewBox="0 0 64 64" focusable="false">
         <g class="ctox-crew-body">${crewBodyMarkup(crew.shape)}</g>
         <g class="ctox-crew-eyes is-${escapeAttr(mode)}">${crewEyesMarkupForMode(crew.shape, mode)}</g>
@@ -2229,6 +2314,7 @@ function executionProgressTooltip(progress) {
   const lines = [
     isReviewPhase ? 'CTOX-Prüfung' : current?.label || 'CTOX',
     `${progress.percent}% · ${stepTurns}/${progress.activity_turns.total} Turns · Plan v${progress.revision}`,
+    `Denkblöcke ${progress.activity_turns.thinking} · Tools ${progress.activity_turns.tools}`,
     ...progress.steps.map((step) => `${step.status === 'completed' ? '✓' : step.status === 'in_progress' ? '●' : '○'} ${step.label}`),
   ];
   if (next) lines.push(`→ ${next.label}`);
@@ -6377,13 +6463,13 @@ function installChatStyles() {
       100% { transform: scale(1, 1); }
     }
     .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-thinking .ctox-chat-title .ctox-crew-creature {
-      animation: ctoxCrewThinkingTick 560ms var(--ease-spring) both;
+      animation: none;
     }
     .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-thinking .ctox-chat-title .ctox-crew-eyes {
       transform: translateX(2px) rotate(-4deg);
     }
     .ctox-chat-window.is-task-running:not(.is-task-review).has-activity-tool .ctox-chat-title .ctox-crew-creature {
-      animation: ctoxCrewToolTick 440ms var(--ease-spring) both;
+      animation: none;
     }
     @media (prefers-reduced-motion: reduce) {
       .ctox-crew-creature,
@@ -7104,7 +7190,7 @@ function installChatStyles() {
       width: 1px;
       height: 7px;
       border-radius: 999px;
-      background: var(--accent);
+      background: var(--crew-color, var(--accent));
       transform: rotate(var(--ctox-turn-angle, 0deg));
       transform-origin: 50% 100%;
       transition: transform var(--motion-slow) var(--ease-spring);
@@ -7116,7 +7202,7 @@ function installChatStyles() {
       width: 4px;
       height: 4px;
       border-radius: 50%;
-      background: var(--accent);
+      background: var(--crew-color, var(--accent));
     }
     .ctox-progress-visual:hover .ctox-progress-activity,
     .ctox-progress-visual:focus-visible .ctox-progress-activity {
@@ -7403,8 +7489,8 @@ function installChatStyles() {
       position: absolute;
       inset: 0 auto 0 0;
       width: calc(var(--ctox-progress-percent, 0) * 1%);
-      background: color-mix(in srgb, var(--accent) 92%, var(--crew-color));
-      box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 68%, transparent);
+      background: color-mix(in srgb, var(--crew-color, var(--accent)) 90%, white 10%);
+      box-shadow: 0 0 12px color-mix(in srgb, var(--crew-color, var(--accent)) 58%, transparent);
       transition: width var(--motion-slow) var(--ease-standard);
     }
     .ctox-progress-work {
@@ -7429,24 +7515,30 @@ function installChatStyles() {
     }
     .ctox-progress-segment.is-in_progress,
     .ctox-progress-visual.is-reviewing .ctox-progress-review:is(.is-running, .is-pending) {
-      background: linear-gradient(90deg,
-        color-mix(in srgb, var(--accent) 42%, transparent),
-        color-mix(in srgb, var(--accent) 82%, var(--crew-color)),
-        color-mix(in srgb, var(--accent) 42%, transparent));
+      background: color-mix(in srgb, var(--crew-color, var(--accent)) 34%, transparent);
       opacity: 1;
-      animation: ctoxQuietProgress 1.25s ease-in-out infinite;
+      animation: none;
     }
     .ctox-progress-visual:not(.is-reviewing) .ctox-progress-review.is-pending {
       background: transparent;
       animation: none;
     }
     .ctox-progress-planning-line {
-      width: 32%;
+      width: 0;
       height: 100%;
       border-radius: 0;
-      background: color-mix(in srgb, var(--accent) 90%, var(--crew-color));
-      box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 58%, transparent);
-      animation: ctoxQuietPlanning 1.15s ease-in-out infinite alternate;
+      background: transparent;
+      box-shadow: none;
+      animation: none;
+    }
+    .ctox-progress-visual.is-planning .ctox-progress-activity,
+    .ctox-progress-visual.is-dormant .ctox-progress-activity {
+      opacity: 0.34;
+      animation: none;
+    }
+    .ctox-progress-visual.is-planning .ctox-progress-activity::after,
+    .ctox-progress-visual.is-dormant .ctox-progress-activity::after {
+      display: none;
     }
     @keyframes ctoxTurnInstrumentPulse {
       0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 58%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 22%, transparent); }
