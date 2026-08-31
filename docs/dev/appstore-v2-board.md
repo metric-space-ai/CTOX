@@ -40,6 +40,16 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
   gegenüber der Core-Kopie (0.1.0) echt divergiert (`core/`-Verzeichnis, records.test.mjs,
   audit-scenarios.json nur dort; alle Kernddateien differieren). → OWNER-Karte unten.
 
+- **[P1.2a] creator als System-App gelandet** — modules/creator/ war komplett, nur ohne
+  module.json; App-Store-Knopf „Neue App per KI-Prompt" lief gemessen als 'unknown app' ins
+  Leere. Manifest + Aufnahme in beide System-Listen (19 Apps), Registry+Fallback regeneriert,
+  APP_BUILD → v327. Wächter grün (creator Shell-V2-konform, creator.test 23 pass).
+  Commit `22c959be9`. HINWEIS: Core-Wirkung nativ erst nach Binary-Rebuild
+  (system-apps.json ist include_str!) — bis dahin stuft ein Alt-Binary creator als store ein.
+- **BEFUND: app-store.test.mjs 2x rot auf HEAD** (vorbestehend, nicht von uns):
+  Regex-Wächter `actionIcon/getActionIcon` und `(els.root || state.ctx?.host)?.append(overlay)`
+  matchen modules/app-store/index.js nicht; Datei trägt stale Buster v141. Fällig in P1.3.
+
 ## Working
 
 - **[P1.1 + P0.3] Loader-Vereinigung + Kollisionsdiagnose** — Sol · Completion, Workjet-Run
@@ -50,6 +60,13 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
   Vorrang, KEIN Bail (Tenant-Altbestand darf nicht sterben). Kein cargo im Workspace (kann
   dort nicht bauen) — Fable kompiliert den Diff im Hauptbaum. Fertig = Diff importiert,
   cargo check grün, eine Definition je Funktion.
+- **[P1.2b] explorer + file-viewer als Module** — Sol · Completion (3. Parallellauf,
+  OpenAI-Pool damit 3/3 — keinen weiteren Sol/Terra-Lauf starten!), Workjet-Run
+  `local-2026-08-31T123104Z-d4712c24-67a7-402a-9c7c-50d65cffe724`, gestartet 12:31Z aus
+  Launchpad ~/.local/state/workjet-launchpads/appstore-v2-ports (19 MB, Baseline 22c959be9).
+  Nur NEUE Verzeichnisse modules/explorer + modules/file-viewer; Schema-Kopien byte-identisch
+  aus Eigentümer-Modulen; app.js-Umschaltung (DESKTOP_APPS raus) macht Fable nach Import.
+  Fertig = Tests grün, Shell-V2-Wächter ohne neue Befunde, Schema-Diff-Beweis.
 - **[P3A] Statischer Appstore-Publisher** — Sol · Completion, Workjet-Run
   `local-2026-08-31T122315Z-09c728d1-3802-4cfc-b628-23036c22b7c3`, gestartet 12:23Z aus
   Launchpad ~/.local/state/workjet-launchpads/appstore-v2-publisher (13 MB, Baseline von
