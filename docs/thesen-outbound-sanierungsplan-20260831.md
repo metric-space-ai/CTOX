@@ -89,6 +89,28 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
   Minuten); Katalog-Eintrag der App noch nicht repliziert — Verifikation v18
   wartet darauf.
 
+- 02:00–02:20 **P1 abgeschlossen (visuell + serverseitig verifiziert):**
+  - P1.1 ✅ Neuer Prompt ist der aktive Policy-Record (Server: 3320 Z., alle 32
+    Felder annotiert, 8 Kategorien; updated 01:18 — v18-Heilung drückte den Write durch).
+  - P1.2 ✅ Button-Sweep: 21 Aktionen interaktiv geprüft — view-mode, Tray/Filter/
+    Chips/Reset, 4 Detail-Tabs, Auswahl (einzeln/alle/aufheben), Lead-Editor auf/zu,
+    Quellen-Dialog + Suche + Settings-Dialog + Skript-Inspector, rename/new/delete-
+    Kampagne-Dialoge, toggle-source (Server: enabled-Flip 02:16:12), test-adapter
+    (Command completed 02:16:11), import-leads (Importer öffnet), Nachrecherche.
+    Zwei App-Fixes dabei: v19/v20 Signatur-Skip + Tipp-Fokus-Guard gegen das
+    Klick-Verschlucken durch Panel-Rewrites (Ursache von „nichts am Menü geht").
+  - P1.3 ✅ Recherche-E2E mit NEUEM Prompt: BNT Chemicals → Chatfenster öffnet
+    mit Auftrag (Owner-Prinzip), Lauf completed 02:20, **9 Felder, 53 Belege aus
+    8 Quellen**, Person GF Robert Süße. Kein Fehler.
+  - P1.4/P1.5 ✅ Selbstheilung wirkt: **maps-google-com und northdata-de wurden
+    durch die Repair-Tasks geheilt** (beide succeeded mit Treffern im BNT-Lauf).
+    mailtester/experte sind funktionsfähig (Input-abhängig). Offen bleiben nur:
+    google-de + companyhouse-de (Provider-Challenge) und rocketreach/linkedin
+    (Login) — Auth-Assist-Tasks stehen, Token-Fix ist P2.2 (Rust).
+  - Bekannter Rest: Erst-Klick direkt nach Dialog-Öffnung kann noch verschluckt
+    werden (Öffnungs-Rewrite-Fenster); Personen-Ausbeute >1 pro Lead hängt an den
+    Auth-Quellen (LinkedIn/Xing-Personensuche).
+
 ## P0 — Der eine Bruch, der alles tötet (Glied 3 der Kette)
 
 **Befund:** Lokale App-Writes gelingen (Trace `write ok`), aber `business_commands`-
