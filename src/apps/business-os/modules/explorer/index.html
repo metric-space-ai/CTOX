@@ -1,0 +1,44 @@
+<main class="ctox-workspace app-explorer" data-explorer-root>
+  <header class="app-explorer-toolbar">
+    <div class="app-explorer-nav" aria-label="Navigation">
+      <button type="button" data-explorer-up>⌃</button>
+      <button type="button" data-explorer-refresh>↻</button>
+    </div>
+    <div class="app-explorer-address" data-explorer-address>
+      <span>Business OS</span>
+      <b data-explorer-path>Files</b>
+    </div>
+    <div class="app-explorer-actions">
+      <button type="button" data-explorer-new-folder><span aria-hidden="true">＋</span><span data-explorer-new-folder-label>Neuer Ordner</span></button>
+      <button type="button" data-explorer-upload><span aria-hidden="true">⇧</span><span>Upload</span></button>
+      <input data-explorer-file-input type="file" multiple hidden>
+    </div>
+    <label class="app-explorer-search">
+      <span aria-hidden="true">⌕</span>
+      <input data-explorer-search>
+    </label>
+  </header>
+  <div class="app-explorer-body">
+    <aside class="app-explorer-sidebar" data-explorer-sources></aside>
+    <section class="app-explorer-main">
+      <div class="app-explorer-heading">
+        <div>
+          <strong data-explorer-title>Files</strong>
+          <span data-explorer-count></span>
+        </div>
+        <div class="app-explorer-view-toggle" data-explorer-view-toggle>
+          <select data-explorer-sort>
+            <option value="modified" data-explorer-sort-modified>Geändert: neueste</option>
+            <option value="created" data-explorer-sort-created>Erstellt: neueste</option>
+            <option value="name" data-explorer-sort-name>Name</option>
+            <option value="kind" data-explorer-sort-kind>Art</option>
+          </select>
+          <button type="button" class="is-active">Details</button>
+        </div>
+      </div>
+      <section class="app-explorer-table" data-explorer-table></section>
+      <footer class="app-explorer-status" data-explorer-status></footer>
+    </section>
+    <aside class="app-explorer-preview" data-explorer-preview></aside>
+  </div>
+</main>

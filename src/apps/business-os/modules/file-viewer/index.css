@@ -1,0 +1,127 @@
+.file-viewer {
+  display: grid;
+  grid-template-rows: 48px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.file-viewer-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--hairline, var(--line));
+  background: color-mix(in srgb, var(--surface) 90%, var(--surface-2));
+  padding: 8px 10px 8px 12px;
+}
+.file-viewer-toolbar > div {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+.file-viewer-toolbar strong,
+.file-viewer-toolbar span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-viewer-toolbar span { color: var(--muted); font-size: 11px; }
+.file-viewer-toolbar button {
+  min-height: 28px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 78%, var(--surface-2));
+  color: var(--accent);
+  padding: 0 10px;
+  font-weight: 730;
+}
+.file-viewer-content {
+  display: grid;
+  min-height: 0;
+  overflow: auto;
+  background: color-mix(in srgb, var(--bg) 48%, var(--surface));
+}
+.file-viewer-content > p {
+  margin: 16px;
+  color: var(--muted);
+}
+.file-viewer-content > p.is-error { color: var(--danger); }
+.file-viewer-image,
+.file-viewer-media {
+  align-self: center;
+  justify-self: center;
+  max-width: calc(100% - 28px);
+  max-height: calc(100% - 28px);
+  border-radius: 8px;
+  border: 1px solid var(--hairline, var(--line));
+  background: var(--surface);
+}
+.file-viewer-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--surface);
+}
+.file-viewer-audio {
+  align-self: center;
+  justify-self: center;
+  width: min(520px, calc(100% - 28px));
+}
+.file-viewer-text {
+  margin: 0;
+  padding: 14px;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.file-viewer-unsupported {
+  align-self: center;
+  justify-self: center;
+  display: grid;
+  gap: 6px;
+  max-width: 420px;
+  color: var(--muted);
+  text-align: center;
+  padding: 20px;
+}
+.file-viewer-unsupported strong { color: var(--text); }
+
+@container business-app-window (max-width: 1024px) {
+  .file-viewer-toolbar {
+    gap: 8px;
+  }
+}
+
+@container business-app-window (max-width: 768px) {
+  .file-viewer {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  .file-viewer-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .file-viewer-toolbar button {
+    align-self: flex-end;
+  }
+}
+
+/* Shell-v2 reserves the top-left app icon and top-right window control. */
+.shell-window[data-shell-contract="v2"] .file-viewer {
+  grid-template-rows: minmax(calc(var(--shell-v2-header-row-size, 37px) * 2), auto) minmax(0, 1fr);
+}
+
+.shell-window[data-shell-contract="v2"] .file-viewer-toolbar {
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2 + 4px);
+}
+

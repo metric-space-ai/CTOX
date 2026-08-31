@@ -1,0 +1,68 @@
+{
+  "id": "explorer",
+  "title": "Explorer",
+  "description": "Dateien, Ordner und Business-OS-Datensätze durchsuchen, hochladen, öffnen und verwalten.",
+  "entry": "modules/explorer/index.html",
+  "collections": [
+    "desktop_file_chunks",
+    "desktop_files",
+    "documents",
+    "knowledge_items",
+    "matching_objects",
+    "outbound_companies",
+    "spreadsheets"
+  ],
+  "layout": {
+    "shell": "windowed",
+    "shell_contract": "v2",
+    "shell_geometry_contract": "business-os-v2-global-1",
+    "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-explorer\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-explorer\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#06b6d4\" /><stop offset=\"100%\" stop-color=\"#8b5cf6\" /></linearGradient></defs><path d=\"M3 7.5h7l2-2h9v13.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7.5Z\" fill=\"url(#grad-explorer)\" fill-opacity=\"0.12\" stroke=\"url(#grad-explorer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M3 10h18\" stroke=\"url(#grad-explorer)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
+    "default_width": 980,
+    "default_height": 640,
+    "min_width": 640,
+    "min_height": 480
+  },
+  "category": "Workspace",
+  "version": "1.0.0",
+  "developer": "CTOX",
+  "license": "AGPL-3.0-only",
+  "tags": [
+    "explorer",
+    "files",
+    "workspace",
+    "documents"
+  ],
+  "store": {
+    "summary": "Zentraler Datei- und Datensatz-Explorer für den Business-OS-Arbeitsbereich.",
+    "repository": "metric-space-ai/ctox",
+    "source_path": "modules/explorer",
+    "installable": false,
+    "editable_after_install": false,
+    "distribution": "system-module"
+  },
+  "install_scope": "core",
+  "default_installed": true,
+  "launch_kind": "desktop-app",
+  "presentation": {
+    "default_mode": "window",
+    "supported_modes": [
+      "window",
+      "maximized",
+      "focus"
+    ],
+    "initial_size": {
+      "width": 980,
+      "height": 640
+    },
+    "minimum_size": {
+      "width": 640,
+      "height": 480
+    },
+    "multi_instance": false,
+    "auto_restore": false
+  },
+  "source": "core",
+  "core": true,
+  "editable": true,
+  "deletable": false
+}

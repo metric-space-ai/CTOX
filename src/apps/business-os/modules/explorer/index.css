@@ -1,0 +1,504 @@
+.app-explorer {
+  position: relative;
+  display: grid;
+  grid-template-rows: 48px minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: var(--surface);
+  color: var(--text);
+  padding: 0;
+  overflow: hidden;
+  box-sizing: border-box;
+  font: 12px/1.35 ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+.app-explorer.is-dragging-files::after {
+  content: attr(data-drop-label);
+  position: absolute;
+  inset: 54px 14px 14px;
+  display: grid;
+  place-items: center;
+  z-index: 4;
+  border: 1px dashed color-mix(in srgb, var(--accent) 58%, var(--line));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  color: var(--accent);
+  font-weight: 780;
+  pointer-events: none;
+}
+.app-explorer-toolbar {
+  display: grid;
+  grid-template-columns: auto minmax(190px, 1fr) auto minmax(150px, 240px);
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--hairline, var(--line));
+  background: color-mix(in srgb, var(--surface) 92%, var(--surface-2));
+}
+.app-explorer-nav,
+.app-explorer-actions,
+.app-explorer-view-toggle { display: inline-flex; gap: 4px; }
+.app-explorer-nav button,
+.app-explorer-actions button,
+.app-explorer-view-toggle select,
+.app-explorer-view-toggle button,
+.app-explorer-preview button,
+.app-explorer-name-dialog button,
+.app-explorer-upload-dialog button {
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 76%, var(--surface-2));
+  color: var(--text);
+  min-height: 28px;
+  padding: 0 10px;
+  font-weight: 720;
+}
+.app-explorer-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.app-explorer-nav button { width: 30px; padding: 0; font-size: 15px; }
+.app-explorer-address {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 30px;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 44%, var(--surface));
+  padding: 0 10px;
+  color: var(--muted);
+}
+.app-explorer-address b { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app-explorer-address span::after { content: "/"; margin-left: 7px; color: var(--muted); }
+.app-explorer-search {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bg) 44%, var(--surface));
+  color: var(--muted);
+  padding: 0 10px;
+}
+.app-explorer-search input {
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+}
+.app-explorer-body {
+  display: grid;
+  grid-template-columns: 210px minmax(0, 1fr) 220px;
+  min-height: 0;
+}
+.app-explorer-sidebar {
+  border-right: 1px solid var(--hairline, var(--line));
+  background: color-mix(in srgb, var(--surface-2) 58%, var(--surface));
+  padding: 10px 8px;
+  overflow: auto;
+}
+.app-explorer-sidebar-group + .app-explorer-sidebar-group { margin-top: 14px; }
+.app-explorer-sidebar h3 {
+  margin: 0 8px 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+.app-explorer-source {
+  width: 100%;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text);
+  padding: 0 8px;
+  text-align: left;
+}
+.app-explorer-source:hover { background: color-mix(in srgb, var(--surface) 72%, transparent); }
+.app-explorer-source.is-active {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+  color: var(--accent);
+}
+.app-explorer-source-mark,
+.app-explorer-file-icon {
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--surface) 82%, var(--surface-2));
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+.app-explorer-source-mark { width: 28px; height: 24px; }
+.app-explorer-main {
+  display: grid;
+  grid-template-rows: 44px minmax(0, 1fr) 28px;
+  min-width: 0;
+  min-height: 0;
+  background: color-mix(in srgb, var(--bg) 34%, var(--surface));
+}
+.app-explorer-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--hairline, var(--line));
+}
+.app-explorer-heading > div:first-child { display: grid; gap: 1px; min-width: 0; }
+.app-explorer-heading strong { font-size: 13px; }
+.app-explorer-heading span { color: var(--muted); font-size: 11px; }
+.app-explorer-view-toggle button { min-height: 26px; color: var(--muted); }
+.app-explorer-view-toggle select {
+  min-height: 26px;
+  max-width: 150px;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--surface) 76%, var(--surface-2));
+  color: var(--text);
+  padding: 0 24px 0 8px;
+}
+.app-explorer-view-toggle button.is-active { color: var(--text); border-color: color-mix(in srgb, var(--accent) 28%, var(--line)); }
+.app-explorer-table {
+  min-height: 0;
+  overflow: auto;
+}
+.app-explorer-grid {
+  display: grid;
+  align-content: start;
+  width: 100%;
+  min-width: 0;
+}
+.app-explorer-grid-header,
+.app-explorer-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, .65fr) minmax(0, .7fr) minmax(0, .45fr);
+  width: 100%;
+  min-width: 0;
+}
+.app-explorer-grid-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  height: 30px;
+  border: 0;
+  border-bottom: 1px solid var(--hairline, var(--line));
+  border-right: 1px solid color-mix(in srgb, var(--line) 54%, transparent);
+  background: color-mix(in srgb, var(--surface) 92%, var(--surface-2));
+  color: var(--muted);
+  padding: 0 10px;
+  text-align: left;
+  font-size: 11px;
+  font-weight: 760;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.app-explorer-grid-head { cursor: pointer; }
+.app-explorer-grid-head.is-active { color: var(--text); }
+.app-explorer-row {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: default;
+  min-width: 0;
+}
+.app-explorer-row > span {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 34px;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 46%, transparent);
+  background: transparent;
+  color: var(--text);
+  padding: 0 10px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-explorer-row:hover > span,
+.app-explorer-row:focus-visible > span {
+  background: color-mix(in srgb, var(--surface-2) 72%, transparent);
+  outline: none;
+}
+.app-explorer-row.is-selected > span {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+.app-explorer-file { gap: 10px; }
+.app-explorer-file-icon {
+  flex: 0 0 28px;
+  width: 28px;
+  height: 24px;
+  color: var(--accent);
+}
+.app-explorer-file-icon[data-kind="folder"] {
+  color: var(--warning, #e2b84c);
+}
+.app-explorer-file-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 650;
+}
+.app-explorer-status {
+  display: flex;
+  align-items: center;
+  border-top: 1px solid var(--hairline, var(--line));
+  color: var(--muted);
+  padding: 0 12px;
+  font-size: 11px;
+}
+.app-explorer-preview {
+  border-left: 1px solid var(--hairline, var(--line));
+  background: color-mix(in srgb, var(--surface) 92%, var(--surface-2));
+  padding: 14px;
+  overflow: auto;
+}
+.app-explorer-preview-card {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 8px 0 14px;
+  border-bottom: 1px solid var(--hairline, var(--line));
+  text-align: center;
+}
+.app-explorer-preview-icon {
+  display: grid;
+  place-items: center;
+  width: 58px;
+  height: 48px;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--surface-2) 72%, var(--surface));
+  color: var(--accent);
+  font-weight: 850;
+  font-size: 12px;
+}
+.app-explorer-preview-card strong {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+}
+.app-explorer-preview-card small,
+.app-explorer-preview-empty {
+  color: var(--muted);
+}
+.app-explorer-preview dl {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 8px;
+  margin: 14px 0;
+  font-size: 11px;
+}
+.app-explorer-preview dt { color: var(--muted); }
+.app-explorer-preview dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.app-explorer-preview button {
+  width: 100%;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--line));
+}
+.app-explorer-image-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 180px;
+  object-fit: contain;
+  margin: 12px auto 0;
+  border-radius: 8px;
+  border: 1px solid var(--hairline, var(--line));
+}
+.app-explorer-text-preview {
+  max-height: 190px;
+  overflow: auto;
+  margin: 12px 0 0;
+  padding: 10px;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 54%, var(--surface));
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.app-explorer-message {
+  margin: 0;
+  padding: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.app-explorer-message.is-error { color: var(--danger); }
+.app-explorer-name-dialog {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 42%, transparent);
+}
+.app-explorer-upload-dialog {
+  position: absolute;
+  inset: 0;
+  z-index: 8;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--bg) 42%, transparent);
+}
+.app-explorer-name-dialog form {
+  display: grid;
+  gap: 10px;
+  width: min(340px, calc(100% - 40px));
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 14px;
+  box-shadow: var(--shadow-2, 0 18px 50px rgba(0,0,0,.35));
+}
+.app-explorer-upload-dialog form {
+  display: grid;
+  gap: 10px;
+  width: min(420px, calc(100% - 40px));
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 10px;
+  background: var(--surface);
+  padding: 14px;
+  box-shadow: var(--shadow-2, 0 18px 50px rgba(0,0,0,.35));
+}
+.app-explorer-upload-dialog p,
+.app-explorer-name-dialog p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+.app-explorer-name-dialog input {
+  min-height: 32px;
+  border: 1px solid var(--hairline, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg) 48%, var(--surface));
+  color: var(--text);
+  padding: 0 10px;
+  outline: 0;
+}
+.app-explorer-dropzone {
+  min-height: 84px;
+  border: 1px dashed color-mix(in srgb, var(--accent) 44%, var(--line));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+  color: var(--accent);
+  font-weight: 780;
+}
+.app-explorer-upload-dialog.is-dragging-files .app-explorer-dropzone {
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+}
+.app-explorer-upload-dialog ul {
+  display: grid;
+  gap: 4px;
+  max-height: 120px;
+  overflow: auto;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  color: var(--text);
+  font-size: 12px;
+}
+.app-explorer-dialog-error {
+  min-height: 16px;
+  margin: 0;
+  color: var(--danger);
+  font-size: 11px;
+}
+.app-explorer-dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.app-explorer-dialog-actions .is-danger {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line));
+  color: var(--danger);
+}
+@container business-app-window (max-width: 1024px) {
+  .app-explorer-body { grid-template-columns: 180px minmax(0, 1fr); }
+  .app-explorer-preview { display: none; }
+  .app-explorer-toolbar { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .app-explorer-search { grid-column: 1 / -1; }
+}
+@container business-app-window (max-width: 768px) {
+  .app-explorer {
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .app-explorer-toolbar {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .app-explorer-actions,
+  .app-explorer-search {
+    grid-column: 1 / -1;
+  }
+  .app-explorer-actions button {
+    flex: 1 1 0;
+  }
+  .app-explorer-body {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .app-explorer-sidebar {
+    display: flex;
+    gap: 10px;
+    border-right: 0;
+    border-bottom: 1px solid var(--hairline, var(--line));
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .app-explorer-sidebar-group {
+    display: grid;
+    grid-auto-flow: column;
+    grid-auto-columns: max-content;
+    align-items: center;
+    gap: 6px;
+  }
+  .app-explorer-sidebar-group + .app-explorer-sidebar-group { margin-top: 0; }
+  .app-explorer-sidebar h3 { margin: 0 2px 0 0; white-space: nowrap; }
+  .app-explorer-source {
+    width: auto;
+    min-width: 128px;
+  }
+  .app-explorer-grid-header,
+  .app-explorer-row {
+    grid-template-columns: minmax(132px, 1fr) minmax(72px, .55fr) minmax(86px, .65fr);
+  }
+  .app-explorer-grid-head:nth-child(4),
+  .app-explorer-row > span:nth-child(4) {
+    display: none;
+  }
+}
+
+/* Shell-v2 reserves the top-left app icon and top-right window control. */
+.shell-window[data-shell-contract="v2"] .app-explorer {
+  grid-template-rows: minmax(calc(var(--shell-v2-header-row-size, 37px) * 2), auto) minmax(0, 1fr);
+}
+
+.shell-window[data-shell-contract="v2"] .app-explorer-toolbar {
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2 + 4px);
+}
+

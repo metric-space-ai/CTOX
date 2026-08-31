@@ -1,34 +1,34 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260831-ctox-creator-systemapp-v327';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-ctox-creator-systemapp-v327';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-ctox-creator-systemapp-v327';
-import { createAppActions } from './shared/app-actions.js?v=20260831-ctox-creator-systemapp-v327';
+import { CtoxResizer } from './shared/resizer.js?v=20260831-ctox-desktopapp-ports-v328';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-ctox-desktopapp-ports-v328';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-ctox-desktopapp-ports-v328';
+import { createAppActions } from './shared/app-actions.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/app-lifecycle.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/permissions.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260831-ctox-creator-systemapp-v327';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/branding.js?v=20260831-ctox-desktopapp-ports-v328';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/presentation.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -39,9 +39,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260831-ctox-creator-systemapp-v327';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-ctox-creator-systemapp-v327';
-import { createDocumentsFacade } from './shared/documents.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/shell-permissions-ui.js?v=20260831-ctox-desktopapp-ports-v328';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-ctox-desktopapp-ports-v328';
+import { createDocumentsFacade } from './shared/documents.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -49,26 +49,26 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/maintenance-state.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/workspace-session.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/taskbar-pins.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
   WORKJET_CATEGORY_IDS,
   workjetCategoryForModule,
   workjetCategoryForTarget,
-} from './shared/workjet-theme.js?v=20260831-ctox-creator-systemapp-v327';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-ctox-creator-systemapp-v327';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-ctox-creator-systemapp-v327';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-ctox-creator-systemapp-v327';
+} from './shared/workjet-theme.js?v=20260831-ctox-desktopapp-ports-v328';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-ctox-desktopapp-ports-v328';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-ctox-desktopapp-ports-v328';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-ctox-desktopapp-ports-v328';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -4343,26 +4343,12 @@ function glyphForModule(moduleId) {
   return MODULE_GLYPHS[moduleId] || '◻︎';
 }
 
-const DESKTOP_APPS = [
-  {
-    id: 'explorer',
-    title: 'Files',
-    glyph: '📁',
-    category: 'workspace',
-    defaultWidth: 720,
-    defaultHeight: 460,
-    loader: () => import(`./desktop-apps/explorer/app.js?v=${APP_BUILD}`),
-  },
-  {
-    id: 'file-viewer',
-    title: 'File Viewer',
-    glyph: '◫',
-    category: 'workspace',
-    defaultWidth: 760,
-    defaultHeight: 560,
-    loader: () => import(`./desktop-apps/file-viewer/app.js?v=${APP_BUILD}`),
-  },
-];
+// Ehemalige Shell-eigene Desktop-Apps (explorer, file-viewer) sind echte
+// Module unter modules/<id>/ — sie kommen wie alle Apps aus dem Katalog.
+// Die Legacy-Quellen unter desktop-apps/ bleiben nur für den
+// rxdb-Browser-Smoke-Harness liegen (browser_rust_smoke.js importiert
+// file-viewer direkt); die Shell lädt sie nicht mehr.
+const DESKTOP_APPS = [];
 
 // Companion viewers remain available internally under a module allowlist, but
 // launchable desktop apps like Files must be explicitly allowlisted per tenant.
@@ -6528,39 +6514,19 @@ const BUSINESS_REPORTER_DB_COLLECTIONS = [
 ];
 
 const DESKTOP_APP_DB_COLLECTIONS = {
-  browser: [],
+  // code-editor ist keine startbare App, sondern die integrierte
+  // Source-Ansicht der Shell (ensureIntegratedModuleToolSession).
   'code-editor': [
     'business_commands',
     'business_module_commits',
     'business_module_source_files',
   ],
-  creator: [],
-  explorer: [
-    'desktop_file_chunks',
-    'desktop_files',
-    'documents',
-    'knowledge_items',
-    'matching_objects',
-    'outbound_companies',
-    'spreadsheets',
-  ],
-  'file-viewer': [
-    'business_commands',
-    'desktop_files',
-  ],
 };
 
 // Desktop utilities do not own module schemas. Register the installed source
 // modules before mounting utilities that expose their collections.
-const DESKTOP_APP_SCHEMA_MODULE_IDS = Object.freeze({
-  explorer: Object.freeze([
-    'documents',
-    'knowledge',
-    'matching',
-    'outbound',
-    'spreadsheets',
-  ]),
-});
+// (explorer registriert seine Collections seit dem Modul-Port selbst.)
+const DESKTOP_APP_SCHEMA_MODULE_IDS = Object.freeze({});
 
 const SCOPED_SYSTEM_MODULE_DB_COLLECTIONS = Object.freeze({
   'app-store': Object.freeze([
@@ -10926,6 +10892,137 @@ const OFFLINE_FALLBACK_CATALOG = {
           "height": 480
         },
         "multi_instance": false,
+        "auto_restore": false
+      },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "explorer",
+      "title": "Explorer",
+      "description": "Dateien, Ordner und Business-OS-Datensätze durchsuchen, hochladen, öffnen und verwalten.",
+      "entry": "modules/explorer/index.html",
+      "collections": [
+        "desktop_file_chunks",
+        "desktop_files",
+        "documents",
+        "knowledge_items",
+        "matching_objects",
+        "outbound_companies",
+        "spreadsheets"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-explorer\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-explorer\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#06b6d4\" /><stop offset=\"100%\" stop-color=\"#8b5cf6\" /></linearGradient></defs><path d=\"M3 7.5h7l2-2h9v13.5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7.5Z\" fill=\"url(#grad-explorer)\" fill-opacity=\"0.12\" stroke=\"url(#grad-explorer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M3 10h18\" stroke=\"url(#grad-explorer)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
+        "default_width": 980,
+        "default_height": 640,
+        "min_width": 640,
+        "min_height": 480
+      },
+      "category": "Workspace",
+      "version": "1.0.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "explorer",
+        "files",
+        "workspace",
+        "documents"
+      ],
+      "store": {
+        "summary": "Zentraler Datei- und Datensatz-Explorer für den Business-OS-Arbeitsbereich.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/explorer",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 980,
+          "height": 640
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "file-viewer",
+      "title": "Datei-Viewer",
+      "description": "Gespeicherte Dateien sicher laden, in einer passenden Vorschau anzeigen und herunterladen.",
+      "entry": "modules/file-viewer/index.html",
+      "collections": [
+        "business_commands",
+        "desktop_files"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-file-viewer\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-file-viewer\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#f59e0b\" /><stop offset=\"100%\" stop-color=\"#8b5cf6\" /></linearGradient></defs><path d=\"M6 3h8l4 4v14H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z\" fill=\"url(#grad-file-viewer)\" fill-opacity=\"0.12\" stroke=\"url(#grad-file-viewer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M14 3v5h4\" stroke=\"url(#grad-file-viewer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M8 14s1.5-2 4-2 4 2 4 2-1.5 2-4 2-4-2-4-2Z\" stroke=\"url(#grad-file-viewer)\" stroke-width=\"1.7\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"14\" r=\"1\" fill=\"url(#grad-file-viewer)\"></circle></svg>",
+        "default_width": 760,
+        "default_height": 560,
+        "min_width": 520,
+        "min_height": 400
+      },
+      "category": "Workspace",
+      "version": "1.0.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "files",
+        "viewer",
+        "preview",
+        "download"
+      ],
+      "store": {
+        "summary": "System-Viewer für Bilder, PDF, Medien und Textdateien aus dem Business-OS-Dateispeicher.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/file-viewer",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 760,
+          "height": 560
+        },
+        "minimum_size": {
+          "width": 520,
+          "height": 400
+        },
+        "multi_instance": true,
         "auto_restore": false
       },
       "source": "core",

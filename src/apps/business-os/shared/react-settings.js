@@ -1,23 +1,23 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260831-ctox-creator-systemapp-v327';
-import { appReleaseProjection } from './app-lifecycle.js?v=20260831-ctox-creator-systemapp-v327';
+import { showBusinessConfirm } from './dialogs.js?v=20260831-ctox-desktopapp-ports-v328';
+import { appReleaseProjection } from './app-lifecycle.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260831-ctox-creator-systemapp-v327';
+} from './permissions.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   brandingExportJson,
   normalizeBrandingImportPayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './branding.js?v=20260831-ctox-creator-systemapp-v327';
+} from './branding.js?v=20260831-ctox-desktopapp-ports-v328';
 import {
   assignableRolesForActor,
   normalizeRole,
   roleCanManage,
   roleDisplayName,
-} from './roles.js?v=20260831-ctox-creator-systemapp-v327';
-import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260831-ctox-creator-systemapp-v327';
+} from './roles.js?v=20260831-ctox-desktopapp-ports-v328';
+import { renderModuleWhyDiagnosticsHtml } from './shell-permissions-ui.js?v=20260831-ctox-desktopapp-ports-v328';
 
 const PROVIDER_SUBSCRIPTION_PROFILES = Object.freeze({
   codex: Object.freeze({ label: 'ChatGPT / Codex', accessMode: 'Subscription', defaultAccountId: 'codex-primary' }),
