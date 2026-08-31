@@ -11,6 +11,12 @@ const dockRule = source.match(/\.ctox-chat-dock\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.
 const manyChatsDockRule = source.match(/\.ctox-chat-dock\.has-many-chats\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
 const oneChatStripRule = source.match(/\.ctox-chat-dock\.has-one-chat\s+\.ctox-chat-strip\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
 const fewChatsStripRule = source.match(/\.ctox-chat-dock\.has-few-chats\s+\.ctox-chat-strip\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
+const collapsedRootRules = [...source.matchAll(/\.ctox-chat-root\.is-collapsed\s*\{(?<body>[\s\S]*?)\n\s*\}/g)];
+const collapsedDockRules = [...source.matchAll(/\.ctox-chat-dock\.is-collapsed\s*\{(?<body>[\s\S]*?)\n\s*\}/g)];
+const expandedDockRule = source.match(/\.ctox-chat-dock:not\(\.is-collapsed\)\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
+const expandedVisibleRule = source.match(/\.ctox-chat-dock\.has-visible-chats:not\(\.is-collapsed\)\s*\{(?<body>[\s\S]*?)\n\s*\}/)?.groups?.body || '';
+const finalCollapsedRootRule = collapsedRootRules.at(-1)?.groups?.body || '';
+const finalCollapsedDockRule = collapsedDockRules.at(-1)?.groups?.body || '';
 const dateNavigationBlock = source.match(/root\.querySelector\('\[data-chat-date-prev\]'[\s\S]*?root\.querySelector\('\[data-chat-new\]'\)/)?.[0] || '';
 
 expect(dockRule, 'Missing .ctox-chat-dock CSS rule');
@@ -38,6 +44,18 @@ expect(oneChatStripRule, 'Missing one-chat compact strip rule');
 expectIncludes(oneChatStripRule, 'width: 148px;', 'One-chat strip must have stable compact width');
 expect(fewChatsStripRule, 'Missing few-chat strip rule');
 expectIncludes(fewChatsStripRule, 'max-width:', 'Few-chat strip must cap growth before many-chat mode');
+
+expect(finalCollapsedRootRule, 'Missing final collapsed root geometry');
+expectIncludes(finalCollapsedRootRule, 'width: max-content;', 'Collapsed Crew root must shrink to its visible controls');
+expectIncludes(finalCollapsedRootRule, 'max-width: max-content;', 'Collapsed Crew root must not inherit a viewport-sized maximum');
+expect(finalCollapsedDockRule, 'Missing final collapsed dock geometry');
+expectIncludes(finalCollapsedDockRule, 'justify-self: start;', 'Collapsed Crew dock must not stretch in its grid');
+expectIncludes(finalCollapsedDockRule, 'width: max-content !important;', 'Collapsed Crew dock must override responsive stretching');
+expect(expandedDockRule, 'Missing explicit expanded dock geometry');
+expectIncludes(expandedDockRule, 'width: max-content;', 'Zero/one-chat Crew dock must remain content-sized');
+expect(expandedVisibleRule, 'Missing expanded visible-chat grid');
+expectIncludes(source, '.ctox-chat-dock.has-few-chats:not(.is-collapsed),', 'Multi-member Crew dock needs an explicit expanded geometry');
+expectIncludes(source, 'justify-self: stretch;', 'Multi-member Crew dock must absorb the available desktop width');
 
 expectIncludes(source, 'const fitsSideBySide =', 'Chat windows need a side-by-side fit check');
 expectIncludes(source, 'const MANY_CHAT_THRESHOLD = 12;', 'Many-chat threshold must be explicit');
@@ -114,11 +132,10 @@ expectIncludes(source, 'renderAndPersistChatState', 'Interactive handlers must r
 rejectIncludes(source, "node.querySelector('[data-chat-new]')", 'Chat-window header must not expose a dead/new-chat plus button');
 expect(dateNavigationBlock, 'Missing date navigation handler block');
 rejectIncludes(dateNavigationBlock, 'ensureChat', 'Date navigation must not create phantom chats');
-expectIncludes(
-  source,
-  '.ctox-chat-window:not(.is-active) .ctox-chat-header-actions',
-  'Inactive window controls must be hidden instead of visibly dead'
-);
+expectIncludes(source, '.ctox-chat-window:not(.is-active) .ctox-chat-header-actions *,', 'Inactive window header controls must remain directly clickable');
+expectIncludes(source, 'pointer-events: auto !important;', 'Inactive window controls must not require an activation click');
+expectIncludes(source, 'bottom: -1px;', 'Header progress must run on the window-frame edge');
+expectIncludes(source, '.ctox-progress-visual:not(.is-reviewing) .ctox-progress-review.is-pending', 'Review progress must stay dormant until review starts');
 expectIncludes(
   source,
   '.ctox-chat-window:not(.is-active) {\n      opacity: 0.6;\n      visibility: visible;\n      pointer-events: auto;',

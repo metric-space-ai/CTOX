@@ -697,7 +697,8 @@ function hasScheduledChatAttachments(value) {
 
 function setWindowInteractiveState(win, isActive) {
   win.querySelectorAll('button, input, textarea, select, a').forEach((node) => {
-    if (isActive) {
+    const isAlwaysInteractiveHeaderControl = Boolean(node.closest('.ctox-chat-header-actions, .ctox-chat-delegation-card'));
+    if (isActive || isAlwaysInteractiveHeaderControl) {
       if (node.dataset.chatInactiveTabManaged === 'true') {
         node.removeAttribute('tabindex');
         delete node.dataset.chatInactiveTabManaged;
@@ -2211,10 +2212,10 @@ function delegationProgressCardHtml(chat, { taskId = '', commandId = '', taskSta
       : (chatUiIsGerman() ? 'Noch kein Ausführungsplan' : 'No execution plan yet');
     return `
       <div class="ctox-chat-delegation-card ${isPlanning ? 'is-planning' : 'is-dormant'}" data-progress-signature="planning">
-        <button class="ctox-progress-visual ${isPlanning ? 'is-planning' : 'is-dormant'}" type="button" data-track-task data-task-id="${escapeAttr(taskId)}" data-command-id="${escapeAttr(commandId)}" data-task-status="${escapeAttr(taskStatus)}" aria-label="${escapeAttr(tooltip)}" title="${escapeAttr(tooltip)}">
+        <button class="ctox-progress-visual ${isPlanning ? 'is-planning' : 'is-dormant'}" type="button" style="--ctox-progress-percent:0" data-track-task data-task-id="${escapeAttr(taskId)}" data-command-id="${escapeAttr(commandId)}" data-task-status="${escapeAttr(taskStatus)}" aria-label="${escapeAttr(tooltip)}" title="${escapeAttr(tooltip)}">
           <span class="ctox-progress-activity" style="--ctox-turn-angle:0deg" aria-hidden="true"><i></i></span>
           <span class="ctox-progress-track">
-            <span class="ctox-progress-work"><span class="ctox-progress-segment is-pending"></span></span>
+            <span class="ctox-progress-work"><span class="ctox-progress-planning-line"></span></span>
             <span class="ctox-progress-review is-pending"></span>
           </span>
         </button>
@@ -2243,7 +2244,7 @@ function delegationProgressCardHtml(chat, { taskId = '', commandId = '', taskSta
 
   return `
     <div class="ctox-chat-delegation-card ${activityClass}" data-progress-signature="${escapeAttr(executionProgressSignature(chat))}">
-      <button class="ctox-progress-visual" type="button" data-track-task data-task-id="${escapeAttr(taskId)}" data-command-id="${escapeAttr(commandId)}" data-task-status="${escapeAttr(taskStatus)}" aria-label="${escapeAttr(tooltip)}" title="${escapeAttr(tooltip)}">
+      <button class="ctox-progress-visual ${isReviewPhase ? 'is-reviewing' : ''}" type="button" style="--ctox-progress-percent:${Math.max(0, Math.min(100, Number(progress.percent) || 0))}" data-track-task data-task-id="${escapeAttr(taskId)}" data-command-id="${escapeAttr(commandId)}" data-task-status="${escapeAttr(taskStatus)}" aria-label="${escapeAttr(tooltip)}" title="${escapeAttr(tooltip)}">
         <span class="ctox-progress-activity" style="--ctox-turn-angle:${turnAngle}deg" aria-hidden="true"><i></i></span>
         <span class="ctox-progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${progress.percent}">
           <div class="ctox-progress-work">${workSegments}</div>
@@ -3104,7 +3105,7 @@ function formatChatBodyHtml(rawText) {
 function messageMarkup(message) {
   const trackId = message.taskId || message.commandId;
   const tracking = message.trackable === false ? '' : (message.commandId || message.taskId)
-    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}" aria-label="${escapeAttr(trackButtonLabel(message))}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6S2 12 2 12Z"></path></svg></button>`
+    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}" aria-label="${escapeAttr(trackButtonLabel(message))}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7"></path><path d="M10 14 21 3"></path><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path></svg></button>`
     : '';
   const rawText = String(message.text || '');
   const promptIsLong = message.role === 'user'
@@ -4024,7 +4025,7 @@ async function persistChatState({ state, db, remote = true }) {
   if (!remote || !collection || !ownedChats.length) return;
   const docs = ownedChats.map((chat) => applyChatTrackingSummary({
     ...chat,
-    messages: Array.isArray(chat.messages) ? chat.messages.slice(-40) : [],
+    messages: Array.isArray(chat.messages) ? mergeChatMessages(chat.messages, []) : [],
     draft: chat.draft || '',
     contextMeta: chat.contextMeta && typeof chat.contextMeta === 'object' ? chat.contextMeta : {},
     updated_at_ms: chat.updated_at_ms,
@@ -4306,7 +4307,24 @@ function isTerminalCtoxReply(message = {}) {
 }
 
 function messageIdentity(message = {}) {
-  return String(message.id || message.replyFor || `${message.role || 'ctox'}:${message.commandId || ''}:${message.taskId || ''}:${message.createdAt || ''}`);
+  const role = String(message.role || 'ctox').trim().toLowerCase();
+  const text = String(message.text || '').replace(/\s+/g, ' ').trim();
+  const trackingRef = String(
+    message.taskId
+    || message.task_id
+    || message.replyFor
+    || message.blockedFor
+    || message.failureFor
+    || message.commandId
+    || message.command_id
+    || '',
+  ).trim();
+  // Local optimistic messages and their RxDB projection can carry different
+  // document ids. A tracked event is the same event when task, role and copy
+  // agree; its status is deliberately excluded because the projection upgrades
+  // queued -> running -> completed in place.
+  if (trackingRef && text) return `tracked:${role}:${trackingRef}:${text}`;
+  return String(message.id || message.replyFor || `${role}:${trackingRef}:${message.createdAt || ''}`);
 }
 
 function preferredMessage(previous, next) {
@@ -7220,6 +7238,181 @@ function installChatStyles() {
     }
     .ctox-chat-overflow-chip span,
     .ctox-chat-overflow-chip small { display: none !important; }
+    /* The dock has two deliberately opposite geometries. Keep these final
+       state rules after all compact/theme overrides so a later generic dock
+       rule cannot stretch the collapsed controls or cap the expanded strip. */
+    .ctox-chat-root.is-collapsed {
+      right: auto;
+      width: max-content;
+      max-width: max-content;
+    }
+    .ctox-chat-dock.is-collapsed {
+      justify-self: start;
+      width: max-content !important;
+      max-width: max-content !important;
+    }
+    .ctox-chat-dock:not(.is-collapsed) {
+      justify-self: start;
+      width: max-content;
+      max-width: 100%;
+    }
+    .ctox-chat-dock.has-visible-chats:not(.is-collapsed) {
+      grid-template-columns: 108px var(--ctox-date-pill-width) minmax(48px, auto) 36px;
+    }
+    .ctox-chat-dock.has-few-chats:not(.is-collapsed),
+    .ctox-chat-dock.has-many-chats:not(.is-collapsed) {
+      grid-template-columns: 108px var(--ctox-date-pill-width) 26px minmax(0, 1fr) 26px 36px;
+      justify-self: stretch;
+      width: 100%;
+      max-width: 100%;
+    }
+    .ctox-chat-dock:is(.has-few-chats, .has-many-chats):not(.is-collapsed) .ctox-chat-strip {
+      width: 100%;
+      max-width: none;
+    }
+    /* Every visible crew window owns its controls. Focusing the window is not
+       a prerequisite for close/minimize/maximize. */
+    .ctox-chat-window:not(.is-active) .ctox-chat-header-actions {
+      opacity: 0.38;
+      visibility: visible;
+    }
+    .ctox-chat-window:not(.is-active) .ctox-chat-delegation-card {
+      opacity: 1;
+      visibility: visible;
+    }
+    .ctox-chat-window:not(.is-active) .ctox-chat-header-actions,
+    .ctox-chat-window:not(.is-active) .ctox-chat-header-actions *,
+    .ctox-chat-window:not(.is-active) .ctox-chat-delegation-card .ctox-progress-activity,
+    .ctox-chat-window:not(.is-active) .ctox-chat-delegation-card .ctox-progress-track {
+      pointer-events: auto !important;
+    }
+    .ctox-chat-window:not(.is-active) header:hover .ctox-chat-header-actions,
+    .ctox-chat-window:not(.is-active) .ctox-chat-header-actions:focus-within {
+      opacity: 0.9;
+    }
+    /* Progress is the lower header frame, not a detached bar. The clock is the
+       compact task link; all explanatory copy stays in its hover/focus title. */
+    .ctox-chat-delegation-card {
+      inset: 0;
+      width: auto;
+      height: auto;
+      min-height: 0;
+      transform: none;
+      pointer-events: none;
+    }
+    .ctox-progress-visual,
+    .ctox-chat-window header button.ctox-progress-visual {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      min-height: 0;
+      pointer-events: none;
+    }
+    .ctox-progress-activity {
+      position: absolute;
+      left: 62px;
+      top: 50%;
+      width: 32px;
+      height: 32px;
+      transform: translateY(-50%);
+      pointer-events: auto;
+      cursor: pointer;
+      border: 2px solid color-mix(in srgb, var(--accent) 74%, var(--line));
+      background:
+        radial-gradient(circle at center, var(--surface) 0 50%, transparent 52%),
+        repeating-conic-gradient(from -1deg, color-mix(in srgb, var(--accent) 72%, transparent) 0 1deg, transparent 1deg 30deg);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 22%, transparent);
+      opacity: 0.94;
+    }
+    .ctox-progress-visual:hover .ctox-progress-activity,
+    .ctox-progress-visual:focus-visible .ctox-progress-activity {
+      transform: translateY(-50%) scale(1.08);
+    }
+    .ctox-progress-track {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      width: 100%;
+      height: 5px;
+      gap: 0;
+      overflow: hidden;
+      border-radius: 0 0 13px 13px;
+      background: color-mix(in srgb, var(--line) 42%, transparent);
+      pointer-events: auto;
+      cursor: pointer;
+      box-shadow: 0 -1px 0 color-mix(in srgb, var(--line) 28%, transparent);
+    }
+    .ctox-progress-track::before {
+      content: '';
+      position: absolute;
+      inset: 0 auto 0 0;
+      width: calc(var(--ctox-progress-percent, 0) * 1%);
+      background: color-mix(in srgb, var(--accent) 92%, var(--crew-color));
+      box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 68%, transparent);
+      transition: width var(--motion-slow) var(--ease-standard);
+    }
+    .ctox-progress-work {
+      position: relative;
+      z-index: 1;
+      gap: 0;
+    }
+    .ctox-progress-segment,
+    .ctox-progress-review {
+      position: relative;
+      z-index: 1;
+      border-radius: 0;
+      border-right: 1px solid color-mix(in srgb, var(--surface) 80%, transparent);
+      background: transparent;
+      opacity: 1;
+    }
+    .ctox-progress-review { border-left: 1px solid color-mix(in srgb, var(--surface) 80%, transparent); border-right: 0; }
+    .ctox-progress-segment.is-completed,
+    .ctox-progress-review.is-completed {
+      background: transparent;
+      opacity: 1;
+    }
+    .ctox-progress-segment.is-in_progress,
+    .ctox-progress-visual.is-reviewing .ctox-progress-review:is(.is-running, .is-pending) {
+      background: linear-gradient(90deg,
+        color-mix(in srgb, var(--accent) 42%, transparent),
+        color-mix(in srgb, var(--accent) 82%, var(--crew-color)),
+        color-mix(in srgb, var(--accent) 42%, transparent));
+      opacity: 1;
+      animation: ctoxQuietProgress 1.25s ease-in-out infinite;
+    }
+    .ctox-progress-visual:not(.is-reviewing) .ctox-progress-review.is-pending {
+      background: transparent;
+      animation: none;
+    }
+    .ctox-progress-planning-line {
+      width: 32%;
+      height: 100%;
+      border-radius: 0;
+      background: color-mix(in srgb, var(--accent) 90%, var(--crew-color));
+      box-shadow: 0 0 8px color-mix(in srgb, var(--accent) 58%, transparent);
+      animation: ctoxQuietPlanning 1.15s ease-in-out infinite alternate;
+    }
+    @keyframes ctoxTurnInstrumentPulse {
+      0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 58%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 22%, transparent); }
+      55% { box-shadow: 0 0 0 7px transparent, 0 0 18px color-mix(in srgb, var(--accent) 62%, transparent); }
+      100% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 22%, transparent); }
+    }
+    .ctox-chat-delegation-card:is(.is-thinking, .is-tool) .ctox-progress-activity {
+      animation: ctoxTurnInstrumentPulse 620ms var(--ease-spring) 1;
+    }
+    .ctox-chat-track {
+      width: 28px;
+      height: 24px;
+      color: color-mix(in srgb, var(--accent) 72%, var(--muted)) !important;
+      cursor: pointer;
+    }
+    .ctox-chat-track:hover,
+    .ctox-chat-track:focus-visible {
+      color: var(--accent) !important;
+      background: color-mix(in srgb, var(--accent) 9%, transparent) !important;
+    }
     @media (prefers-reduced-motion: reduce) {
       .ctox-progress-segment.is-in_progress,
       .ctox-progress-review:is(.is-running, .is-pending),
@@ -7857,6 +8050,7 @@ export const __businessChatTestInternals = Object.freeze({
   executionProgressHeaderHtml,
   executionProgressSignature,
   messageMarkup,
+  mergeChatMessages,
   normalizeExecutionProgress,
   createTrackedMessageWatch,
   findDocsByIds,

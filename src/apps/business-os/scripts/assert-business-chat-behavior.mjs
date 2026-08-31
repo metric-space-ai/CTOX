@@ -150,7 +150,7 @@ try {
     expect(m.chipCount === 6, 'six chats render six chips');
     expect(m.navCount === 2, 'six chats show strip nav');
     expect(m.dockWidth > 480, `six-chat dock should keep visible creatures, got ${m.dockWidth}`);
-    expect(m.dockWidth < m.viewportWidth * 0.75, `six-chat dock should not be full width, ratio ${m.dockRatio}`);
+    expect(m.dockWidth > m.viewportWidth * 0.85, `six-chat dock should use the available workspace width, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'six-chat active chip center must sit under the active window');
     expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'six-member gallery must keep its active window inside the viewport');
   });
@@ -159,7 +159,7 @@ try {
     expect(m.chipCount === 8, 'eight chats render eight chips');
     expect(m.navCount === 2, 'eight chats show strip nav');
     expect(m.stripHasOverflow === false, 'eight compact creature chips should fit without needless scrolling');
-    expect(m.dockWidth < m.viewportWidth * 0.75, `eight-chat dock should avoid premature full width, ratio ${m.dockRatio}`);
+    expect(m.dockWidth > m.viewportWidth * 0.85, `eight-chat dock should use the available workspace width, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'eight-chat active chip center must sit under the active window');
     expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'eight-member gallery must keep its active window inside the viewport');
   });
@@ -167,8 +167,8 @@ try {
   await scenario(page, 'twelve-chats-full-width-scroll', { count: 12, activeIndex: 5 }, async (m) => {
     expect(m.chipCount === 12, 'twelve chats render twelve chips');
     expect(m.navCount === 2, 'twelve chats show strip nav');
-    expect(m.stripHasOverflow === true, 'twelve-chat strip must be horizontally scrollable');
-    expect(m.dockWidth < m.viewportWidth * 0.75, `twelve-member crew dock must stay bounded, ratio ${m.dockRatio}`);
+    expect(m.stripHasOverflow === false, 'twelve-chat strip should use available width before scrolling');
+    expect(m.dockWidth > m.viewportWidth * 0.85, `twelve-member crew dock must use the available workspace width, ratio ${m.dockRatio}`);
     expect(m.activeChipCenterWithinWindow === true, 'twelve-chat active chip center must sit under the active window');
     expect(m.activeWindowLeft >= 0 && m.activeWindowRight <= m.viewportWidth, 'twelve-member gallery must keep its active window inside the viewport');
     await page.screenshot({ path: screenshotPath, fullPage: true });
@@ -224,14 +224,27 @@ try {
   });
 
   await scenario(page, 'expanded-crew-windows-render-side-by-side', { count: 3, activeIndex: 1 }, async (m) => {
-    expect(m.inactiveFocusable === 0, `inactive controls must not be tabbable, got ${m.inactiveFocusable}`);
-    expect(m.inactiveVisibleActions === 0, `inactive header actions must be hidden, got ${m.inactiveVisibleActions}`);
+    expect(m.inactiveFocusable >= 3, `inactive window actions must be directly tabbable, got ${m.inactiveFocusable}`);
+    expect(m.inactiveVisibleActions >= 1, `inactive header actions must remain visible, got ${m.inactiveVisibleActions}`);
     expect(m.windowCount === 3, `the stage must render all three expanded crew windows, got ${m.windowCount}`);
     expect(m.renderedWindowIds.join(',') === 'chat_0,chat_1,chat_2', `the rendered crew should preserve its order, got ${m.renderedWindowIds.join(',')}`);
     expect(m.stageClasses.includes('is-side-by-side'), `three crew windows should arrange side by side, got ${m.stageClasses}`);
     expect(m.windowCreatureCount === 3, `each work window needs its own creature, got ${m.windowCreatureCount}`);
     expect(m.dockCreatureCount === 3, `the dock must show the same three crew members, got ${m.dockCreatureCount}`);
     expect(m.dockLabel === 'Crew', `crew navigation label must remain visible, got ${m.dockLabel}`);
+  });
+
+  await scenario(page, 'inactive-window-minimizes-with-one-click', { count: 3, activeIndex: 1 }, async () => {
+    const after = await page.evaluate(async () => {
+      const button = document.querySelector('.ctox-chat-window[data-chat-id="chat_0"] [data-chat-minimize]');
+      if (!button) throw new Error('inactive minimize action is not visible');
+      button.click();
+      await window.chatHarness.waitFor(() => document.querySelector('[data-chat-focus="chat_0"]')?.classList.contains('is-minimized'));
+      return window.chatHarness.collect();
+    });
+    results.push({ scenario: 'inactive-window-minimized-after-one-click', metrics: after });
+    expect(after.minimizedChipIds.includes('chat_0'), 'one click on an inactive window must minimize that window');
+    expect(after.activeId === 'chat_1', `minimizing an inactive window must not steal focus, got ${after.activeId}`);
   });
 
   await scenario(page, 'crew-task-renders-quiet-visual-progress', {
@@ -251,11 +264,27 @@ try {
     expect(m.progressInHeader === true, 'visual progress must live inside the window header');
     expect(m.progressClockCount === 1, `header needs one visual turn clock, got ${m.progressClockCount}`);
     expect(m.progressTrackWidth >= 180, `header step progress must remain clearly visible, got ${m.progressTrackWidth}px`);
+    expect(m.progressTrackHeight >= 5, `header frame progress must be visibly weighted, got ${m.progressTrackHeight}px`);
+    expect(m.progressTrackEdgeDelta <= 1, `progress must span the full header frame, edge delta ${m.progressTrackEdgeDelta}px`);
     expect(m.headerHeight >= 60 && m.headerHeight <= 68, `header must stay readable at about 64px, got ${m.headerHeight}`);
     expect(m.firstMessageTop >= m.headerBottom - 0.5, `chat copy must start below the header: ${m.firstMessageTop} < ${m.headerBottom}`);
     expect(m.activeWindowHeight >= 420, `crew window must retain a readable work area, got ${m.activeWindowHeight}`);
     expect(m.visibleChromeText === '', `status chrome must be text-free, got ${m.visibleChromeText}`);
     await page.screenshot({ path: progressScreenshotPath, fullPage: true });
+  });
+
+  await scenario(page, 'task-link-opens-ctox-detail', { count: 1, activeIndex: 0, groupedResearch: true }, async () => {
+    const navigation = await page.evaluate(async () => {
+      const link = document.querySelector('.ctox-chat-track');
+      if (!link) throw new Error('tracked message has no CTOX task link');
+      link.click();
+      await window.chatHarness.waitFor(() => location.hash.includes('task_id='));
+      return { hash: location.hash, title: link.getAttribute('title') || '' };
+    });
+    results.push({ scenario: 'task-link-navigation', navigation });
+    expect(navigation.hash.includes('#ctox?'), `task link must navigate into CTOX, got ${navigation.hash}`);
+    expect(navigation.hash.includes('drawer=1'), `task link must request the CTOX detail drawer, got ${navigation.hash}`);
+    expect(navigation.title.includes('task_research_0'), `task link hover must expose its stable id, got ${navigation.title}`);
   });
 
   await scenario(page, 'overflowing-crew-folds-into-3d-gallery', { count: 7, activeIndex: 3 }, async (m) => {
@@ -313,7 +342,7 @@ try {
     expect(after.minimizedRunningTitle.includes('Aktiv'), `running minimized chat hover hint should expose Aktiv, got ${after.minimizedRunningTitle}`);
   });
 
-  await scenario(page, 'keyboard-focus-skips-hidden-and-inactive-controls', { count: 4, activeIndex: 1 }, async () => {
+  await scenario(page, 'keyboard-focus-keeps-inactive-header-actions-operable', { count: 4, activeIndex: 1 }, async () => {
     const focusTrace = [];
     for (let i = 0; i < 18; i += 1) {
       await page.keyboard.press('Tab');
@@ -324,12 +353,13 @@ try {
           tag: active?.tagName || '',
           className: active?.className || '',
           inactiveWindow: Boolean(active?.closest?.('.ctox-chat-window:not(.is-active)')),
+          inactiveHeaderControl: Boolean(active?.closest?.('.ctox-chat-window:not(.is-active) .ctox-chat-header-actions, .ctox-chat-window:not(.is-active) .ctox-chat-delegation-card')),
           label: active?.getAttribute?.('aria-label') || active?.textContent?.trim()?.slice(0, 40) || '',
         };
       }));
     }
     results.push({ scenario: 'keyboard-focus-trace', focusTrace });
-    expect(focusTrace.every((item) => !item.inactiveWindow), 'tab focus must not enter inactive chat windows');
+    expect(focusTrace.every((item) => !item.inactiveWindow || item.inactiveHeaderControl), 'tab focus may enter only the direct header actions of inactive chat windows');
     expect(focusTrace.every((item) => !String(item.className).includes('ctox-date-native-picker')), 'tab focus must not enter hidden native date input');
   });
 
@@ -910,6 +940,8 @@ function harnessHtml() {
         .find((node) => node.dataset.chatFocus === activeWindow?.dataset.chatId);
       const activeWindowRect = box(activeWindow);
       const activeChipRect = box(activeChip);
+      const progressTrackRect = box(document.querySelector('.ctox-chat-window.is-active header .ctox-progress-track'));
+      const activeHeaderRect = box(document.querySelector('.ctox-chat-window.is-active header'));
       const activeChipCenterX = activeChipRect.width ? activeChipRect.x + activeChipRect.width / 2 : 0;
       const activeWindowCenterX = activeWindowRect.width ? activeWindowRect.x + activeWindowRect.width / 2 : 0;
       return {
@@ -967,6 +999,10 @@ function harnessHtml() {
         progressInHeader: Boolean(document.querySelector('.ctox-chat-window header > .ctox-chat-delegation-card')),
         progressClockCount: document.querySelectorAll('.ctox-chat-window header .ctox-progress-activity').length,
         progressTrackWidth: document.querySelector('.ctox-chat-window header .ctox-progress-track')?.getBoundingClientRect().width || 0,
+        progressTrackHeight: progressTrackRect.height,
+        progressTrackEdgeDelta: activeHeaderRect.width && progressTrackRect.width
+          ? Math.max(Math.abs(progressTrackRect.x - activeHeaderRect.x), Math.abs((progressTrackRect.x + progressTrackRect.width) - (activeHeaderRect.x + activeHeaderRect.width)))
+          : 0,
         headerHeight: document.querySelector('.ctox-chat-window header')?.getBoundingClientRect().height || 0,
         headerBottom: document.querySelector('.ctox-chat-window header')?.getBoundingClientRect().bottom || 0,
         firstMessageTop: document.querySelector('.ctox-chat-window .ctox-chat-message')?.getBoundingClientRect().top || 0,

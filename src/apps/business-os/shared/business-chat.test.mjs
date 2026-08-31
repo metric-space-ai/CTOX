@@ -38,6 +38,22 @@ test('business chat renders no agent scope panel without visible scope context',
   assert.equal(renderChatAgentScopeHtml({ client_context: { module: 'inventory' } }), '');
 });
 
+test('chat merge deduplicates the same tracked event across optimistic and RxDB ids', () => {
+  const shared = {
+    role: 'ctox',
+    text: 'Recherche wurde gestartet.',
+    taskId: 'task-42',
+    commandId: 'command-42',
+  };
+  const merged = __businessChatTestInternals.mergeChatMessages(
+    [{ ...shared, id: 'local-status', status: 'queued', createdAt: 10 }],
+    [{ ...shared, id: 'remote-projection', status: 'running', createdAt: 20 }],
+  );
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'remote-projection');
+  assert.equal(merged[0].status, 'running');
+});
+
 test('background control commands cannot steal focus when their result arrives', () => {
   assert.equal(__businessChatTestInternals.chatAllowsAutoFocus({
     contextMeta: {
