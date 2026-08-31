@@ -1,15 +1,15 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260831-shell-v2-unified-v324';
+import { showBusinessConfirm } from './dialogs.js?v=20260831-ctox-crew-home-v325';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260831-shell-v2-unified-v324';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260831-shell-v2-unified-v324';
+} from './file-integrity.js?v=20260831-ctox-crew-home-v325';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260831-ctox-crew-home-v325';
 import {
   normalizeWorkjetCategory,
   workjetCategoryStyle,
-} from './workjet-theme.js?v=20260831-shell-v2-unified-v324';
+} from './workjet-theme.js?v=20260831-ctox-crew-home-v325';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -1976,7 +1976,17 @@ function crewEyesMarkupForMode(shape, mode = 'working') {
 function crewCreatureMode(chat, taskState = getTaskState(chat)) {
   if (taskState === 'failed') return 'failed';
   if (taskState === 'running') {
-    return executionProgressForChat(chat)?.phase === 'review' ? 'review' : 'working';
+    const phase = String(
+      executionProgressForChat(chat)?.phase
+      || chat?.executionPhase
+      || chat?.execution_phase
+      || chat?.routeStatus
+      || chat?.status
+      || '',
+    ).toLowerCase();
+    return ['review', 'awaiting_review', 'awaiting-review', 'reviewing', 'validating'].includes(phase)
+      ? 'review'
+      : 'working';
   }
   if (taskState === 'idle'
       || taskState === 'queued'

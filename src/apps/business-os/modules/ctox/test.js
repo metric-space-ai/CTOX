@@ -31,6 +31,7 @@ const {
   compactTaskFlowRow,
   deriveHarnessHealth,
   eventToNodeId,
+  flowCrewSvg,
   flowSourceView,
   formatRelativeAge,
   friendlyWebStackStatus,
@@ -46,6 +47,8 @@ const {
   taskColumnMarkup,
   taskListInner,
   taskPipelineStage,
+  taskCrewNodeId,
+  taskCrewStatus,
   taskSteps,
   timelinePanel,
   webStackPanel,
@@ -57,6 +60,32 @@ const {
 test('Missing authoritative task telemetry remains a safe empty state', () => {
   assert.equal(authoritativeTaskStatus(null), '');
   assert.equal(authoritativeTaskNodeId(null), '');
+});
+
+test('CTOX flow map places the same crew on waiting, working, and failed task nodes', () => {
+  const working = { id: 'task-working', commandId: 'cmd-working', title: 'Working task', status: 'running', executionPhase: 'running' };
+  const waiting = { id: 'task-waiting', commandId: 'cmd-waiting', title: 'Waiting task', status: 'queued', executionPhase: 'queued' };
+  const failed = { id: 'task-failed', commandId: 'cmd-failed', title: 'Failed task', status: 'failed', executionPhase: 'terminal', terminalStatus: 'failed' };
+  const model = {
+    activeTask: working,
+    activeNodeId: 'running',
+    tasks: [waiting, failed, working],
+    nodeMap: new Map([
+      ['queued', { id: 'queued', x: 120, y: 160 }],
+      ['running', { id: 'running', x: 420, y: 160 }],
+      ['model-failed', { id: 'model-failed', x: 720, y: 360 }],
+    ]),
+  };
+  const html = flowCrewSvg(model, working, { lang: 'de' });
+  assert.equal((html.match(/ctox-flow-creature-slot/g) || []).length, 3);
+  assert.match(html, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
+  assert.match(html, /data-task-id="task-waiting"[^>]+data-creature-node-id="queued"/);
+  assert.match(html, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
+  assert.match(html, /is-working/);
+  assert.match(html, /is-sleeping/);
+  assert.match(html, /is-failed/);
+  assert.equal(taskCrewNodeId(working, model), 'running');
+  assert.equal(taskCrewStatus(waiting), 'queued');
 });
 
 // --- Minimal fake DOM ---------------------------------------------------------

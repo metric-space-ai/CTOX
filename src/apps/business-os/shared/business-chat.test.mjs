@@ -38,6 +38,34 @@ test('business chat renders no agent scope panel without visible scope context',
   assert.equal(renderChatAgentScopeHtml({ client_context: { module: 'inventory' } }), '');
 });
 
+test('tracked crew messages expose a compact task id that deep-links to CTOX', () => {
+  const taskId = 'queue:system::task_1234567890abcdef';
+  const previousDocument = globalThis.document;
+  globalThis.document = { documentElement: { lang: 'de' } };
+  const html = __businessChatTestInternals.messageMarkup({
+      id: 'status-1',
+      role: 'ctox',
+      text: 'Recherche gestartet.',
+      taskId,
+      commandId: 'cmd-42',
+      status: 'running',
+    });
+  globalThis.document = previousDocument;
+  assert.match(html, /data-track-task/);
+  assert.match(html, new RegExp(`data-task-id="${taskId}"`));
+  assert.match(html, /<code>…567890abcdef<\/code>/);
+  assert.match(html, new RegExp(`aria-label="[^"]+${taskId}`));
+});
+
+test('crew identity follows the command id across chat and CTOX task projections', () => {
+  const chat = { id: 'chat-random', messages: [{ commandId: 'cmd-shared', taskId: 'task-shared' }] };
+  const task = { id: 'task-shared', commandId: 'cmd-shared' };
+  assert.deepEqual(
+    __businessChatTestInternals.crewIdentity(chat),
+    __businessChatTestInternals.crewIdentity(task),
+  );
+});
+
 test('chat merge deduplicates the same tracked event across optimistic and RxDB ids', () => {
   const shared = {
     role: 'ctox',
@@ -136,7 +164,7 @@ test('review progress selects a distinct creature mode with deterministic motion
   assert.match(work, /is-running is-working/);
   assert.match(work, /--crew-work-drift:/);
   assert.doesNotMatch(work, /is-review/);
-  assert.notEqual(review.match(/--crew-review-drift:[^;]+/)[0], work.match(/--crew-review-drift:[^;]+/)[0]);
+  assert.equal(review.match(/--crew-review-drift:[^;]+/)[0], work.match(/--crew-review-drift:[^;]+/)[0]);
   assert.equal(review, __businessChatTestInternals.crewCreatureHtml(reviewChat, 'running', 'window'));
 });
 

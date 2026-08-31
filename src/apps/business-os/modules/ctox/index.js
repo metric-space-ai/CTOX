@@ -1,6 +1,7 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
+import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260831-ctox-crew-home-v325';
 
 const FLOW_WIDTH = 1760;
 const FLOW_HEIGHT = 1050;
@@ -17,7 +18,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260721-reference-flow-pins1';
+const CTOX_STYLE_BUILD = '20260831-ctox-crew-home-v325';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -1876,6 +1877,13 @@ function renderMain(state) {
     button.addEventListener('click', () => {
       selectTask(state, button.dataset.taskId, { drawer: true, center: true });
     });
+    if (button.classList.contains('ctox-flow-creature-slot')) {
+      button.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        selectTask(state, button.dataset.taskId, { drawer: true, center: true });
+      });
+    }
   });
   main.querySelector('[data-timeline-range]')?.addEventListener('input', (event) => {
     if (event.target.dataset.taskTimelineRange === 'true') {
@@ -1898,6 +1906,7 @@ function renderMain(state) {
     });
   });
   wireCanvasDrag(main.querySelector('[data-flow-canvas]'));
+  syncCrewProceduralMotion(main);
   updateLiveIndicators(state);
 }
 
@@ -2009,6 +2018,7 @@ function flowSvg(model, selectedNode, visibleTrace, selectedTask, state, taskSte
         return `<path class="ctox-flow-edge ${strength > 0 ? 'is-observed' : ''} ${activeEdge ? 'is-active-edge' : ''}" d="${edgePath(from, to, edge.route)}" style="--edge-strength:${strength}"></path>`;
       }).join('')}
       ${communicationOnly ? '' : model.nodes.map((node) => flowNodeSvg(node, selectedNode, visibleTrace.nodeStrength.get(node.id) || 0, state.lang)).join('')}
+      ${communicationOnly ? '' : flowCrewSvg(model, selectedTask, state)}
       ${communicationOnly ? '' : '</g>'}
     </svg>
   `;
@@ -2301,6 +2311,72 @@ function flowNodeSvg(node, selectedNode, traceStrength, lang = 'de') {
       <text class="ctox-flow-node-metrics" x="${-NODE_WIDTH / 2 + 10}" y="${NODE_HEIGHT / 2 - 8}">${escapeHtml(metricsLabel(node, lang))}</text>
     </g>
   `;
+}
+
+function flowCrewSvg(model, selectedTask, state) {
+  const tasks = taskCrewCandidates(model);
+  const occupied = new Map();
+  return tasks.map((task) => {
+    const nodeId = taskCrewNodeId(task, model);
+    const node = model.nodeMap.get(nodeId) || model.nodeMap.get('queued');
+    if (!node) return '';
+    const slot = occupied.get(node.id) || 0;
+    occupied.set(node.id, slot + 1);
+    const column = slot % 4;
+    const row = Math.floor(slot / 4);
+    const x = node.x - 82 + column * 42;
+    const y = node.y - NODE_HEIGHT / 2 - 52 - row * 40;
+    const selected = task.id === selectedTask?.id;
+    const status = taskCrewStatus(task);
+    const title = `${taskDisplayTitle(task, state)} · ${task.id}`;
+    const creature = crewCreatureHtml({
+      ...task,
+      crewKey: task.commandId || task.command_id || task.taskId || task.task_id || task.id,
+      executionProgress: task.executionProgress || task.execution_progress,
+    }, status, 'map');
+    return `
+      <foreignObject class="ctox-flow-creature-slot ${selected ? 'is-selected' : ''}" x="${x}" y="${y}" width="48" height="48"
+        data-task-id="${escapeAttr(task.id)}" data-creature-node-id="${escapeAttr(node.id)}" role="button" tabindex="0"
+        aria-label="${escapeAttr(title)}">
+        <div class="ctox-flow-creature-shell" xmlns="http://www.w3.org/1999/xhtml" title="${escapeAttr(title)}">${creature}</div>
+      </foreignObject>
+    `;
+  }).join('');
+}
+
+function taskCrewCandidates(model) {
+  const tasks = Array.isArray(model?.tasks) ? model.tasks : [];
+  const priority = (task) => {
+    const status = taskCrewStatus(task);
+    if (status === 'running') return 0;
+    if (status === 'queued') return 1;
+    if (status === 'failed') return 2;
+    return 3;
+  };
+  return [...tasks]
+    .sort((left, right) => priority(left) - priority(right) || taskTimestampMs(right) - taskTimestampMs(left))
+    .slice(0, 12);
+}
+
+function taskCrewNodeId(task, model) {
+  const active = model?.activeTask;
+  const matchesActive = active && (
+    (task.id && task.id === active.id)
+    || (task.taskId && task.taskId === active.taskId)
+    || (task.commandId && task.commandId === active.commandId)
+  );
+  if (matchesActive) {
+    return model.activeNodeId || authoritativeTaskNodeId(task);
+  }
+  return authoritativeTaskNodeId(task);
+}
+
+function taskCrewStatus(task) {
+  const status = authoritativeTaskStatus(task) || normalizeCommandStatus(task?.routeStatus || task?.status);
+  if (HARNESS_PROBLEM_TERMINAL_STATUSES.has(status)) return 'failed';
+  if (HARNESS_ACTIVE_STATUSES.has(status) || status === 'review') return 'running';
+  if (HARNESS_SUCCESS_STATUSES.has(status)) return 'success';
+  return 'queued';
 }
 
 function buildHarnessModel(data, flow, lang = 'de') {
@@ -4494,5 +4570,8 @@ export const __ctoxTestHooks = {
   applyTaskSelection,
   webStackPanel,
   taskPipelineStage,
+  flowCrewSvg,
+  taskCrewNodeId,
+  taskCrewStatus,
   wireTaskSourceReadiness,
 };
