@@ -1881,7 +1881,7 @@ function setBusy(busy, text = '') {
   const showLoading = busy || state.marketplaceStatus === 'loading';
   if (els.loading) els.loading.hidden = !showLoading;
   if (els.loadingText) {
-    els.loadingText.textContent = text || state.marketplaceMessage || 'GitHub Discovery wird synchronisiert.';
+    els.loadingText.textContent = text || state.marketplaceMessage || 'Katalogprojektion wird geladen.';
   }
   if (els.refresh) els.refresh.disabled = busy || state.marketplaceStatus === 'loading';
 }
@@ -1956,7 +1956,7 @@ function renderMarketplaceState() {
   const showLoading = state.marketplaceStatus === 'loading' || state.busy;
   if (els.loading) els.loading.hidden = !showLoading;
   if (els.loadingText && showLoading) {
-    els.loadingText.textContent = state.marketplaceMessage || 'GitHub Discovery wird synchronisiert.';
+    els.loadingText.textContent = state.marketplaceMessage || 'Katalogprojektion wird geladen.';
   }
   if (state.ctx?.host) {
     const root = state.ctx.host.querySelector('[data-app-store-root]');
@@ -2400,7 +2400,7 @@ function emptyCatalogBody(scope, query, marketplaceStatus, marketplaceMessage = 
   if (scope === 'marketplace' && marketplaceStatus === 'loading') return 'Der Katalog wird gerade aus der Server-Projektion neu geladen.';
   if (scope === 'marketplace' && marketplaceStatus === 'error') return marketplaceMessage || 'Der letzte Katalog-Refresh konnte nicht geladen werden.';
   if (query) return `Kein Katalogeintrag passt zu "${query}".`;
-  return 'Wechsle die Kategorie oder aktualisiere GitHub Discovery.';
+  return 'Wechsle die Kategorie oder aktualisiere den Katalog.';
 }
 
 function externalLinkIcon() {
