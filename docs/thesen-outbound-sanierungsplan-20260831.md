@@ -125,6 +125,23 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
   experte.de serverseitig AUS (wieder einschalten); BNT inzwischen 14/32.
 - Browser-Pane verlor die Sitzung — UI-Verifikation wartet auf Owner-Login.
 
+- 06:18–06:35 **Entsperr-Pfad live seziert** (Owner-Test): (a) v23-Button →
+  eigene Sitzung → „Chromium reported ready" — **funktioniert**; mein Deploy-
+  Neustart hat die erste Sitzung gekillt (23 Chromium-Tode/24h = meine
+  Deploys; ab jetzt Deploy-Stopp während Owner-Tests). (b) Live-View zeigt
+  nichts, weil der Scraper nur die SITZUNG anlegt, aber keinen TAB öffnet
+  („0 Tabs" → „Inhalt wird geladen" wartet ewig). (c) Worker-initiierte
+  Auth-Sitzungen (rocketreach/xing/bundesanzeiger) laufen unter
+  `_ctox_harness`-Identität — für den Owner unsichtbar/unsteuerbar („Kein
+  laufender Browser-Prozess"). Das IST der Capability-Token-Defekt P2.4 in
+  letzter Konsequenz: Worker kann Sitzungen nicht an den Nutzer übergeben.
+  (d) „Zugangsdaten einsetzen" scheiterte einmal an SQLite „database is
+  locked" (Store-Contention unter Agentenlast) → P2-Punkt busy_timeout/Retry
+  im Command-Intake.
+  → P2.4 präzisiert: auth_assist muss die Sitzung unter der NUTZER-Identität
+  anfordern (oder übertragen) UND beim Start direkt einen Tab mit der Ziel-URL
+  öffnen.
+
 ## P0 — Der eine Bruch, der alles tötet (Glied 3 der Kette)
 
 **Befund:** Lokale App-Writes gelingen (Trace `write ok`), aber `business_commands`-
