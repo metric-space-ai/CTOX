@@ -69,6 +69,52 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
 
 ## Ereignis-Log (fortgeschrieben)
 
+- 12:25 **P2-Batch gepusht und Server-Build gestartet** (origin/main `c8d9e3e20`,
+  Log `upgrade-outbound-heilung-c8d9e3e20-20260831T122521Z.log`, pid 598199).
+  Owner-Ansage: EIN Upgrade-Lauf, danach keiner mehr. Inhalt (2 Commits, lokal
+  `cargo check` grün, Sellify-Evidenz-Test grün):
+  1. Auth-Assist-Sessions gehören dem anfragenden NUTZER (zentrale
+     Besitzer-Auflösung aus dem Task-Actor statt `ctox_harness`); Session+Tab
+     werden bei Annahme sofort projiziert (Unlock-View hat sofort etwas zu
+     zeigen); Browser-Automation läuft im Profil des Besitzers.
+  2. auth-assist-login/-signup Intake auf trusted-local — die Token-Ablehnung
+     („a valid capability token is required", live 06:22Z in Dauerschleife,
+     15 dnbhoovers-Duplikate in der Queue) ist damit an der Wurzel weg.
+  3. Harness: 404 „Response ... was not found" auf `previous_response_id` →
+     Kette verwerfen, EINMAL mit voller Historie neu senden. Gemessen: die
+     Queue-Worker starben daran seriell (02:07/07:14/07:29, je andere ID);
+     Gateway-Events zeigen für diese IDs NULL Einträge (Stream serverseitig
+     nie fertig, Client übernahm die ID trotzdem).
+  4. `impressum`-Wurzelfix (Builtin-Skip VOR URL-Parse), RxDB-busy_timeout
+     10s→30s (Sellify-Lookups starben an „database is locked" + vergiftetem
+     „canonical command replay remained nonterminal").
+  5. Sellify als sichtbare Belegquelle im Rechercheergebnis (Name/Domain/
+     E-Mail/Telefon/CRM-Nr., exakt + rechtsformfreier Fuzzy-Probe) und
+     `outbound.sellify_lookup` mit `fuzzy_selectors`, `website_url`-Feld und
+     `campaign`-Entity (Kampagnen-Mitglieder, Limit 2000).
+- 12:25 KORREKTUR zur Adapter-Forensik: der `/v1/responses`-404 des Reviews
+  ist ein GATEWAY-Persistenzverlust bei abgebrochenen Streams (Vercel-Pfad
+  `storeFallbackResponseStateWithRetry` im SSE-`onCompleted` ohne Event bei
+  Abbruch), kein Tenant-Zuordnungsfehler. Harness-Selbstheilung (Punkt 3)
+  entschärft ihn; Gateway-Härtung bleibt offen (ctox-dev, separater Deploy).
+- 12:20 Test-Befund: `appsec_worker_dispatches_business_os_web_stack_auth_
+  assist_contract` scheitert IDENTISCH auf Basis f8271bd2d (accepted vs
+  pending_sync) — vorbestehend; der Test-Build des ctox-Bins war upstream
+  ohnehin kaputt (ring-Konvertierungen, in Batch repariert).
+- 12:30 **App v1.0.52 gebaut** (Tarball + Deploy-Skript bereit, Deploy NACH
+  dem Upgrade): zwei Buttons „Neue Recherche"/„Nachrecherche" mit harter
+  Sellify-Weiche (existiert→nur Nachrecherche; fehlt→nur Neue Recherche;
+  Prüffehler→kein Start), Domain- und Fuzzy-Fallback in der Dublettensuche,
+  Sellify-Kampagnen-Import (eigenes Icon, Suche→Mitglieder→Kampagne mit
+  Leads), Zwei-Prompt-Settings (Neue/Nachrecherche, leer=Fallback).
+- 11:00 Queue-Räumung Teil 2: 5 Tasks gecancelt (rocketreach/google/mailtester/
+  2×reconcile); 15 dnbhoovers-Duplikate transition-geschützt — lösen sich
+  mit dem Token-Fix. 3 frische „Nachrecherche WITTENSTEIN SE"-Aufträge warten
+  auf den Deploy. WITTENSTEIN: 32 Sellify-Treffer (v0), BNT vorhanden.
+- 10:56 Launcher-Schreck „Apps weg": Module+Katalog serverseitig intakt
+  (17 Einträge, outbound+sellify enthalten); Ursache veraltete Browser-Ansicht
+  nach Dienst-Neustarts 08:36–08:38; Reload zeigt alles. Kein Datenverlust.
+
 - 01:15 v18 deployt: **Kanal-Selbstheilung in der App** (`recoverCommandChannel` via
   `ctx.sync.restartCollection` auf der geteilten Shell-Runtime + Handle-Neuauflösung
   + Einmal-Retry) für researchLead, saveResearchPolicy, toggleSource,
