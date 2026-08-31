@@ -9521,3 +9521,14 @@ button.shell-window-header-meta:focus-visible,
 .shell-release-version:hover { color: var(--text); text-decoration: underline; }
 .shell-release-version:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 4px; }
 .shell-release-status[data-state="current"] { display: none; }
+
+/* Eindaemmung (31.08., Betreiber-Befund: seitenfuellendes App-Overlay macht
+   Fenster unverschiebbar): Ein App-Fenster darf die Shell nicht lahmlegen
+   koennen. contain:paint macht den Fensterinhalt zum Containing Block auch
+   fuer position:fixed-Nachfahren - ein Overlay aus dem Modulinhalt kann
+   maximal das eigene Fenster bedecken, nie den Desktop. Modul-Overlays
+   gehoeren per Vertrag in den App-Host; body-Montagen faengt zusaetzlich
+   der statische Waechter (Regel body-overlay). */
+.shell-window[data-shell-contract="v2"] > .shell-window-content {
+  contain: paint;
+}

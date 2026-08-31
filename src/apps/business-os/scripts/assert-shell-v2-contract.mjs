@@ -56,6 +56,13 @@ for (const app of apps) {
   if (BLUE.test(css) || BLUE.test(js)) {
     findings.push({ app: app.id, base: app.base, rule: 'hardcoded-accent', detail: 'Host-Blau-Hex in Modulcode; Akzent muss vom Icon abgeleitet sein' });
   }
+  // Betreiber-Regel "nichts ausserhalb der App": Module montieren Overlays im
+  // eigenen Host, nie auf document.body - body-Overlays fangen Zeiger-Events
+  // ueber dem ganzen Desktop ab und machen Fenster unverschiebbar.
+  if (/document\.body\.(appendChild|append|prepend|insertBefore)/.test(js)) {
+    findings.push({ app: app.id, base: app.base, rule: 'body-overlay', detail: 'Modul montiert DOM auf document.body statt im App-Host' });
+  }
+
   if (/^\s*--accent\s*:/m.test(css)) {
     findings.push({ app: app.id, base: app.base, rule: 'accent-override', detail: 'Modul definiert --accent selbst; gehoert der Shell (Icon-Palette)' });
   }
