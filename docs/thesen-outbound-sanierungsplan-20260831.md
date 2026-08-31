@@ -111,6 +111,20 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
     werden (Öffnungs-Rewrite-Fenster); Personen-Ausbeute >1 pro Lead hängt an den
     Auth-Quellen (LinkedIn/Xing-Personensuche).
 
+- 06:13 **v21: Owner-Befund behoben — der gepflegte Rechercheablauf erreichte den
+  Agenten NIE** (er floss nur in die Adapter-Generierung; der Recherche-Prompt
+  war ein zweiter, hartkodierter Kurztext). Jetzt steht der Ablauf wörtlich in
+  beiden Prompts (Einzel + Kampagne) + als `research_instructions` im Payload.
+- 06:14 **v22: Quellen-Glossar + Phasenmodell im Agenten-Prompt** (Adapter =
+  Werkzeuge mit Glossar; Phase B = aktives Lückenschließen per Websuche/
+  CTOX-Browser mit Belegpflicht; Phase C = strukturiertes Nachtragen).
+- 06:10 **Mega-Reconcile-Task geblockt** (Review: erfundene Blocker; Rework-Kreis).
+  Strategie: Einzel-Generierung je Quelle (3× nachweislich erfolgreich).
+- Befunde: Brave-Insert im STREAM_LIMIT verloren (neu anlegen); Testleichen-
+  Löschung kam NICHT am Server an (delete-source NICHT e2e — Korrektur);
+  experte.de serverseitig AUS (wieder einschalten); BNT inzwischen 14/32.
+- Browser-Pane verlor die Sitzung — UI-Verifikation wartet auf Owner-Login.
+
 ## P0 — Der eine Bruch, der alles tötet (Glied 3 der Kette)
 
 **Befund:** Lokale App-Writes gelingen (Trace `write ok`), aber `business_commands`-
