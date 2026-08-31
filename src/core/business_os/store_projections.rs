@@ -2,19 +2,20 @@
 // License: Apache-2.0
 
 use super::store::{
-    apply_queue_projection_status_fields, browser_context_artifact_for_command, clip_text,
-    command_inbound_channel, command_status_for_queue_route_status,
-    count_legacy_http_fallback_records, find_queue_task_for_command, first_string_field, now_ms,
-    open_store, projection_route_status_for_command_status, projection_status_is_active,
-    push_repair_action, queue_status_is_terminal_failure, queue_status_is_terminal_success,
+    BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS, BusinessCommand, QueueProjectionRepairOptions,
+    RxdbProjectionWriterCache, apply_queue_projection_status_fields,
+    browser_context_artifact_for_command, clip_text, command_inbound_channel,
+    command_status_for_queue_route_status, count_legacy_http_fallback_records,
+    find_queue_task_for_command, first_string_field, now_ms, open_store,
+    projection_route_status_for_command_status, projection_status_is_active, push_repair_action,
+    queue_status_is_terminal_failure, queue_status_is_terminal_success,
     redact_document_client_context_secrets, repair_inline_payload_artifacts,
     upsert_command_projection_from_queue_status, upsert_rxdb_collection_record,
-    upsert_rxdb_collection_record_cached, BusinessCommand, QueueProjectionRepairOptions,
-    RxdbProjectionWriterCache, BUSINESS_OS_QUEUE_ORPHAN_REPAIR_AGE_MS,
+    upsert_rxdb_collection_record_cached,
 };
 use crate::mission::channels;
 use anyhow::Context;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
@@ -1278,12 +1279,12 @@ pub(crate) mod tests {
         queue_status_is_terminal_success, rxdb_store_path,
     };
     use super::{
-        business_chat_result_status_is_failure, effective_queue_projection_route_status,
-        repair_queue_projections, upsert_business_record, QueueProjectionRepairOptions,
+        QueueProjectionRepairOptions, business_chat_result_status_is_failure,
+        effective_queue_projection_route_status, repair_queue_projections, upsert_business_record,
     };
     use crate::mission::channels;
     use anyhow::Context;
-    use rusqlite::{params, Connection};
+    use rusqlite::{Connection, params};
     use serde_json::Value;
     use std::fs;
     use std::path::Path;
@@ -1719,8 +1720,8 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn repair_queue_projections_redacts_inline_report_artifacts_and_counts_legacy_records(
-    ) -> anyhow::Result<()> {
+    fn repair_queue_projections_redacts_inline_report_artifacts_and_counts_legacy_records()
+    -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
         let conn = open_store(root)?;

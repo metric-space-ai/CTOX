@@ -153,6 +153,11 @@ export async function mount(container, ctx) {
     fallback: container.querySelector('[data-source-fallback]'),
     placeholder: container.querySelector('[data-source-placeholder]'),
   };
+  const codingAgentAppAvailable = isDesktopAppTargetAvailable(ctx, 'coding-agents');
+  if (refs.agentOpenApp && !codingAgentAppAvailable) {
+    refs.agentOpenApp.disabled = true;
+    refs.agentOpenApp.title = 'Coding-Agent-App ist in diesem Workspace nicht verfügbar';
+  }
 
   refs.search.addEventListener('input', () => {
     state.search = refs.search.value.trim();
@@ -243,7 +248,7 @@ export async function mount(container, ctx) {
     delegateAgentTurn();
   });
   refs.agentOpenApp?.addEventListener('click', () => {
-    if (!state.moduleId) return;
+    if (!state.moduleId || !codingAgentAppAvailable) return;
     // Cross-link into the aggregate coding-agent app, focused on this app.
     ctx.openDesktopApp?.('coding-agents', { args: { moduleId: state.moduleId, moduleTitle: state.moduleTitle } });
   });
@@ -739,6 +744,7 @@ export async function mount(container, ctx) {
     if (refs.history) refs.history.disabled = !state.moduleId;
     if (refs.agent) refs.agent.disabled = !state.moduleId;
     if (refs.agentRun) refs.agentRun.disabled = !state.moduleId || state.readonly || state.saving;
+    if (refs.agentOpenApp) refs.agentOpenApp.disabled = !state.moduleId || !codingAgentAppAvailable;
   }
 
   async function ensureSourceReplication() {
@@ -1147,6 +1153,22 @@ export function sourceEditorActionState(input) {
     reload: hasModule && !Boolean(input.saving),
     save: hasFile && dirty && !busy && !Boolean(input.readonly),
   };
+}
+
+export function isDesktopAppTargetAvailable(ctx, appId) {
+  const targetId = String(appId || '').trim();
+  if (!targetId) return false;
+  if (typeof ctx?.canOpenDesktopApp === 'function') {
+    try {
+      return ctx.canOpenDesktopApp(targetId) === true;
+    } catch {
+      return false;
+    }
+  }
+  const apps = typeof ctx?.getDesktopApps === 'function'
+    ? ctx.getDesktopApps()
+    : ctx?.desktopApps;
+  return Array.isArray(apps) && apps.some((entry) => entry?.id === targetId);
 }
 
 function moduleEmptyStatus() {

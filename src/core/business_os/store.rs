@@ -21696,6 +21696,7 @@ Business OS app task metadata:
 - install_target: {install_target}
 - app_directory: {module_dir}
 - skill: business-os-app-module-development
+- resource.shell_v2_contract: src/skills/system/product_engineering/business-os-app-module-development/references/shell-v2-contract.md
 - resource.module_contract: src/skills/system/product_engineering/business-os-app-module-development/references/module-contract.md
 - resource.design_guide: src/skills/system/product_engineering/business-os-app-module-development/references/design-guide.md
 - resource.standalone_porting: src/skills/system/product_engineering/business-os-app-module-development/references/standalone-porting.md

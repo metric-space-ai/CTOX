@@ -2,11 +2,6 @@ import { loadModuleMessages } from '../../shared/i18n.js';
 import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { createCtoxLauncher } from './ctoxLauncher.js';
 import { makeIconDraggable } from './iconDrag.js?v=20260816-browser-sync-guards-v141';
-import {
-  positionIntersectsReservedRects,
-  positionOutsideReservedRects,
-  rowMajorGridPosition,
-} from './iconLayout.js?v=20260830-widget-reservation-v1';
 import { getSvgIcon as getFallbackSvgIcon } from '../../shared/icons.js?v=20260816-browser-sync-guards-v141';
 import {
   buildQuickAppCreateCommand,
@@ -24,7 +19,7 @@ const STYLE_BUILD = '20260826-workjet-ui-contract-v1';
 const LAYOUT_DOC_ID = 'layout';
 const ICON_POSITION_CACHE_KEY = 'ctox.businessOs.desktopIconPositions';
 const ICON_POSITION_CACHE_VERSION = 2;
-const ROW_MAJOR_LAYOUT_MIGRATION = 'row-major-v3-widget-reserved';
+const ROW_MAJOR_LAYOUT_MIGRATION = 'row-major-v2';
 const DESKTOP_SYNC_COLLECTIONS = Object.freeze([
   'desktop_icons',
   'desktop_layout',
@@ -160,7 +155,6 @@ export async function mount(ctx) {
     root,
     surface: root.querySelector('[data-desktop-surface]'),
     icons: root.querySelector('[data-desktop-icons]'),
-    widgetContainer: root.querySelector('[data-desktop-widget]'),
     widgetStatus: root.querySelector('[data-widget-status]'),
     widgetSync: root.querySelector('[data-widget-sync]'),
     widgetSyncTitle: root.querySelector('[data-widget-sync-title]'),
@@ -177,19 +171,7 @@ export async function mount(ctx) {
   let disposed = false;
   const mountedAtMs = Date.now();
 
-  const layoutCollection = ctx.db?.collection?.('desktop_layout');
-  const iconsCollection = ctx.db?.collection?.('desktop_icons');
-  const commandsCollection = ctx.db?.collection?.('business_commands');
-
-  const layout = await ensureLayout(layoutCollection, launcher);
-  let iconPositionCache = readIconPositionCache();
-  let iconsReadiness = readIconsReadiness();
-  await ensureIcons(iconsCollection, launcher);
-  await renderIcons();
-
-  // Maintenance can make the initial layout/icon writes fail closed. Start
-  // timers and subscriptions only after that persistence boundary succeeds,
-  // so a shell-owned remount cannot leave a leaked clock or sync listener.
+  // Wire up the live clock and date widget
   const timeEl = refs.root.querySelector('[data-widget-time]');
   const dateEl = refs.root.querySelector('[data-widget-date]');
   if (refs.widgetStatus) refs.widgetStatus.textContent = t('platformActive', 'CTOX Plattform aktiv');
@@ -219,6 +201,15 @@ export async function mount(ctx) {
     cleanups.push(() => clearInterval(clockInterval));
   }
   wireSyncStatusWidget();
+  const layoutCollection = ctx.db?.collection?.('desktop_layout');
+  const iconsCollection = ctx.db?.collection?.('desktop_icons');
+  const commandsCollection = ctx.db?.collection?.('business_commands');
+
+  const layout = await ensureLayout(layoutCollection, launcher);
+  let iconPositionCache = readIconPositionCache();
+  let iconsReadiness = readIconsReadiness();
+  await ensureIcons(iconsCollection, launcher);
+  await renderIcons();
 
   cleanups.push(subscribeIcons());
   cleanups.push(subscribeIconsReadiness());
@@ -568,11 +559,6 @@ export async function mount(ctx) {
         ...currentGrid(),
         flow: document.documentElement.dataset.workjetMobileHost === 'true' || currentGrid().compact,
       },
-      normalizePosition: (position, iconSize) => normalizeDesktopIconPosition(
-        position,
-        iconSize,
-        currentGrid(),
-      ),
       onSelect: () => {
         for (const node of refs.icons.querySelectorAll('.desktop-icon.selected')) {
           node.classList.remove('selected');
@@ -1251,52 +1237,12 @@ export async function mount(ctx) {
 
   function gridPosition(index, grid = currentGrid()) {
     const surfaceRect = refs.surface?.getBoundingClientRect();
-    return rowMajorGridPosition(index, {
-      grid,
-      surfaceWidth: surfaceRect?.width || 1024,
-      iconSize: desktopIconSize(grid),
-      reservedRects: desktopReservedRects(),
-    });
-  }
-
-  function desktopIconSize(grid = currentGrid()) {
+    const usableWidth = Math.max(grid.cellW, (surfaceRect?.width || 1024) - grid.offset * 2);
+    const columns = Math.max(1, Math.floor(usableWidth / grid.cellW));
     return {
-      width: grid.compact ? ICON_METRICS.compactWidth : ICON_METRICS.width,
-      height: grid.compact ? ICON_METRICS.compactHeight : ICON_METRICS.height,
+      x: grid.offset + (index % columns) * grid.cellW,
+      y: grid.offset + Math.floor(index / columns) * grid.cellH,
     };
-  }
-
-  function desktopReservedRects() {
-    const surfaceRect = refs.surface?.getBoundingClientRect?.();
-    const widgetRect = refs.widgetContainer?.getBoundingClientRect?.();
-    const style = refs.widgetContainer && globalThis.getComputedStyle
-      ? globalThis.getComputedStyle(refs.widgetContainer)
-      : null;
-    if (!surfaceRect || !widgetRect || !widgetRect.width || !widgetRect.height) return [];
-    if (style?.display === 'none' || style?.visibility === 'hidden') return [];
-    const clearance = 12;
-    return [{
-      left: Math.max(0, widgetRect.left - surfaceRect.left - clearance),
-      top: Math.max(0, widgetRect.top - surfaceRect.top - clearance),
-      right: Math.min(surfaceRect.width, widgetRect.right - surfaceRect.left + clearance),
-      bottom: Math.min(surfaceRect.height, widgetRect.bottom - surfaceRect.top + clearance),
-    }];
-  }
-
-  function normalizeDesktopIconPosition(position, iconSize = desktopIconSize(), grid = currentGrid()) {
-    const surfaceRect = refs.surface?.getBoundingClientRect();
-    const width = Number(iconSize?.width) || desktopIconSize(grid).width;
-    const height = Number(iconSize?.height) || desktopIconSize(grid).height;
-    return positionOutsideReservedRects(position, {
-      iconSize: { width, height },
-      bounds: {
-        minX: grid.offset,
-        minY: grid.offset,
-        maxX: Math.max(grid.offset, (surfaceRect?.width || 1024) - width - 8),
-        maxY: Math.max(grid.offset, (surfaceRect?.height || 720) - height - 8),
-      },
-      reservedRects: desktopReservedRects(),
-    });
   }
 
   async function ensureIcons(collection, launcherRef, { force = false } = {}) {
@@ -1390,10 +1336,10 @@ export async function mount(ctx) {
     const maxY = Math.max(grid.offset, (surfaceRect?.height || 720) - iconHeight - 8);
     const x = Number.isFinite(doc.x) ? doc.x : fallback.x;
     const y = Number.isFinite(doc.y) ? doc.y : fallback.y;
-    return normalizeDesktopIconPosition({
+    return {
       x: Math.max(grid.offset, Math.min(x, maxX)),
       y: Math.max(grid.offset, Math.min(y, maxY)),
-    }, { width: iconWidth, height: iconHeight }, grid);
+    };
   }
 
   async function normalizeIconLayoutIfNeeded(collection, launcherRef) {
@@ -1415,15 +1361,8 @@ export async function mount(ctx) {
       }
       seen.add(key);
     }
+    if (!hasCollision && !needsRowMajorMigration) return;
     const grid = currentGrid();
-    const iconSize = desktopIconSize(grid);
-    const reservedRects = desktopReservedRects();
-    const hasReservedCollision = docs.some((doc) => positionIntersectsReservedRects(
-      { x: doc.x, y: doc.y },
-      iconSize,
-      reservedRects,
-    ));
-    if (!hasCollision && !hasReservedCollision && !needsRowMajorMigration) return;
     await Promise.all(docs.map((doc, index) => {
       const position = gridPosition(index, grid);
       iconPositionCache.set(doc.id, {

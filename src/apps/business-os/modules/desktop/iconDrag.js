@@ -36,6 +36,47 @@ export function reorderTargetAtPoint(parent, draggedElement, clientX, clientY) {
   return nearest?.element || null;
 }
 
+export function nearestFreeGridPosition({
+  rawX,
+  rawY,
+  grid,
+  maxX,
+  maxY,
+  iconWidth,
+  iconHeight,
+  occupied = [],
+  blockedRects = [],
+}) {
+  const offset = Number(grid?.offset) || 0;
+  const cellW = Math.max(1, Number(grid?.cellW) || Math.max(1, Number(iconWidth) || 1));
+  const cellH = Math.max(1, Number(grid?.cellH) || Math.max(1, Number(iconHeight) || 1));
+  const boundedMaxX = Math.max(offset, Number(maxX) || offset);
+  const boundedMaxY = Math.max(offset, Number(maxY) || offset);
+  const columns = Math.max(1, Math.floor((boundedMaxX - offset) / cellW) + 1);
+  const rows = Math.max(1, Math.floor((boundedMaxY - offset) / cellH) + 1);
+  const cellKey = (x, y) => `${Math.round((x - offset) / cellW)}:${Math.round((y - offset) / cellH)}`;
+  const occupiedCells = new Set(occupied.map((position) => cellKey(position.x, position.y)));
+  const width = Math.max(1, Number(iconWidth) || cellW);
+  const height = Math.max(1, Number(iconHeight) || cellH);
+  const intersectsWidget = (x, y) => blockedRects.some((rect) => (
+    x < rect.right && x + width > rect.left && y < rect.bottom && y + height > rect.top
+  ));
+  const candidates = [];
+  for (let row = 0; row < rows; row += 1) {
+    for (let column = 0; column < columns; column += 1) {
+      const x = Math.min(boundedMaxX, offset + column * cellW);
+      const y = Math.min(boundedMaxY, offset + row * cellH);
+      if (occupiedCells.has(`${column}:${row}`) || intersectsWidget(x, y)) continue;
+      candidates.push({ x, y, distance: Math.hypot(x - rawX, y - rawY) });
+    }
+  }
+  candidates.sort((a, b) => a.distance - b.distance || a.y - b.y || a.x - b.x);
+  return candidates[0] || {
+    x: Math.max(offset, Math.min(Math.round(rawX), boundedMaxX)),
+    y: Math.max(offset, Math.min(Math.round(rawY), boundedMaxY)),
+  };
+}
+
 export function makeIconDraggable(iconEl, {
   surface,
   iconId,
@@ -45,7 +86,6 @@ export function makeIconDraggable(iconEl, {
   onMoved,
   onDragToTopbar,
   onReorder,
-  normalizePosition,
 }) {
   if (!iconEl) throw new Error('makeIconDraggable: iconEl is required');
   const surfaceEl = surface || iconEl.parentElement;
@@ -143,19 +183,35 @@ export function makeIconDraggable(iconEl, {
       const maxX = (surfaceRect?.width ?? globalThis.innerWidth) - iconEl.offsetWidth - 8;
       const maxY = (surfaceRect?.height ?? globalThis.innerHeight) - iconEl.offsetHeight - 8;
 
-      const offset = grid.offset ?? 24;
       const rawX = iconEl.offsetLeft;
       const rawY = iconEl.offsetTop;
-      const bounded = {
-        x: Math.max(offset, Math.min(Math.round(rawX), maxX)),
-        y: Math.max(offset, Math.min(Math.round(rawY), maxY)),
-      };
-      const normalized = normalizePosition?.(bounded, {
-        width: iconEl.offsetWidth,
-        height: iconEl.offsetHeight,
-      }) || bounded;
-      const finalX = Number.isFinite(normalized.x) ? normalized.x : bounded.x;
-      const finalY = Number.isFinite(normalized.y) ? normalized.y : bounded.y;
+      const surfaceLeft = surfaceRect?.left || 0;
+      const surfaceTop = surfaceRect?.top || 0;
+      const occupied = [...(iconEl.parentElement?.querySelectorAll('.desktop-icon[data-icon-id]') || [])]
+        .filter((element) => element !== iconEl)
+        .map((element) => ({ x: element.offsetLeft, y: element.offsetTop }));
+      const blockedRects = [...(surfaceEl?.querySelectorAll('.desktop-widget-container') || [])]
+        .map((element) => element.getBoundingClientRect())
+        .filter((rect) => rect.width > 0 && rect.height > 0)
+        .map((rect) => ({
+          left: rect.left - surfaceLeft,
+          top: rect.top - surfaceTop,
+          right: rect.right - surfaceLeft,
+          bottom: rect.bottom - surfaceTop,
+        }));
+      const snapped = nearestFreeGridPosition({
+        rawX,
+        rawY,
+        grid,
+        maxX,
+        maxY,
+        iconWidth: iconEl.offsetWidth,
+        iconHeight: iconEl.offsetHeight,
+        occupied,
+        blockedRects,
+      });
+      const finalX = snapped.x;
+      const finalY = snapped.y;
       iconEl.style.left = `${finalX}px`;
       iconEl.style.top = `${finalY}px`;
       onMoved?.(iconId, { x: finalX, y: finalY }, iconEl);

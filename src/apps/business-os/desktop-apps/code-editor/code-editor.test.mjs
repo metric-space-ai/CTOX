@@ -19,6 +19,7 @@ const appSource = await readFile(new URL('./app.js', import.meta.url), 'utf8');
 const {
   filterSourceFiles,
   formatSourceContent,
+  isDesktopAppTargetAvailable,
   isJavaScriptMime,
   normalizeModuleCatalog,
   normalizeSourceFiles,
@@ -129,6 +130,18 @@ test('actions stay disabled until a dirty writable file is selected', () => {
     dirty: false,
     readonly: true,
   }).format, false);
+});
+
+test('coding-agent cross-link is gated by the shell target catalog', () => {
+  assert.equal(isDesktopAppTargetAvailable({
+    canOpenDesktopApp: (appId) => appId === 'coding-agents',
+  }, 'coding-agents'), true);
+  assert.equal(isDesktopAppTargetAvailable({
+    desktopApps: [{ id: 'explorer' }],
+  }, 'coding-agents'), false);
+  assert.equal(isDesktopAppTargetAvailable({
+    getDesktopApps: () => [{ id: 'coding-agents' }],
+  }, 'coding-agents'), true);
 });
 
 test('failed source commands surface policy denials as hard errors', () => {
