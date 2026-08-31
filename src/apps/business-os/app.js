@@ -1,34 +1,34 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260816-browser-sync-guards-v141';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260816-browser-sync-guards-v141';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260816-browser-sync-guards-v141';
-import { createAppActions } from './shared/app-actions.js?v=20260816-browser-sync-guards-v141';
+import { CtoxResizer } from './shared/resizer.js?v=20260831-local-lab-v319';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-local-lab-v319';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-local-lab-v319';
+import { createAppActions } from './shared/app-actions.js?v=20260831-local-lab-v319';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260816-browser-sync-guards-v141';
+} from './shared/app-lifecycle.js?v=20260831-local-lab-v319';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260816-browser-sync-guards-v141';
+} from './shared/permissions.js?v=20260831-local-lab-v319';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260816-browser-sync-guards-v141';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260816-browser-sync-guards-v141';
+} from './shared/branding.js?v=20260831-local-lab-v319';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-local-lab-v319';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260830-global-shell-v2-raster-v298';
+} from './shared/presentation.js?v=20260831-local-lab-v319';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -39,9 +39,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260816-browser-sync-guards-v141';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260816-browser-sync-guards-v141';
-import { createDocumentsFacade } from './shared/documents.js?v=20260816-browser-sync-guards-v141';
+} from './shared/shell-permissions-ui.js?v=20260831-local-lab-v319';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-local-lab-v319';
+import { createDocumentsFacade } from './shared/documents.js?v=20260831-local-lab-v319';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -49,24 +49,26 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260816-browser-sync-guards-v141';
+} from './shared/maintenance-state.js?v=20260831-local-lab-v319';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260816-browser-sync-guards-v141';
+} from './shared/workspace-session.js?v=20260831-local-lab-v319';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260816-browser-sync-guards-v141';
+} from './shared/taskbar-pins.js?v=20260831-local-lab-v319';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
   WORKJET_CATEGORY_IDS,
   workjetCategoryForModule,
   workjetCategoryForTarget,
-} from './shared/workjet-theme.js?v=20260826-workjet-ui-contract-v1';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260830-operator-raster-v1';
+} from './shared/workjet-theme.js?v=20260831-local-lab-v319';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-local-lab-v319';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-local-lab-v319';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-local-lab-v319';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -81,8 +83,28 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260830-global-shell-v2-raster-v298';
+const APP_BUILD = '20260831-local-lab-v319';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
+
+const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
+const shellGenerationReloadGuard = createShellGenerationReloadGuard({
+  readMarker: (key) => sessionStorage.getItem(key),
+  writeMarker: (key, value) => sessionStorage.setItem(key, value),
+  defer: (callback) => setTimeout(callback, 0),
+  reload: () => globalThis.location?.reload?.(),
+});
+
+function scheduleShellGenerationReload(response) {
+  return shellGenerationReloadGuard.inspect(response);
+}
+
+if (nativeBusinessOsFetch) {
+  globalThis.fetch = async (...args) => {
+    const response = await nativeBusinessOsFetch(...args);
+    scheduleShellGenerationReload(response);
+    return response;
+  };
+}
 
 ensureShellStylesheets();
 
@@ -127,6 +149,7 @@ const CTOX_WORKSPACE_SCOPE_HINT_KEY = 'workjet.businessOs.workspaceScope';
 const CTOX_UPDATE_CHECK_POLL_MS = 30 * 60 * 1000;
 const SYNC_RECOVERY_REPAIR_DELAY_MS = 15000;
 const SHELL_IMPORT_TIMEOUT_MS = 45000;
+const SHELL_INTEGRATED_TOOL_TIMEOUT_MS = 30000;
 const MODULE_SCRIPT_PRELOAD_STABLE_HEALTH_MS = 10000;
 const MODULE_SCRIPT_PRELOAD_INTERVAL_MS = 250;
 const DEFAULT_TASKBAR_PIN_IDS = ['ctox', 'tickets', 'documents', 'spreadsheets', 'explorer', 'knowledge', 'app-store', 'research', 'calendar'];
@@ -157,15 +180,26 @@ function ensureShellStylesheets() {
     `shared/base.css?v=${APP_BUILD}`,
   ]) {
     const absoluteHref = new URL(href, import.meta.url).href;
-    const alreadyLoaded = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-      .some((link) => {
+    // Match on the pathname, not the full URL. index.html pins its own build
+    // stamp for these three sheets; when a deploy leaves that stamp behind the
+    // one baked into APP_BUILD, an exact-URL comparison never matches and the
+    // shell appends a second copy of the same stylesheet (measured live:
+    // app.css served twice at v302 and v303, 237 KB each). Re-point the
+    // existing link instead so the newest build wins without a duplicate.
+    const absolutePath = new URL(absoluteHref).pathname;
+    const existing = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+      .find((link) => {
         try {
-          return new URL(link.getAttribute('href') || link.href, document.baseURI).href === absoluteHref;
+          return new URL(link.getAttribute('href') || link.href, document.baseURI).pathname === absolutePath;
         } catch {
           return false;
         }
       });
-    if (alreadyLoaded) continue;
+    if (existing) {
+      if (existing.href !== absoluteHref) existing.href = absoluteHref;
+      existing.dataset.shellRequiredStylesheet = 'true';
+      continue;
+    }
     const link = document.createElement('link');
     link.rel = 'stylesheet';
     link.href = absoluteHref;
@@ -280,6 +314,7 @@ const state = {
   maintenanceTimer: null,
   maintenanceEmptyObserver: null,
   maintenanceAckLeaseId: '',
+  maintenanceRemountModuleId: '',
   workspaceSessionRestored: false,
   workspaceSessionRestoring: false,
   preferredDesktopAppFocusId: '',
@@ -698,6 +733,14 @@ async function importBusinessOsModule(url, label) {
       return await withImportTimeout(import(attemptUrl), label, attemptUrl);
     } catch (error) {
       lastError = error;
+      try {
+        const generationProbe = await fetch(`app.js?v=${APP_BUILD}`, { cache: 'no-store' });
+        if (scheduleShellGenerationReload(generationProbe)) {
+          throw new Error(`${label} belongs to an inactive shell generation`);
+        }
+      } catch (generationError) {
+        if (shellGenerationReloadGuard.scheduled) throw generationError;
+      }
       if (attempt < retryDelaysMs.length - 1) {
         console.warn(`[business-os] ${label} temporarily unavailable; retrying`, error);
       }
@@ -715,6 +758,22 @@ function withImportTimeout(promise, label, url) {
       }, SHELL_IMPORT_TIMEOUT_MS);
     }),
   ]);
+}
+
+async function withOperationTimeout(promise, label, timeoutMs) {
+  let timer = 0;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = window.setTimeout(() => {
+          reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) window.clearTimeout(timer);
+  }
 }
 
 const shellMessages = {
@@ -2317,6 +2376,8 @@ async function toggleShellV2VersionMenu(mod, context = {}) {
   const lifecycle = appLifecycleState(mod, { session: state.session, governance: state.governance });
   const canSource = canViewModuleSource(mod);
   const canCode = canUseModulePermission(mod, BusinessOsPermissions.AppsModify);
+  const codingAgentAvailable = desktopAppTargetAvailable('coding-agents');
+  const canOpenCodingAgent = canCode && codingAgentAvailable;
   const canRollback = canUseModulePermission(mod, BusinessOsPermissions.AppsRollback);
   const moduleTitle = moduleDisplayTitle(mod);
   const menu = document.createElement('section');
@@ -2331,10 +2392,10 @@ async function toggleShellV2VersionMenu(mod, context = {}) {
     <div class="shell-v2-version-menu-actions">
       <button type="button" data-v2-menu-action="history">Versionshistorie</button>
       ${canSource ? '<button type="button" data-v2-menu-action="source">Im Source Code Editor öffnen</button>' : ''}
-      <button type="button" data-v2-menu-action="coding" ${canCode ? '' : 'disabled title="Keine Berechtigung: apps.modify"'}>Im Coding Agent öffnen</button>
+      <button type="button" data-v2-menu-action="coding" ${canOpenCodingAgent ? '' : `disabled title="${canCode ? 'Coding-Agent-App ist nicht verfügbar' : 'Keine Berechtigung: apps.modify'}"`}>Im Coding Agent öffnen</button>
     </div>
     <div class="shell-v2-version-history" data-v2-version-history aria-live="polite">
-      <p>Versionshistorie wird autorisiert geladen…</p>
+      <p>Versionshistorie auswählen, um gespeicherte Versionen zu laden.</p>
     </div>
   `;
   winElement.appendChild(menu);
@@ -2382,7 +2443,7 @@ async function toggleShellV2VersionMenu(mod, context = {}) {
     await openModuleSourceEditor(mod.id);
   });
   menu.querySelector('[data-v2-menu-action="coding"]')?.addEventListener('click', async () => {
-    if (!canCode) return;
+    if (!canOpenCodingAgent) return;
     closeShellV2VersionMenu(windowId, { returnFocus: false });
     await openDesktopApp('coding-agents', {
       args: {
@@ -2394,23 +2455,39 @@ async function toggleShellV2VersionMenu(mod, context = {}) {
   });
 
   const history = menu.querySelector('[data-v2-version-history]');
-  try {
-    const terminal = await dispatchShellModuleCommand({
-      commandType: 'ctox.module.list_versions',
-      moduleId: mod.id,
-      recordId: `${mod.id}:versions`,
-      payload: { module_id: mod.id },
-      source: 'business-os-shell-v2-version-menu',
-      until: 'terminal',
-    });
-    if (!menu.isConnected) return;
-    const result = terminal?.result || terminal?.output || terminal?.payload?.result || {};
-    const versions = Array.isArray(result?.versions) ? result.versions : [];
-    renderShellV2VersionHistory({ mod, menu, history, versions, canRollback, windowId });
-  } catch (error) {
-    if (!menu.isConnected) return;
-    history.innerHTML = `<p class="is-error" role="alert">Versionshistorie nicht verfügbar: ${escapeHtml(error?.message || error)}</p>`;
-  }
+  const historyAction = menu.querySelector('[data-v2-menu-action="history"]');
+  let historyLoading = false;
+  const loadHistory = async () => {
+    if (historyLoading || !menu.isConnected) return;
+    historyLoading = true;
+    if (historyAction) historyAction.disabled = true;
+    history.innerHTML = '<p aria-busy="true">Versionshistorie wird autorisiert geladen…</p>';
+    try {
+      const terminal = await dispatchShellModuleCommand({
+        commandType: 'ctox.module.list_versions',
+        moduleId: mod.id,
+        recordId: `${mod.id}:versions`,
+        payload: { module_id: mod.id },
+        source: 'business-os-shell-v2-version-menu',
+        until: 'terminal',
+      });
+      if (!menu.isConnected) return;
+      const result = terminal?.result || terminal?.output || terminal?.payload?.result || {};
+      const versions = Array.isArray(result?.versions) ? result.versions : [];
+      renderShellV2VersionHistory({ mod, menu, history, versions, canRollback, windowId });
+    } catch (error) {
+      if (!menu.isConnected) return;
+      history.innerHTML = `
+        <p class="is-error" role="alert">Versionshistorie nicht verfügbar: ${escapeHtml(error?.message || error)}</p>
+        <button type="button" data-v2-version-retry>Erneut versuchen</button>
+      `;
+      history.querySelector('[data-v2-version-retry]')?.addEventListener('click', loadHistory, { once: true });
+    } finally {
+      historyLoading = false;
+      if (historyAction?.isConnected) historyAction.disabled = false;
+    }
+  };
+  historyAction?.addEventListener('click', loadHistory);
   menu.querySelector('button:not(:disabled)')?.focus();
 }
 
@@ -2592,8 +2669,16 @@ async function ensureIntegratedModuleToolSession(mod) {
     async showSource() {
       if (closed) return;
       setMode('source');
-      sourceMountPromise ||= mountIntegratedModuleSource({ mod, host: sourceHost, showApp: session.showApp });
-      sourceTeardown = await sourceMountPromise;
+      if (!sourceMountPromise) {
+        sourceMountPromise = mountIntegratedModuleSource({ mod, host: sourceHost, showApp: session.showApp });
+      }
+      try {
+        sourceTeardown = await sourceMountPromise;
+      } catch (error) {
+        sourceMountPromise = null;
+        sourceTeardown = null;
+        renderIntegratedModuleSourceError({ mod, host: sourceHost, error, retry: session.showSource });
+      }
     },
     async showVersions() {
       if (closed) return;
@@ -2623,42 +2708,77 @@ async function ensureIntegratedModuleToolSession(mod) {
 }
 
 async function mountIntegratedModuleSource({ mod, host, showApp }) {
-  host.innerHTML = `
+  const mountHost = document.createElement('div');
+  mountHost.className = 'module-integrated-source-mount';
+  mountHost.style.height = '100%';
+  mountHost.style.minHeight = '0';
+  mountHost.innerHTML = `
     <div class="module-integrated-loading" aria-busy="true">
       <strong>Source wird geladen</strong>
       <span>${escapeHtml(moduleDisplayTitle(mod))}</span>
     </div>
   `;
+  host.replaceChildren(mountHost);
+  const sourceModule = await withOperationTimeout(
+    import(`./desktop-apps/code-editor/app.js?v=${APP_BUILD}`),
+    `${moduleDisplayTitle(mod)} Source-Editor-Import`,
+    SHELL_INTEGRATED_TOOL_TIMEOUT_MS,
+  );
+  const sync = createLiveSyncFacade({ host: mountHost });
+  const commandBus = createLiveCommandBusFacade();
+  const mountPromise = Promise.resolve(sourceModule.mount(mountHost, {
+    host: mountHost,
+    db: createScopedSystemDbFacade(`module-source:${mod.id}`, DESKTOP_APP_DB_COLLECTIONS['code-editor']),
+    sync,
+    commandBus,
+    session: state.session,
+    governance: state.governance,
+    modules: [mod],
+    getModules: () => [mod],
+    desktopApps: listDesktopApps(),
+    getDesktopApps: () => listDesktopApps(),
+    canOpenDesktopApp: desktopAppTargetAvailable,
+    contextMenu: state.contextMenu,
+    notifications: state.notifications,
+    locale: shellLang(),
+    args: {
+      moduleId: mod.id,
+      moduleTitle: moduleDisplayTitle(mod),
+      lockedModule: true,
+    },
+    getSvgIcon: getRegisteredSvgIcon,
+    getActionIcon: getRegisteredActionIcon,
+    openDesktopApp,
+    openBusinessChat,
+    showApp,
+    setTitle: () => {},
+  }));
   try {
-    const sourceModule = await import(`./desktop-apps/code-editor/app.js?v=${APP_BUILD}`);
-    return await sourceModule.mount(host, {
-      db: createScopedSystemDbFacade(`module-source:${mod.id}`, DESKTOP_APP_DB_COLLECTIONS['code-editor']),
-      sync: createLiveSyncFacade({ host }),
-      commandBus: createLiveCommandBusFacade(),
-      session: state.session,
-      governance: state.governance,
-      modules: [mod],
-      locale: shellLang(),
-      args: {
-        moduleId: mod.id,
-        moduleTitle: moduleDisplayTitle(mod),
-        lockedModule: true,
-      },
-      showApp,
-      setTitle: () => {},
-    });
+    const teardown = await withOperationTimeout(
+      mountPromise,
+      `${moduleDisplayTitle(mod)} Source-Editor-Mount`,
+      SHELL_INTEGRATED_TOOL_TIMEOUT_MS,
+    );
+    return () => {
+      teardown?.();
+      mountHost.remove();
+    };
   } catch (error) {
-    console.error(`[module-source:${mod.id}] mount failed:`, error);
-    host.innerHTML = `
-      <div class="module-integrated-error" role="alert">
-        <strong>Source konnte nicht geladen werden</strong>
-        <span>${escapeHtml(error?.message || error)}</span>
-        <button type="button">Erneut versuchen</button>
-      </div>
-    `;
-    host.querySelector('button')?.addEventListener('click', () => openModuleSourceEditor(mod.id));
-    return null;
+    mountPromise.then((lateTeardown) => lateTeardown?.()).catch(() => {});
+    throw error;
   }
+}
+
+function renderIntegratedModuleSourceError({ mod, host, error, retry }) {
+  console.error(`[module-source:${mod.id}] mount failed:`, error);
+  host.innerHTML = `
+    <div class="module-integrated-error" role="alert">
+      <strong>Source konnte nicht geladen werden</strong>
+      <span>${escapeHtml(error?.message || error)}</span>
+      <button type="button">Erneut versuchen</button>
+    </div>
+  `;
+  host.querySelector('button')?.addEventListener('click', () => retry?.(), { once: true });
 }
 
 async function renderIntegratedModuleVersions({ mod, host, windowId }) {
@@ -4204,7 +4324,6 @@ const DESKTOP_APPS = [
     id: 'explorer',
     title: 'Files',
     glyph: '📁',
-    iconAsset: 'shared/assets/workjet-icons/operator-selection-v1/documents.jpg',
     category: 'workspace',
     defaultWidth: 720,
     defaultHeight: 460,
@@ -4214,7 +4333,6 @@ const DESKTOP_APPS = [
     id: 'code-editor',
     title: 'Source Editor',
     glyph: '⌘',
-    iconAsset: 'shared/assets/workjet-icons/operator-selection-v1/coding-agents.jpg',
     category: 'development',
     defaultWidth: 980,
     defaultHeight: 640,
@@ -4224,7 +4342,6 @@ const DESKTOP_APPS = [
     id: 'file-viewer',
     title: 'File Viewer',
     glyph: '◫',
-    iconAsset: 'shared/assets/workjet-icons/operator-selection-v1/documents.jpg',
     category: 'workspace',
     defaultWidth: 760,
     defaultHeight: 560,
@@ -4265,6 +4382,11 @@ function listDesktopApps() {
     });
   }
   return Array.from(targetsById.values());
+}
+
+function desktopAppTargetAvailable(appId) {
+  const targetId = String(appId || '').trim();
+  return Boolean(targetId && listDesktopApps().some((entry) => entry.id === targetId));
 }
 
 function moduleLaunchesAsDesktopApp(mod) {
@@ -5614,6 +5736,9 @@ async function openModule(moduleId, options = {}) {
     const moduleScript = await moduleScriptPromise;
     if (typeof moduleScript.mount === 'function') {
       try {
+        if (mod.id === 'desktop' && state.maintenance?.active) {
+          assertMaintenanceWriteAllowed('desktop');
+        }
         state.activeUnmount = await moduleScript.mount(createModuleContext(mod));
       } catch (error) {
         // A failing module mount must not take the shell down with it: the
@@ -5624,6 +5749,9 @@ async function openModule(moduleId, options = {}) {
         if (isBusinessOsPermissionError(error)) {
           console.log(`[business-os] mount locked for ${mod.id}: ${error?.message || error}`);
           renderModulePermissionDeniedState(mod, error);
+        } else if (mod.id === 'desktop' && isMaintenanceReadOnlyError(error)) {
+          state.maintenanceRemountModuleId = mod.id;
+          console.info('[business-os] desktop mount paused until maintenance completes');
         } else {
           console.error(`[business-os] mount failed for ${mod.id}`, error);
         }
@@ -6345,6 +6473,7 @@ const DESKTOP_APP_DB_COLLECTIONS = {
   browser: [],
   'code-editor': [
     'business_commands',
+    'business_module_commits',
     'business_module_source_files',
   ],
   creator: [],
@@ -9400,6 +9529,7 @@ async function refreshMaintenanceStatus(options = {}) {
 }
 
 function applyMaintenanceState(next) {
+  const wasActive = Boolean(state.maintenance?.active);
   state.maintenance = next;
   document.body.dataset.maintenanceActive = next.active ? 'true' : 'false';
   document.body.dataset.maintenanceStatus = next.status || 'idle';
@@ -9425,7 +9555,29 @@ function applyMaintenanceState(next) {
   } else {
     stopMaintenanceEmptyStateGuard();
     state.maintenanceAckLeaseId = '';
+    if (wasActive) resumeMaintenanceInterruptedModuleMount();
   }
+}
+
+function resumeMaintenanceInterruptedModuleMount() {
+  const moduleId = String(state.maintenanceRemountModuleId || '').trim();
+  if (!moduleId || state.maintenance?.active) return;
+  window.queueMicrotask(async () => {
+    if (state.maintenance?.active) return;
+    if (state.activeModule?.id !== moduleId) {
+      if (state.maintenanceRemountModuleId === moduleId) state.maintenanceRemountModuleId = '';
+      return;
+    }
+    if (state.maintenanceRemountModuleId !== moduleId) return;
+    state.maintenanceRemountModuleId = '';
+    try {
+      const refreshed = state.modules.find((entry) => entry.id === moduleId) || state.activeModule;
+      await openModule(refreshed.id, { force: true, isNavHistory: true });
+    } catch (error) {
+      console.error(`[business-os] ${moduleId} remount after maintenance failed`, error);
+      setStatus(`${moduleId}: ${error?.message || error}`);
+    }
+  });
 }
 
 function maintenanceOpenModules() {
@@ -10683,16 +10835,23 @@ function getOfflineFallbackCatalog() {
       },
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "browser-v2-reference-1",
+        "shell_header_rows": 2,
+        "shell_icon_rows": 2,
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
         "min_height": 480,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg",
+        "icon_asset_srcset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg 1x",
+        "icon_provenance": "shared/assets/workjet-icons/operator-selection-v1/manifest.json",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-browser\"><defs><linearGradient id=\"grad-browser\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0ea5e9\" /><stop offset=\"100%\" stop-color=\"#22c55e\" /></linearGradient></defs><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"3\" fill=\"url(#grad-browser)\" fill-opacity=\"0.12\" stroke=\"url(#grad-browser)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M3 9h18\" stroke=\"url(#grad-browser)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><circle cx=\"7\" cy=\"6.5\" r=\"0.8\" fill=\"url(#grad-browser)\"></circle><circle cx=\"10\" cy=\"6.5\" r=\"0.8\" fill=\"url(#grad-browser)\"></circle><path d=\"M8 15h8M12 11v8\" stroke=\"url(#grad-browser)\" stroke-width=\"1.7\" stroke-linecap=\"round\"></path></svg>",
         "top": "browser tabs and address bar",
         "center": "web page"
       },
       "category": "Workspace",
-      "version": "v0.2.4",
+      "version": "v0.2.5",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -11978,6 +12137,10 @@ function isRecoverableDataPlaneAbort(error) {
     || isVolatileSyncTransportError(error);
 }
 
+function isMaintenanceReadOnlyError(error) {
+  return error?.code === 'CTOX_MAINTENANCE_READ_ONLY';
+}
+
 function isClosedRxDbCollectionError(error) {
   const message = String(error?.message || error || '');
   return message.includes('RxDB Error-Code: COL21')
@@ -12942,7 +13105,7 @@ function buildStartMenuItem(target) {
   applyWorkjetCategory(el, target.category || workjetCategoryForTarget(target));
 
   const pinned = isTaskbarPinned(target.id);
-  const iconMarkup = getLauncherIconSvg(target);
+  const iconMarkup = getLauncherIconMarkup(target);
   const lifecycleBadge = renderStartMenuLifecycleBadge(target);
 
   el.innerHTML = `
@@ -12985,14 +13148,15 @@ function buildStartMenuItem(target) {
   return el;
 }
 
-function getLauncherIconSvg(target) {
-  if (target.kind === 'module' && target.module?.layout?.icon_svg) {
-    return target.module.layout.icon_svg;
+function getLauncherIconMarkup(target) {
+  const icon = resolveLauncherIcon(target, {
+    fallbackSvg: target.kind === 'app' ? DESKTOP_APP_SVGS[target.id] : '',
+  });
+  if (icon.kind === 'raster') {
+    return `<img src="${escapeHtml(icon.asset)}" alt="" aria-hidden="true" decoding="async">`;
   }
-  if (target.kind === 'app' && DESKTOP_APP_SVGS[target.id]) {
-    return DESKTOP_APP_SVGS[target.id];
-  }
-  return `<span>${target.glyph || target.title.charAt(0)}</span>`;
+  if (icon.kind === 'svg') return icon.markup;
+  return `<span>${escapeHtml(icon.text)}</span>`;
 }
 
 let globalCtoxContextMenuEl = null;

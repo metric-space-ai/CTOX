@@ -1488,6 +1488,14 @@ body.is-resizing * {
   height: 16px;
 }
 
+.start-menu-item-icon img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  object-fit: cover;
+}
+
 .start-menu-item-icon span {
   font-size: 14px;
 }
@@ -6818,9 +6826,15 @@ body[data-shell-chat-dock-compact] .ctox-chat-stage {
   caret-color: var(--accent);
 }
 
-:where(input::placeholder, textarea::placeholder) {
-  color: var(--muted);
-  -webkit-text-fill-color: var(--muted);
+input::placeholder,
+textarea::placeholder {
+  /* WICHTIG: kein :where() um Pseudo-ELEMENTE - :where() nimmt nur
+     Pseudo-KLASSEN; Chrome verwirft sonst die komplette Regel und es gilt der
+     UA-Default (#757575, ~4,0:1). Seit jeher kaputt; entdeckt im UI-Review
+     31.08.2026 (r3-B1/r4). 60%-Mischung: erreicht auch im dunkleren
+     Kopfband-Kontext (~--muted #55) die Leerzustand-Stufe ~#939393 >= 4,5:1. */
+  color: color-mix(in srgb, var(--text) 22%, var(--muted));
+  -webkit-text-fill-color: color-mix(in srgb, var(--text) 22%, var(--muted));
   opacity: 1;
 }
 
@@ -7171,6 +7185,12 @@ body[data-shell-chat-dock-compact] .ctox-chat-stage {
   inset-inline-start: 50%;
   transform: translateX(-50%);
   width: 2px;
+  /* Die generische [data-resizer]::before-Regel weiter oben setzt height 48px
+     und opacity .5 (Pillen-Stummel); ohne explizite Neutralisierung mischt die
+     Kaskade beide Regeln zu einem unsichtbaren 48px-Rest (UI-Review 31.08.,
+     Befund r3-B2). Ruhelinie laeuft vertragsgemaess durch. */
+  height: auto;
+  opacity: 1;
   border-radius: 2px;
   background: var(--line);
   transition: background var(--motion-fast) var(--ease-standard), width var(--motion-fast) var(--ease-standard);
@@ -9299,3 +9319,138 @@ button.shell-window-header-meta:focus-visible,
     max-width: calc(100vw - 32px) !important;
   }
 }
+
+/* ===========================================================================
+   Shell V2 · Spaltenmodell und Einklappverhalten
+   ---------------------------------------------------------------------------
+   Die Shell besass bisher keine einzige Layoutregel fuer App-Inhalte: ihre
+   Container-Queries (760px/520px) betreffen nur ihre eigenen Werkzeugpanels.
+   Folge waren 20 verschiedene Haltepunkte ueber 33 Module - 767px, 760px und
+   768px stehen nebeneinander fuer dieselbe gemeinte Grenze.
+
+   Schwerer wiegt, dass jedes Modul das Einklappen selbst schreibt und dabei
+   denselben Fehler machen kann: outbound-lead-generation verschiebt seine
+   Detailspalte bei @container 1120px in eine zweite Zeile, setzt aber
+   grid-template-columns nicht zurueck. Die 410px breite Spur bleibt reserviert
+   und leer stehen (live gemessen: 248px 12px 391px 12px 410px bei 1101px
+   Fensterbreite). Das Zuruecksetzen der Spur ist der eigentliche Punkt.
+
+   Vertrag: Die App baut ihr Raster wie bisher als [data-resize-frame] und
+   markiert es mit data-shell-columns="3" bzw. "2". Spaltenbreiten kommen aus
+   --shell-col-left / --shell-col-right, damit der vorhandene Resizer-Vertrag
+   (.ctox-column-resizer[data-resizer-var]) unveraendert weiterarbeitet. Wann
+   eingeklappt wird, entscheidet ab hier die Shell - nicht die App.
+   =========================================================================== */
+
+.shell-window[data-shell-contract="v2"] [data-shell-columns] {
+  display: grid;
+  min-width: 0;
+  min-height: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.shell-window[data-shell-contract="v2"] [data-shell-columns="3"] {
+  grid-template-columns:
+    var(--shell-col-left, 260px)
+    var(--shell-col-gutter, 12px)
+    minmax(0, 1fr)
+    var(--shell-col-gutter, 12px)
+    var(--shell-col-right, 360px);
+}
+
+.shell-window[data-shell-contract="v2"] [data-shell-columns="2"] {
+  grid-template-columns:
+    var(--shell-col-left, 260px)
+    var(--shell-col-gutter, 12px)
+    minmax(0, 1fr);
+}
+
+/* Jede Spur eines eingeklappten Rasters muss ueber alle Spalten laufen,
+   sonst entsteht genau die leere Restspur. */
+.shell-window[data-shell-contract="v2"] [data-shell-columns] > [data-shell-column] {
+  min-width: 0;
+  min-height: 0;
+}
+
+/* 3 -> 2: die rechte Spalte wird zum Band unter dem Raster, ihre Spur faellt
+   weg, ihr Resizer verschwindet mit ihr. */
+@container business-app-window (max-width: 1024px) {
+  .shell-window[data-shell-contract="v2"] [data-shell-columns="3"] {
+    grid-template-columns:
+      var(--shell-col-left, 260px)
+      var(--shell-col-gutter, 12px)
+      minmax(0, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns="3"] > [data-shell-column="right"] {
+    grid-column: 1 / -1;
+    grid-row: 2;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns="3"] > [data-shell-resizer="right"] {
+    display: none;
+  }
+}
+
+/* 2 -> 1: alles stapelt, kein Resizer bleibt bedienbar. Der Wert liegt auf
+   768px, weil 767/760/768 in den Modulen ohnehin dieselbe Grenze meinen. */
+@container business-app-window (max-width: 768px) {
+  .shell-window[data-shell-contract="v2"] [data-shell-columns] {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto;
+    grid-auto-rows: auto;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns] > [data-shell-column] {
+    grid-column: 1 / -1;
+    grid-row: auto;
+  }
+
+  .shell-window[data-shell-contract="v2"] [data-shell-columns] > [data-shell-resizer] {
+    display: none;
+  }
+}
+
+/* Der Fenstertitel ist zugleich der Ausloeser des Versionsmenues. Wird der
+   Pane-Titel im Kopf zusammengedrueckt, schrumpft die Trefferflaeche mit -
+   im App Store live auf 7px Breite gemessen. Eine Mindestflaeche gehoert der
+   Shell, weil ihr auch der Ausloeser gehoert. */
+.shell-window[data-shell-contract="v2"] .shell-v2-module-title-trigger {
+  min-width: 44px;
+  min-height: 24px;
+}
+
+/* Innen-Akzente folgen der Icon-Palette (31.08.): Die Shell leitet die
+   Rahmenfarben pro App aus dem Icon ab, aber das Innere hing bisher am
+   globalen blauen --accent - jede App sah innen gleich aus. Das Fenster
+   remappt --accent auf den Icon-Mittelton; die leichte Beimischung von
+   --text sichert die Lesbarkeit heller Paletten auf dunklen Flaechen.
+   Faellt ohne Palette (z.B. Prueflabor ohne JS) auf den Altwert zurueck. */
+.shell-window[data-shell-contract="v2"] > .shell-window-content {
+  /* Keine hartkodierten Interaktionsfarben im App-Fenster (Betreiber-Direktive
+     31.08.): jeder Akzent leitet sich aus der Icon-Palette des Fensters ab
+     (--shell-v2-frame-middle, vom Fenster-Manager aus dem Icon gesetzt).
+     Einziger Rueckfall ist der Host-Akzent des Desktops - eine Variable,
+     kein Literal; das Literal existiert nur noch in der Desktop-Theme-Basis,
+     die kein Icon besitzt. */
+  --accent: color-mix(in srgb, var(--shell-v2-frame-middle, var(--ctox-host-accent)) 82%, var(--text) 18%);
+  --accent-soft: color-mix(in srgb, var(--shell-v2-frame-middle, var(--ctox-host-accent)) 16%, transparent);
+  --accent-foreground: color-mix(in srgb, var(--text-strong, #ffffff) 94%, var(--shell-v2-frame-middle, var(--ctox-host-accent)) 6%);
+}
+
+
+/* Versionszeile (31.08.): Die Nummer ist das Klickziel des Release-Menues;
+   die Status-Bubble erscheint nur, wenn sie etwas zu melden hat (Update,
+   Fehler, Recovery) - der Dauer-Haken "Aktuell" entfaellt. */
+.shell-release-version {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.shell-release-version:hover { color: var(--text); text-decoration: underline; }
+.shell-release-version:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: 4px; }
+.shell-release-status[data-state="current"] { display: none; }

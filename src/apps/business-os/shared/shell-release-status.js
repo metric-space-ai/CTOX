@@ -125,11 +125,18 @@ function start() {
   const button = root.querySelector('[data-shell-release-status]');
   const panel = root.querySelector('[data-shell-release-panel]');
   let lastDetail = { version: '', channel: 'recovery', state: 'recovery' };
-  button.addEventListener('click', () => {
+  const versionLabel = root.querySelector('[data-shell-version-label]');
+  const togglePanel = () => {
     panel.hidden = !panel.hidden;
     button.setAttribute('aria-expanded', String(!panel.hidden));
+    versionLabel?.setAttribute?.('aria-expanded', String(!panel.hidden));
     if (!panel.hidden) render(root, lastDetail);
-  });
+  };
+  button.addEventListener('click', togglePanel);
+  // Die Versionsnummer selbst oeffnet das Menue; die Status-Bubble traegt im
+  // Zustand "Aktuell" keine Information und ist dann per CSS ausgeblendet
+  // (Betreiber-Direktive 31.08.).
+  versionLabel?.addEventListener?.('click', togglePanel);
   document.addEventListener('click', (event) => {
     if (root.contains(event.target)) return;
     panel.hidden = true;
