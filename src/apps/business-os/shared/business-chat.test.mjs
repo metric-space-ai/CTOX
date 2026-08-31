@@ -2618,3 +2618,65 @@ test('die Chat-Leiste faengt nur dort Klicks, wo sie etwas anzeigt', () => {
   assert.match(css, /\.ctox-chat-dock > \*,[\s\S]{0,200}pointer-events:\s*auto/,
     'Die sichtbaren Kinder des Docks brauchen pointer-events: auto');
 });
+
+// --- Vorgegebene Befehls-ID: einmal gueltig, danach frisch ------------------
+// Web Research backt die Command-ID in den Prompttext und in den Writeback-
+// Vertrag. Wuerde der Chat beim Senden eine eigene ID erfinden, zeigte der
+// Research-Run auf einen Befehl, den es nie gab - genau das Muster der
+// verwaisten "Failed"-Laeufe.
+test('chatContextMetaFromDetail traegt eine vorgegebene Befehls-ID weiter', () => {
+  const meta = __businessChatTestInternals.chatContextMetaFromDetail({
+    module: 'research',
+    command_type: 'research.systematic.run',
+    command_id: 'cmd_vorgegeben',
+    record_id: 'research_task_1',
+  });
+  assert.equal(meta.command_id, 'cmd_vorgegeben');
+  assert.equal(meta.command_type, 'research.systematic.run');
+});
+
+test('ohne vorgegebene Befehls-ID bleibt das Feld leer statt erfunden', () => {
+  const meta = __businessChatTestInternals.chatContextMetaFromDetail({
+    module: 'outbound',
+    command_type: 'business_os.chat.task',
+  });
+  assert.equal('command_id' in meta, false);
+});
+
+test('die vorgegebene Befehls-ID wird beim Senden verbraucht, nicht wiederverwendet', () => {
+  const source = businessChatSource;
+  const readIndex = source.indexOf('const commandId = meta.command_id || meta.commandId ||');
+  const deleteIndex = source.indexOf('delete chat.contextMeta.command_id;', readIndex);
+  const reassignIndex = source.indexOf('chat.contextMeta = {', readIndex);
+  assert.ok(readIndex >= 0, 'commandId wird aus meta gelesen');
+  assert.ok(deleteIndex > readIndex, 'die ID wird erst nach dem Lesen entfernt');
+  assert.ok(reassignIndex > deleteIndex, 'das Entfernen passiert vor dem Neuaufbau von contextMeta');
+});
+
+// --- Web Research geht ueber den Chat, nicht am Chat vorbei -----------------
+test('Web Research oeffnet den Chat und dispatcht nicht direkt', () => {
+  const researchSource = readFileSync(
+    new URL('../modules/research/index.js', import.meta.url),
+    'utf8',
+  );
+  const runStart = researchSource.indexOf('async function runSelectedResearch()');
+  assert.ok(runStart >= 0);
+  const runBody = researchSource.slice(runStart, runStart + 12000);
+  assert.ok(
+    runBody.includes('state.ctx?.openBusinessChat'),
+    'der Lauf muss den Business Chat oeffnen',
+  );
+  assert.ok(
+    runBody.includes('draft: instruction'),
+    'der vollstaendige systematic-research Prompt muss im Eingabefeld stehen',
+  );
+  assert.ok(
+    runBody.includes("command_type: 'research.systematic.run'"),
+    'der Chat muss denselben Befehlstyp dispatchen wie zuvor',
+  );
+  // Der Direktversand bleibt nur als Rueckfallebene ohne Chat-Oberflaeche.
+  const dispatchIndex = runBody.indexOf('commandBus.dispatch');
+  const fallbackIndex = runBody.indexOf('} else {');
+  assert.ok(dispatchIndex > fallbackIndex && fallbackIndex >= 0,
+    'commandBus.dispatch darf nur im Rueckfallzweig stehen');
+});

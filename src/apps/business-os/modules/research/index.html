@@ -4,7 +4,16 @@
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">Web Research</span>
-          <h2 class="ctox-pane-title">Knowledge Dashboards</h2>
+          <!-- Kurzer Titel wie im Referenzmodul (knowledge): in der
+               Dreispaltenansicht liegt die 80px-Icon-Zone auf diesem Kopf, der
+               Titel hat dort ~96px. "Knowledge Dashboards" (173px) konnte dort
+               nur als "Knowledge Das..." stehen (Betreiber-Befund 31.08.). -->
+          <h2 class="ctox-pane-title">Dashboards</h2>
+        </div>
+        <!-- Genau eine gefuellte Primaeraktion je Kopf: links das Anlegen. -->
+        <div class="ctox-pane-actions">
+          <button type="button" class="ctox-pane-icon" data-action="refresh" aria-label="Daten neu laden" title="Daten neu laden"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"/></svg></button>
+          <button type="button" class="ctox-pane-icon is-primary" data-action="new-task" aria-label="Research anlegen" title="Research anlegen"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
         </div>
       </div>
     </header>
@@ -37,6 +46,14 @@
           <span class="ctox-pane-kicker">Web Research</span>
           <h2 class="ctox-pane-title">Semantic Graph &amp; Evidence Workbench</h2>
         </div>
+        <!-- Ohne ausgewaehlte Aufgabe ist der Mittelkopf ein Warte-/Leerkopf:
+             seine dominante Aktion ist das Nachladen der Daten, nicht das
+             Anlegen (das gehoert der Aufgabenliste links und stuende sonst
+             zweimal gefuellt in derselben 37px-Zeile). -->
+        <div class="ctox-pane-actions">
+          <button type="button" class="ctox-pane-icon is-primary" data-action="refresh" aria-label="Daten neu laden" title="Daten neu laden"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4"/></svg></button>
+          <button type="button" class="ctox-pane-icon" data-action="new-task" aria-label="Research anlegen" title="Research anlegen"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+        </div>
       </div>
     </header>
     <div class="ctox-empty">
@@ -52,12 +69,17 @@
           <span class="ctox-pane-kicker">Context</span>
           <h2 class="ctox-pane-title">Research</h2>
         </div>
+        <!-- Dominante Aktion der Kontextspalte: aus der Research-Aufgabe die
+             Knowledge Base bauen. Ohne Aufgabe ist sie ehrlich deaktiviert. -->
+        <div class="ctox-pane-actions">
+          <button type="button" class="ctox-pane-icon is-primary" data-action="build-knowledge" disabled aria-disabled="true" aria-label="Knowledge aufbauen" title="Knowledge aufbauen"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5v-15ZM4 18a2.5 2.5 0 0 1 2.5-2.5H20M8 7h8"/></svg></button>
+        </div>
       </div>
     </header>
     <div class="research-right-scroll">
       <section class="research-context-block">
         <span class="ctox-pane-kicker">Knowledge Base</span>
-        <strong>Keine Domain ausgewählt</strong>
+        <strong class="research-context-empty">Keine Domain ausgewählt</strong>
         <p>Wähle links eine Research-Aufgabe oder lass CTOX über die Chatleiste eine neue Aufgabe auf Basis einer Knowledge Base anlegen. Hier erscheinen dann Domain-Kontext, Scoring-Modell und der Status des CTOX-Research-Laufs.</p>
       </section>
       <section class="research-context-block">

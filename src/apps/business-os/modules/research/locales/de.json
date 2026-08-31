@@ -1,6 +1,6 @@
 {
   "webResearch": "Web Research",
-  "knowledgeDashboards": "Knowledge Dashboards",
+  "knowledgeDashboards": "Dashboards",
   "evidenceWorkbench": "Semantic Graph & Evidence Workbench",
   "refreshData": "Daten neu laden",
   "createResearch": "Research anlegen",
@@ -158,5 +158,6 @@
   "retry": "Erneut versuchen",
   "actionFailed": "Aktion fehlgeschlagen",
   "targetedResearchQueued": "Gezielte Nachrecherche wurde an CTOX übergeben.",
-  "graphDocumentQueued": "Word-Dokument wurde an CTOX übergeben."
+  "graphDocumentQueued": "Word-Dokument wurde an CTOX übergeben.",
+  "researchChatOpened": "Research-Aufgabe im Chat vorbereitet – zum Starten im Chat senden."
 }

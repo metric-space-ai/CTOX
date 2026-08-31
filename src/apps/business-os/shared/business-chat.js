@@ -1,15 +1,15 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260831-shell-v2-merged-v323';
+import { showBusinessConfirm } from './dialogs.js?v=20260831-shell-v2-unified-v324';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260831-shell-v2-merged-v323';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260831-shell-v2-merged-v323';
+} from './file-integrity.js?v=20260831-shell-v2-unified-v324';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260831-shell-v2-unified-v324';
 import {
   normalizeWorkjetCategory,
   workjetCategoryStyle,
-} from './workjet-theme.js?v=20260831-shell-v2-merged-v323';
+} from './workjet-theme.js?v=20260831-shell-v2-unified-v324';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';
@@ -1909,8 +1909,26 @@ function crewHash(value) {
   return hash >>> 0;
 }
 
+function crewIdentityKey(subject = {}) {
+  const tracking = Array.isArray(subject.messages) ? latestTrackingMessage(subject) : null;
+  return subject.crewKey
+    || subject.commandId
+    || subject.command_id
+    || tracking?.commandId
+    || tracking?.command_id
+    || subject.taskId
+    || subject.task_id
+    || tracking?.taskId
+    || tracking?.task_id
+    || subject.lastTrackingId
+    || subject.id
+    || subject.createdAt
+    || subject.title
+    || 'ctox-crew';
+}
+
 function crewIdentity(chat = {}) {
-  const hash = crewHash(chat.id || chat.createdAt || chat.title);
+  const hash = crewHash(crewIdentityKey(chat));
   return {
     name: CREW_NAMES[hash % CREW_NAMES.length],
     color: CREW_COLORS[(hash >>> 3) % CREW_COLORS.length],
@@ -1968,7 +1986,7 @@ function crewCreatureMode(chat, taskState = getTaskState(chat)) {
 }
 
 function crewMotionStyle(chat) {
-  const hash = crewHash(chat?.id || chat?.createdAt || chat?.title);
+  const hash = crewHash(crewIdentityKey(chat));
   const tenths = (offset, min, span) => (min + ((hash >>> offset) % span) / 10).toFixed(2);
   const delay = (offset, duration) => (-((hash >>> offset) % 1000) / 1000 * duration).toFixed(2);
   const workDrift = tenths(3, 3.7, 21);
@@ -2008,7 +2026,7 @@ function stopCrewProceduralMotion(root, { reset = true } = {}) {
   if (root) root.__ctoxCrewProceduralMotion = null;
 }
 
-function syncCrewProceduralMotion(root) {
+export function syncCrewProceduralMotion(root) {
   if (!root || typeof window === 'undefined') return;
   if (window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches) {
     stopCrewProceduralMotion(root);
@@ -2083,12 +2101,12 @@ function syncCrewProceduralMotion(root) {
   state.frame = window.requestAnimationFrame(tick);
 }
 
-function crewCreatureHtml(chat, taskState = getTaskState(chat), placement = 'dock') {
+export function crewCreatureHtml(chat, taskState = getTaskState(chat), placement = 'dock') {
   const crew = crewIdentity(chat);
   const mode = crewCreatureMode(chat, taskState);
   const progress = executionProgressForChat(chat);
   const progressAngle = Math.max(0, Math.min(360, Number(progress?.percent || 0) * 3.6));
-  const motionSeed = crewHash(`${chat?.id || chat?.createdAt || chat?.title || 'ctox-crew'}:${placement}`);
+  const motionSeed = crewHash(`${crewIdentityKey(chat)}:${placement}`);
   return `
     <span class="ctox-crew-creature is-${escapeAttr(taskState)} is-${escapeAttr(mode)} is-${escapeAttr(crew.shape)} is-${escapeAttr(placement)}" data-crew-mode="${escapeAttr(mode)}" data-crew-seed="${motionSeed}" style="--crew-color:${escapeAttr(crew.color)};--ctox-progress-angle:${progressAngle}deg;${crewMotionStyle(chat)}" aria-hidden="true">
       <svg viewBox="0 0 64 64" focusable="false">
@@ -2145,7 +2163,11 @@ function latestTrackingMessage(chat) {
 }
 
 function executionProgressForChat(chat) {
-  return normalizeExecutionProgress(latestTrackingMessage(chat)?.executionProgress);
+  return normalizeExecutionProgress(
+    chat?.executionProgress
+    || chat?.execution_progress
+    || latestTrackingMessage(chat)?.executionProgress,
+  );
 }
 
 function executionProgressSignature(chat) {
@@ -3106,8 +3128,9 @@ function formatChatBodyHtml(rawText) {
 
 function messageMarkup(message) {
   const trackId = message.taskId || message.commandId;
+  const visibleTrackId = compactTrackingId(trackId);
   const tracking = message.trackable === false ? '' : (message.commandId || message.taskId)
-    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}" aria-label="${escapeAttr(trackButtonLabel(message))}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7"></path><path d="M10 14 21 3"></path><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path></svg></button>`
+    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}" aria-label="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7"></path><path d="M10 14 21 3"></path><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path></svg><code>${escapeHtml(visibleTrackId)}</code></button>`
     : '';
   const rawText = String(message.text || '');
   const promptIsLong = message.role === 'user'
@@ -3129,6 +3152,14 @@ function messageMarkup(message) {
       ${tracking ? `<footer>${tracking}</footer>` : ''}
     </article>
   `;
+}
+
+function compactTrackingId(value) {
+  const id = String(value || '').trim();
+  if (id.length <= 16) return id;
+  const tail = id.split(/[:/]/).filter(Boolean).at(-1) || id;
+  if (tail.length <= 14) return `…${tail}`;
+  return `…${tail.slice(-12)}`;
 }
 
 function chatMessagesMarkup(messages = []) {
@@ -3157,6 +3188,11 @@ async function submitChatMessage({
   const extraClientContext = meta.client_context && typeof meta.client_context === 'object' ? meta.client_context : {};
   const now = Date.now();
   const commandId = meta.command_id || meta.commandId || `cmd_${crypto.randomUUID()}`;
+  // Consume a caller-supplied command id: it is valid for this one submission.
+  if (chat.contextMeta && typeof chat.contextMeta === 'object') {
+    delete chat.contextMeta.command_id;
+    delete chat.contextMeta.commandId;
+  }
   const messageId = `chatmsg_${crypto.randomUUID()}`;
   const threadKey = meta.thread_key || meta.threadKey || extraPayload.thread_key || extraPayload.threadKey || chat.contextMeta?.thread_key || `business-os/chat/${chat.id}`;
   const sourceTracking = followUpSubmission ? chatTrackingSummary(chat) : null;
@@ -3866,6 +3902,12 @@ function chatContextMetaFromDetail(detail = {}) {
     instruction: detail.instruction || '',
     inbound_channel: detail.inbound_channel || detail.inboundChannel || '',
     command_type: detail.command_type || detail.commandType || '',
+    // A caller that already minted the command id and baked it into the prompt
+    // text (Web Research does) must dispatch under exactly that id, otherwise
+    // its own run record points at a command that never exists. The id is
+    // consumed once - submitChat drops it again so follow-up messages in the
+    // same chat mint a fresh one instead of colliding on the idempotency key.
+    command_id: detail.command_id || detail.commandId || '',
     workjet_category: detail.workjet_category
       || detail.workjetCategory
       || clientContext.workjet_category
@@ -7405,10 +7447,18 @@ function installChatStyles() {
       animation: ctoxTurnInstrumentPulse 620ms var(--ease-spring) 1;
     }
     .ctox-chat-track {
-      width: 28px;
+      width: auto;
+      min-width: 28px;
       height: 24px;
+      padding: 0 6px;
+      gap: 4px;
       color: color-mix(in srgb, var(--accent) 72%, var(--muted)) !important;
       cursor: pointer;
+    }
+    .ctox-chat-track code {
+      color: currentColor;
+      font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      letter-spacing: .015em;
     }
     .ctox-chat-track:hover,
     .ctox-chat-track:focus-visible {
@@ -8041,6 +8091,7 @@ async function cancelScheduledChat(state, chat, db, root, commandBus, getActiveM
 export const __businessChatTestInternals = Object.freeze({
   clearSchedulerLoop,
   chatAllowsAutoFocus,
+  chatContextMetaFromDetail,
   collectScheduledChatEntries,
   collectTrackedMessages,
   collapseRestoredTerminalChat,

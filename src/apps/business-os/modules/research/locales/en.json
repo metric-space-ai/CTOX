@@ -1,6 +1,6 @@
 {
   "webResearch": "Web Research",
-  "knowledgeDashboards": "Knowledge Dashboards",
+  "knowledgeDashboards": "Dashboards",
   "evidenceWorkbench": "Semantic Graph & Evidence Workbench",
   "refreshData": "Refresh data",
   "createResearch": "Create research",
@@ -158,5 +158,6 @@
   "retry": "Try again",
   "actionFailed": "Action failed",
   "targetedResearchQueued": "Targeted research was handed off to CTOX.",
-  "graphDocumentQueued": "Word document was handed off to CTOX."
+  "graphDocumentQueued": "Word document was handed off to CTOX.",
+  "researchChatOpened": "Research task prepared in chat – send it there to start."
 }

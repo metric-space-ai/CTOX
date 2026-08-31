@@ -1976,11 +1976,11 @@ function renderLeft() {
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${escapeHtml(state.t('webResearch', 'Web Research'))}</span>
-          <h2 class="ctox-pane-title">${escapeHtml(state.t('knowledgeDashboards', 'Knowledge Dashboards'))}</h2>
+          <h2 class="ctox-pane-title">${escapeHtml(state.t('knowledgeDashboards', 'Dashboards'))}</h2>
         </div>
         <div class="ctox-pane-actions">
           <button type="button" class="ctox-pane-icon" data-action="refresh" aria-label="${escapeHtml(state.t('refreshData', 'Daten neu laden'))}" title="${escapeHtml(state.t('refreshData', 'Daten neu laden'))}">${iconSvg('refresh')}</button>
-          <button type="button" class="ctox-pane-icon" data-action="new-task" aria-label="${escapeHtml(state.t('createResearch', 'Research anlegen'))}" title="${escapeHtml(state.t('createResearch', 'Research anlegen'))}">${iconSvg('plus')}</button>
+          <button type="button" class="ctox-pane-icon is-primary" data-action="new-task" aria-label="${escapeHtml(state.t('createResearch', 'Research anlegen'))}" title="${escapeHtml(state.t('createResearch', 'Research anlegen'))}">${iconSvg('plus')}</button>
         </div>
       </div>
     </header>
@@ -2129,6 +2129,18 @@ function renderCenter() {
         </div>
         <div class="ctox-pane-actions">
           ${state.showDiagram ? `<span class="research-map-hint">${escapeHtml(state.t('graphNavigationHint', 'Ziehen: drehen · Scrollen: zoomen'))}</span>` : ''}
+          <!-- Dominante Flussaktion der Mittelspalte. Sie steht hier nicht
+               doppelt: die gleichnamige Schaltflaeche liegt IM Graphen und ist
+               weg, sobald das Diagramm ausgeblendet wird. -->
+          <button type="button"
+                  class="ctox-pane-icon is-primary"
+                  data-action="graph-ai"
+                  data-graph-ai="research"
+                  ${state.graph.busyAction ? 'disabled aria-disabled="true"' : ''}
+                  title="${escapeHtml(state.t('targetedResearch', 'Nachrecherche'))}"
+                  aria-label="${escapeHtml(state.t('targetedResearch', 'Nachrecherche'))}">
+            ${iconSvg('search')}
+          </button>
           <button type="button"
                   class="ctox-pane-icon${state.showDiagram ? ' is-active' : ''}"
                   data-action="toggle-diagram"
@@ -2771,7 +2783,7 @@ function renderNoTaskCenter() {
           <h2 class="ctox-pane-title">${escapeHtml(state.t('evidenceWorkbench', 'Portfolio Map & Evidence Workbench'))}</h2>
         </div>
         <div class="ctox-pane-actions">
-          <button type="button" class="ctox-pane-icon" data-action="refresh" aria-label="${escapeHtml(state.t('refreshData', 'Daten neu laden'))}" title="${escapeHtml(state.t('refreshData', 'Daten neu laden'))}">${iconSvg('refresh')}</button>
+          <button type="button" class="ctox-pane-icon is-primary" data-action="refresh" aria-label="${escapeHtml(state.t('refreshData', 'Daten neu laden'))}" title="${escapeHtml(state.t('refreshData', 'Daten neu laden'))}">${iconSvg('refresh')}</button>
           <button type="button" class="ctox-pane-icon" data-action="new-task" aria-label="${escapeHtml(state.t('createResearch', 'Research anlegen'))}" title="${escapeHtml(state.t('createResearch', 'Research anlegen'))}">${iconSvg('plus')}</button>
         </div>
       </div>
@@ -3700,14 +3712,29 @@ function renderRight() {
       <div class="ctox-pane-title-row">
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${escapeHtml(state.t('context', 'Context'))}</span>
-          <h2 class="ctox-pane-title">${escapeHtml(task?.title || 'Research')}</h2>
+          <!-- Statischer Spaltentitel wie im Skelett: der Aufgabentitel steht
+               bereits im Mittelkopf; die Dublette ellipsierte hier nur frueh
+               (Betreiber-Nachtrag 31.08.2026). -->
+          <h2 class="ctox-pane-title">Research</h2>
+        </div>
+        <!-- Dominante Flussaktion der Kontextspalte; ohne waehlbare Aufgabe
+             ehrlich deaktiviert (gleicher Grund wie am Textknopf unten). -->
+        <div class="ctox-pane-actions">
+          <button type="button"
+                  class="ctox-pane-icon is-primary"
+                  data-action="build-knowledge"
+                  ${canBuildKnowledge ? '' : 'disabled aria-disabled="true"'}
+                  title="${escapeHtml(canBuildKnowledge ? (task?.payload?.knowledge_refresh?.command_id ? state.t('updateKnowledge', 'Knowledge aktualisieren') : state.t('buildKnowledge', 'Knowledge aufbauen')) : knowledgeUnavailableReason())}"
+                  aria-label="${escapeHtml(task?.payload?.knowledge_refresh?.command_id ? state.t('updateKnowledge', 'Knowledge aktualisieren') : state.t('buildKnowledge', 'Knowledge aufbauen'))}">
+            ${iconSvg('book')}
+          </button>
         </div>
       </div>
     </header>
     <div class="research-right-scroll">
       <section class="research-context-block">
         <span class="ctox-pane-kicker">Knowledge Base</span>
-        <strong>${escapeHtml(task?.knowledge_domain || state.t('noDomain', 'Keine Domain'))}</strong>
+        <strong${task?.knowledge_domain ? '' : ' class="research-context-empty"'}>${escapeHtml(task?.knowledge_domain || state.t('noDomain', 'Keine Domain'))}</strong>
         <p>${escapeHtml(state.t('defaultTaskDesc', 'Research, Knowledge und Berichte teilen eine gemeinsame, nachvollziehbare Lineage.'))}</p>
         ${task ? `<div class="research-context-actions">
           <button type="button" class="ctox-button" data-action="build-knowledge" ${canBuildKnowledge ? '' : 'disabled aria-disabled="true"'} title="${escapeHtml(canBuildKnowledge ? '' : knowledgeUnavailableReason())}">${escapeHtml(task.payload?.knowledge_refresh?.command_id ? state.t('updateKnowledge', 'Knowledge aktualisieren') : state.t('buildKnowledge', 'Knowledge aufbauen'))}</button>
@@ -4273,33 +4300,66 @@ async function runSelectedResearch() {
       },
     },
   };
-  const dispatched = await state.ctx.commandBus.dispatch({
+  const clientContext = {
+    action: 'research-run-chat',
+    module: 'research',
+    source_module: 'research',
+    inbound_channel: 'business_os.research',
+    knowledge_domain: task.knowledge_domain,
+    research_run_id: researchRunId,
+    research_command_id: commandId,
+    knowledge_table_refs: knowledgeTableRefs,
+  };
+  // The run reaches the harness through the Business Chat, exactly like the
+  // Outbound module: the operator sees the full systematic-research prompt,
+  // can adjust it, and sends it themselves. Before this the module dispatched
+  // straight into the queue while still calling itself `business-chat` in
+  // status text and transport - no chat ever opened.
+  const openBusinessChat = state.ctx?.openBusinessChat;
+  const useChat = typeof openBusinessChat === 'function';
+  let dispatched = null;
+  if (useChat) {
+    openBusinessChat({
+      module: 'research',
+      source_module: 'research',
+      source_title: 'Web Research',
+      action: 'context-chat',
+      reuseActive: false,
+      command_id: commandId,
+      command_type: 'research.systematic.run',
+      record_id: task.id,
+      title,
+      command_title: title,
+      thread_key: threadKey,
+      instruction,
+      // `draft` prefills the composer; the operator presses send.
+      draft: instruction,
+      text: instruction,
+      payload,
+      client_context: clientContext,
+    });
+  } else {
+    // No chat surface available (embedded/QA hosts): keep the direct path so
+    // the run is still dispatchable rather than silently doing nothing.
+    dispatched = await state.ctx.commandBus.dispatch({
       id: commandId,
       command_id: commandId,
       module: 'research',
       command_type: 'research.systematic.run',
       record_id: task.id,
       payload,
-      client_context: {
-        action: 'research-run-chat',
-        module: 'research',
-        source_module: 'research',
-        inbound_channel: 'business_os.research',
-        knowledge_domain: task.knowledge_domain,
-        research_run_id: researchRunId,
-        research_command_id: commandId,
-        knowledge_table_refs: knowledgeTableRefs,
-      },
-  });
+      client_context: clientContext,
+    });
+  }
   const result = {
     ...(dispatched || {}),
     ok: true,
     command_id: commandId,
-    status: dispatched?.status || 'queued',
-    task_status: dispatched?.task_status || dispatched?.status || 'queued',
+    status: useChat ? 'chat' : (dispatched?.status || 'queued'),
+    task_status: useChat ? 'chat' : (dispatched?.task_status || dispatched?.status || 'queued'),
     title,
     thread_key: threadKey,
-    transport: 'business-chat',
+    transport: useChat ? 'business-chat' : 'command-bus',
   };
   const run = {
     id: researchRunId,
@@ -4318,16 +4378,28 @@ async function runSelectedResearch() {
   await upsertDoc(writableCollection('research_runs'), run).catch((error) => {
     console.warn('[research] could not persist run', error);
   });
-  await patchDoc(writableCollection('research_tasks'), task.id, { status: 'collecting', updated_at_ms: now }).catch((error) => {
-    console.warn('[research] could not patch task status', error);
-  });
-  setStatus(state.t('researchChatQueued', 'Research-Aufgabe im Chat gestartet.'));
+  // `collecting` means the harness is working. In the chat path nothing runs
+  // until the operator sends, so claiming it here would show a dashboard that
+  // is busy with a run that was never started.
+  if (!useChat) {
+    await patchDoc(writableCollection('research_tasks'), task.id, { status: 'collecting', updated_at_ms: now }).catch((error) => {
+      console.warn('[research] could not patch task status', error);
+    });
+  }
+  setStatus(useChat
+    ? state.t('researchChatOpened', 'Research-Aufgabe im Chat vorbereitet - zum Starten im Chat senden.')
+    : state.t('researchChatQueued', 'Research-Aufgabe an CTOX uebergeben.'));
   render();
-  await focusCtoxRun(
-    result.task_id || result.task_queue_id || '',
-    commandId,
-    result.task_status || result.status || 'queued',
-  );
+  // Only a dispatched command has a queue task to focus. In the chat path the
+  // queue entry appears when the operator sends, so focusing here would jump
+  // to a run that does not exist yet.
+  if (!useChat) {
+    await focusCtoxRun(
+      result.task_id || result.task_queue_id || '',
+      commandId,
+      result.task_status || result.status || 'queued',
+    );
+  }
 }
 
 function compactKnowledgeTableReferences(tables = []) {

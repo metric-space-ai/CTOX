@@ -15,6 +15,10 @@
   --research-good: var(--success);
   --research-warn: var(--warning);
   --research-risk: var(--danger);
+  /* Leerzustands-Stufe des Kits (.ctox-empty). Modul-eigene Leertexte lagen
+     auf --muted (#818181) bzw. --text (#D4D4D8) und damit neben dem Kit
+     (UI-Review 31.08.); dieses Token haelt sie auf einer Stufe. */
+  --research-empty: color-mix(in srgb, var(--text) 22%, var(--muted));
   --research-left-width: 280px;
   --research-right-width: 280px;
   grid-template-columns: var(--research-left-width) 6px minmax(0, 1fr) 6px var(--research-right-width);
@@ -65,8 +69,33 @@
   overflow: hidden;
 }
 
+/* Kuerzungs-Reihenfolge in der einen 37px-Zeile (Betreiber-Befund 31.08.):
+   Kicker und Titel sind Flex-Geschwister und schrumpften proportional, bis der
+   Kicker als Fragment stehen blieb ("CONTEXT" -> "CO..."), waehrend der Titel
+   noch Platz hatte. Der Kicker schrumpft jetzt nicht mehr; die Ellipse traegt
+   zuerst der Titel. Die 55%-Schranke verhindert nur, dass ein sehr langer
+   Kicker (Knowledge-Domain im Mittelkopf) den Titel ganz verdraengt - gekuerzt
+   wird er dann auf mehr als die halbe Zeile, nie auf ein Fragment. */
+.shell-window[data-shell-contract="v2"] .research-module .ctox-pane-header .ctox-pane-kicker {
+  flex: 0 0 auto;
+  max-width: 55%;
+}
+
+/* Zweite Haelfte derselben Regel: "bei Platznot ausblenden". Dreispaltig teilt
+   sich der Mittelkopf die Zeile mit zwei festen Seitenspalten; neben der
+   Knowledge-Domain bliebe fuer den Aufgabentitel - den laengsten Titel des
+   Moduls - kaum Platz. Die Mittelspalte gibt ihren Kicker deshalb dreispaltig
+   ganz auf, genau wie die Aufgabenspalte ihn an die Icon-Zone abgibt; die
+   Domain steht weiterhin in der Kontextspalte und an jeder Aufgabe der Liste.
+   Ab dem 1024er-Haltepunkt fuehrt der Graph die volle Breite, dort kommt der
+   Kicker zurueck (Regel weiter unten). */
+.shell-window[data-shell-contract="v2"] .research-module .research-center > .ctox-pane-header .ctox-pane-kicker {
+  display: none;
+}
+
 .shell-window[data-shell-contract="v2"] .research-module .ctox-pane-header .ctox-pane-title {
   min-width: 0;
+  flex: 0 1 auto;
   margin-top: 0;
   line-height: 1.1;
   white-space: nowrap;
@@ -359,13 +388,33 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
-  max-width: min(58%, 620px);
+  /* Rechts daneben liegt das Suchfeld (right: 74px, Breite min(240px, 28%)).
+     Die feste 58%-Schranke reichte in der schmalen Dreispaltenansicht darunter
+     und die Zeile malte ueber Suchfeld und LIVE-Marke. Jetzt endet der Block
+     definitionsgemaess vor dem Suchfeld: 18px linker Rand + 74px Abstand des
+     Suchfelds + dessen Breite + 12px Luft. */
+  max-width: min(620px, calc(100% - 104px - min(240px, 28%)));
   pointer-events: none;
 }
 
 .research-graph-meta > div {
   display: grid;
   gap: 3px;
+  min-width: 0;
+}
+
+/* Die Meta-Zeile ist absolut positioniert, die Ebenenumschaltung darunter
+   ebenfalls (top: 58px). Umbrach die Zusammenfassung ("0 Elemente ·
+   0 Verknuepfungen · 0 Themenfelder") in der schmalen Dreispaltenansicht auf
+   zwei Zeilen, malte sie ueber die Umschaltung (Betreiber-Befund 31.08.).
+   Beide Zeilen bleiben deshalb einzeilig und kuerzen mit Ellipse; die Hoehe
+   des Blocks ist damit konstant und stapelt sauber ueber der Umschaltung. */
+.research-graph-meta strong,
+.research-graph-meta > div > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .research-graph-meta strong {
@@ -1025,10 +1074,18 @@
   font-size: 14px;
 }
 
+/* Ohne ausgewaehlte Aufgabe traegt dieses <strong> keinen Domainnamen, sondern
+   die Leerzustands-Ueberschrift ("Keine Domain ausgewaehlt") - dann gilt die
+   Leerzustands-Stufe, nicht der Datenton. */
+.research-context-block > strong.research-context-empty {
+  color: var(--research-empty);
+  font-weight: 700;
+}
+
 .research-context-block p,
 .research-context-block small {
   margin: 0;
-  color: var(--research-muted);
+  color: var(--research-empty);
 }
 
 .research-metric-grid {
@@ -1225,8 +1282,17 @@
   font-size: 12px;
 }
 
+/* Leerzustaende sprechen im Modul eine Stufe: die Kit-Stufe .ctox-empty
+   (#939393). Vorher standen die Ueberschriften auf Fliesstext-Helligkeit
+   (#D4D4D8) und die Seitenpane-Leertexte auf --muted (#818181) - beide neben
+   dem Kit (UI-Review 31.08.). */
+.research-module .ctox-empty strong,
+.research-module .ctox-empty.research-empty-card strong {
+  color: inherit;
+}
+
 .research-empty {
-  color: var(--research-muted);
+  color: var(--research-empty);
   font-size: 13px;
 }
 
@@ -1245,13 +1311,13 @@
 }
 
 .research-empty-card strong {
-  color: var(--research-text);
+  color: inherit;
   font-size: 12px;
   font-weight: 820;
 }
 
 .research-empty-card span {
-  color: var(--research-muted);
+  color: inherit;
   font-size: 12px;
 }
 
@@ -1286,7 +1352,7 @@
   gap: 10px;
   min-height: 0;
   padding: 12px;
-  color: var(--research-muted);
+  color: var(--research-empty);
   font-size: 12px;
 }
 
@@ -1510,6 +1576,12 @@
      die 74px-Fenstersteuerung frei, die vorher die Kontextspalte trug. */
   .shell-window[data-shell-contract="v2"] .research-module .research-center > .ctox-pane-header {
     padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  }
+
+  /* Zweispaltig fuehrt der Graph die volle Breite: der Mittelkopf hat wieder
+     Platz fuer Kicker UND Titel. */
+  .shell-window[data-shell-contract="v2"] .research-module .research-center > .ctox-pane-header .ctox-pane-kicker {
+    display: block;
   }
 
   /* Die Kontextspalte steht in der zweiten Zeile — dort liegt keine
