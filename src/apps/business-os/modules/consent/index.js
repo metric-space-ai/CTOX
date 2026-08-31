@@ -7,7 +7,7 @@ const EXPORT_COMMAND = 'ats.subject.export';
 const ERASE_COMMAND = 'ats.subject.erase';
 const COPY = {
   de: {
-    title: 'Einwilligungen', kicker: 'ATS', listTitle: 'Einwilligungen', newTitle: 'Neue Prüfung',
+    title: 'Einwilligungen', kicker: 'ATS', mainKicker: 'Prüfung', listTitle: 'Einwilligungen', newTitle: 'Neue Prüfung',
     newAction: 'Neue Prüfung', importAction: 'Importieren', exportAction: 'Exportieren',
     searchPlaceholder: 'Suchen...', closeDetail: 'Details schließen',
     bandAll: 'Alle', bandValid: 'Gültig', bandOpen: 'Offen', bandEnded: 'Erloschen',
@@ -32,7 +32,7 @@ const COPY = {
     viewToList: 'Als Liste anzeigen', viewToCards: 'Als Karten anzeigen',
   },
   en: {
-    title: 'Consent', kicker: 'ATS', listTitle: 'Consent', newTitle: 'New check',
+    title: 'Consent', kicker: 'ATS', mainKicker: 'Check', listTitle: 'Consent', newTitle: 'New check',
     newAction: 'New check', importAction: 'Import', exportAction: 'Export',
     searchPlaceholder: 'Search...', closeDetail: 'Close details',
     bandAll: 'All', bandValid: 'Valid', bandOpen: 'Pending', bandEnded: 'Ended',
@@ -285,7 +285,14 @@ export async function mount(ctx) {
   const toggleRightsEl = root?.querySelector('[data-toggle-rights]');
   const viewToggleEl = rail?.querySelector('.consent-view-toggle');
   if (titleEl) titleEl.textContent = locale === 'en' ? t('title') : (ctx.manifest?.title || t('title'));
-  if (subEl) subEl.textContent = ctx.manifest?.description || '';
+  // Der Kicker ist ein Etikett in einer 37px-Kopfzeile. Die vollstaendige
+  // Modulbeschreibung (84 Zeichen, gemessen 619px) passte dort nie und hat den
+  // Titel messbar auf 0px zerdrueckt. Sichtbar bleibt das kurze Etikett, die
+  // Beschreibung wandert in den Tooltip — nichts geht verloren.
+  if (subEl) {
+    subEl.textContent = t('mainKicker');
+    subEl.title = ctx.manifest?.description || '';
+  }
 
   let rowsCache = [];
   let selectedId = null;

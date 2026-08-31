@@ -611,7 +611,7 @@ async function seedDefaultDataIfNeeded() {
     id: sourceId,
     kind: 'local',
     title: 'Lokale Kalender',
-    color: '#3b82f6',
+    color: paletteAccentColor(),
     sync_status: 'synced',
     created_at_ms: Date.now(),
     updated_at_ms: Date.now()
@@ -623,7 +623,7 @@ async function seedDefaultDataIfNeeded() {
     id: calPersonalId,
     source_id: sourceId,
     title: 'Persönlich',
-    color: '#3b82f6',
+    color: paletteAccentColor(),
     visibility: true,
     owner_user_id: 'default_user',
     timezone: 'Europe/Berlin',
@@ -1801,7 +1801,7 @@ function openCalendarForm(calId = null) {
 
         <div class="calendar-form-group">
           <label class="ctox-field-label">Farbe</label>
-          <input type="color" class="ctox-input" name="color" value="${dbCal?.color || '#3b82f6'}" />
+          <input type="color" class="ctox-input" name="color" value="${hexColorToken(dbCal?.color) || paletteAccentColor()}" />
         </div>
       </div>
 
@@ -2066,9 +2066,33 @@ function safeDomId(value) {
   return String(value || 'item').replace(/[^a-zA-Z0-9_-]/g, '-');
 }
 
+// Direktive 31.08.: kein Host-Blau-Hex im Modulcode. Der Farbwaehler-Default
+// fuer NEUE Kalender ist keine feste Farbe mehr, sondern wird zur Laufzeit aus
+// der Fensterpalette abgeleitet (Shell V2 setzt --accent am Fenster aus dem
+// App-Icon). Bereits gespeicherte Kalenderfarben bleiben unveraendert Daten.
+const NEUTRAL_ITEM_COLOR = '#8a8f98';
+
+function hexColorToken(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/.exec(raw);
+  if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`;
+  return /^#[0-9a-f]{6}$/.test(raw) ? raw : '';
+}
+
+function paletteAccentColor(element = state.ctx?.host) {
+  const host = element;
+  if (!host || typeof globalThis.getComputedStyle !== 'function') return NEUTRAL_ITEM_COLOR;
+  try {
+    const raw = globalThis.getComputedStyle(host).getPropertyValue('--accent');
+    return hexColorToken(raw) || NEUTRAL_ITEM_COLOR;
+  } catch {
+    return NEUTRAL_ITEM_COLOR;
+  }
+}
+
 function safeColor(value) {
   const color = String(value || '').trim();
-  return /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(color) ? color : '#3b82f6';
+  return /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(color) ? color : paletteAccentColor();
 }
 
 function findEventForRenderedCalendarElement(eventEl, events = state.events) {
@@ -2126,4 +2150,6 @@ export const __calendarTestHooks = {
   buildCalendarExport,
   parseCalendarImport,
   leftEmptyContent,
+  paletteAccentColor,
+  safeColor,
 };

@@ -18,8 +18,13 @@
 .shell-window[data-shell-contract="v2"] .consent-module .ctox-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
 
 /* Default track width for the shell-owned resizer (it writes inline
-   --ctox-left-width onto the frame while dragging). */
-.consent-module { --ctox-left-width: 320px; }
+   --ctox-left-width onto the frame while dragging). 340px statt 320px:
+   gemessen bleiben der Titelgruppe bei 320px nur 102px, waehrend der deutsche
+   Titel "Einwilligungen" 106px braucht — die Spur kuerzte den Titel um vier
+   Pixel, also rein aus Spurbreite. Der Kopf haelt links die 80px-Icon-Zone
+   frei (Vertrag §3), diese 94px sind nicht verhandelbar; die fehlende Breite
+   muss deshalb aus der Spur selbst kommen. */
+.consent-module { --ctox-left-width: 340px; }
 
 /* Explicit column pins so the center pane never slides onto the resizer track
    when the kit hides resizers on narrow windows. Linke Spur (Shell-v2-Zeilen):
@@ -77,6 +82,32 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Kuerzungsprioritaet in der 37px-Kopfzeile (Betreiber-Direktive 31.08.):
+   1. der TITEL kuerzt mit Ellipse, 2. der KICKER weicht ganz, 3. NIE ein
+   Fragment. Der Kicker ist ein Etikett, kein Fliesstext: er schrumpft nicht
+   (flex-shrink 0) und zerfaellt deshalb nie zu "A…"; reicht die Zeile fuer
+   beide nicht, verschwindet er komplett und ueberlaesst dem Titel die Breite.
+   Gemessen war der Ausgangszustand umgekehrt: der Kicker nahm sich seine
+   volle Breite, der Titel wurde auf 0px zerdrueckt.
+   Die Schwelle haengt an der TITELZEILE, nicht am Fenster — die linke Spur
+   ist bei 1180px und bei 1000px gleich breit, ein Fensterquery koennte den
+   Fall gar nicht sehen. */
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-title-row {
+  container-type: inline-size;
+  container-name: consent-titlebar;
+}
+
+.shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-kicker {
+  flex: 0 0 auto;
+  min-width: max-content;
+}
+
+@container consent-titlebar (max-width: 260px) {
+  .shell-window[data-shell-contract="v2"] .consent-module .ctox-pane-kicker {
+    display: none;
+  }
 }
 
 /* Linke Spalte: Icon-Zone (80px) freihalten — Titelzeile UND Filterleiste. */

@@ -2205,16 +2205,6 @@ function renderSemanticGraph(task, projection) {
           ${iconSvg('search')}
           <input type="search" data-action="graph-search" value="${escapeHtml(state.graph.query)}" placeholder="${escapeHtml(state.t('searchConcepts', 'Begriff suchen …'))}" autocomplete="off" />
         </label>
-        <div class="research-graph-rail" aria-label="${escapeHtml(state.t('graphControls', 'Graph-Steuerung'))}">
-          <button type="button" data-action="graph-command" data-graph-command="panel" class="research-graph-tool${state.graph.panel !== 'hidden' ? ' is-active' : ''}" aria-label="${escapeHtml(state.t('toggleInsights', 'Insights ein-/ausblenden'))}" title="${escapeHtml(state.t('toggleInsights', 'Insights ein-/ausblenden'))}">${iconSvg('layers')}</button>
-          <div class="research-graph-detail" role="group" aria-label="${escapeHtml(state.t('graphDetail', 'Detailstufe'))}">
-            ${graphDetailButton('overview', state.t('detailOverview', 'Übersicht'))}
-            ${graphDetailButton('standard', state.t('detailStandard', 'Standard'))}
-            ${graphDetailButton('deep', state.t('detailDeep', 'Tief'))}
-          </div>
-          <button type="button" data-action="graph-dimension" class="research-graph-tool research-graph-dimension" aria-label="${state.graph.dimensions === 3 ? escapeHtml(state.t('switch2d', 'Zu 2D wechseln')) : escapeHtml(state.t('switch3d', 'Zu 3D wechseln'))}" title="${state.graph.dimensions === 3 ? escapeHtml(state.t('switch2d', 'Zu 2D wechseln')) : escapeHtml(state.t('switch3d', 'Zu 3D wechseln'))}">${state.graph.dimensions}D</button>
-          <button type="button" data-action="graph-command" data-graph-command="fit" class="research-graph-tool" aria-label="${escapeHtml(state.t('fitGraph', 'Graph einpassen'))}" title="${escapeHtml(state.t('fitGraph', 'Graph einpassen'))}">${iconSvg('focus')}</button>
-        </div>
         <div class="research-graph-layer-switch" role="group" aria-label="${escapeHtml(state.t('graphLayer', 'Graph-Ebene'))}">
           ${graphLayerButton('all', state.t('all', 'Alle'))}
           ${graphLayerButton('concepts', state.t('concepts', 'Themen'))}
@@ -2223,9 +2213,30 @@ function renderSemanticGraph(task, projection) {
         </div>
         ${state.graph.panel === 'hidden' ? '' : renderGraphInsights(projection)}
         ${projection.status === 'invalid_graph_contract' ? `<div class="research-graph-contract-error" data-graph-contract-status="invalid_graph_contract" data-graph-contract-errors="${escapeHtml((projection.errors || state.graphContractErrors || []).join(','))}">invalid_graph_contract</div>` : ''}
-        <div class="research-graph-actions">
-          <button type="button" class="research-graph-action" data-action="graph-ai" data-graph-ai="research" ${state.graph.busyAction ? 'disabled' : ''}>${iconSvg('search')}<span>${escapeHtml(state.t('targetedResearch', 'Nachrecherche'))}</span></button>
-          <button type="button" class="research-graph-action" data-action="graph-ai" data-graph-ai="document" ${state.graph.busyAction || !evidenceRankedSources().length ? 'disabled' : ''}>${iconSvg('file')}<span>${escapeHtml(evidenceRankedSources().length ? state.t('createDocument', 'Dokument erstellen') : state.t('reportUnavailable', 'Report nicht verfügbar'))}</span></button>
+        <!-- Untere Leiste: Aktionszeile (links) und Graph-Steuerung (rechts)
+             teilen sich EINE Reihe. Beide lagen frueher getrennt absolut am
+             unteren Rand und ueberdeckten sich, sobald die Buehne schmal wurde
+             (Dreispaltenansicht ab ~1180px: 34px Ueberlappung, gemessen
+             31.08.). Als Flex-Zeile ist die Ueberdeckung strukturell
+             ausgeschlossen. -->
+        <div class="research-graph-bottombar">
+          <div class="research-graph-actions">
+            <!-- title/aria-label sind Pflicht: in der schmalen Buehne rendert
+                 die Zeile nur die Glyphe (siehe index.css), der Knopf braucht
+                 dann trotzdem einen Namen. -->
+            <button type="button" class="research-graph-action" data-action="graph-ai" data-graph-ai="research" title="${escapeHtml(state.t('targetedResearch', 'Nachrecherche'))}" aria-label="${escapeHtml(state.t('targetedResearch', 'Nachrecherche'))}" ${state.graph.busyAction ? 'disabled' : ''}>${iconSvg('search')}<span>${escapeHtml(state.t('targetedResearch', 'Nachrecherche'))}</span></button>
+            <button type="button" class="research-graph-action" data-action="graph-ai" data-graph-ai="document" title="${escapeHtml(evidenceRankedSources().length ? state.t('createDocument', 'Dokument erstellen') : state.t('reportUnavailable', 'Report nicht verfügbar'))}" aria-label="${escapeHtml(evidenceRankedSources().length ? state.t('createDocument', 'Dokument erstellen') : state.t('reportUnavailable', 'Report nicht verfügbar'))}" ${state.graph.busyAction || !evidenceRankedSources().length ? 'disabled' : ''}>${iconSvg('file')}<span>${escapeHtml(evidenceRankedSources().length ? state.t('createDocument', 'Dokument erstellen') : state.t('reportUnavailable', 'Report nicht verfügbar'))}</span></button>
+          </div>
+          <div class="research-graph-rail" aria-label="${escapeHtml(state.t('graphControls', 'Graph-Steuerung'))}">
+            <button type="button" data-action="graph-command" data-graph-command="panel" class="research-graph-tool${state.graph.panel !== 'hidden' ? ' is-active' : ''}" aria-label="${escapeHtml(state.t('toggleInsights', 'Insights ein-/ausblenden'))}" title="${escapeHtml(state.t('toggleInsights', 'Insights ein-/ausblenden'))}">${iconSvg('layers')}</button>
+            <div class="research-graph-detail" role="group" aria-label="${escapeHtml(state.t('graphDetail', 'Detailstufe'))}">
+              ${graphDetailButton('overview', state.t('detailOverview', 'Übersicht'))}
+              ${graphDetailButton('standard', state.t('detailStandard', 'Standard'))}
+              ${graphDetailButton('deep', state.t('detailDeep', 'Tief'))}
+            </div>
+            <button type="button" data-action="graph-dimension" class="research-graph-tool research-graph-dimension" aria-label="${state.graph.dimensions === 3 ? escapeHtml(state.t('switch2d', 'Zu 2D wechseln')) : escapeHtml(state.t('switch3d', 'Zu 3D wechseln'))}" title="${state.graph.dimensions === 3 ? escapeHtml(state.t('switch2d', 'Zu 2D wechseln')) : escapeHtml(state.t('switch3d', 'Zu 3D wechseln'))}">${state.graph.dimensions}D</button>
+            <button type="button" data-action="graph-command" data-graph-command="fit" class="research-graph-tool" aria-label="${escapeHtml(state.t('fitGraph', 'Graph einpassen'))}" title="${escapeHtml(state.t('fitGraph', 'Graph einpassen'))}">${iconSvg('focus')}</button>
+          </div>
         </div>
       </div>
     </section>
@@ -2499,7 +2510,9 @@ function updateGraphInsights() {
   }
   const markup = renderGraphInsights(state.graphProjection);
   if (existing) existing.outerHTML = markup;
-  else stage.querySelector('.research-graph-actions')?.insertAdjacentHTML('beforebegin', markup);
+  // Anker ist die untere Leiste (sie traegt Aktionszeile UND Steuerung); ein
+  // Einhaengen vor `.research-graph-actions` landete sonst IN der Leiste.
+  else stage.querySelector('.research-graph-bottombar')?.insertAdjacentHTML('beforebegin', markup);
   toggle?.classList.add('is-active');
 }
 
@@ -3942,7 +3955,9 @@ function openTaskDialog(editTask = null) {
   const dimensionsText = formatDimensionLines(scoringDimensionsForTask(editTask));
   const domainOptions = knowledgeDomainOptionsMarkup(selectedDomain);
   const overlay = document.createElement('div');
-  overlay.className = 'ctox-modal research-task-dialog';
+  // Modul-Overlay: der Dialog gehoert in den Modul-Host, nicht auf
+  // document.body — `.research-module-overlay` haelt ihn im Fenster.
+  overlay.className = 'ctox-modal research-task-dialog research-module-overlay';
   overlay.innerHTML = `
     <section class="ctox-modal-card" role="dialog" aria-modal="true" aria-labelledby="research-create-title">
       <header class="ctox-modal-header">
@@ -5356,9 +5371,30 @@ function relativeTime(ms) {
 // Standard action icons come from the shell icon set (shared/icons.js via
 // ctx.getActionIcon): monochrome stroke glyphs that inherit currentColor.
 // Legacy local names are mapped onto the shared glyph names.
+// Modul-eigene Icon-Pfade. `ctx.getActionIcon` ist die erste Quelle; fehlt sie
+// (Modul ausserhalb der Shell-Icon-Kit-Version, unbekannter Name), lieferte
+// iconSvg bisher einen leeren String und die Knoepfe standen ohne Glyphe da.
+// Referenz: modules/knowledge/index.js (ACTION_ICON_FALLBACK_PATHS).
+const RESEARCH_ICON_FALLBACK_PATHS = Object.freeze({
+  book: 'M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5v-15ZM4 18a2.5 2.5 0 0 1 2.5-2.5H20M8 7h8',
+  close: 'M6 6l12 12M18 6L6 18',
+  eye: 'M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Zm9.5 2.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5Z',
+  file: 'M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8l-5-5Zm0 0v5h5M9 13h6M9 17h6',
+  focus: 'M4 9V5.5A1.5 1.5 0 0 1 5.5 4H9M15 4h3.5A1.5 1.5 0 0 1 20 5.5V9M20 15v3.5a1.5 1.5 0 0 1-1.5 1.5H15M9 20H5.5A1.5 1.5 0 0 1 4 18.5V15M12 9.5a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5Z',
+  knowledge: 'M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5v-15ZM4 18a2.5 2.5 0 0 1 2.5-2.5H20M8 7h8',
+  layers: 'M12 3.5 3.5 8l8.5 4.5L20.5 8 12 3.5ZM3.5 12.5 12 17l8.5-4.5M3.5 17 12 21.5l8.5-4.5',
+  plus: 'M12 5v14M5 12h14',
+  refresh: 'M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4',
+  search: 'M11 4a7 7 0 1 0 0 14 7 7 0 0 0 0-14ZM20 20l-4-4',
+});
+
 function iconSvg(name) {
   const kitNames = { plus: 'add', knowledge: 'knowledge' };
-  return state.ctx?.getActionIcon?.(kitNames[name] || name, 16, 1.8) || '';
+  const fromShell = state.ctx?.getActionIcon?.(kitNames[name] || name, 16, 1.8);
+  if (fromShell) return fromShell;
+  const path = RESEARCH_ICON_FALLBACK_PATHS[name];
+  if (!path) return '';
+  return `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${path}"></path></svg>`;
 }
 
 // Grade → kit badge state (A=success, B=info, C=warning, D=danger).
@@ -5878,11 +5914,13 @@ function getPromptForFilename(filename) {
 
 function showPromptViewer(filename) {
   const promptText = getPromptForFilename(filename);
-  
+  // Projektregel "nichts ausserhalb der App": der Viewer rendert im
+  // Modul-Host, nicht auf document.body. Ohne Host wird er nicht gezeigt.
+  const mountTarget = state.ctx?.host?.querySelector('[data-research-root]') || state.ctx?.host || null;
+  mountTarget?.querySelector('.research-prompt-viewer')?.remove();
+
   const backdrop = document.createElement("div");
-  backdrop.className = "ctox-modal";
-  // Above module modals (240), below shell notifications (260).
-  backdrop.style.zIndex = "250";
+  backdrop.className = "ctox-modal research-prompt-viewer research-module-overlay";
   backdrop.innerHTML = `
     <div class="ctox-modal-card">
       <header class="ctox-modal-header">
@@ -5890,14 +5928,17 @@ function showPromptViewer(filename) {
           <span class="ctox-pane-kicker">KI-Generierung</span>
           <h3 class="ctox-modal-title">System-Prompt des Fachberichts</h3>
         </div>
-        <button type="button" class="ctox-button" onclick="this.closest('.ctox-modal').remove()">Schließen</button>
+        <button type="button" class="ctox-button" data-close>Schließen</button>
       </header>
       <div class="ctox-modal-body">
-        <div style="font-family: var(--font-mono, monospace); font-size: 11px; line-height: 1.6; color: var(--research-text); max-height: 380px; overflow-y: auto; white-space: pre-wrap; background: var(--research-surface-2); padding: 12px; border-radius: 6px; border: 1px solid var(--research-line); text-align: left;">\${escapeHtml(promptText)}</div>
+        <div class="research-ai-prompt-pre research-prompt-viewer-text">${escapeHtml(promptText)}</div>
       </div>
     </div>
   `;
-  document.body.appendChild(backdrop);
+  backdrop.addEventListener('click', (event) => {
+    if (event.target === backdrop || event.target.closest('[data-close]')) backdrop.remove();
+  });
+  if (mountTarget) mountTarget.appendChild(backdrop);
 }
 
 function parseMarkdown(md) {

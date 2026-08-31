@@ -479,15 +479,14 @@
   color: #647179;
 }
 
+/* Rechtes Glied der unteren Buehnenleiste (siehe .research-graph-bottombar). */
 .research-graph-rail {
-  position: absolute;
-  right: 12px;
-  bottom: 12px;
-  z-index: 6;
+  position: static;
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 5px;
-  max-width: calc(100% - 24px);
+  max-width: 100%;
   overflow-x: auto;
   padding: 3px;
   border: 1px solid rgba(43, 53, 64, 0.75);
@@ -720,12 +719,37 @@
   font: 700 11px/1.2 ui-monospace, SFMono-Regular, monospace;
 }
 
-.research-graph-actions {
+/* Untere Buehnenleiste. Aktionszeile (links) und Graph-Steuerung (rechts) sind
+   EIN Flex-Element und koennen sich damit auf keiner Breite mehr ueberdecken.
+   Vorher lagen beide getrennt absolut am unteren Rand (actions: left 16px,
+   rail: right 12px); sobald die Buehne schmal wurde, lief die Aktionszeile
+   unter die Steuerung (z-index 6 > 5) — in der Dreispaltenansicht bei 1180px
+   um 34px, gemessen 31.08. Bei knappem Platz faellt statt der Ueberdeckung
+   die Beschriftung der Aktionszeile weg (Schwelle am Dateiende). */
+.research-graph-bottombar {
   position: absolute;
-  bottom: 15px;
-  left: 16px;
-  z-index: 5;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  z-index: 6;
   display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  /* Die Leiste selbst liegt ueber der Zeichenflaeche, faengt aber keine
+     Zieh-/Zoomgesten ab; nur ihre Bedienelemente sind klickbar. */
+  pointer-events: none;
+}
+
+.research-graph-bottombar > * {
+  pointer-events: auto;
+}
+
+.research-graph-actions {
+  position: static;
+  display: flex;
+  min-width: 0;
+  flex: 0 1 auto;
   gap: 5px;
 }
 
@@ -733,6 +757,7 @@
   display: flex;
   align-items: center;
   gap: 6px;
+  min-width: 34px;
   min-height: 31px;
   border: 1px solid #2c363c;
   border-radius: 5px;
@@ -742,6 +767,19 @@
   font-size: 10px;
   font-weight: 650;
   cursor: pointer;
+}
+
+/* Bei knappem Platz schrumpfen die Aktionsknoepfe, statt die Steuerung zu
+   ueberdecken: Glyphe bleibt, die Beschriftung kuerzt mit Ellipse. */
+.research-graph-action > span {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.research-graph-action > svg {
+  flex: 0 0 auto;
 }
 
 .research-graph-action:hover {
@@ -1413,6 +1451,36 @@
   font-size: 11px;
 }
 
+/* ----------------------------------------------------------------------------
+   Modul-Overlays (Projektregel "nichts ausserhalb der App").
+   `.ctox-modal` des Kits ist `position: fixed` und deckt damit den ganzen
+   Desktop ab — inklusive Shell-Chrome und anderer Fenster. Research-Dialoge
+   (Task-Dialog, Prompt-Viewer) haengen deshalb im Modul-Host
+   ([data-research-root], `position: relative`) und liegen nur ueber dem
+   eigenen Fensterinhalt. Referenz: modules/app-store/index.css.
+   -------------------------------------------------------------------------- */
+.research-module-overlay,
+.shell-window[data-shell-contract="v2"] .research-module-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 240;
+  box-sizing: border-box;
+}
+
+/* Der Prompt-Viewer kann ueber dem Task-Dialog geoeffnet werden. Die Regel
+   muss die Spezifitaet der Overlay-Regel oben schlagen. */
+.research-module-overlay.research-prompt-viewer,
+.shell-window[data-shell-contract="v2"] .research-module-overlay.research-prompt-viewer {
+  z-index: 250;
+}
+
+.research-prompt-viewer-text {
+  margin-top: 0;
+  max-height: 380px;
+  font-size: 11px;
+  text-align: left;
+}
+
 /* Task dialog (ctox-modal) — module-specific form layout. */
 .research-task-dialog label {
   display: grid;
@@ -1716,21 +1784,16 @@
     max-height: none;
   }
 
-  .research-graph-actions span {
-    display: none;
-  }
-
-  .research-graph-action {
-    min-width: 34px;
-    justify-content: center;
-    padding: 6px;
+  /* Die Beschriftung der Aktionszeile ist hier bereits ueber die
+     1240px-Schwelle am Dateiende ausgeblendet. */
+  .research-graph-bottombar {
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    gap: 6px;
   }
 
   .research-graph-rail {
-    top: auto;
-    right: 8px;
-    bottom: 8px;
-    left: auto;
     display: flex;
     transform: none;
     gap: 2px;
@@ -1757,6 +1820,25 @@
   }
 
   .research-graph-detail button { width: 48px; min-width: 48px; height: 40px; padding-inline: 0; font-size: 8.5px; }
+}
+
+/* Beschriftung der Aktionszeile: erst ab einer Buehne, die sie NEBEN der
+   Graph-Steuerung ungekuerzt traegt. Aktionszeile 266px + Steuerung 284px +
+   Raender/Luft = 582px Mindestbuehne; die stellt das Fenster erst ab ~1241px
+   Containerbreite. Darunter zeigt die Zeile nur die Glyphe (title/aria-label
+   tragen den Namen) — sonst stuenden dort angeschnittene Woerter wie
+   "Nachrech..." / "Dokument er..." (gemessen 31.08. bei 800-1200px). Die
+   Schwelle ist bewusst monoton: keine Beschriftung, die beim Verbreitern
+   erscheint, wieder verschwindet und dann erneut erscheint. */
+@container business-app-window (max-width: 1240px) {
+  .research-graph-actions span {
+    display: none;
+  }
+
+  .research-graph-action {
+    justify-content: center;
+    padding: 6px;
+  }
 }
 
 /* Research Shards & View Toggle styles */

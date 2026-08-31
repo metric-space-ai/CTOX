@@ -60,13 +60,24 @@ for (const app of apps) {
     findings.push({ app: app.id, base: app.base, rule: 'accent-override', detail: 'Modul definiert --accent selbst; gehoert der Shell (Icon-Palette)' });
   }
 
-  const containerWidths = [...css.matchAll(/@container\s+business-app-window\s*\([^)]*?max-width:\s*(\d+)px/g)]
-    .map((m) => Number(m[1]));
-  const stray = [...new Set(containerWidths)].filter((w) => !SANCTIONED.has(w)).sort((a, b) => a - b);
-  if (stray.length) {
+  // Nur STRUKTURELLE Haltepunkte sind auf 1024/768 beschraenkt (Vertrag §6:
+  // Spaltenmodell). Inhaltsabgeleitete Feinschwellen (z.B. Beschriftungen
+  // ikonisieren) sind zulaessig, solange der Block keine Grid-Struktur
+  // veraendert.
+  const stray = [];
+  for (const m of css.matchAll(/@container\s+business-app-window\s*\([^)]*?max-width:\s*(\d+)px[^)]*\)\s*\{/g)) {
+    const w = Number(m[1]);
+    if (SANCTIONED.has(w)) continue;
+    let i = m.index + m[0].length, depth = 1, start = i;
+    while (depth && i < css.length) { if (css[i] === '{') depth++; else if (css[i] === '}') depth--; i++; }
+    const body = css.slice(start, i - 1);
+    if (/grid-template|grid-column|grid-row|grid-auto/.test(body)) stray.push(w);
+  }
+  const uniqStray = [...new Set(stray)].sort((a, b) => a - b);
+  if (uniqStray.length) {
     findings.push({
       app: app.id, base: app.base, rule: 'breakpoint',
-      detail: `eigene Haltepunkte statt 1024/768: ${stray.join(', ')}px`,
+      detail: `strukturelle Haltepunkte statt 1024/768: ${uniqStray.join(', ')}px`,
     });
   }
 }

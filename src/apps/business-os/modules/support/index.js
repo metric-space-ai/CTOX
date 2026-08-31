@@ -53,8 +53,8 @@ const REFRESH_DEBOUNCE_MS = 80;
 const labels = {
   de: {
     kicker: 'Support Desk',
-    queueTitle: 'Queues',
-    conversationKicker: 'Conversation',
+    queueTitle: 'Warteschlangen',
+    conversationKicker: 'Konversation',
     emptyTitle: 'Keine Support-Konversation ausgewählt',
     contextKicker: 'Kontext',
     contextTitle: 'Kunde und Ticket',
@@ -72,10 +72,10 @@ const labels = {
     exportDone: 'Queue exportiert.',
     allOpen: 'Offen',
     mine: 'Meine',
-    unassigned: 'Unassigned',
+    unassigned: 'Nicht zugewiesen',
     needsReply: 'Antwort nötig',
     slaRisk: 'SLA-Risiko',
-    snoozed: 'Snoozed',
+    snoozed: 'Zurückgestellt',
     agentDrafts: 'CTOX Entwürfe',
     loadingTitle: 'Support wird synchronisiert',
     loadingBody: 'Konversationen erscheinen, sobald die Support-Projektionen lokal verfügbar sind.',
@@ -87,11 +87,11 @@ const labels = {
     noTimelineBody: 'Nachrichten, interne Notizen und CTOX Vorschläge werden hier zusammengeführt.',
     status: 'Status',
     priority: 'Priorität',
-    assignee: 'Assignee',
+    assignee: 'Zuordnung',
     team: 'Team',
     customer: 'Kunde',
     ticket: 'Ticket',
-    inbox: 'Inbox',
+    inbox: 'Posteingang',
     updated: 'Aktualisiert',
     noValue: 'nicht gesetzt',
     askCtox: 'CTOX fragen',
@@ -574,10 +574,10 @@ function renderConversationRow(item, viewMode = state.viewMode) {
   const primary = [
     displayStatus(item.status),
     item.priority || 'normal',
-    item.inbox_id || state.t('inbox', 'Inbox'),
+    item.inbox_id || state.t('inbox', 'Posteingang'),
   ];
   const secondary = [
-    `${state.t('assignee', 'Zuordnung')}: ${item.assignee_id || state.t('unassigned', 'Unassigned')}`,
+    `${state.t('assignee', 'Zuordnung')}: ${item.assignee_id || state.t('unassigned', 'Nicht zugewiesen')}`,
     `${state.t('lastActivity', 'Letzte Aktivität')}: ${formatTime(item.last_activity_at_ms || item.updated_at_ms)}`,
   ];
   return `
@@ -648,7 +648,7 @@ function queueLabel(queue) {
   const map = {
     open: state.t('allOpen', 'Offen'),
     mine: state.t('mine', 'Meine'),
-    unassigned: state.t('unassigned', 'Unassigned'),
+    unassigned: state.t('unassigned', 'Nicht zugewiesen'),
     slaRisk: state.t('slaRisk', 'SLA-Risiko'),
   };
   return map[queue] || map.open;
@@ -895,7 +895,7 @@ function renderContext() {
         <dl class="ctox-fields ctox-fields--stacked">
           ${fact(state.t('status', 'Status'), displayStatus(item.status))}
           ${fact(state.t('priority', 'Priorität'), item.priority)}
-          ${fact(state.t('assignee', 'Assignee'), item.assignee_id)}
+          ${fact(state.t('assignee', 'Zuordnung'), item.assignee_id)}
           ${fact(state.t('team', 'Team'), item.team_id)}
           ${fact(state.t('customer', 'Kunde'), item.customer_account_id || item.customer_contact_id)}
           ${fact(state.t('ticket', 'Ticket'), item.ticket_case_id)}

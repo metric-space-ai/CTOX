@@ -317,10 +317,28 @@ test('rail chrome is shell grammar: search, view toggle, tray, counted band, foo
   assert.doesNotMatch(js, /data-refresh-reports/);
   assert.doesNotMatch(css, /reports-refresh-button/);
 
-  // Standing rail action: JSON export of the filtered list.
-  assert.match(html, /class="ctox-pane-icon" data-action="export-json"/);
+  // Standing rail action: JSON export of the filtered list. It is the rail
+  // head's ONE dominant flow action and therefore carries the filled
+  // `is-primary` variant (UI-Review 31.08.2026) — the class pin moved with the
+  // contract, it did not loosen.
+  assert.match(html, /class="ctox-pane-icon is-primary" data-action="export-json"/);
   assert.match(js, /function exportVisibleReports\(\)/);
   assert.match(js, /URL\.createObjectURL/);
+
+  // Exactly ONE filled primary per pane head (UI-Review 31.08.2026): rail =
+  // export, detail = handover to the coding agent. The actions column is
+  // collapsed by default, so the detail head is where that flow action lives.
+  // The disclosure toggle beside it stays a plain icon.
+  assert.equal(html.match(/ctox-pane-icon is-primary/g).length, 2);
+  assert.match(html, /class="ctox-pane-icon is-primary reports-head-delegate" data-head-delegate/);
+  assert.doesNotMatch(html, /reports-toggle-actions[^>]*is-primary/);
+  assert.match(js, /root\.querySelector\('\[data-head-delegate\]'\)\?\.addEventListener\('click'/);
+  assert.match(js, /function syncHeadDelegateButton\(report\)/);
+
+  // Missing attachments must not render an empty screenshot card: the
+  // normalizer hands back `{}` (truthy) for absent client-context attachments,
+  // so the detail gates on the actual image source.
+  assert.match(js, /report\.attachment\?\.data_url \? report\.attachment : null/);
 
   // In-place selection flip: aria-selected on rows, no list rebuild on click.
   assert.match(js, /function applyReportsSelection\(\)/);

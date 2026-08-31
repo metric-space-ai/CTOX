@@ -53,6 +53,8 @@
   "modifyReportsApp": "Modify Reports App",
   "editReport": "Work on report",
   "showCtoxTask": "Show CTOX Task",
+  "delegateCoding": "Hand over to coding agent",
+  "delegateCodingRunning": "Handover already running.",
   "actionsTitle": "Actions",
   "showActions": "Show actions",
   "hideActions": "Hide actions",

@@ -70,13 +70,17 @@
   white-space: nowrap;
 }
 
-/* Leftmost head: clear the icon column. The padding sits on the <header> so
-   the filter row underneath — still inside the icon's 74px reach — clears it
-   as well. */
+/* Leftmost head: clear the icon column. The icon clearance is declared EXACTLY
+   ONCE, here on the <header>, so the filter row underneath — still inside the
+   icon's 74px reach — clears it as well; the rows below add only their own 8px
+   gutter and must never repeat the icon width (reference: knowledge/index.css,
+   which likewise indents the header and not the rows). Repeating it stacked two
+   indents (94px + 88px = 182px for an 80px glyph) and squeezed the title slot
+   to 52px, amputating "Assets & Signale" to "Asse…". */
 .shell-window[data-shell-contract="v2"] .iot-module .iot-left > .ctox-pane-header {
   padding-top: 0;
   padding-bottom: 0;
-  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  padding-left: var(--shell-v2-icon-size, 80px);
 }
 
 /* Second head row: the filter/search bar is exactly one header row, so the
@@ -334,9 +338,10 @@
 }
 .shell-window[data-shell-contract="v2"] .iot-left > .ctox-pane-header,
 .shell-window[data-shell-contract="v2"] .iot-center > .ctox-pane-header { padding: 0; background: var(--shell-v2-surface-alt, var(--surface)); }
+/* Row gutters only — the icon clearance already sits on the <header> above. */
 .shell-window[data-shell-contract="v2"] .iot-left > .ctox-pane-header > [data-shell-v2-header-row="1"] {
   height: var(--shell-v2-header-row-size, 37px);
-  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+  padding: 0 8px;
 }
 .shell-window[data-shell-contract="v2"] .iot-center > .ctox-pane-header > [data-shell-v2-header-row="1"] {
   height: var(--shell-v2-header-row-size, 37px);
@@ -346,7 +351,7 @@
   box-sizing: border-box;
   min-height: var(--shell-v2-header-row-size, 37px);
   height: var(--shell-v2-header-row-size, 37px);
-  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+  padding: 0 8px;
   overflow-x: auto;
   overflow-y: hidden;
   white-space: nowrap;

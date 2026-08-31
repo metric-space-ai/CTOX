@@ -53,6 +53,8 @@
   "modifyReportsApp": "Reports-App modifizieren",
   "editReport": "Report bearbeiten",
   "showCtoxTask": "CTOX Task zeigen",
+  "delegateCoding": "An Coding Agent übergeben",
+  "delegateCodingRunning": "Übergabe läuft bereits.",
   "actionsTitle": "Aktionen",
   "showActions": "Aktionen einblenden",
   "hideActions": "Aktionen ausblenden",

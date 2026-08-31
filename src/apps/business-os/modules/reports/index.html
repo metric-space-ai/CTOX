@@ -14,9 +14,12 @@
         </div>
         <!-- Standing rail action: JSON export of the filtered list. No import
              (reports arrive through CTOX intake flows) and no refresh button —
-             the module keeps itself current (reactive). -->
+             the module keeps itself current (reactive). It is the rail's ONLY
+             standing action and therefore carries `is-primary` — the filled
+             variant marks the one dominant flow action per header
+             (shared/base.css). Never add a second filled button here. -->
         <div class="ctox-pane-actions">
-          <button type="button" class="ctox-pane-icon" data-action="export-json" aria-label="Gefilterte Liste als JSON exportieren" title="Gefilterte Liste als JSON exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11M12 3 8 7M12 3l4 4M5 12v7h14v-7"/></svg></button>
+          <button type="button" class="ctox-pane-icon is-primary" data-action="export-json" aria-label="Gefilterte Liste als JSON exportieren" title="Gefilterte Liste als JSON exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v11M12 3 8 7M12 3l4 4M5 12v7h14v-7"/></svg></button>
         </div>
       </div>
     </header>
@@ -67,7 +70,15 @@
           <span class="ctox-pane-kicker" data-report-kind-label></span>
           <h2 class="ctox-pane-title" data-report-title>Eintrag auswählen</h2>
         </div>
+        <!-- Detail head: exactly ONE filled action — the dominant flow for a
+             selected report is the handover to the coding agent. The actions
+             column is collapsed by default, so without this the module's main
+             action had no head presence at all. The disclosure toggle beside
+             it stays a plain icon (it is chrome, not a flow action). -->
         <div class="ctox-pane-actions">
+          <button type="button" class="ctox-pane-icon is-primary reports-head-delegate" data-head-delegate title="An Coding Agent übergeben" aria-label="An Coding Agent übergeben" disabled>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 12h11"/><path d="M11 7l5 5-5 5"/><path d="M20 4v16"/></svg>
+          </button>
           <button type="button" class="ctox-pane-icon reports-toggle-actions" data-toggle-actions title="Aktionen einblenden" aria-label="Aktionen einblenden" aria-pressed="false">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></svg>
           </button>

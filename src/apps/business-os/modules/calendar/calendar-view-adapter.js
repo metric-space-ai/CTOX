@@ -3,6 +3,28 @@
  * Decouples Business-OS schema and EventCalendar internals.
  * Supports Recurrence Rule expansion using rrule.js.
  */
+
+// Neutrale Ersatzfarbe, wenn keine Fensterpalette lesbar ist. Bewusst kein
+// Host-Blau: Interaktions- und Akzentfarben gehoeren der Shell (Icon-Palette).
+const NEUTRAL_ITEM_COLOR = '#8a8f98';
+
+function hexColorToken(value) {
+  const raw = String(value || '').trim().toLowerCase();
+  const short = /^#([0-9a-f])([0-9a-f])([0-9a-f])$/.exec(raw);
+  if (short) return `#${short[1]}${short[1]}${short[2]}${short[2]}${short[3]}${short[3]}`;
+  return /^#[0-9a-f]{6}$/.test(raw) ? raw : '';
+}
+
+function paletteAccentColor(element) {
+  if (!element || typeof globalThis.getComputedStyle !== 'function') return NEUTRAL_ITEM_COLOR;
+  try {
+    const raw = globalThis.getComputedStyle(element).getPropertyValue('--accent');
+    return hexColorToken(raw) || NEUTRAL_ITEM_COLOR;
+  } catch {
+    return NEUTRAL_ITEM_COLOR;
+  }
+}
+
 export function createCalendarView({
   root,
   events = [],
@@ -31,7 +53,12 @@ export function createCalendarView({
   const viewEnd = new Date();
   viewEnd.setDate(viewEnd.getDate() + 90);    // expand +90 days
 
-  const formattedEvents = prepareEventsForCalendar(events, calendars, viewStart, viewEnd);
+  // Direktive 31.08.: kein Host-Blau-Hex im Modulcode. Die Ersatzfarbe fuer
+  // Termine ohne eigene und ohne Kalenderfarbe kommt aus der Fensterpalette
+  // (--accent am Modul-Host), Fallback neutral.
+  const fallbackEventColor = paletteAccentColor(root);
+
+  const formattedEvents = prepareEventsForCalendar(events, calendars, viewStart, viewEnd, fallbackEventColor);
 
   // Initialize EventCalendar
   const options = {
@@ -129,7 +156,13 @@ export function createCalendarView({
       }
     },
     setEvents: (newEvents, newCalendars) => {
-      const formatted = prepareEventsForCalendar(newEvents, newCalendars, viewStart, viewEnd);
+      const formatted = prepareEventsForCalendar(
+        newEvents,
+        newCalendars,
+        viewStart,
+        viewEnd,
+        paletteAccentColor(root),
+      );
       options.events = formatted;
       if (typeof ec?.setOption === 'function') {
         ec.setOption('events', formatted);
@@ -154,13 +187,20 @@ export function createCalendarView({
 /**
  * Maps CTOX Sync Engine events to EventCalendar standard structure and expands recurring series using rrule.js.
  */
-function prepareEventsForCalendar(events, calendars, rangeStart, rangeEnd) {
+function prepareEventsForCalendar(
+  events,
+  calendars,
+  rangeStart,
+  rangeEnd,
+  fallbackColor = NEUTRAL_ITEM_COLOR,
+) {
   const result = [];
   const calendarMap = new Map(calendars.map(c => [c.id, c]));
+  const fallback = hexColorToken(fallbackColor) || NEUTRAL_ITEM_COLOR;
 
   for (const ev of events) {
     const cal = calendarMap.get(ev.calendar_id);
-    const color = ev.color || (cal ? cal.color : '#3b82f6');
+    const color = ev.color || (cal ? cal.color : fallback);
     const visibility = cal ? cal.visibility : true;
     if (visibility === false) continue; // skip hidden calendars
 
@@ -291,6 +331,7 @@ function resolveOriginalEventForCalendarClick(info, events) {
 
 export const __calendarViewAdapterTestHooks = {
   getOriginalEventId,
+  paletteAccentColor,
   prepareEventsForCalendar,
   resolveOriginalEventForCalendarClick,
 };

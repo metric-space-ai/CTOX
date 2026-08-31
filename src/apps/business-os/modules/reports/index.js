@@ -169,6 +169,11 @@ function applyStaticLabels(host, t) {
   // One-button view switch — icon/label always name the target view.
   syncViewToggleButton(root);
 
+  // Detail head primary — starts disabled (nothing selected yet) and gets its
+  // localized label immediately, so an `en` mount never shows the German
+  // fallback that ships in the static markup.
+  syncHeadDelegateButton(null);
+
   // Right-pane actions toggle — title and aria label swap depending on state.
   const toggleActions = root.querySelector('[data-toggle-actions]');
   if (toggleActions) {
@@ -210,6 +215,28 @@ function syncViewToggleButton(root) {
   button.innerHTML = cards ? VIEW_ICON_LIST : VIEW_ICON_CARDS;
 }
 
+// Enablement of the detail head's single filled action. Mirrors the actions
+// pane exactly: no selected report, or a delegation already in flight, means
+// the handover is not available — the button then dims (`:disabled`) instead
+// of vanishing, so the head never changes height between reports.
+function syncHeadDelegateButton(report) {
+  const button = state.ctx?.host?.querySelector('[data-head-delegate]');
+  if (!button) return;
+  const t = state.t || ((key, fallback) => fallback ?? key);
+  const label = t('delegateCoding', 'An Coding Agent übergeben');
+  const delegation = report ? delegationInfoFor(report) : null;
+  const delegationOpen = Boolean(delegation?.approval && String(delegation.approval.status || 'pending') === 'pending')
+    || Boolean(delegation?.command && !['completed', 'failed'].includes(String(delegation.command.status || '')));
+  button.disabled = !report || delegationOpen;
+  const title = !report
+    ? t('selectReportTitle', 'Eintrag auswählen')
+    : delegationOpen
+      ? t('delegateCodingRunning', 'Übergabe läuft bereits.')
+      : label;
+  button.setAttribute('aria-label', title);
+  button.setAttribute('title', title);
+}
+
 function updateToggleActionsAria(root) {
   const toggle = root?.querySelector('[data-toggle-actions]');
   if (!toggle) return;
@@ -243,6 +270,15 @@ function wireUi() {
     state.viewMode = state.viewMode === 'list' ? 'cards' : 'list';
     syncViewToggleButton(root);
     renderList({ resetScroll: true });
+  });
+  // The one filled primary action of the detail head: hand the selected report
+  // over to the coding agent. Same target as the actions-pane button, but the
+  // pane is collapsed by default, so the head is where the flow action has to
+  // live. Enablement is synced from renderDetail() (see syncHeadDelegateButton).
+  root.querySelector('[data-head-delegate]')?.addEventListener('click', (event) => {
+    if (event.currentTarget.disabled) return;
+    const report = currentReportForActions();
+    if (report) openDelegateDialog(report);
   });
   // Right actions column is collapsible — same toggle pattern threads/tickets
   // use. The toggle stays in the detail header so the actions pane never has
@@ -869,6 +905,7 @@ function renderDetail() {
   const filtered = filteredReports();
   const report = filtered.find((item) => item.id === state.selectedId) || null;
   renderDetailFooter(report);
+  syncHeadDelegateButton(report);
   const kindLabelNode = detail.querySelector('[data-report-kind-label]');
   const titleNode = detail.querySelector('[data-report-title]');
   if (!report) {
@@ -889,7 +926,11 @@ function renderDetail() {
   state.renderedDetailId = report.id;
   if (kindLabelNode) kindLabelNode.textContent = `${report.kindLabel} · ${displayStatus(report.status)}`;
   if (titleNode) titleNode.textContent = report.title;
-  const attachment = report.attachment;
+  // normalizeReportItems() runs the raw value through objectValue(), which
+  // returns `{}` for a missing attachment — truthy. Gate on the actual image
+  // source, otherwise every report without a screenshot renders an empty
+  // "Screenshot und Markup" card with a broken <img> (measured 31.08.2026).
+  const attachment = report.attachment?.data_url ? report.attachment : null;
   let scroller = detail.querySelector('[data-reports-detail-scroll]');
   if (!scroller) {
     scroller = document.createElement('div');

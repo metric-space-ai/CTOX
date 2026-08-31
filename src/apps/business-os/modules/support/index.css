@@ -14,11 +14,14 @@
    inline --ctox-*-width onto the frame while dragging. The primary (center)
    column keeps a hard minimum so side panes never squeeze it to zero. */
 .support-module {
-  /* 364px, not 300: the counted band is four labels WITH their counts
-     (Offen/Meine/Unassigned/SLA-Risiko) and the kit pins .ctox-pane-tabs to
-     min-width: max-content, so a 300px queue column cut the last tab off.
-     Measured live: the band needs 356px of content box. */
-  --ctox-left-width: 364px;
+  /* 380px, not 300: the counted band is four labels WITH their counts
+     (Offen/Meine/Nicht zugewiesen/SLA-Risiko) and the kit pins .ctox-pane-tabs
+     to min-width: max-content, so a 300px queue column cut the last tab off.
+     Measured live (Renderprobe 31.08., three-digit counts, German labels): the
+     band's max-content width is 375px, so 380px is the floor that keeps the
+     last tab inside the pane. The left resizer carries the same 380px minimum
+     — below it the band clipped AND the search box collapsed to 34px. */
+  --ctox-left-width: 380px;
   --ctox-right-width: 340px;
   grid-template-columns:
     var(--ctox-left-width) 12px minmax(320px, 1fr) 12px var(--ctox-right-width);
@@ -101,6 +104,17 @@
   padding-top: 0;
   padding-bottom: 0;
   align-items: center;
+}
+
+/* The kit gives the search `flex: 1 1 auto; min-width: 0`, i.e. it is the only
+   part of row 2 that yields — with the head indented past the 80px app icon it
+   shrank to 34px ("Suc…") at the old 240px resizer minimum. Addressed
+   structurally (the search INSIDE this head's row 2), not via the kit's
+   .ctox-pane-search class, so this stays head geometry and not chrome styling.
+   120px is a floor, not the working size: at the pane's own 380px minimum the
+   field measures 174px, so the floor never forces the two row icons out. */
+.shell-window[data-shell-contract="v2"] .support-module .support-left > .ctox-pane-header > .ctox-pane-title-row + div > [data-pg-search] {
+  min-width: 120px;
 }
 
 .shell-window[data-shell-contract="v2"] .support-module .support-center > .ctox-pane-header {
