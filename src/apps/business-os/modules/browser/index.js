@@ -88,6 +88,13 @@ export async function mount(ctx) {
     authAssist: root.querySelector('[data-browser-auth-assist]'),
     shell: root.querySelector('[data-browser-frame-shell]'),
     canvas: root.querySelector('[data-browser-canvas]'),
+    railToggle: root.querySelector('[data-browser-rail-toggle]'),
+    preciseToggle: root.querySelector('[data-browser-precise]'),
+    preciseLayer: root.querySelector('[data-browser-precise-layer]'),
+    preciseMark: root.querySelector('[data-browser-precise-mark]'),
+    precisePanel: root.querySelector('[data-browser-precise-panel]'),
+    preciseText: root.querySelector('[data-browser-precise-text]'),
+    preciseHint: root.querySelector('[data-browser-precise-hint]'),
     empty: root.querySelector('[data-browser-empty]'),
     viewSwitch: root.querySelectorAll('[data-browser-view]'),
     scriptPanel: root.querySelector('[data-browser-script-panel]'),
@@ -661,7 +668,10 @@ export async function mount(ctx) {
       safeLoadAndRender();
     }
   });
+  installRailToggle(refs);
+  installPreciseInput(ctx, refs, state);
   installInputHandlers(ctx, refs, state, scheduleRefresh);
+  installCanvasPaste(ctx, refs, state);
   installViewSwitch(ctx, refs, state);
   cleanups.push(startDirectBrowserLive(ctx, refs, state, () => mounted, scheduleRefresh));
   const leaseRenewTimer = globalThis.setInterval(renewControllerLeaseIfNeeded, 30_000);
@@ -1811,6 +1821,147 @@ function installContextMenu(refs) {
   };
   menu.addEventListener('keydown', aufEscape);
   document.addEventListener('keydown', aufEscape, true);
+}
+
+// Sitzungsleiste einklappbar: auf schmalen Fenstern und im Freischaltmodus
+// braucht die Buehne jede Spalte. Zustand ueberlebt den Reload.
+function installRailToggle(refs) {
+  const root = refs.railToggle?.closest('[data-browser-root]');
+  if (!root || !refs.railToggle) return;
+  let gespeichert = '';
+  try { gespeichert = window.localStorage.getItem('ctox-browser-rail') || ''; } catch {}
+  const anwenden = (zu) => {
+    root.classList.toggle('is-rail-collapsed', zu);
+    refs.railToggle.setAttribute('aria-pressed', zu ? 'true' : 'false');
+    try { window.localStorage.setItem('ctox-browser-rail', zu ? 'zu' : 'offen'); } catch {}
+  };
+  if (gespeichert === 'zu') anwenden(true);
+  refs.railToggle.addEventListener('click', () => {
+    anwenden(!root.classList.contains('is-rail-collapsed'));
+  });
+}
+
+// Praezise Eingabe: Klickpunkt waehlen, lokal tippen/pasten, am Punkt
+// ausfuehren. Umgeht die Latenz des fernen Eingabekanals fuer Formulare.
+function installPreciseInput(ctx, refs, state) {
+  if (!refs.preciseToggle || !refs.preciseLayer || !refs.shell || !refs.canvas) return;
+  const root = refs.preciseToggle.closest('[data-browser-root]');
+  const setHint = (text) => { if (refs.preciseHint) refs.preciseHint.textContent = text || ''; };
+  const layerZu = () => {
+    refs.preciseLayer.hidden = true;
+    setHint('');
+  };
+  const modusSetzen = (an) => {
+    state.preciseEnabled = an;
+    refs.preciseToggle.setAttribute('aria-pressed', an ? 'true' : 'false');
+    root?.classList.toggle('is-precise', an);
+    if (!an) layerZu();
+  };
+  refs.preciseToggle.addEventListener('click', () => modusSetzen(!state.preciseEnabled));
+  // Capture-Phase auf dem Buehnen-Container: faengt den Klick VOR den
+  // normalen Canvas-Handlern ab, solange der Modus aktiv ist.
+  refs.shell.addEventListener('pointerdown', (event) => {
+    if (!state.preciseEnabled) return;
+    if (refs.precisePanel?.contains(event.target)) return;
+    if (event.target !== refs.canvas) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    const punkt = canvasPoint(refs.canvas, event);
+    state.precisePoint = punkt;
+    const shellBox = refs.shell.getBoundingClientRect();
+    const lokalX = event.clientX - shellBox.left;
+    const lokalY = event.clientY - shellBox.top;
+    refs.preciseLayer.hidden = false;
+    if (refs.preciseMark) {
+      refs.preciseMark.style.left = `${Math.round(lokalX)}px`;
+      refs.preciseMark.style.top = `${Math.round(lokalY)}px`;
+    }
+    if (refs.precisePanel) {
+      const panelBreite = 340;
+      const links = Math.max(8, Math.min(lokalX + 14, Math.max(8, shellBox.width - panelBreite - 8)));
+      const oben = Math.max(8, Math.min(lokalY + 14, Math.max(8, shellBox.height - 170)));
+      refs.precisePanel.style.left = `${Math.round(links)}px`;
+      refs.precisePanel.style.top = `${Math.round(oben)}px`;
+    }
+    setHint(`Punkt ${punkt.x}×${punkt.y} gewählt`);
+    refs.preciseText?.focus();
+  }, true);
+  const fernerKlick = async (button, anzahl = 1) => {
+    const punkt = state.precisePoint;
+    if (!punkt) return;
+    for (let i = 0; i < anzahl; i += 1) {
+      await writeInputEvent(ctx, state, 'click', preciseClickPatch(ctx, refs, punkt, button));
+    }
+  };
+  refs.precisePanel?.addEventListener('click', async (event) => {
+    const knopf = event.target.closest?.('[data-browser-precise-act]');
+    if (!knopf) return;
+    const akt = knopf.dataset.browserPreciseAct;
+    if (akt === 'close') { layerZu(); return; }
+    try {
+      if (akt === 'click') { await fernerKlick('left'); setHint('Klick gesendet'); }
+      if (akt === 'dblclick') { await fernerKlick('left', 2); setHint('Doppelklick gesendet'); }
+      if (akt === 'rightclick') { await fernerKlick('right'); setHint('Rechtsklick gesendet'); }
+      if (akt === 'type' || akt === 'type-enter') {
+        const text = String(refs.preciseText?.value || '');
+        await fernerKlick('left');
+        await new Promise((r) => setTimeout(r, 160));
+        if (text) await writeInputEvent(ctx, state, 'keyDown', preciseTextPatch(ctx, text));
+        if (akt === 'type-enter') {
+          await new Promise((r) => setTimeout(r, 120));
+          await writeInputEvent(ctx, state, 'keyDown', preciseKeyPatch(ctx, 'Enter'));
+        }
+        setHint(text ? 'Text am Punkt eingefügt' : 'Klick gesendet (kein Text eingegeben)');
+      }
+    } catch (error) {
+      setHint(`Eingabe fehlgeschlagen: ${error?.message || error}`);
+    }
+  });
+  refs.preciseText?.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') { layerZu(); refs.canvas?.focus(); }
+    event.stopPropagation();
+  });
+}
+
+function preciseClickPatch(ctx, refs, punkt, button) {
+  return {
+    x: punkt.x, y: punkt.y, detail: 1, clickCount: 1,
+    button, buttons: button === 'right' ? 2 : 1, dx: 0, dy: 0,
+    key: '', code: '', modifiers: [], text: '',
+    payload: {
+      pointer_id: 0, pointer_type: 'precise', click_count: 1,
+      viewport_w: refs.canvas?.width || VIEWPORT.width,
+      viewport_h: refs.canvas?.height || VIEWPORT.height,
+      actor: actorContext(ctx.session),
+    },
+  };
+}
+
+function preciseTextPatch(ctx, text) {
+  return {
+    x: 0, y: 0, detail: 0, clickCount: 0, button: 'none', buttons: 0,
+    dx: 0, dy: 0, key: '', code: '', modifiers: [], text,
+    payload: { repeat: false, location: 0, actor: actorContext(ctx.session) },
+  };
+}
+
+function preciseKeyPatch(ctx, key) {
+  return {
+    x: 0, y: 0, detail: 0, clickCount: 0, button: 'none', buttons: 0,
+    dx: 0, dy: 0, key, code: key, modifiers: [], text: '',
+    payload: { repeat: false, location: 0, actor: actorContext(ctx.session) },
+  };
+}
+
+// Einfuegen aus der Zwischenablage direkt auf der Buehne: das paste-Ereignis
+// traegt den Text lokal; er geht als EIN keyboard.type an die ferne Seite.
+function installCanvasPaste(ctx, refs, state) {
+  refs.canvas?.addEventListener('paste', (event) => {
+    const text = event.clipboardData?.getData('text/plain') || '';
+    if (!text) return;
+    event.preventDefault();
+    writeInputEvent(ctx, state, 'keyDown', preciseTextPatch(ctx, text));
+  });
 }
 
 function installInputHandlers(ctx, refs, state, scheduleRefresh) {
@@ -3165,11 +3316,10 @@ function renderAuthAssist(refs, session) {
   const instruction = String(payload.instruction || '').trim()
     || 'Melden Sie sich auf der geöffneten Seite an und lösen Sie gegebenenfalls MFA oder Captcha. Bestätigen Sie erst danach die Fortsetzung.';
   refs.authAssist.innerHTML = `
-    <div>
+    <div class="browser-auth-summary">
       <span class="ctox-pane-kicker">Web Stack Anmeldung</span>
       <strong>${escapeHtml(payload.source_id || 'Anmeldung erforderlich')}</strong>
-      <small>${escapeHtml(domains || payload.target_url || '')}</small>
-      <small>${escapeHtml(instruction)}</small>
+      <small class="browser-auth-instruction" title="${escapeHtml(instruction)}">${escapeHtml(domains || payload.target_url || '')} · ${escapeHtml(instruction)}</small>
       ${fillStatus ? `<small>${escapeHtml(authAssistStatusLabel(fillStatus, 'Zugangsdaten werden eingesetzt'))}</small>` : ''}
       ${extractStatus ? `<small>${escapeHtml(authAssistStatusLabel(extractStatus, 'Seitenauswertung laeuft'))}</small>` : ''}
     </div>

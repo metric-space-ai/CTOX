@@ -962,3 +962,94 @@
   font-size: 0.78rem;
   opacity: 0.6;
 }
+
+
+/* --- Sitzungsleiste einklappbar (data-browser-rail-toggle) --- */
+.browser-module.is-rail-collapsed .browser-sessions,
+.browser-module.is-rail-collapsed [data-resizer="left"] {
+  display: none;
+}
+
+/* --- Praezise Eingabe --- */
+.browser-module.is-precise [data-browser-canvas] {
+  cursor: crosshair;
+}
+.browser-precise-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 30;
+}
+.browser-precise-mark {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border: 2px solid var(--accent, #e8833a);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.45);
+}
+.browser-precise-mark::before,
+.browser-precise-mark::after {
+  content: '';
+  position: absolute;
+  background: var(--accent, #e8833a);
+}
+.browser-precise-mark::before { left: 50%; top: -6px; width: 2px; height: 6px; margin-left: -1px; }
+.browser-precise-mark::after { top: 50%; left: -6px; height: 2px; width: 6px; margin-top: -1px; }
+.browser-precise-panel {
+  position: absolute;
+  width: 340px;
+  max-width: calc(100% - 16px);
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border-1, #333);
+  background: var(--surface-1, #16181c);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+  pointer-events: auto;
+}
+.browser-precise-panel textarea {
+  width: 100%;
+  resize: vertical;
+  min-height: 40px;
+  font: inherit;
+  color: var(--text-1, #eee);
+  background: var(--surface-2, #1e2126);
+  border: 1px solid var(--border-1, #333);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+.browser-precise-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.browser-precise-actions .ctox-button {
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.browser-precise-hint {
+  color: var(--text-2, #9aa);
+  min-height: 14px;
+}
+
+/* --- Kompakte Web-Stack-Anmeldezeile --- */
+[data-browser-auth-assist] {
+  padding: 6px 10px;
+}
+[data-browser-auth-assist] .browser-auth-summary {
+  min-width: 0;
+}
+[data-browser-auth-assist] .browser-auth-instruction {
+  display: block;
+  max-width: 60ch;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+[data-browser-auth-assist] .ctox-pane-tools .ctox-button {
+  font-size: 12px;
+  padding: 4px 8px;
+}
