@@ -251,7 +251,7 @@
         "icon_selection_sha256": "8fa94a7ae4b6db8885c0088a68cf736a23c0fd717a3711cd9b015c969f799a11"
       },
       "category": "Workspace",
-      "version": "v0.2.5",
+      "version": "v0.2.6",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
