@@ -2624,6 +2624,153 @@ test('focusChatForUser zieht die Leiste nicht ungefragt in die Vergangenheit', (
   assert.equal(nutzer.selectedDate, '2026-07-26', 'ausdrueckliche Navigation muss den Tag wechseln');
 });
 
+test('ein spaeter Oeffner verliert nach lokalem Minimieren sein Besitz-Ticket', () => {
+  const {
+    claimChatOpenOwnership,
+    ownsChatOpenOwnership,
+    markChatExpandedByUser,
+    markChatMinimizedByUser,
+  } = __businessChatTestInternals;
+  const state = {};
+  const chat = { id: 'chat-ticket', open: true, minimized: false };
+  const openTicket = claimChatOpenOwnership(state);
+
+  assert.equal(ownsChatOpenOwnership(state, openTicket), true);
+  markChatMinimizedByUser(state, chat);
+  assert.equal(ownsChatOpenOwnership(state, openTicket), false);
+  assert.equal(markChatExpandedByUser(state, chat, openTicket), false);
+  assert.equal(chat.minimized, true);
+  assert.equal(chat.userMinimized, true);
+});
+
+test('lokal neueres Minimieren gewinnt gegen ein spaeteres business_chats Echo', async () => {
+  const previousLocalStorage = globalThis.localStorage;
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    setItem(key, value) {
+      store.set(key, String(value));
+    },
+    removeItem(key) {
+      store.delete(key);
+    },
+  };
+  const now = Date.now();
+  const localChat = {
+    id: 'chat-local-minimized',
+    owner_user_id: 'user-1',
+    title: 'Laufender Research',
+    createdAt: now - 1000,
+    updated_at_ms: now,
+    presentation_updated_at_ms: now + 2000,
+    open: true,
+    minimized: true,
+    userMinimized: true,
+    messages: [{
+      id: 'status-local-minimized',
+      role: 'ctox',
+      commandId: 'cmd-local-minimized',
+      taskId: 'task-local-minimized',
+      status: 'running',
+      createdAt: now - 500,
+    }],
+  };
+  const remoteChat = {
+    ...localChat,
+    updated_at_ms: now + 3000,
+    presentation_updated_at_ms: now + 1000,
+    minimized: false,
+    userMinimized: false,
+    messages: [
+      ...localChat.messages,
+      {
+        id: 'reply-local-minimized',
+        role: 'ctox',
+        text: 'Fertig, ohne die Leiste erneut zu oeffnen.',
+        replyFor: 'task-local-minimized',
+        commandId: 'cmd-local-minimized',
+        taskId: 'task-local-minimized',
+        status: 'completed',
+        createdAt: now + 3000,
+      },
+    ],
+  };
+  const state = {
+    ownerUserId: 'user-1',
+    selectedDate: __businessChatTestInternals.getLocalDateString(now),
+    activeChatId: localChat.id,
+    dockCollapsed: false,
+    remoteHydrationComplete: true,
+    deletedChatIds: {},
+    chats: [localChat],
+  };
+
+  try {
+    const changed = await __businessChatTestInternals.hydrateChatsFromRxDb({
+      state,
+      session: { user: { id: 'user-1' } },
+      db: { raw: { business_chats: makeFindCollection([remoteChat]) } },
+    });
+
+    const merged = state.chats.find((chat) => chat.id === localChat.id);
+    assert.equal(changed, true);
+    assert.equal(merged.minimized, true);
+    assert.equal(merged.userMinimized, true);
+    assert.equal(merged.presentation_updated_at_ms, localChat.presentation_updated_at_ms);
+    assert.equal(merged.messages.at(-1).status, 'completed');
+  } finally {
+    if (previousLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousLocalStorage;
+  }
+});
+
+test('lokales Minimieren ueberlebt Persistenz und Reload', async () => {
+  const previousLocalStorage = globalThis.localStorage;
+  const store = new Map();
+  globalThis.localStorage = {
+    getItem(key) {
+      return store.has(key) ? store.get(key) : null;
+    },
+    setItem(key, value) {
+      store.set(key, String(value));
+    },
+    removeItem(key) {
+      store.delete(key);
+    },
+  };
+  const state = {
+    ownerUserId: 'user-1',
+    selectedDate: __businessChatTestInternals.getLocalDateString(Date.now()),
+    activeChatId: 'chat-reload-minimized',
+    dockCollapsed: false,
+    chats: [{
+      id: 'chat-reload-minimized',
+      owner_user_id: 'user-1',
+      title: 'Persistenter Chat',
+      createdAt: Date.now(),
+      updated_at_ms: Date.now(),
+      open: true,
+      minimized: false,
+      messages: [],
+    }],
+  };
+
+  try {
+    __businessChatTestInternals.markChatMinimizedByUser(state, state.chats[0]);
+    const minimizedAt = state.chats[0].presentation_updated_at_ms;
+    await __businessChatTestInternals.persistChatState({ state, db: null, remote: false });
+    const restored = __businessChatTestInternals.readChatState({ user: { id: 'user-1' } });
+    assert.equal(restored.chats[0].minimized, true);
+    assert.equal(restored.chats[0].userMinimized, true);
+    assert.equal(restored.chats[0].presentation_updated_at_ms, minimizedAt);
+  } finally {
+    if (previousLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = previousLocalStorage;
+  }
+});
+
 test('eine Antwort auf einen alten Chat holt sich die Ansicht nicht', () => {
   // remoteReplyChatToFocus meldet jeden Chat mit neuer Serverantwort. Der
   // Abgleich schreibt laufend in alte Vorgaenge nach — am 11.08.2026 riss

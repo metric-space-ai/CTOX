@@ -118,12 +118,15 @@ export function initBusinessChat({
       trackingSyncRerun = true;
       return;
     }
+    const presentationTicket = currentChatOpenOwnership(state);
     trackingSyncRunning = true;
     try {
       captureDrafts(root, state);
       const changed = await syncTrackedMessages({ state, db, sync: syncFacade });
       if (changed) persistChatState({ state, db });
-      if (changed) renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      if (changed && ownsChatOpenOwnership(state, presentationTicket)) {
+        renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      }
     } finally {
       trackingSyncRunning = false;
       trackingWatch?.refresh?.();
@@ -167,9 +170,12 @@ export function initBusinessChat({
       scheduleChatHydrationRetry();
       return;
     }
+    const presentationTicket = currentChatOpenOwnership(state);
     captureDrafts(root, state);
     hydrateChatsFromRxDb({ state, db, session }).then((changed) => {
-      if (changed) renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      if (changed && ownsChatOpenOwnership(state, presentationTicket)) {
+        renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      }
     }).catch(() => {});
   };
 
@@ -187,12 +193,14 @@ export function initBusinessChat({
     const detail = event.detail || {};
     const text = String(detail.text || detail.message || '').trim();
     if (!text) return;
+    const presentationTicket = claimChatOpenOwnership(state);
     state.selectedDate = getLocalDateString(Date.now());
     const createNewChat = shouldCreateChatForExternalSubmit(detail);
     const chat = createNewChat ? createChat(state.ownerUserId, state.selectedDate) : ensureChat(state, session);
     if (createNewChat) state.chats.push(chat);
     if (detail.title) chat.title = String(detail.title).trim() || chat.title;
     chat.contextMeta = chatContextMetaFromDetail(detail);
+    markChatExpandedByUser(state, chat, presentationTicket);
     focusChatForUser(state, chat);
     chat.draft = '';
     try {
@@ -218,22 +226,29 @@ export function initBusinessChat({
       // must not keep the originating workflow in a false pending state.
       detail.resolveSubmission?.(submission);
       await persistChatState({ state, db });
-      renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      if (ownsChatOpenOwnership(state, presentationTicket)) {
+        renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      }
       syncAfterSubmit();
     } catch (error) {
       detail.rejectSubmission?.(
         error instanceof Error ? error : new Error(String(error || 'Task konnte nicht übergeben werden.')),
       );
-      renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      if (ownsChatOpenOwnership(state, presentationTicket)) {
+        renderChatRoot({ root, state, commandBus, db, getActiveModule });
+      }
     }
   };
 
   const handleExternalOpen = async (event) => {
     const detail = event.detail || {};
+    const presentationTicket = claimChatOpenOwnership(state);
     await hydrateChatsFromRxDb({ state, db, session }).catch(() => false);
+    if (!ownsChatOpenOwnership(state, presentationTicket)) return;
     state.selectedDate = getLocalDateString(Date.now());
     const chat = resolveChatForOpenDetail(state, session, detail);
     chat.title = String(detail.title || chat.title || 'CTOX').trim() || 'CTOX';
+    markChatExpandedByUser(state, chat, presentationTicket);
     focusChatForUser(state, chat);
     chat.maximized = Boolean(detail.maximized);
     if ('draft' in detail || 'message' in detail) {
@@ -258,15 +273,19 @@ export function initBusinessChat({
     touchChats(state, [chat]);
     renderChatRoot({ root, state, commandBus, db, getActiveModule });
     await persistChatState({ state, db });
+    if (!ownsChatOpenOwnership(state, presentationTicket)) return;
     renderChatRoot({ root, state, commandBus, db, getActiveModule });
   };
 
+  const initialPresentationTicket = currentChatOpenOwnership(state);
   hydrateChatsFromRxDb({ state, db, session })
     .then(() => {
+      if (!ownsChatOpenOwnership(state, initialPresentationTicket)) return;
       renderChatRoot({ root, state, commandBus, db, getActiveModule });
       trackingWatch?.refresh?.({ schedule: true });
     })
     .catch(() => {
+      if (!ownsChatOpenOwnership(state, initialPresentationTicket)) return;
       renderChatRoot({ root, state, commandBus, db, getActiveModule });
       trackingWatch?.refresh?.({ schedule: true });
     });
@@ -1307,22 +1326,24 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     node.addEventListener('click', async (e) => {
       if (node.classList.contains('is-active')) return;
       if (e.target.closest('button, a, input, textarea, form, svg, path')) return;
+      const presentationTicket = claimChatOpenOwnership(state);
       state.activeChatId = chat.id;
-      chat.minimized = false;
+      markChatExpandedByUser(state, chat, presentationTicket);
       touchChats(state, [chat]);
       renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
     });
 
     node.querySelectorAll('[data-chat-minimize]').forEach((button) => button.addEventListener('click', async () => {
-      chat.minimized = true;
+      markChatMinimizedByUser(state, chat);
       touchChats(state, [chat]);
       renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
     }));
 
     node.querySelectorAll('[data-chat-title]').forEach((titleBtn) => {
       titleBtn.addEventListener('click', async (e) => {
+        const presentationTicket = claimChatOpenOwnership(state);
         chat.maximized = !chat.maximized;
-        chat.minimized = false;
+        markChatExpandedByUser(state, chat, presentationTicket);
         state.activeChatId = chat.id;
         touchChats(state, [chat]);
         renderAndPersistChatState({ root, state, commandBus, db, getActiveModule });
@@ -1330,8 +1351,9 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     });
 
     node.querySelectorAll('[data-chat-maximize]').forEach((button) => button.addEventListener('click', async () => {
+      const presentationTicket = claimChatOpenOwnership(state);
       chat.maximized = !chat.maximized;
-      chat.minimized = false;
+      markChatExpandedByUser(state, chat, presentationTicket);
       state.dockCollapsed = false;
       state.activeChatId = chat.id;
       touchChats(state, [chat]);
@@ -1599,14 +1621,14 @@ function captureDrafts(root, state) {
 
 async function toggleChatDock({ root, state, commandBus, db, getActiveModule }) {
   captureDrafts(root, state);
+  const openingTicket = state.dockCollapsed ? claimChatOpenOwnership(state) : 0;
   let selectedDate = state.selectedDate || getLocalDateString(Date.now());
   if (state.dockCollapsed && !selectedDateHasSubstantiveOpenChat(state, selectedDate)) {
     const preferred = preferredChatForDockOpen(state);
     if (preferred) {
       selectedDate = getLocalDateString(preferred.createdAt);
       state.selectedDate = selectedDate;
-      preferred.open = true;
-      preferred.minimized = false;
+      markChatExpandedByUser(state, preferred, openingTicket);
       state.activeChatId = preferred.id;
     } else {
       selectedDate = getLocalDateString(Date.now());
@@ -1617,6 +1639,7 @@ async function toggleChatDock({ root, state, commandBus, db, getActiveModule }) 
     chat.open !== false && getLocalDateString(chat.createdAt) === selectedDate
   ));
   if (!state.dockCollapsed) {
+    invalidateChatOpenOwnership(state);
     state.preCollapseExpandedChatIds = openChats
       .filter((chat) => !chat.minimized)
       .map((chat) => chat.id);
@@ -1633,15 +1656,18 @@ async function toggleChatDock({ root, state, commandBus, db, getActiveModule }) 
       for (const chat of openChats) {
         const nextMinimized = !restoreSet.has(chat.id);
         if (chat.minimized !== nextMinimized) {
-          chat.minimized = nextMinimized;
+          if (nextMinimized) {
+            chat.minimized = true;
+          } else {
+            markChatExpandedByUser(state, chat, openingTicket);
+          }
           changedChats.push(chat);
         }
       }
       state.activeChatId = restoreIds.find((id) => openChats.some((chat) => chat.id === id)) || state.activeChatId;
     } else if (!openChats.some((chat) => !chat.minimized)) {
       const chat = ensureChat(state);
-      chat.open = true;
-      chat.minimized = false;
+      markChatExpandedByUser(state, chat, openingTicket);
       state.activeChatId = chat.id;
       changedChats.push(chat);
     }
@@ -1655,13 +1681,12 @@ async function toggleChatDock({ root, state, commandBus, db, getActiveModule }) 
 
 function toggleChatFromDock(state, chat) {
   if (chat.id === state.activeChatId && !chat.minimized) {
-    chat.minimized = true;
-    chat.userMinimized = true;
+    markChatMinimizedByUser(state, chat);
     return;
   }
+  const presentationTicket = claimChatOpenOwnership(state);
   chat.open = true;
-  chat.minimized = false;
-  chat.userMinimized = false;
+  markChatExpandedByUser(state, chat, presentationTicket);
   state.activeChatId = chat.id;
 }
 
@@ -1670,11 +1695,7 @@ async function collapseChatWindow({ root, state, commandBus, db, getActiveModule
   const chat = state.chats.find((item) => item.id === node?.dataset.chatId);
   if (!chat) return;
   captureDrafts(root, state);
-  chat.minimized = true;
-  // Merken, dass der NUTZER zugeklappt hat. Ein eintreffendes Ergebnis darf
-  // dieses Fenster dann nicht wieder aufreissen — bei einem Kampagnenlauf mit
-  // vielen Einzelaufgaben sprang es sonst im Sekundentakt auf.
-  chat.userMinimized = true;
+  markChatMinimizedByUser(state, chat);
   touchChats(state, [chat]);
   renderChatRoot({ root, state, commandBus, db, getActiveModule });
   await persistChatState({ state, db });
@@ -1756,7 +1777,7 @@ function focusChatForUser(state, chat, { openDock = true, allowDateChange = fals
   if (allowDateChange || chatDate === getLocalDateString(Date.now())) {
     state.selectedDate = chatDate;
   }
-  if (chat.userMinimized) {
+  if (chat.userMinimized && chat.minimized) {
     // Der Nutzer hat dieses Fenster zugeklappt. Es wird aktiv gefuehrt und der
     // Chip markiert den neuen Zustand — aufgerissen wird es nicht.
     state.activeChatId = chat.id;
@@ -3085,9 +3106,54 @@ function focusAdjacentChat(state, direction) {
   const index = open.findIndex((chat) => chat.id === state.activeChatId);
   const current = index >= 0 ? index : 0;
   const next = open[(current + direction + open.length) % open.length];
-  next.minimized = false;
+  const presentationTicket = claimChatOpenOwnership(state);
+  markChatExpandedByUser(state, next, presentationTicket);
   state.activeChatId = next.id;
   return next;
+}
+
+// Jede asynchrone Oeffnung besitzt genau ein Ticket. Minimieren oder eine
+// spaetere Oeffnung entwertet es. Ein nach await zurueckkehrender Pfad darf
+// weder erneut montieren noch den lokal neueren Darstellungszustand ersetzen.
+function claimChatOpenOwnership(state) {
+  if (!state) return 0;
+  state.chatOpenOwnershipTicket = Number(state.chatOpenOwnershipTicket || 0) + 1;
+  return state.chatOpenOwnershipTicket;
+}
+
+function currentChatOpenOwnership(state) {
+  return Number(state?.chatOpenOwnershipTicket || 0);
+}
+
+function ownsChatOpenOwnership(state, ticket) {
+  return Number(ticket) === currentChatOpenOwnership(state);
+}
+
+function invalidateChatOpenOwnership(state) {
+  return claimChatOpenOwnership(state);
+}
+
+function markChatMinimizedByUser(state, chat) {
+  if (!state || !chat) return 0;
+  invalidateChatOpenOwnership(state);
+  const now = Date.now();
+  chat.open = true;
+  chat.minimized = true;
+  chat.userMinimized = true;
+  chat.presentation_updated_at_ms = now;
+  state.lastUiMutationMs = now;
+  return now;
+}
+
+function markChatExpandedByUser(state, chat, ticket = claimChatOpenOwnership(state)) {
+  if (!state || !chat || !ownsChatOpenOwnership(state, ticket)) return false;
+  const now = Date.now();
+  chat.open = true;
+  chat.minimized = false;
+  chat.userMinimized = false;
+  chat.presentation_updated_at_ms = now;
+  state.lastUiMutationMs = now;
+  return true;
 }
 
 function touchChats(state, chats) {
@@ -4050,6 +4116,8 @@ function readChatState(session) {
           title: chat.title || 'CTOX',
           open: chat.open !== false,
           minimized: Boolean(chat.minimized),
+          userMinimized: Boolean(chat.userMinimized && chat.minimized),
+          presentation_updated_at_ms: Number(chat.presentation_updated_at_ms || 0),
           maximized: Boolean(chat.maximized),
           owner_user_id: chat.owner_user_id || owner,
           lastTrackingId: chat.lastTrackingId || '',
@@ -4381,13 +4449,18 @@ function mergeChatPair(localChat, remoteChat, owner) {
   const remote = normalizeChat(remoteChat);
   const localIsNewer = (local.updated_at_ms || 0) >= (remote.updated_at_ms || 0);
   const base = localIsNewer ? local : remote;
+  const localPresentationAt = Number(local.presentation_updated_at_ms || 0);
+  const remotePresentationAt = Number(remote.presentation_updated_at_ms || 0);
+  const presentation = localPresentationAt >= remotePresentationAt ? local : remote;
   const messages = mergeChatMessages(local.messages, remote.messages);
   return applyChatTrackingSummary({
     ...base,
     title: local.title || remote.title || base.title,
     open: local.open !== false || remote.open !== false,
-    minimized: Boolean(local.minimized),
-    maximized: Boolean(local.maximized),
+    minimized: Boolean(presentation.minimized),
+    userMinimized: Boolean(presentation.userMinimized && presentation.minimized),
+    presentation_updated_at_ms: Math.max(localPresentationAt, remotePresentationAt),
+    maximized: Boolean(presentation.maximized),
     owner_user_id: local.owner_user_id || remote.owner_user_id || owner,
     lastTrackingId: preferredChatTrackingId(local, remote, messages),
     messages,
@@ -4499,6 +4572,8 @@ function normalizeChat(chat) {
     title: chat.title || 'CTOX',
     open: chat.open !== false,
     minimized: Boolean(chat.minimized),
+    userMinimized: Boolean(chat.userMinimized && chat.minimized),
+    presentation_updated_at_ms: Number(chat.presentation_updated_at_ms || 0),
     maximized: Boolean(chat.maximized),
     owner_user_id: chat.owner_user_id || '',
     lastTrackingId: chat.lastTrackingId || '',
@@ -8205,7 +8280,14 @@ export const __businessChatTestInternals = Object.freeze({
   executionProgressHeaderHtml,
   executionProgressSignature,
   messageMarkup,
+  mergeChatPair,
   mergeChatMessages,
+  claimChatOpenOwnership,
+  currentChatOpenOwnership,
+  ownsChatOpenOwnership,
+  invalidateChatOpenOwnership,
+  markChatExpandedByUser,
+  markChatMinimizedByUser,
   normalizeExecutionProgress,
   createTrackedMessageWatch,
   findDocsByIds,
