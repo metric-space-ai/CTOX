@@ -1,34 +1,34 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260831-ctox-appstore-registry-v326';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-ctox-appstore-registry-v326';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-ctox-appstore-registry-v326';
-import { createAppActions } from './shared/app-actions.js?v=20260831-ctox-appstore-registry-v326';
+import { CtoxResizer } from './shared/resizer.js?v=20260831-ctox-creator-systemapp-v327';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-ctox-creator-systemapp-v327';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-ctox-creator-systemapp-v327';
+import { createAppActions } from './shared/app-actions.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/app-lifecycle.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/permissions.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260831-ctox-appstore-registry-v326';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/branding.js?v=20260831-ctox-creator-systemapp-v327';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/presentation.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -39,9 +39,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260831-ctox-appstore-registry-v326';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-ctox-appstore-registry-v326';
-import { createDocumentsFacade } from './shared/documents.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/shell-permissions-ui.js?v=20260831-ctox-creator-systemapp-v327';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-ctox-creator-systemapp-v327';
+import { createDocumentsFacade } from './shared/documents.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -49,26 +49,26 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/maintenance-state.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/workspace-session.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/taskbar-pins.js?v=20260831-ctox-creator-systemapp-v327';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
   WORKJET_CATEGORY_IDS,
   workjetCategoryForModule,
   workjetCategoryForTarget,
-} from './shared/workjet-theme.js?v=20260831-ctox-appstore-registry-v326';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-ctox-appstore-registry-v326';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-ctox-appstore-registry-v326';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-ctox-appstore-registry-v326';
+} from './shared/workjet-theme.js?v=20260831-ctox-creator-systemapp-v327';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-ctox-creator-systemapp-v327';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-ctox-creator-systemapp-v327';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-ctox-creator-systemapp-v327';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -83,7 +83,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260831-ctox-appstore-registry-v326';
+const APP_BUILD = '20260831-ctox-crew-home-release-v328';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -10869,9 +10869,74 @@ const OFFLINE_FALLBACK_CATALOG = {
       "deletable": false
     },
     {
+      "id": "creator",
+      "title": "App Creator",
+      "description": "Erstellt neue Business-OS-Apps per KI-Prompt: Archetyp, Collections und Layout wählen, Auftrag an den CTOX-Coding-Agenten übergeben und den Fortschritt der App-Aufträge verfolgen.",
+      "entry": "modules/creator/index.html",
+      "collections": [
+        "business_commands"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-creator\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-creator\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"4\" fill=\"url(#grad-creator)\" fill-opacity=\"0.12\" stroke=\"url(#grad-creator)\" stroke-width=\"2\" stroke-linejoin=\"round\"></rect><path d=\"M12 7v10M7 12h10\" stroke=\"url(#grad-creator)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M16.5 5.5l2 2\" stroke=\"url(#grad-creator)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
+        "left": "app library and recent creator requests",
+        "center": "app blueprint composer with archetype, collections and prompt",
+        "right": "agent context",
+        "default_width": 1200,
+        "default_height": 800,
+        "min_width": 640,
+        "min_height": 480
+      },
+      "category": "Development",
+      "version": "1.0.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "creator",
+        "apps",
+        "coding-agent",
+        "scaffold"
+      ],
+      "store": {
+        "summary": "App-Erstellung per KI-Prompt über den CTOX-Coding-Agenten.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/creator",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1200,
+          "height": 800
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
       "id": "appsec-pentest",
       "title": "Penetration Testing",
-      "description": "CTOX-native penetration testing workspace for black-box and source-assisted assessments, scanner coverage, validated findings, executable proofs, reports, and active-check approvals.",
+      "description": "CTOX penetration testing workspace for black-box and source-assisted assessments, scanner coverage, validated findings, executable proofs, reports, and active-check approvals.",
       "entry": "modules/appsec-pentest/index.html",
       "collections": [
         "business_commands",
@@ -10910,7 +10975,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "approvals"
       ],
       "store": {
-        "summary": "Native penetration testing console over CTOX durable AppSec projections and WebRTC-only Business OS data.",
+        "summary": "Penetration testing console over durable CTOX AppSec projections and direct Business OS data.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/appsec-pentest",
         "installable": false,

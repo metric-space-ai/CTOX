@@ -1,7 +1,7 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
-import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260831-ctox-appstore-registry-v326';
+import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260831-ctox-creator-systemapp-v327';
 
 const FLOW_WIDTH = 1760;
 const FLOW_HEIGHT = 1050;
@@ -18,7 +18,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260831-ctox-appstore-registry-v326';
+const CTOX_STYLE_BUILD = '20260831-ctox-creator-systemapp-v327';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".

@@ -2,6 +2,7 @@
   "schema": "ctox.business-os.standard-app-bundle.v1",
   "selected_apps": [
     "app-store",
+    "creator",
     "appsec-pentest",
     "browser",
     "coding-agents",

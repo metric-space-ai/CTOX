@@ -2,7 +2,7 @@ import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canUseBusinessPermission,
-} from './permissions.js?v=20260831-ctox-appstore-registry-v326';
+} from './permissions.js?v=20260831-ctox-creator-systemapp-v327';
 
 export function parseBusinessAppSemver(version) {
   const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.exec(String(version || '').trim());

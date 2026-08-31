@@ -22,8 +22,8 @@ import {
   collectionTopic,
   nativeRxdbPeerReady,
   normalizeCollectionReadinessState,
-} from './sync-contract.js?v=20260831-ctox-appstore-registry-v326';
-import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260831-ctox-appstore-registry-v326';
+} from './sync-contract.js?v=20260831-ctox-creator-systemapp-v327';
+import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260831-ctox-creator-systemapp-v327';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
@@ -33,7 +33,7 @@ const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
 // those builds made the new tab follow the old, failed bridge forever. The
 // release epoch isolates only the local BroadcastChannel/Web Lock; both builds
 // still replicate through the same server-authoritative WebRTC room.
-const MULTI_TAB_COORDINATOR_EPOCH = '20260831-ctox-appstore-registry-v326';
+const MULTI_TAB_COORDINATOR_EPOCH = '20260831-ctox-creator-systemapp-v327';
 const CTOX_BROWSER_CAPABILITIES = [
   'ctox-control-plane-v1',
   'ctox-role-bound-signaling-v1',
@@ -506,7 +506,7 @@ export function createSyncRuntime({
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260831-ctox-appstore-registry-v326');
+    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260831-ctox-creator-systemapp-v327');
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1530,7 +1530,7 @@ async function startWebRtcReplication({
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260831-ctox-appstore-registry-v326');
+  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260831-ctox-creator-systemapp-v327');
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }

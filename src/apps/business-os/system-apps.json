@@ -3,6 +3,7 @@
   "apps": [
     "desktop",
     "app-store",
+    "creator",
     "appsec-pentest",
     "browser",
     "coding-agents",
