@@ -1,6 +1,6 @@
 # APPSTORE-V2 — Kampagnen-Board
 
-**Headline:** Kritischer Pfad = Phase 0 abschließen (Registry-Generator), dann Phase 1 Loader-Vereinigung an Sol.
+**Headline:** Phase 0 komplett; kritischer Pfad = Sol-Lauf P1.1 (Loader-Vereinigung) landet, danach P1.2/P2.
 
 Zielbild (entscheidungsfrei bis auf OWNER-Karten unten):
 https://claude.ai/code/artifact/00f7ce23-1cb4-450d-bb26-a1f1f5fc2898
@@ -14,6 +14,14 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
   `installable:false / editable_after_install:false / distribution:system-module` (wie registry
   und alle System-Apps). Verifiziert: `node src/apps/business-os/scripts/assert-standard-app-bundle.mjs`
   → `standard_app_bundle_ok=1 selected=17`. Commit `f1f5d84d0`.
+- **[P0.2] Registry-Generator gelandet** — `scripts/generate-module-registry.mjs` projiziert
+  die 36 Manifeste deterministisch nach `modules/registry.json` UND in den markierten
+  `OFFLINE_FALLBACK_CATALOG`-Block in app.js (jetzt alle 18 System-Apps statt 10);
+  `--check` = Drift-Wächter; harte Validierung der Core-Mitgliedschaft. 7 Manifest-Versionen
+  auf SemVer normalisiert. APP_BUILD → `20260831-ctox-appstore-registry-v326` (11 Träger).
+  Verifiziert: generate --check, assert-standard-app-bundle, assert-shell-v2-contract
+  (33/35, 2 Restbefunde calendar/importer sind vorbestehend), node --check app.js — grün.
+  Commit `393ba88ce`.
 - **[P0-Messung] kundenpipeline-Doppelgänger vermessen** — `src/apps/business-os/installed-modules/`
   ist gitignored (.gitignore:111) und wird von keinem Loader gelesen (Serving-Root ist
   `<state>/runtime/business-os`). Kein Laufzeitkonflikt. ABER: die ignorierte Kopie (0.3.1) ist
@@ -22,17 +30,18 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
 
 ## Working
 
-- **[P0.2] Registry-Generator** — Fable direkt. `registry.json` + Offline-Fallback aus den
-  Manifesten generieren, Wächter auf Byte-Stabilität. Fertig = Generator deterministisch,
-  Wächter grün, `app.js`-Fallback aus derselben Quelle, alle drei Cache-Buster-Regeln beachtet.
+- **[P1.1 + P0.3] Loader-Vereinigung + Kollisionsdiagnose** — Sol · Completion, Workjet-Run
+  `local-2026-08-31T121437Z-2d73f775-d971-4baa-8ce6-0fab405b222c`, gestartet 12:14Z aus
+  Launchpad ~/.local/state/workjet-launchpads/appstore-v2 (business_os-Subtree, Baseline
+  9f618cb; Voll-Repo-Archiv 408 MB > 64-MiB-Limit). Brief: eine gemeinsame Loader-/Upsert-
+  Implementierung, store.rs-Semantik kanonisch; ID-Kollision = laute Diagnose + erhaltener
+  Vorrang, KEIN Bail (Tenant-Altbestand darf nicht sterben). Kein cargo im Workspace (kann
+  dort nicht bauen) — Fable kompiliert den Diff im Hauptbaum. Fertig = Diff importiert,
+  cargo check grün, eine Definition je Funktion.
+- **[P5-Vorlauf] Shell-Kartierung Code-Modus** — Explore-Agent auf code-editor +
+  Shell-Drawer + Fenster-Host, Grundlage für den Kimi-UI/UX-Brief.
 
 ## To-Do
-
-- **[P0.3] ID-Kollision → harter Fehler** in beiden Loadern (store.rs:4434, server.rs:2336).
-  TRIGGER: kann sofort; sinnvoll zusammen mit P1.1 (Loader-Vereinigung), sonst doppelte Arbeit.
-- **[P1.1] Loader-Vereinigung** store.rs:4385/server.rs:2284 + upsert-Duplikat (store.rs:4684 /
-  server.rs:2804) auf eine Funktion. Route: Sol. Rust-Diff selbst im Hauptbaum kompilieren.
-  TRIGGER: startet nach P0.2-Commit (gemeinsame Basis).
 - **[P1.2] Manifeste für explorer/file-viewer/creator**, DESKTOP_APPS (app.js:4346) entfernen.
   TRIGGER: nach P1.1.
 - **[P1.3] Store-UI-Katalogquellen auf Server-Projektion reduzieren** (app-store/index.js:468–508).
