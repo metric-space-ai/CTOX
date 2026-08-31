@@ -2393,7 +2393,7 @@ async function toggleShellV2VersionMenu(mod, context = {}) {
     </header>
     <div class="shell-v2-version-menu-actions">
       <button type="button" data-v2-menu-action="history">Versionshistorie</button>
-      ${canSource ? '<button type="button" data-v2-menu-action="source">Im Source Code Editor öffnen</button>' : ''}
+      ${canSource ? '<button type="button" data-v2-menu-action="source">Code-Modus (Quellcode dieser App)</button>' : ''}
       <button type="button" data-v2-menu-action="coding" ${canOpenCodingAgent ? '' : `disabled title="${canCode ? 'Coding-Agent-App ist nicht verfügbar' : 'Keine Berechtigung: apps.modify'}"`}>Im Coding Agent öffnen</button>
     </div>
     <div class="shell-v2-version-history" data-v2-version-history aria-live="polite">
