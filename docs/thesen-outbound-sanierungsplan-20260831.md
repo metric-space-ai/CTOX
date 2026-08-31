@@ -67,6 +67,28 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
   - 2 portal_drift (Skript kaputt): mailtester-com(1), experte-de(26) → P1.4.
   - 2 E2E-Dummies ohne Skript (abnahme-e2e07*) — erwartbar.
 
+## Ereignis-Log (fortgeschrieben)
+
+- 01:15 v18 deployt: **Kanal-Selbstheilung in der App** (`recoverCommandChannel` via
+  `ctx.sync.restartCollection` auf der geteilten Shell-Runtime + Handle-Neuauflösung
+  + Einmal-Retry) für researchLead, saveResearchPolicy, toggleSource,
+  Adapter-Reconcile. Damit ist P0 App-seitig gemildert, ohne Shell-Bypass.
+  Shell-seitig bleibt der saubere Fix (P2.8) — Slot-System ist Ed25519-signiert,
+  Hot-Patch wäre Integritäts-Bypass → OWNER.
+- 01:25–01:45 **Queue bereinigt** (Owner-Auftrag): 6 doppelte Reconcile-Tasks + 11
+  doppelte Repair-Tasks + 178 failed-Altlasten gecancelt; 279 failed-Reste sind
+  durch die Zustandsmaschine geschützt (Command terminal = reine Historie).
+  Aktiv jetzt: 6 einzigartige Repair-Tasks, 2 Auth-Assists (rocketreach, google),
+  1 laufender Reconcile.
+- 01:34 **P1.4 aufgelöst — kein Defekt**: mailtester/experte melden
+  `CTOX_SCRAPE_INPUT_JSON.email missing` = Validierungs-Targets brauchen eine
+  Eingabe-E-Mail; ohne Input ehrlich portal_drift (Phantom-Lead!). Mit Input
+  zuletzt 18:02 erfolgreich. ⇒ ALLE 20 echten Targets haben funktionierende
+  Skripte. (Kosmetik-Punkt: Status-Label „input fehlt" statt „portal_drift".)
+- Mess-Pane-Zustand: frisches Browser-Profil resynct langsam (160 Docs nach
+  Minuten); Katalog-Eintrag der App noch nicht repliziert — Verifikation v18
+  wartet darauf.
+
 ## P0 — Der eine Bruch, der alles tötet (Glied 3 der Kette)
 
 **Befund:** Lokale App-Writes gelingen (Trace `write ok`), aber `business_commands`-
