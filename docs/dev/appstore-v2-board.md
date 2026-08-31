@@ -22,6 +22,18 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
   Verifiziert: generate --check, assert-standard-app-bundle, assert-shell-v2-contract
   (33/35, 2 Restbefunde calendar/importer sind vorbestehend), node --check app.js — grün.
   Commit `393ba88ce`.
+- **[P5-Messung] Shell-Kartierung Code-Modus** — KORREKTUR zweier Annahmen aus der Codekarte:
+  (1) `code-editor` ist HEUTE SCHON keine startbare App — er fehlt in DESKTOP_APPS
+  (app.js:4346 enthält nur explorer+file-viewer) und wird ausschließlich als integrierte
+  Source-Ansicht ins App-Fenster gemountet (`ensureIntegratedModuleToolSession`, Modi
+  app|source|versions, app.js:2598ff; Mount app.js:2713). Der Fenster-Modus-Umschalter,
+  den OWNER 2 fordert, existiert im Kern bereits. (2) `creator` ist eine TOTE Referenz:
+  kein Modul, kein DESKTOP_APPS-Eintrag, aber der App-Store ruft `ctx.openApp('creator')`
+  → der „Neue App per KI-Prompt"-Weg über den Store ist vermutlich defekt (in P1.2 messen).
+  Coding läuft heute als separates Fenster (coding-agents) aus dem Titel-Versionsmenü
+  (app.js:2450); code-editor hat aber ein eingebautes Agent-Panel mit `ctox.coding.turn`
+  (desktop-apps/code-editor/app.js:890). P5 = Umschalter sichtbar machen + Agent-Panel im
+  integrierten Modus + Reste (`DESKTOP_APP_DB_COLLECTIONS` browser/creator, app.js:6531).
 - **[P0-Messung] kundenpipeline-Doppelgänger vermessen** — `src/apps/business-os/installed-modules/`
   ist gitignored (.gitignore:111) und wird von keinem Loader gelesen (Serving-Root ist
   `<state>/runtime/business-os`). Kein Laufzeitkonflikt. ABER: die ignorierte Kopie (0.3.1) ist
@@ -38,12 +50,19 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
   Vorrang, KEIN Bail (Tenant-Altbestand darf nicht sterben). Kein cargo im Workspace (kann
   dort nicht bauen) — Fable kompiliert den Diff im Hauptbaum. Fertig = Diff importiert,
   cargo check grün, eine Definition je Funktion.
-- **[P5-Vorlauf] Shell-Kartierung Code-Modus** — Explore-Agent auf code-editor +
-  Shell-Drawer + Fenster-Host, Grundlage für den Kimi-UI/UX-Brief.
+- **[P3A] Statischer Appstore-Publisher** — Sol · Completion, Workjet-Run
+  `local-2026-08-31T122315Z-09c728d1-3802-4cfc-b628-23036c22b7c3`, gestartet 12:23Z aus
+  Launchpad ~/.local/state/workjet-launchpads/appstore-v2-publisher (13 MB, Baseline von
+  393ba88ce). Liefert build-appstore-index.mjs + node:test-Suite: deterministische Zips,
+  Ed25519-Signaturen, index.json v1, 18 Store-Apps. Fertig = Tests grün im Hauptbaum,
+  Proof-Lauf mit 18 Apps.
 
 ## To-Do
-- **[P1.2] Manifeste für explorer/file-viewer/creator**, DESKTOP_APPS (app.js:4346) entfernen.
-  TRIGGER: nach P1.1.
+- **[P1.2] explorer/file-viewer/creator als echte Module** — explorer+file-viewer aus
+  DESKTOP_APPS (app.js:4346) zu modules/<id>/ portieren (mount(container,ctx) →
+  mount(ctx)-Vertrag), creator aus desktop-apps/ als Modul wiederbeleben (App-Store-Pfad
+  `openApp('creator')` ist tot — erst messen). System-Apps-Listen + Registry-Generator
+  laufen automatisch mit. TRIGGER: nach P1.1-Import (Loader-Landung).
 - **[P1.3] Store-UI-Katalogquellen auf Server-Projektion reduzieren** (app-store/index.js:468–508).
   TRIGGER: nach P1.2.
 - **[P2] origin-Feld + Core-Repair + local-catalog-Install.** TRIGGER: nach P1.
@@ -51,8 +70,12 @@ Phasen: 0 Boden · 1 Katalog/Loader · 2 Origin+Core-Repair · 3 Store-Kanal app
   DNS appstore.ctox.dev = OWNER-Handgriff.
 - **[P4] Nutzer-Apps-Pipeline** (Zip/GitHub-Link als origin:user, Importer auf Kommando,
   Deinstallation). TRIGGER: nach P2, parallel zu P3 möglich.
-- **[P5] Code-Modus in der Shell**, danach code-editor stilllegen. Route: Kimi UI/UX + Sol.
-  Geometrie-Labor + assert-shell-v2-contract Pflicht. TRIGGER: parallel ab sofort möglich.
+- **[P5] Code-Modus sichtbar + Agent-Panel integriert** — deutlich kleiner als geplant
+  (siehe P5-Messung): sichtbarer Modus-Umschalter am v2-Fenster (heute nur über
+  Titel-Klick-Menü erreichbar), Agent-Panel des eingebetteten Editors als Coding-Weg im
+  Fenster, coding-agents-Querstart bleibt. desktop-apps/code-editor bleibt als
+  Shell-Komponente (nicht App) — Doku entsprechend. Route: Fable direkt + Kimi-Pixelreview.
+  Geometrie-Labor + assert-shell-v2-contract Pflicht. TRIGGER: nach P1.2 (app.js-Konflikt).
 - **[P6] Rubriken kanonisieren** (16 Slugs, Mapping, PUBLIC_DISTRIBUTIONS raus). TRIGGER: nach P1.
 
 ## Backlog + Owner
