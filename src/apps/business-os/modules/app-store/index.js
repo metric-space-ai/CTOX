@@ -2309,7 +2309,7 @@ function scopeTitle(scope) {
   const t = state.t;
   return {
     all: t('scopeTitleAll', 'Alle Anwendungen'),
-    marketplace: t('scopeTitleMarketplace', 'GitHub Marketplace'),
+    marketplace: t('scopeTitleMarketplace', 'Offizieller Katalog'),
     template: t('scopeTitleTemplate', 'Templates'),
     installed: t('scopeTitleInstalled', 'Installierte Apps'),
     system: t('scopeTitleSystem', 'System Apps'),
