@@ -1,4 +1,4 @@
-import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260831-ctox-crew-home-v325';
+import { readStoredFileFromDemandChunks } from './file-integrity.js?v=20260831-ctox-appstore-registry-v326';
 import { showBusinessAlert } from './dialogs.js';
 
 const STATUS_KEY = 'ctox.businessOs.importer.status.v1';

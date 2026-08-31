@@ -1,15 +1,15 @@
-import { showBusinessConfirm } from './dialogs.js?v=20260831-ctox-crew-home-v325';
+import { showBusinessConfirm } from './dialogs.js?v=20260831-ctox-appstore-registry-v326';
 import {
   FILE_CHUNK_HASH_SCHEME,
   FILE_CONTENT_HASH_SCHEME,
   base64ToBytes,
   sha256Hex,
-} from './file-integrity.js?v=20260831-ctox-crew-home-v325';
-import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260831-ctox-crew-home-v325';
+} from './file-integrity.js?v=20260831-ctox-appstore-registry-v326';
+import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=20260831-ctox-appstore-registry-v326';
 import {
   normalizeWorkjetCategory,
   workjetCategoryStyle,
-} from './workjet-theme.js?v=20260831-ctox-crew-home-v325';
+} from './workjet-theme.js?v=20260831-ctox-appstore-registry-v326';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';

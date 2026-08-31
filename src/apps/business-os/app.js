@@ -1,34 +1,34 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260831-ctox-crew-home-v325';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-ctox-crew-home-v325';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-ctox-crew-home-v325';
-import { createAppActions } from './shared/app-actions.js?v=20260831-ctox-crew-home-v325';
+import { CtoxResizer } from './shared/resizer.js?v=20260831-ctox-appstore-registry-v326';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-ctox-appstore-registry-v326';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-ctox-appstore-registry-v326';
+import { createAppActions } from './shared/app-actions.js?v=20260831-ctox-appstore-registry-v326';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260831-ctox-crew-home-v325';
+} from './shared/app-lifecycle.js?v=20260831-ctox-appstore-registry-v326';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260831-ctox-crew-home-v325';
+} from './shared/permissions.js?v=20260831-ctox-appstore-registry-v326';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260831-ctox-crew-home-v325';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-ctox-crew-home-v325';
+} from './shared/branding.js?v=20260831-ctox-appstore-registry-v326';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-ctox-appstore-registry-v326';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260831-ctox-crew-home-v325';
+} from './shared/presentation.js?v=20260831-ctox-appstore-registry-v326';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -39,9 +39,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260831-ctox-crew-home-v325';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-ctox-crew-home-v325';
-import { createDocumentsFacade } from './shared/documents.js?v=20260831-ctox-crew-home-v325';
+} from './shared/shell-permissions-ui.js?v=20260831-ctox-appstore-registry-v326';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-ctox-appstore-registry-v326';
+import { createDocumentsFacade } from './shared/documents.js?v=20260831-ctox-appstore-registry-v326';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -49,26 +49,26 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260831-ctox-crew-home-v325';
+} from './shared/maintenance-state.js?v=20260831-ctox-appstore-registry-v326';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260831-ctox-crew-home-v325';
+} from './shared/workspace-session.js?v=20260831-ctox-appstore-registry-v326';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260831-ctox-crew-home-v325';
+} from './shared/taskbar-pins.js?v=20260831-ctox-appstore-registry-v326';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
   WORKJET_CATEGORY_IDS,
   workjetCategoryForModule,
   workjetCategoryForTarget,
-} from './shared/workjet-theme.js?v=20260831-ctox-crew-home-v325';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-ctox-crew-home-v325';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-ctox-crew-home-v325';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-ctox-crew-home-v325';
+} from './shared/workjet-theme.js?v=20260831-ctox-appstore-registry-v326';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-ctox-appstore-registry-v326';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-ctox-appstore-registry-v326';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-ctox-appstore-registry-v326';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -83,7 +83,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260831-ctox-crew-home-v325';
+const APP_BUILD = '20260831-ctox-appstore-registry-v326';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -10755,8 +10755,8 @@ async function readModuleCatalogProjection(coll) {
   return null;
 }
 
-function getOfflineFallbackCatalog() {
-  const catalog = {
+// BEGIN GENERATED offline-fallback-catalog (node scripts/generate-module-registry.mjs — do not edit by hand)
+const OFFLINE_FALLBACK_CATALOG = {
   "ok": true,
   "modules": [
     {
@@ -10778,7 +10778,7 @@ function getOfflineFallbackCatalog() {
         "right": "agent context"
       },
       "category": "Workspace",
-      "version": "v1",
+      "version": "1.0.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -10805,7 +10805,7 @@ function getOfflineFallbackCatalog() {
     {
       "id": "app-store",
       "title": "App Store",
-      "description": "CTOX GitHub app catalog to discover repository apps, create apps from templates, and manage local Business OS installations.",
+      "description": "Workjet App Store to discover repository apps, create apps from templates, and manage local Business OS installations.",
       "entry": "modules/app-store/index.html",
       "collections": [
         "business_commands",
@@ -10813,6 +10813,8 @@ function getOfflineFallbackCatalog() {
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-app-store\"><defs><linearGradient id=\"grad-app-store\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#f59e0b\" /><stop offset=\"100%\" stop-color=\"#ec4899\" /></linearGradient></defs><path d=\"M21 8H3a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h18a2 2 0 0 0 2-2V10a2 2 0 0 0-2-2z\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.12\" stroke=\"url(#grad-app-store)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M16 8A4 4 0 0 0 8 8\" stroke=\"url(#grad-app-store)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><rect x=\"5\" y=\"12\" width=\"5\" height=\"5\" rx=\"1\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.25\" stroke=\"url(#grad-app-store)\" stroke-width=\"1.2\"></rect><rect x=\"14\" y=\"12\" width=\"5\" height=\"5\" rx=\"1\" fill=\"url(#grad-app-store)\" fill-opacity=\"0.25\" stroke=\"url(#grad-app-store)\" stroke-width=\"1.2\"></rect></svg>",
         "left": "Categories and Search",
         "center": "Available Applications Catalog",
@@ -10823,7 +10825,7 @@ function getOfflineFallbackCatalog() {
         "min_height": 480
       },
       "category": "Development",
-      "version": "v1",
+      "version": "1.1.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -10842,6 +10844,7 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
         "supported_modes": [
@@ -10860,7 +10863,81 @@ function getOfflineFallbackCatalog() {
         "multi_instance": false,
         "auto_restore": false
       },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "appsec-pentest",
+      "title": "Penetration Testing",
+      "description": "CTOX-native penetration testing workspace for black-box and source-assisted assessments, scanner coverage, validated findings, executable proofs, reports, and active-check approvals.",
+      "entry": "modules/appsec-pentest/index.html",
+      "collections": [
+        "business_commands",
+        "appsec_assessments",
+        "appsec_runs",
+        "appsec_artifacts",
+        "appsec_findings",
+        "appsec_investigations",
+        "appsec_coverage",
+        "appsec_pipeline_stages",
+        "appsec_scanner_inventory",
+        "appsec_approvals"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "left": "assessment launch, scope, and navigation",
+        "center": "selected penetration-test evidence workbench",
+        "default_width": 1280,
+        "default_height": 820,
+        "min_width": 640,
+        "min_height": 480
+      },
+      "category": "Security",
+      "version": "0.2.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "appsec",
+        "penetration-testing",
+        "deployment-audit",
+        "go-live",
+        "security",
+        "scanners",
+        "approvals"
+      ],
+      "store": {
+        "summary": "Native penetration testing console over CTOX durable AppSec projections and WebRTC-only Business OS data.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/appsec-pentest",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1280,
+          "height": 820
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
       "source": "core",
       "core": true,
       "editable": true,
@@ -10877,46 +10954,28 @@ function getOfflineFallbackCatalog() {
         "browser_tabs",
         "browser_frames",
         "browser_input_events",
-        "ctox_queue_tasks"
+        "ctox_queue_tasks",
+        "outbound_lead_generation_adapters"
       ],
-      "launch_kind": "desktop-app",
-      "presentation": {
-        "default_mode": "window",
-        "supported_modes": [
-          "window",
-          "maximized",
-          "focus"
-        ],
-        "initial_size": {
-          "width": 1120,
-          "height": 760
-        },
-        "minimum_size": {
-          "width": 640,
-          "height": 480
-        },
-        "multi_instance": false,
-        "auto_restore": false
-      },
       "layout": {
         "shell": "windowed",
         "shell_contract": "v2",
         "shell_geometry_contract": "browser-v2-reference-1",
         "shell_header_rows": 2,
         "shell_icon_rows": 2,
+        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg",
+        "icon_asset_srcset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg 1x",
+        "icon_provenance": "shared/assets/workjet-icons/operator-selection-v1/manifest.json",
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
         "min_height": 480,
-        "icon_asset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg",
-        "icon_asset_srcset": "shared/assets/workjet-icons/operator-selection-v1/browser.jpg 1x",
-        "icon_provenance": "shared/assets/workjet-icons/operator-selection-v1/manifest.json",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-browser\"><defs><linearGradient id=\"grad-browser\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0ea5e9\" /><stop offset=\"100%\" stop-color=\"#22c55e\" /></linearGradient></defs><rect x=\"3\" y=\"4\" width=\"18\" height=\"16\" rx=\"3\" fill=\"url(#grad-browser)\" fill-opacity=\"0.12\" stroke=\"url(#grad-browser)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M3 9h18\" stroke=\"url(#grad-browser)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><circle cx=\"7\" cy=\"6.5\" r=\"0.8\" fill=\"url(#grad-browser)\"></circle><circle cx=\"10\" cy=\"6.5\" r=\"0.8\" fill=\"url(#grad-browser)\"></circle><path d=\"M8 15h8M12 11v8\" stroke=\"url(#grad-browser)\" stroke-width=\"1.7\" stroke-linecap=\"round\"></path></svg>",
         "top": "browser tabs and address bar",
         "center": "web page"
       },
       "category": "Workspace",
-      "version": "v0.2.6",
+      "version": "0.2.6",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -10934,6 +10993,90 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1120,
+          "height": 760
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "coding-agents",
+      "title": "Coding Agents",
+      "description": "Delegate coding tasks on Business OS apps to the pi coding agent and track them live: chat with the agent, watch its transcript, and follow its self-published task artifact.",
+      "entry": "modules/coding-agents/index.html",
+      "collections": [
+        "business_commands",
+        "coding_agent_workspace_grants",
+        "coding_agent_sessions",
+        "coding_agent_events"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-coding-agents\"><defs><linearGradient id=\"grad-coding-agents\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#8b5cf6\" /><stop offset=\"100%\" stop-color=\"#3b82f6\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" ry=\"2\" fill=\"url(#grad-coding-agents)\" fill-opacity=\"0.12\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M9 16l-3-3 3-3M15 10l3 3-3 3\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"13\" y1=\"8\" x2=\"11\" y2=\"16\" stroke=\"url(#grad-coding-agents)\" stroke-width=\"2\" stroke-linecap=\"round\"></line></svg>",
+        "left": "Projects: Business OS apps the agent can work on",
+        "center": "Chat with the pi agent (transcript + composer)",
+        "right": "Live task artifact: free HTML the agent maintains about its run",
+        "third_pane_justification": "The agent's self-published progress artifact must stay visible while chatting — hiding it would blind the user to the running task."
+      },
+      "category": "Development",
+      "version": "0.2.6",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "coding",
+        "agents",
+        "automation",
+        "dev-tools"
+      ],
+      "store": {
+        "summary": "Unified dashboard to manage, configure, license, and remotely run Antigravity, Claude, and Codex agents.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/coding-agents",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1180,
+          "height": 780
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
       "source": "core",
       "core": true,
       "editable": true,
@@ -10947,6 +11090,8 @@ function getOfflineFallbackCatalog() {
       "collections": [],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-importer\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-importer\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0ea5e9\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"12\" rx=\"2.5\" fill=\"url(#grad-importer)\" fill-opacity=\"0.12\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></rect><path d=\"M12 3v9\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M8.5 8.5 12 12l3.5-3.5\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Source: folder or GitHub",
         "center": "Transcode report and module details",
@@ -10973,6 +11118,7 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
         "supported_modes": [
@@ -10991,7 +11137,6 @@ function getOfflineFallbackCatalog() {
         "multi_instance": false,
         "auto_restore": false
       },
-      "launch_kind": "desktop-app",
       "source": "core",
       "core": true,
       "editable": true,
@@ -11007,13 +11152,15 @@ function getOfflineFallbackCatalog() {
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-credentials\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-credentials\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#14b8a6\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><path d=\"M12 2l8 3v6c0 5-3.5 8-8 11-4.5-3-8-6-8-11V5l8-3z\" fill=\"url(#grad-credentials)\" fill-opacity=\"0.12\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"10\" r=\"2.4\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\"></circle><path d=\"M12 12.4V16\" stroke=\"url(#grad-credentials)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
         "left": "Credential catalog and status",
         "center": "Set, rotate and remove credentials",
         "right": "Security notes"
       },
       "category": "Security",
-      "version": "v0.1",
+      "version": "0.1.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -11023,7 +11170,7 @@ function getOfflineFallbackCatalog() {
         "security"
       ],
       "store": {
-        "summary": "Write-only credentials manager backed by the encrypted CTOX credential store. Set, rotate and remove provider credentials; values remain on the selected backend.",
+        "summary": "Write-only credentials manager backed by the encrypted CTOX secret store. Set, rotate and remove provider credentials; values never leave the local service.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/credentials",
         "installable": false,
@@ -11072,21 +11219,26 @@ function getOfflineFallbackCatalog() {
         "business_module_acl",
         "business_module_releases",
         "business_module_reports",
-        "business_module_source_files"
+        "business_module_source_files",
+        "business_module_commits",
+        "business_module_source_blob_chunks",
+        "workjet_projects",
+        "workjet_working_copies"
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-ctox\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"12 2 22 8 22 16 12 22 2 16 2 8\" fill=\"currentColor\" fill-opacity=\"0.12\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polygon><polyline points=\"12 22 12 12 22 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 12 2 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 2 12 12\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><circle cx=\"12\" cy=\"12\" r=\"3.5\" fill=\"currentColor\" fill-opacity=\"0.88\"></circle></svg>",
         "left": "runtime scopes",
         "center": "active workbench",
-        "right": "agent context",
         "default_width": 1320,
         "default_height": 860,
         "min_width": 640,
         "min_height": 480
       },
       "category": "System",
-      "version": "v1",
+      "version": "1.1.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -11105,6 +11257,7 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
         "supported_modes": [
@@ -11123,7 +11276,151 @@ function getOfflineFallbackCatalog() {
         "multi_instance": false,
         "auto_restore": false
       },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "documents",
+      "title": "Dokumente",
+      "description": "DOCX- und Markdown-Arbeitsbereich mit Dokumentverwaltung, Serienbriefen, Versionen und Runbooks.",
+      "entry": "modules/documents/index.html",
+      "collections": [
+        "business_commands",
+        "documents",
+        "document_versions",
+        "document_blob_chunks",
+        "document_runbooks",
+        "knowledge_items",
+        "knowledge_runbooks",
+        "knowledge_tables"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-documents\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-documents\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#3b82f6\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><path d=\"M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7z\" fill=\"url(#grad-documents)\" fill-opacity=\"0.12\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M14 2v4a2 2 0 0 0 2 2h4\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"8\" y1=\"12\" x2=\"16\" y2=\"12\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"8\" y1=\"16\" x2=\"16\" y2=\"16\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"8\" y1=\"8\" x2=\"10\" y2=\"8\" stroke=\"url(#grad-documents)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line></svg>",
+        "left": "document navigation and explorer",
+        "center": "DOCX viewer/editor workbench",
+        "drawers": {
+          "left": "document metadata and import settings",
+          "right": "runbook details and generated commands",
+          "bottom": "diagnostics, export evidence, and selected document context"
+        }
+      },
+      "category": "Knowledge",
+      "version": "1.0.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "documents",
+        "docx",
+        "markdown",
+        "runbooks"
+      ],
+      "store": {
+        "summary": "Dokumentverwaltung für Word- und Markdown-Dateien mit Versionen, Serienbriefen und automatisierten Arbeitsabläufen.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/documents",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1180,
+          "height": 800
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "iot",
+      "title": "IoT",
+      "description": "CTOX IoT delegation app (RFC 0011): a 2-pane workspace where you task CTOX in free text (Wenn/Dann) to watch your signals and act. LEFT = asset/signal tree (right-click a signal to create an order or a webhook source). CENTER = dashboards of automation widgets; each widget is one standing order CTOX programs in three editable parts — ① Trigger-Logik (a sandboxed Rhai watcher that fires per datapoint in the backend), ② Widget-Code (render_code in a sandboxed iframe), ③ Auftrags-Prompt (spawns a chat on fire). Reads iot_* projections only and writes via business_commands; webhooks in & out. The actual trigger/render code is generated by CTOX (model-driven), never a heuristic template.",
+      "entry": "modules/iot/index.html",
+      "collections": [
+        "business_commands",
+        "iot_realms",
+        "iot_asset_types",
+        "iot_assets",
+        "iot_attributes",
+        "iot_datapoints",
+        "iot_alarms",
+        "iot_agents",
+        "iot_agent_status",
+        "iot_rulesets",
+        "iot_dashboards",
+        "iot_widgets"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-iot\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-iot\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><circle cx=\"12\" cy=\"12\" r=\"3\" fill=\"url(#grad-iot)\" fill-opacity=\"0.18\" stroke=\"url(#grad-iot)\" stroke-width=\"2\"></circle><path d=\"M7.8 7.8a6 6 0 0 0 0 8.4M16.2 7.8a6 6 0 0 1 0 8.4\" stroke=\"url(#grad-iot)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14\" stroke=\"url(#grad-iot)\" stroke-width=\"1.6\" stroke-linecap=\"round\" stroke-opacity=\"0.7\"></path></svg>",
+        "left": "Realm scope, asset/signal tree; right-click a signal to create an order or a webhook source",
+        "center": "Dashboards of automation widgets (the three CTOX-programmed parts: trigger logic, widget code, order prompt), Karten ⇄ Liste",
+        "right": ""
+      },
+      "category": "Operations",
+      "version": "1.0.2",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "iot",
+        "sensors",
+        "assets",
+        "alarms",
+        "telemetry"
+      ],
+      "store": {
+        "summary": "Task CTOX in plain text (Wenn/Dann) to watch your signals and act. Each dashboard widget is a standing order CTOX programs in three parts (Rhai watcher · sandboxed render code · order prompt that spawns a chat on fire). Webhooks in & out; MQTT/HTTP/WS ingest; multi-realm isolation; sandboxed generated code.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/iot",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1180,
+          "height": 780
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
       "source": "core",
       "core": true,
       "editable": true,
@@ -11132,7 +11429,7 @@ function getOfflineFallbackCatalog() {
     {
       "id": "knowledge",
       "title": "Knowledge",
-      "description": "CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and dataframes.",
+      "description": "CTOX Knowledge workspace for skillbooks, runbooks, markdown assets, and Polars-backed dataframes.",
       "entry": "modules/knowledge/index.html",
       "collections": [
         "business_commands",
@@ -11143,7 +11440,7 @@ function getOfflineFallbackCatalog() {
       "layout": {
         "shell": "windowed",
         "shell_contract": "v2",
-        "shell_geometry_contract": "knowledge-v2-reference-3",
+        "shell_geometry_contract": "knowledge-v2-reference-4",
         "shell_header_rows": 2,
         "shell_icon_rows": 2,
         "icon_asset": "modules/knowledge/assets/icon/knowledge-256.png",
@@ -11174,7 +11471,7 @@ function getOfflineFallbackCatalog() {
         "min_height": 480
       },
       "category": "Knowledge",
-      "version": "1.1.6",
+      "version": "1.1.7",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -11193,6 +11490,7 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
         "supported_modes": [
@@ -11211,7 +11509,69 @@ function getOfflineFallbackCatalog() {
         "multi_instance": false,
         "auto_restore": false
       },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "notes",
+      "title": "Notes",
+      "description": "Premium local-first markdown note workspace matching macOS Notes aesthetic.",
+      "entry": "modules/notes/index.html",
+      "collections": [
+        "business_commands",
+        "notes"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-notes\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-notes\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#eab308\" /><stop offset=\"100%\" stop-color=\"#d97706\" /></linearGradient></defs><path d=\"M16 2H4a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2z\" fill=\"url(#grad-notes)\" fill-opacity=\"0.12\" stroke=\"url(#grad-notes)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><path d=\"M2 6h2M2 10h2M2 14h2M2 18h2\" stroke=\"url(#grad-notes)\" stroke-width=\"1.5\" stroke-linecap=\"round\"></path><path d=\"M18.5 2.5a2.121 2.121 0 0 1 3 3L11 16l-4 1 1-4 10.5-10.5z\" fill=\"url(#grad-notes)\" fill-opacity=\"0.3\" stroke=\"url(#grad-notes)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
+        "left": "Folders and note list",
+        "center": "Markdown editor and rich text live preview",
+        "right": "Command dashboard and formatting shortcuts",
+        "third_pane_justification": "Editor-type app (IA-Karte): left = books/tags nav + note list, main = rich-text editor; the third pane is the justified reference/metadata surface of the editor layout."
+      },
+      "category": "Productivity",
+      "version": "1.0.2",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "notes",
+        "markdown",
+        "local-first",
+        "writing"
+      ],
+      "store": {
+        "summary": "Local-first markdown notes workspace with folder navigation and live preview.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/notes",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1120,
+          "height": 760
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
       "source": "core",
       "core": true,
       "editable": true,
@@ -11233,6 +11593,8 @@ function getOfflineFallbackCatalog() {
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-reports\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-reports\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#ef4444\" /><stop offset=\"100%\" stop-color=\"#f97316\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-reports)\" fill-opacity=\"0.12\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><path d=\"M18 17V10M12 17V6M6 17v-4\" stroke=\"url(#grad-reports)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"12\" cy=\"6\" r=\"2\" fill=\"#ffffff\" stroke=\"url(#grad-reports)\" stroke-width=\"1.2\"></circle></svg>",
         "left": "Bug and feature filters and history",
         "center": "Selected report evidence, CTOX change log, and rollback",
@@ -11263,6 +11625,7 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
         "supported_modes": [
@@ -11281,7 +11644,151 @@ function getOfflineFallbackCatalog() {
         "multi_instance": false,
         "auto_restore": false
       },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "research",
+      "title": "Web Research",
+      "description": "Knowledge-backed research dashboards with an interactive 3D/2D semantic graph, source evidence, and durable CTOX research handoff.",
+      "entry": "modules/research/index.html",
+      "collections": [
+        "business_commands",
+        "business_chats",
+        "ctox_queue_tasks",
+        "research_tasks",
+        "research_runs",
+        "research_notes",
+        "knowledge_tables",
+        "documents",
+        "document_versions",
+        "document_blob_chunks"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-research\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-research\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0891b2\" /><stop offset=\"100%\" stop-color=\"#10b981\" /></linearGradient></defs><path d=\"M6 3h12\" stroke=\"url(#grad-research)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M8 3v4c0 1.66-1.34 3-3 3v0a7 7 0 0 0-2 4.9V20a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-5.1a7 7 0 0 0-2-4.9v0c-1.66 0-3-1.34-3-3V3\" fill=\"url(#grad-research)\" fill-opacity=\"0.12\" stroke=\"url(#grad-research)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><line x1=\"8.5\" y1=\"11\" x2=\"15.5\" y2=\"11\" stroke=\"url(#grad-research)\" stroke-width=\"2\"></line><circle cx=\"12\" cy=\"16\" r=\"2.5\" fill=\"url(#grad-research)\"></circle><circle cx=\"9\" cy=\"18\" r=\"1\" fill=\"#ffffff\"></circle><circle cx=\"15\" cy=\"15\" r=\"1\" fill=\"#ffffff\"></circle></svg>",
+        "left": "research tasks and scored source ranking",
+        "center": "interactive 3D/2D semantic research graph and source evidence workbench",
+        "right": "research task context, decisions, and CTOX handoff",
+        "third_pane_justification": "The task and evidence inspector remains visible beside source ranking and the portfolio workbench in wide mode; compact mode uses the shared right drawer.",
+        "drawers": {
+          "right": "task setup, scoring model, and selected source detail",
+          "bottom": "Knowledge table diagnostics and raw row evidence"
+        }
+      },
+      "category": "Research",
+      "version": "1.0.14",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "research",
+        "sources",
+        "scoring",
+        "knowledge"
+      ],
+      "store": {
+        "summary": "Knowledge-backed web research with a live semantic graph, source scoring, and CTOX systematic-research handoff.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/research",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1280,
+          "height": 820
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "spreadsheets",
+      "title": "CTOX Spreadsheets",
+      "description": "XLSX workspace with the CTOX Spreadsheets fork, explorer, versions, and CTOX runbooks.",
+      "entry": "modules/spreadsheets/index.html",
+      "collections": [
+        "business_commands",
+        "spreadsheets",
+        "spreadsheet_versions",
+        "spreadsheet_blob_chunks",
+        "spreadsheet_runbooks"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-spreadsheets\"><defs><linearGradient id=\"grad-spreadsheets\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#10b981\" /><stop offset=\"100%\" stop-color=\"#059669\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-spreadsheets)\" fill-opacity=\"0.12\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"9\" y1=\"3\" x2=\"9\" y2=\"21\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"15\" x2=\"21\" y2=\"15\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><path d=\"M5 17l3-3 4 2 4-4\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"16\" cy=\"12\" r=\"1.5\" fill=\"#ffffff\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1\"></circle></svg>",
+        "left": "spreadsheet navigation and explorer",
+        "center": "Spreadsheet viewer/editor workbench",
+        "right": "spreadsheet runbooks and automation prompts",
+        "third_pane_justification": "Runbooks and automation prompts are actionable context for the selected spreadsheet, so they belong beside the workbench in wide mode; the pane is hidden by default and opens through the center-header toggle, then stacks below the grid in compact layouts.",
+        "drawers": {
+          "left": "spreadsheet metadata and import settings",
+          "right": "runbook details and generated commands",
+          "bottom": "diagnostics, export evidence, and selected spreadsheet context"
+        }
+      },
+      "category": "Analytics",
+      "version": "1.0.1",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "spreadsheets",
+        "xlsx",
+        "tables",
+        "runbooks"
+      ],
+      "store": {
+        "summary": "XLSX spreadsheet workspace with the CTOX Spreadsheets ESM fork, verified local roundtrip, versions, and automation runbooks.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/spreadsheets",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
+      "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1280,
+          "height": 820
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
       "source": "core",
       "core": true,
       "editable": true,
@@ -11304,17 +11811,20 @@ function getOfflineFallbackCatalog() {
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-threads\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-threads\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#7c3aed\" /></linearGradient></defs><path d=\"M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v7A2.5 2.5 0 0 1 17.5 15H10l-5 4v-4.2A2.5 2.5 0 0 1 4 12.5z\" fill=\"url(#grad-threads)\" fill-opacity=\"0.12\" stroke=\"url(#grad-threads)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M8 8h8M8 11h5\" stroke=\"url(#grad-threads)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><circle cx=\"18\" cy=\"18\" r=\"3\" fill=\"#fff\" stroke=\"url(#grad-threads)\" stroke-width=\"1.5\"></circle><path d=\"M18 16.6v1.7l1.2.8\" stroke=\"url(#grad-threads)\" stroke-width=\"1.4\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "personal inbox, approvals, and source filters",
         "center": "durable thread timeline tied to app records",
         "right": "new notes, CTOX approval requests, and lifecycle context",
+        "third_pane_justification": "Die Aktions-Werkbank (Übergabe, AI-Auftrag, Notiz, CTOX-Freigabe, Benachrichtigungsregeln, Kontext) gehört zum selektierten Thread und muss in breiten Fenstern neben Liste und Timeline sichtbar bleiben; in kompakten Fenstern klappt sie hinter den Aktionen-Toggle.",
         "default_width": 1120,
         "default_height": 760,
         "min_width": 640,
         "min_height": 480
       },
       "category": "System",
-      "version": "v0.1",
+      "version": "0.2.4",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -11334,6 +11844,7 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
         "supported_modes": [
@@ -11355,13 +11866,12 @@ function getOfflineFallbackCatalog() {
       "source": "core",
       "core": true,
       "editable": true,
-      "deletable": false,
-      "launch_kind": "desktop-app"
+      "deletable": false
     },
     {
       "id": "tickets",
       "title": "Tickets",
-      "description": "CTOX ticket operations for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
+      "description": "CTOX ticket operations surface for synchronized tickets, routed cases, self-work, approvals, verification, and writeback evidence.",
       "entry": "modules/tickets/index.html",
       "collections": [
         "ctox_ticket_items",
@@ -11379,6 +11889,8 @@ function getOfflineFallbackCatalog() {
       ],
       "layout": {
         "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-tickets\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-tickets\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0f766e\" /><stop offset=\"100%\" stop-color=\"#2563eb\" /></linearGradient></defs><path d=\"M4 5a2 2 0 0 1 2-2h9l5 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2z\" fill=\"url(#grad-tickets)\" fill-opacity=\"0.12\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M15 3v5h5\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linejoin=\"round\"></path><path d=\"M8 12h8M8 16h6\" stroke=\"url(#grad-tickets)\" stroke-width=\"2\" stroke-linecap=\"round\"></path></svg>",
         "left": "ticket inbox, source and state filters",
         "center": "selected ticket timeline and case evidence",
@@ -11389,7 +11901,7 @@ function getOfflineFallbackCatalog() {
         "min_height": 480
       },
       "category": "Operations",
-      "version": "v1",
+      "version": "1.0.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -11399,7 +11911,7 @@ function getOfflineFallbackCatalog() {
         "support"
       ],
       "store": {
-        "summary": "Read-only CTOX ticket operations app with synchronized ticket data.",
+        "summary": "Read-only CTOX ticket operations app over synchronized ticket projections.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/tickets",
         "installable": false,
@@ -11408,6 +11920,7 @@ function getOfflineFallbackCatalog() {
       },
       "install_scope": "core",
       "default_installed": true,
+      "launch_kind": "desktop-app",
       "presentation": {
         "default_mode": "window",
         "supported_modes": [
@@ -11426,7 +11939,79 @@ function getOfflineFallbackCatalog() {
         "multi_instance": false,
         "auto_restore": false
       },
+      "source": "core",
+      "core": true,
+      "editable": true,
+      "deletable": false
+    },
+    {
+      "id": "kundenpipeline",
+      "title": "Decision Hub",
+      "description": "Bounded customer decisions, triage proposals, approvals, and follow-up actions.",
+      "entry": "modules/kundenpipeline/index.html",
+      "collections": [
+        "kundenpipeline_vorgaenge",
+        "kundenpipeline_entscheidungen",
+        "kundenpipeline_projekte",
+        "business_commands"
+      ],
+      "layout": {
+        "shell": "windowed",
+        "shell_contract": "v2",
+        "shell_geometry_contract": "business-os-v2-global-1",
+        "icon_asset": "modules/kundenpipeline/assets/icon/decision-hub-256.png",
+        "icon_asset_srcset": "modules/kundenpipeline/assets/icon/decision-hub-256.png 1x",
+        "icon_asset_60": "modules/kundenpipeline/assets/icon/decision-hub-60.png",
+        "icon_provenance": "modules/kundenpipeline/assets/icon/provenance.json",
+        "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M5 5.5h14v13H5z\" stroke=\"currentColor\" stroke-width=\"1.8\"/><path d=\"M8 9h8M8 12h5M8 15h7\" stroke=\"currentColor\" stroke-width=\"1.8\" stroke-linecap=\"round\"/><circle cx=\"18\" cy=\"18\" r=\"3\" fill=\"var(--surface)\" stroke=\"currentColor\" stroke-width=\"1.6\"/><path d=\"M18 16.7v1.5l1 0.6\" stroke=\"currentColor\" stroke-width=\"1.3\" stroke-linecap=\"round\"/></svg>",
+        "left": "Offene Entscheidungen und Vorgänge",
+        "center": "Entscheidungsdetails, Kontext und Audit",
+        "right": "Freigabe, Antwort und Übergabe",
+        "third_pane_justification": "Die Aktions-Spalte gehört zur ausgewählten Entscheidung und bleibt auf breiten Fenstern sichtbar; auf kleinen Fenstern wird sie über den Shell-Aktionen-Toggle erreichbar.",
+        "default_width": 1120,
+        "default_height": 760,
+        "min_width": 640,
+        "min_height": 480
+      },
+      "category": "Operations",
+      "version": "0.1.0",
+      "developer": "CTOX",
+      "license": "AGPL-3.0-only",
+      "tags": [
+        "decision-hub",
+        "kundenpipeline",
+        "approvals",
+        "triage"
+      ],
+      "store": {
+        "summary": "Decision Hub for bounded owner decisions and customer pipeline follow-up.",
+        "repository": "metric-space-ai/ctox",
+        "source_path": "modules/kundenpipeline",
+        "installable": false,
+        "editable_after_install": false,
+        "distribution": "system-module"
+      },
+      "install_scope": "core",
+      "default_installed": true,
       "launch_kind": "desktop-app",
+      "presentation": {
+        "default_mode": "window",
+        "supported_modes": [
+          "window",
+          "maximized",
+          "focus"
+        ],
+        "initial_size": {
+          "width": 1120,
+          "height": 760
+        },
+        "minimum_size": {
+          "width": 640,
+          "height": 480
+        },
+        "multi_instance": false,
+        "auto_restore": false
+      },
       "source": "core",
       "core": true,
       "editable": true,
@@ -11434,6 +12019,10 @@ function getOfflineFallbackCatalog() {
     }
   ]
 };
+// END GENERATED offline-fallback-catalog
+
+function getOfflineFallbackCatalog() {
+  const catalog = structuredClone(OFFLINE_FALLBACK_CATALOG);
   return {
     ...catalog,
     id: 'module-catalog',

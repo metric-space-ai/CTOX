@@ -14,7 +14,7 @@
     "right": "Install into local-modules"
   },
   "category": "Development",
-  "version": "v0.1",
+  "version": "0.1.0",
   "developer": "CTOX",
   "license": "AGPL-3.0-only",
   "tags": [
