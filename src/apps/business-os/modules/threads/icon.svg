@@ -1,4 +1,14 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-  <path d="M4 5h16v11H9l-5 4z"/>
-  <path d="M8 9h8M8 12h5"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+  <defs>
+    <linearGradient id="grad-threads" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f9a8d4" />
+      <stop offset="100%" stop-color="#a855f7" />
+    </linearGradient>
+  </defs>
+  <!-- Fenster-Icon: als img eingesetzt erbt currentColor nicht (war schwarz
+       auf dunkel, UI-Review 01.09.) — feste App-Farben. -->
+  <g stroke="url(#grad-threads)">
+    <path d="M4 5h16v11H9l-5 4z"/>
+    <path d="M8 9h8M8 12h5"/>
+  </g>
 </svg>

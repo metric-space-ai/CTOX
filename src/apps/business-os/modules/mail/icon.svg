@@ -1,4 +1,13 @@
 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <rect x="3" y="5" width="18" height="14" rx="3" fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-width="1.8"/>
-  <path d="m5 8 7 5 7-5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <defs>
+    <linearGradient id="grad-mail" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#93c5fd" />
+      <stop offset="100%" stop-color="#4f46e5" />
+    </linearGradient>
+  </defs>
+  <!-- Fenster-Icon: als img eingesetzt erbt currentColor nicht (war schwarz
+       auf dunkel, UI-Review 01.09.) — feste App-Farben wie bei den anderen
+       Modul-Icons. -->
+  <rect x="3" y="5" width="18" height="14" rx="3" fill="url(#grad-mail)" fill-opacity="0.12" stroke="url(#grad-mail)" stroke-width="1.8"/>
+  <path d="m5 8 7 5 7-5" stroke="url(#grad-mail)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

@@ -1,7 +1,19 @@
 <svg width="24" height="24" viewBox="0 0 24 24" fill="none" class="svg-icon svg-ctox" xmlns="http://www.w3.org/2000/svg">
-  <polygon points="12 2 22 8 22 16 12 22 2 16 2 8" fill="currentColor" fill-opacity="0.12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polygon>
-  <polyline points="12 22 12 12 22 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
-  <polyline points="12 12 2 8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
-  <polyline points="12 2 12 12" stroke="currentColor" stroke-width="1.5" stroke-dasharray="2 2" stroke-linecap="round" stroke-linejoin="round"></polyline>
-  <circle cx="12" cy="12" r="3.5" fill="currentColor" fill-opacity="0.88"></circle>
+  <defs>
+    <linearGradient id="grad-ctox" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f0b56f" />
+      <stop offset="55%" stop-color="#9c7182" />
+      <stop offset="100%" stop-color="#17345c" />
+    </linearGradient>
+  </defs>
+  <!-- Fenster-Icon: als img eingesetzt erbt currentColor NICHT — das SVG
+       wurde schwarz-auf-dunkel und das Logo unsichtbar (UI-Review 01.09.).
+       Deshalb traegt das Fenster-Asset die CTOX-Frame-Palette fest
+       (frame-start amber nach frame-end tiefblau, siehe app.css). Die inline
+       Variante in shared/icons.js behaelt bewusst currentColor. -->
+  <polygon points="12 2 22 8 22 16 12 22 2 16 2 8" fill="url(#grad-ctox)" fill-opacity="0.12" stroke="url(#grad-ctox)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polygon>
+  <polyline points="12 22 12 12 22 8" stroke="url(#grad-ctox)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+  <polyline points="12 12 2 8" stroke="url(#grad-ctox)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+  <polyline points="12 2 12 12" stroke="url(#grad-ctox)" stroke-width="1.5" stroke-dasharray="2 2" stroke-linecap="round" stroke-linejoin="round"></polyline>
+  <circle cx="12" cy="12" r="3.5" fill="url(#grad-ctox)" fill-opacity="0.88"></circle>
 </svg>
