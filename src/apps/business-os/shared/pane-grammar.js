@@ -34,7 +34,7 @@ export function wirePaneGrammar(pane, { onChange } = {}) {
   const state = () => ({
     search: (search?.value || '').trim().toLowerCase(),
     view: viewButtons.find((b) => b.getAttribute('aria-pressed') === 'true')?.dataset.pgView
-      || viewButtons[0]?.dataset.pgView || 'cards',
+      || viewButtons[0]?.dataset.pgView || pane.dataset.pgDefaultView || 'cards',
     band: bandTabs.find((b) => b.getAttribute('aria-selected') === 'true')?.dataset.pgBand
       || bandTabs[0]?.dataset.pgBand || '',
     filters: Object.fromEntries(filters.map((el) => [el.dataset.pgName || el.name || el.dataset.pgFilter || 'filter', el.value])),

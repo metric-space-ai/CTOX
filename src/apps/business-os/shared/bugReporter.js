@@ -1,5 +1,9 @@
 // shared/bugReporter.js
 // -----------------------------------------------------------------------------
+// Legacy browser-extension variant of the reporter. The surface Business OS
+// actually loads is shared/business-reporter.js; this file talks to chrome.*
+// extension APIs and is kept in sync behaviourally, not wired into the shell.
+// -----------------------------------------------------------------------------
 // Floating bug-report widget for the Ninja Workflow Tool sidepanel, options
 // page, and individual views. Adapted from the ctox business-basic bug-report
 // widget — vanilla JS, persistence via RxDB (bug_reports + bug_report_chunks)
@@ -46,6 +50,27 @@ let selectionRect = null;     // {x,y,width,height}
 let strokes = [];             // [[ {x,y}, ... ], ...]
 let activeStroke = null;
 let savingMarkup = false;
+let overlayKeyHandler = null;
+
+// A report keeps its identity across a retry, so a second attempt updates the
+// same record instead of writing a duplicate.
+let pendingReportId = "";
+let saving = false;
+const SAVE_TIMEOUT_MS = 45000;
+const RETRY_DELAY_MS = 600;
+// Screen capture can stall forever when a display picker is never answered.
+// Without a deadline the pending promise keeps the capture layer over the
+// page, because the teardown sits behind that await.
+const CAPTURE_TIMEOUT_MS = 45000;
+
+function withDeadline(operation, timeoutMs, label) {
+  let timer = null;
+  const deadline = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(label || "operation exceeded its deadline")), timeoutMs);
+  });
+  return Promise.race([Promise.resolve().then(operation), deadline])
+    .finally(() => { if (timer !== null) clearTimeout(timer); });
+}
 
 // ----------------------------------------------------------------------------
 // Locale
@@ -92,6 +117,10 @@ const COPY = {
     failed: "Speichern fehlgeschlagen",
     queueHint: "Reports werden in Optionen → „Bug Reports“ gesammelt und können dort als Schwung versendet werden.",
     openList: "Bug-Liste öffnen",
+    retrying: "Das Speichern dauert länger als sonst. Neuer Versuch läuft …",
+    savedToast: "Report gespeichert. Du findest ihn in der Bug-Liste.",
+    failedTimeout: "Speichern hat zu lange gedauert. Dein Text bleibt erhalten – bitte noch einmal speichern.",
+    keepOpenHint: "Dein Text bleibt erhalten. Zum Schließen bitte „Schließen“ benutzen.",
   },
   en: {
     fab: "Report bug / feature",
@@ -123,6 +152,10 @@ const COPY = {
     failed: "Save failed",
     queueHint: "Reports are collected under Options → “Bug Reports” and can be submitted in batches there.",
     openList: "Open bug list",
+    retrying: "Saving takes longer than usual. Trying again …",
+    savedToast: "Report saved. You will find it in the bug list.",
+    failedTimeout: "Saving took too long. Your text is kept — please save again.",
+    keepOpenHint: "Your text is kept. Use “Close” when you are done.",
   },
 };
 
@@ -255,6 +288,22 @@ const BUG_REPORTER_CSS = `
 }
 .nwt-bug-attachment img { max-width: 100%; max-height: 240px; object-fit: contain; border-radius: 6px; background: #0a0d11; }
 
+.nwt-bug-toast {
+  position: fixed; right: 16px; bottom: 72px; z-index: 2147483647;
+  max-width: min(420px, calc(100vw - 32px));
+  padding: 11px 14px; border-radius: 10px;
+  border: 1px solid rgba(103,232,249,0.35);
+  background: #141a20; color: #e7ecf2;
+  font: 13px/1.4 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  box-shadow: 0 14px 34px rgba(0,0,0,0.42);
+  opacity: 0; transform: translateY(8px); pointer-events: none;
+  transition: opacity .2s ease, transform .2s ease;
+}
+.nwt-bug-toast.is-visible { opacity: 1; transform: translateY(0); }
+@media (prefers-reduced-motion: reduce) {
+  .nwt-bug-toast { transition: none; transform: none; }
+}
+
 .nwt-bug-markup-overlay {
   position: fixed; inset: 0; z-index: 2147483647;
   background: rgba(8,12,18,0.18); cursor: crosshair;
@@ -313,20 +362,40 @@ function openModal() {
   if (!modalEl) renderModal();
   modalEl.hidden = false;
   modalEl.setAttribute("aria-hidden", "false");
+  // Pay the lazy store import while the user is still typing, so the first
+  // save is not the one that has to wait for it.
+  rxdb().catch(() => {});
   setTimeout(() => {
     const ta = modalEl.querySelector('textarea[data-field="summary"]');
     ta?.focus();
   }, 30);
 }
 
+function draftHasContent() {
+  return Boolean((summary || "").trim() || (expected || "").trim() || attachment);
+}
+
+// Soft close for the implicit gesture (backdrop click). With text in the form
+// it refuses and says how to close on purpose.
+function requestCloseModal() {
+  if (saving) return;
+  if (draftHasContent()) {
+    setStatus(t.keepOpenHint);
+    return;
+  }
+  closeModal();
+}
+
 function closeModal() {
   if (!modalOpen) return;
   modalOpen = false;
+  // The capture layer never outlives the dialog, and its teardown restores
+  // the chrome first so the hide below is the last word.
+  destroyOverlay();
   if (modalEl) {
     modalEl.hidden = true;
     modalEl.setAttribute("aria-hidden", "true");
   }
-  if (markupMode !== "idle") cancelMarkup();
 }
 
 function renderModal() {
@@ -395,7 +464,7 @@ function renderModal() {
   modalEl.addEventListener("change", onModalInput);
   // close on backdrop click
   modalEl.addEventListener("mousedown", (event) => {
-    if (event.target === modalEl) closeModal();
+    if (event.target === modalEl) requestCloseModal();
   });
 }
 
@@ -466,6 +535,25 @@ function syncAttachmentInModal() {
   meta.textContent = attachment.captureMode === "markup-only" ? t.attachmentFallback : t.attachmentScreen;
 }
 
+function showToast(message) {
+  if (!message || !document.body) return;
+  toastEl?.remove();
+  toastEl = document.createElement("div");
+  toastEl.className = "nwt-bug-toast";
+  toastEl.setAttribute("role", "status");
+  toastEl.textContent = message;
+  document.body.appendChild(toastEl);
+  const element = toastEl;
+  requestAnimationFrame(() => element.classList.add("is-visible"));
+  setTimeout(() => {
+    element.classList.remove("is-visible");
+    setTimeout(() => {
+      element.remove();
+      if (toastEl === element) toastEl = null;
+    }, 260);
+  }, 4200);
+}
+
 function setStatus(text) {
   if (!modalEl) return;
   const el = modalEl.querySelector("[data-status]");
@@ -478,14 +566,19 @@ function setStatus(text) {
 // ----------------------------------------------------------------------------
 
 async function saveReport() {
+  if (saving) return;
   const trimmed = (summary || "").trim();
   if (!trimmed) {
     setStatus(t.failed + " — " + t.summaryPlaceholder);
     return;
   }
+  const id = pendingReportId
+    || (crypto?.randomUUID?.() || `bug-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`);
+  pendingReportId = id;
+  saving = true;
   setStatus(t.saving);
-  try {
-    const id = (crypto?.randomUUID?.() || `bug-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`);
+
+  const attempt = () => withDeadline(async () => {
     const meta = buildReportMetadata(id, trimmed);
     const client = await rxdb();
     if (!client?.upsertBugReport) {
@@ -515,8 +608,24 @@ async function saveReport() {
       annotationCaptureMode: attachment?.captureMode || "",
       annotationCapturedAt: attachment?.capturedAt || ""
     });
+  }, SAVE_TIMEOUT_MS, "bug report save exceeded its deadline");
+
+  try {
+    try {
+      await attempt();
+    } catch (firstError) {
+      // The first save of a session is the one that has to build the store
+      // connection. Retry it once silently before bothering the user; the
+      // draft is untouched meanwhile.
+      console.warn("[bugReporter] first save attempt failed, retrying once", firstError);
+      setStatus(t.retrying);
+      _rxdbClientPromise = null;
+      await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
+      await attempt();
+    }
 
     setStatus(t.saved + " (" + id.slice(0, 8) + ")");
+    pendingReportId = "";
     summary = "";
     expected = "";
     attachment = null;
@@ -525,13 +634,19 @@ async function saveReport() {
       modalEl.querySelector('textarea[data-field="expected"]').value = "";
       syncAttachmentInModal();
     }
+    showToast(t.savedToast);
     try {
       chrome?.runtime?.sendMessage?.({ type: "bug-reports:updated", id }, () => void chrome?.runtime?.lastError);
     } catch {}
     setTimeout(() => setStatus(""), 2500);
   } catch (err) {
+    // Draft, attachment and report id survive so the user can simply save again.
     console.warn("[bugReporter] save failed", err);
-    setStatus(t.failed + " — " + (err?.message || String(err)));
+    setStatus(t.failed + " — " + (/exceeded its deadline/.test(String(err?.message || "")) ? t.failedTimeout : (err?.message || String(err))));
+  } finally {
+    saving = false;
+    // No capture layer may outlive a save — success, failure or timeout.
+    destroyOverlay();
   }
 }
 
@@ -594,13 +709,7 @@ function startMarkup() {
 }
 
 function cancelMarkup() {
-  markupMode = "idle";
-  selectionOrigin = null;
-  selectionRect = null;
-  strokes = [];
-  activeStroke = null;
   destroyOverlay();
-  showHostChrome();
 }
 
 // --- Hide/show modal + FAB during markup ---
@@ -648,6 +757,15 @@ function renderOverlay() {
   `;
   document.body.appendChild(overlayEl);
 
+  // Escape aborts the capture instead of stranding the layer.
+  overlayKeyHandler = (event) => {
+    if (event.key !== "Escape") return;
+    event.preventDefault();
+    event.stopPropagation();
+    cancelMarkup();
+  };
+  document.addEventListener("keydown", overlayKeyHandler, true);
+
   overlayEl.addEventListener("pointerdown", onOverlayPointerDown);
   overlayEl.addEventListener("pointermove", onOverlayPointerMove);
   overlayEl.addEventListener("pointerup", onOverlayPointerUp);
@@ -669,10 +787,24 @@ function renderOverlay() {
   paintSelection();
 }
 
+// Single teardown for the capture layer: it resets the markup state, sweeps
+// stray overlay nodes so none can be left sitting over the page, and always
+// brings the dialog and the FAB back.
 function destroyOverlay() {
-  if (!overlayEl) return;
-  overlayEl.remove();
+  markupMode = "idle";
+  selectionOrigin = null;
+  selectionRect = null;
+  strokes = [];
+  activeStroke = null;
+  savingMarkup = false;
+  if (overlayKeyHandler) {
+    document.removeEventListener("keydown", overlayKeyHandler, true);
+    overlayKeyHandler = null;
+  }
+  overlayEl?.remove();
   overlayEl = null;
+  document.querySelectorAll?.(".nwt-bug-markup-overlay")?.forEach?.((node) => node.remove());
+  showHostChrome();
 }
 
 function onOverlayPointerDown(event) {
@@ -804,20 +936,30 @@ async function commitMarkup() {
   await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
 
   try {
-    const screenDataUrl = await captureScreenRegion(rect).catch(() => null);
-    const domDataUrl = screenDataUrl ? null : await captureDomRegion(rect).catch(() => null);
-    const screenshotDataUrl = screenDataUrl ?? domDataUrl;
-    const compositeDataUrl = screenshotDataUrl
-      ? await buildCompositeDataUrl(rect, finalStrokes, screenshotDataUrl).catch(() => markupSvgDataUrl)
-      : markupSvgDataUrl;
+    const captured = await withDeadline(async () => {
+      const screenDataUrl = await captureScreenRegion(rect, CAPTURE_TIMEOUT_MS).catch(() => null);
+      const domDataUrl = screenDataUrl ? null : await captureDomRegion(rect).catch(() => null);
+      const screenshotDataUrl = screenDataUrl ?? domDataUrl;
+      const compositeDataUrl = screenshotDataUrl
+        ? await buildCompositeDataUrl(rect, finalStrokes, screenshotDataUrl).catch(() => markupSvgDataUrl)
+        : markupSvgDataUrl;
+      return {
+        screenshotDataUrl: screenshotDataUrl || null,
+        compositeDataUrl,
+        captureMode: screenDataUrl ? "screen" : domDataUrl ? "dom" : "markup-only",
+      };
+    }, CAPTURE_TIMEOUT_MS + 15000, "screen capture exceeded its deadline").catch((err) => {
+      console.warn("[bugReporter] screen capture unavailable, keeping the markup only", err);
+      return { screenshotDataUrl: null, compositeDataUrl: markupSvgDataUrl, captureMode: "markup-only" };
+    });
 
     attachment = {
       rect,
       strokes: finalStrokes,
-      screenshotDataUrl: screenshotDataUrl || null,
+      screenshotDataUrl: captured.screenshotDataUrl,
       markupSvgDataUrl,
-      compositeDataUrl,
-      captureMode: screenDataUrl ? "screen" : domDataUrl ? "dom" : "markup-only",
+      compositeDataUrl: captured.compositeDataUrl,
+      captureMode: captured.captureMode,
       capturedAt: new Date().toISOString(),
     };
     syncAttachmentInModal();
@@ -825,14 +967,9 @@ async function commitMarkup() {
     console.warn("[bugReporter] markup commit failed", err);
     markupMode = previousMode;
   } finally {
+    // The overlay always goes away and the dialog always comes back, so the
+    // capture can never leave the page covered.
     destroyOverlay();
-    selectionOrigin = null;
-    selectionRect = null;
-    strokes = [];
-    activeStroke = null;
-    savingMarkup = false;
-    // Bring the modal + FAB back so the user sees their attachment.
-    showHostChrome();
   }
 }
 
@@ -863,7 +1000,7 @@ function captureVisibleTabPng() {
   });
 }
 
-async function captureScreenRegion(rect) {
+async function captureScreenRegion(rect, timeoutMs = CAPTURE_TIMEOUT_MS) {
   // 1) Try chrome.tabs.captureVisibleTab first — no picker, no focus loss.
   try {
     const dataUrl = await captureVisibleTabPng();
@@ -903,14 +1040,19 @@ async function captureScreenRegion(rect) {
   //    or when captureVisibleTab is blocked.
   if (!navigator?.mediaDevices?.getDisplayMedia) return null;
   let stream;
+  // A picker that is never answered must not hold the capture layer hostage.
+  const pending = Promise.resolve().then(() => navigator.mediaDevices.getDisplayMedia({
+    video: { displaySurface: "browser" },
+    audio: false,
+  }));
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: "browser" },
-      audio: false,
-    });
+    stream = await withDeadline(() => pending, timeoutMs, "display capture picker exceeded its deadline");
   } catch {
+    // If the picker answers after the deadline, release the stream anyway.
+    pending.then((late) => late?.getTracks?.().forEach((track) => track.stop())).catch(() => {});
     return null;
   }
+  if (!stream) return null;
   try {
     const video = document.createElement("video");
     video.muted = true;

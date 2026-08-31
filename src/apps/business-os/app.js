@@ -1,34 +1,34 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260831-local-lab-v319';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-local-lab-v319';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-local-lab-v319';
-import { createAppActions } from './shared/app-actions.js?v=20260831-local-lab-v319';
+import { CtoxResizer } from './shared/resizer.js?v=20260831-unified-v322';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260831-unified-v322';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260831-unified-v322';
+import { createAppActions } from './shared/app-actions.js?v=20260831-unified-v322';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260831-local-lab-v319';
+} from './shared/app-lifecycle.js?v=20260831-unified-v322';
 import {
   BusinessOsPermissions,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260831-local-lab-v319';
+} from './shared/permissions.js?v=20260831-unified-v322';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260831-local-lab-v319';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-local-lab-v319';
+} from './shared/branding.js?v=20260831-unified-v322';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260831-unified-v322';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260831-local-lab-v319';
+} from './shared/presentation.js?v=20260831-unified-v322';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -39,9 +39,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260831-local-lab-v319';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-local-lab-v319';
-import { createDocumentsFacade } from './shared/documents.js?v=20260831-local-lab-v319';
+} from './shared/shell-permissions-ui.js?v=20260831-unified-v322';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260831-unified-v322';
+import { createDocumentsFacade } from './shared/documents.js?v=20260831-unified-v322';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -49,26 +49,26 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260831-local-lab-v319';
+} from './shared/maintenance-state.js?v=20260831-unified-v322';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260831-local-lab-v319';
+} from './shared/workspace-session.js?v=20260831-unified-v322';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260831-local-lab-v319';
+} from './shared/taskbar-pins.js?v=20260831-unified-v322';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
   WORKJET_CATEGORY_IDS,
   workjetCategoryForModule,
   workjetCategoryForTarget,
-} from './shared/workjet-theme.js?v=20260831-local-lab-v319';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-local-lab-v319';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-local-lab-v319';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-local-lab-v319';
+} from './shared/workjet-theme.js?v=20260831-unified-v322';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-unified-v322';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-unified-v322';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-unified-v322';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -83,7 +83,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260831-local-lab-v319';
+const APP_BUILD = '20260831-unified-v322';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -2999,8 +2999,27 @@ function preferenceOption(value, label, selected) {
   return `<option value="${escapeHtml(value)}" ${selected === value ? 'selected' : ''}>${escapeHtml(label)}</option>`;
 }
 
+// Der rechte Drawer hat genau einen gueltigen Inhaltsbesitzer. Jede Oeffnung
+// zieht ein Ticket; closeDrawers() und jede andere Oeffnung entwerten alle
+// aelteren Tickets. Asynchrone Oeffner (der Settings-Drawer wartet auf die
+// Datenebene und laedt danach shared/react-settings.js nach) muessen nach JEDEM
+// await pruefen, ob ihr Ticket noch gilt. Ohne diese Pruefung schreibt ein spaet
+// zurueckkehrender Oeffner in einen bereits geschlossenen Drawer -- und da
+// openReactSettings() beim Montieren `mount.hidden = false` setzt, springt der
+// Drawer sekundenlang nach dem Schliessen von selbst wieder auf.
+let rightDrawerTicket = 0;
+
+function claimRightDrawer() {
+  rightDrawerTicket += 1;
+  return rightDrawerTicket;
+}
+
+function ownsRightDrawer(ticket) {
+  return ticket === rightDrawerTicket && els.rightDrawer && !els.rightDrawer.hidden;
+}
 
 async function openSettingsDrawer(options = {}) {
+  const ticket = claimRightDrawer();
   els.rightDrawer.classList.remove('account-popover');
   els.rightDrawer.classList.add('settings-drawer-open');
   els.rightDrawer.hidden = false;
@@ -3024,6 +3043,7 @@ async function openSettingsDrawer(options = {}) {
   try {
     await waitForDataPlaneReady();
   } catch (error) {
+    if (!ownsRightDrawer(ticket)) return;
     els.rightDrawer.replaceChildren();
     const failed = document.createElement('div');
     failed.className = 'drawer-body settings-drawer';
@@ -3041,7 +3061,9 @@ async function openSettingsDrawer(options = {}) {
     els.rightDrawer.append(failed);
     return;
   }
+  if (!ownsRightDrawer(ticket)) return;
   const { openReactSettings } = await loadReactSettingsModule();
+  if (!ownsRightDrawer(ticket)) return;
   openReactSettings({
     mount: els.rightDrawer,
     modules: state.modules,
@@ -9347,6 +9369,9 @@ function drawerContent(title, text) {
 function openDrawer(side, content) {
   const target = side === 'left' ? els.leftDrawer : side === 'right' ? els.rightDrawer : els.bottomDrawer;
   if (side === 'right') {
+    // Neuer Besitzer des rechten Drawers: alle laufenden asynchronen Oeffner
+    // (z. B. ein noch wartender Settings-Drawer) duerfen nicht mehr montieren.
+    claimRightDrawer();
     target.classList.remove('settings-drawer-open');
     if (!target.classList.contains('account-popover')) {
       target.classList.remove('account-popover');
@@ -9368,6 +9393,10 @@ function showBackdrop() {
 }
 
 function closeDrawers() {
+  // Schliessen entwertet das aktuelle Ticket. Ein danach zurueckkehrender
+  // asynchroner Oeffner findet sein Ticket ungueltig vor und montiert nichts
+  // mehr -- der Drawer bleibt zu, bis der Nutzer ihn erneut oeffnet.
+  claimRightDrawer();
   els.backdrop.hidden = true;
   els.leftDrawer.hidden = true;
   els.rightDrawer.hidden = true;
