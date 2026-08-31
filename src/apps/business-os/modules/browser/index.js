@@ -1996,6 +1996,10 @@ function installInputHandlers(ctx, refs, state, scheduleRefresh) {
     writePointerInput(ctx, refs, state, 'wheel', event).then(afterInput);
   }, { passive: false });
   refs.canvas?.addEventListener('keydown', (event) => {
+    // Cmd/Ctrl+V muss durch: preventDefault hier wuergte das paste-Ereignis
+    // ab, bevor es entstand — deshalb kam ⌘V nie an. installCanvasPaste
+    // schickt den Zwischenablage-Text dann als Ganzes.
+    if ((event.metaKey || event.ctrlKey) && String(event.key).toLowerCase() === 'v') return;
     event.preventDefault();
     writeKeyboardInput(ctx, state, 'keyDown', event).then(afterInput);
   });
@@ -2536,7 +2540,11 @@ function keyboardText(type, event) {
   if (type !== 'keyDown') return '';
   const key = event.key || '';
   if (!key || key.length !== 1) return '';
-  if (event.ctrlKey || event.metaKey || event.altKey) return '';
+  // Option (macOS) und AltGr (Windows, meldet ctrl+alt) KOMPONIEREN Zeichen:
+  // @ ist auf deutschem Mac-Layout Option+L. Solche Tasten muessen als TEXT
+  // zur fernen Seite, nicht als Kombination — "Alt+@" drueckt dort nichts.
+  const altGr = event.ctrlKey && event.altKey;
+  if ((event.ctrlKey || event.metaKey) && !altGr) return '';
   return key;
 }
 
