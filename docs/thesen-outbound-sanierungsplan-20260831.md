@@ -13,6 +13,20 @@ Tenant: thesen.ctox.dev = `ctox-e5ed9648`, Release `branch-main-20260830T135158Z
 
 ## DONE (selbst verifiziert, nicht nur behauptet)
 
+### Upgrade-Pfad freigegeben (Owner, 31.08. ~19:00)
+
+Owner-Direktive: „dann fahre jetzt den upgrade pfad". Befund vor dem Start:
+ALLE sechs Rust-Batch-Punkte liegen bereits auf origin/main — 19c067835
+(Codex-Parallelsession: auth_assist-Nutzeridentität, Trusted-Local-Intake,
+Sofort-Tab, Harness-404-Selbstheilung `retry_without_response_chain`),
+c8d9e3e20 (Sellify-Lookup/Kampagnen-Entity), busy_timeout store.rs:1613,
+URL-Parse-Skip person_research_command.rs:908. Kein eigener Push nötig;
+mein Browser-UI-Commit c64a40945 ist die main-Spitze. Gestartet:
+`setsid nohup ctox upgrade --dev` auf thesen (pid 759287,
+Log ~/upgrade-dev-20260831c.log). Abnahme danach: Journal ohne
+Token-Ablehnung, Unlock mit Nutzer-Sitzung + Sofort-Tab, Nachrecherche E2E,
+dnbhoovers-Duplikate abräumbar.
+
 ### Build-Vermeidung als Arbeitsprinzip (Owner-Direktive 31.08. Nachmittag)
 
 Direktive: „abarbeiten und auf teure upgrades verzichten, wenn es geht." Teuer =
