@@ -882,8 +882,8 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         const categoryChanged = setDatasetIfChanged(chip, 'workjetCategory', category);
         if (categoryChanged) {
           if (typeof chip.getAttribute === 'function') {
-            if (setAttrIfChanged(chip, 'style', chatWorkjetCategoryStyleText(category))) inPlaceDomChanged = true;
-          } else if (setInlineStyleIfChanged(chip, chatWorkjetCategoryStyleText(category))) {
+            if (setAttrIfChanged(chip, 'style', chatWorkjetCategoryStyleText(category, chat))) inPlaceDomChanged = true;
+          } else if (setInlineStyleIfChanged(chip, chatWorkjetCategoryStyleText(category, chat))) {
             inPlaceDomChanged = true;
           }
         }
@@ -962,8 +962,8 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
       const categoryChanged = setDatasetIfChanged(win, 'workjetCategory', category);
       if (categoryChanged) {
         if (typeof win.getAttribute === 'function') {
-          if (setAttrIfChanged(win, 'style', chatWorkjetCategoryStyleText(category))) inPlaceDomChanged = true;
-        } else if (setInlineStyleIfChanged(win, chatWorkjetCategoryStyleText(category))) {
+            if (setAttrIfChanged(win, 'style', chatWorkjetCategoryStyleText(category, chat))) inPlaceDomChanged = true;
+        } else if (setInlineStyleIfChanged(win, chatWorkjetCategoryStyleText(category, chat))) {
           inPlaceDomChanged = true;
         }
       }
@@ -2261,20 +2261,22 @@ function chatWorkjetCategory(chat) {
   );
 }
 
-function chatWorkjetCategoryStyleText(category) {
+function chatWorkjetCategoryStyleText(category, chat = null) {
   const style = workjetCategoryStyle(category);
+  const crewColor = chat ? crewIdentity(chat).color : style.accent;
   return [
     `--shell-category-accent:${style.accent}`,
     `--shell-category-foreground:${style.foreground}`,
     `--shell-category-soft:${style.soft}`,
     `--shell-category-border:${style.border}`,
+    `--crew-color:${crewColor}`,
   ].join(';');
 }
 
 function chatWindow(chat, activeId, relation = 'center') {
   const moduleName = chat.contextMeta?.module || 'ctox';
   const category = chatWorkjetCategory(chat);
-  const categoryStyleText = chatWorkjetCategoryStyleText(category);
+  const categoryStyleText = chatWorkjetCategoryStyleText(category, chat);
   const taskState = getTaskState(chat);
   const creatureMode = crewCreatureMode(chat, taskState);
   const crew = crewIdentity(chat);
@@ -2900,7 +2902,7 @@ function chatDockItem(chat, activeId) {
   const status = chatDockStatusText(chat, taskState);
   const moduleName = chat.contextMeta?.module || 'ctox';
   const category = chatWorkjetCategory(chat);
-  const categoryStyleText = chatWorkjetCategoryStyleText(category);
+  const categoryStyleText = chatWorkjetCategoryStyleText(category, chat);
   const markHtml = chatChipMarkHtml(chat, taskState);
   const crew = crewIdentity(chat);
   const taskTitle = String(chat.title || (chatUiIsGerman() ? 'Neue Aufgabe' : 'New task')).trim();
@@ -7318,11 +7320,11 @@ function installChatStyles() {
       transform: translateY(-50%);
       pointer-events: auto;
       cursor: pointer;
-      border: 2px solid color-mix(in srgb, var(--accent) 74%, var(--line));
+      border: 2px solid color-mix(in srgb, var(--crew-color, var(--accent)) 74%, var(--line));
       background:
         radial-gradient(circle at center, var(--surface) 0 50%, transparent 52%),
-        repeating-conic-gradient(from -1deg, color-mix(in srgb, var(--accent) 72%, transparent) 0 1deg, transparent 1deg 30deg);
-      box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 8%, transparent), 0 0 12px color-mix(in srgb, var(--accent) 22%, transparent);
+        repeating-conic-gradient(from -1deg, color-mix(in srgb, var(--crew-color, var(--accent)) 72%, transparent) 0 1deg, transparent 1deg 30deg);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--crew-color, var(--accent)) 8%, transparent), 0 0 12px color-mix(in srgb, var(--crew-color, var(--accent)) 22%, transparent);
       opacity: 0.94;
     }
     .ctox-progress-visual:hover .ctox-progress-activity,

@@ -266,6 +266,9 @@ try {
     expect(m.progressTrackWidth >= 180, `header step progress must remain clearly visible, got ${m.progressTrackWidth}px`);
     expect(m.progressTrackHeight >= 5, `header frame progress must be visibly weighted, got ${m.progressTrackHeight}px`);
     expect(m.progressTrackEdgeDelta <= 1, `progress must span the full header frame, edge delta ${m.progressTrackEdgeDelta}px`);
+    expect(m.progressCrewColor !== '', 'window must expose its creature color to progress chrome');
+    expect(m.progressFillBackground !== 'rgba(0, 0, 0, 0)', `progress fill must resolve to a visible color, got ${m.progressFillBackground}`);
+    expect(m.progressClockBorder !== 'rgb(0, 0, 0)', `turn clock must resolve to a visible crew-colored border, got ${m.progressClockBorder}`);
     expect(m.headerHeight >= 60 && m.headerHeight <= 68, `header must stay readable at about 64px, got ${m.headerHeight}`);
     expect(m.firstMessageTop >= m.headerBottom - 0.5, `chat copy must start below the header: ${m.firstMessageTop} < ${m.headerBottom}`);
     expect(m.activeWindowHeight >= 420, `crew window must retain a readable work area, got ${m.activeWindowHeight}`);
@@ -941,6 +944,8 @@ function harnessHtml() {
       const activeWindowRect = box(activeWindow);
       const activeChipRect = box(activeChip);
       const progressTrackRect = box(document.querySelector('.ctox-chat-window.is-active header .ctox-progress-track'));
+      const progressTrack = document.querySelector('.ctox-chat-window.is-active header .ctox-progress-track');
+      const progressClock = document.querySelector('.ctox-chat-window.is-active header .ctox-progress-activity');
       const activeHeaderRect = box(document.querySelector('.ctox-chat-window.is-active header'));
       const activeChipCenterX = activeChipRect.width ? activeChipRect.x + activeChipRect.width / 2 : 0;
       const activeWindowCenterX = activeWindowRect.width ? activeWindowRect.x + activeWindowRect.width / 2 : 0;
@@ -1000,6 +1005,9 @@ function harnessHtml() {
         progressClockCount: document.querySelectorAll('.ctox-chat-window header .ctox-progress-activity').length,
         progressTrackWidth: document.querySelector('.ctox-chat-window header .ctox-progress-track')?.getBoundingClientRect().width || 0,
         progressTrackHeight: progressTrackRect.height,
+        progressCrewColor: activeWindow ? getComputedStyle(activeWindow).getPropertyValue('--crew-color').trim() : '',
+        progressFillBackground: progressTrack ? getComputedStyle(progressTrack, '::before').backgroundColor : 'rgba(0, 0, 0, 0)',
+        progressClockBorder: progressClock ? getComputedStyle(progressClock).borderTopColor : 'rgb(0, 0, 0)',
         progressTrackEdgeDelta: activeHeaderRect.width && progressTrackRect.width
           ? Math.max(Math.abs(progressTrackRect.x - activeHeaderRect.x), Math.abs((progressTrackRect.x + progressTrackRect.width) - (activeHeaderRect.x + activeHeaderRect.width)))
           : 0,
