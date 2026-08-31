@@ -1,4 +1,4 @@
-import { normalizeRole, roleCanManage } from './roles.js?v=20260831-ctox-desktopapp-ports-v328';
+import { normalizeRole, roleCanManage } from './roles.js?v=20260831-shell-v2-unified-v325';
 
 export const BusinessOsPermissions = Object.freeze({
   WorkspaceManage: 'workspace.manage',

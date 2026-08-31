@@ -10743,7 +10743,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "center": "desktop surface",
         "right": "agent context"
       },
-      "category": "Workspace",
+      "category": "workspace",
       "version": "1.0.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -10790,7 +10790,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "Development",
+      "category": "development",
       "version": "1.1.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -10855,7 +10855,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "Development",
+      "category": "development",
       "version": "1.0.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -10923,7 +10923,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "Workspace",
+      "category": "workspace",
       "version": "1.0.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -10986,7 +10986,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 520,
         "min_height": 400
       },
-      "category": "Workspace",
+      "category": "workspace",
       "version": "1.0.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11058,7 +11058,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "Security",
+      "category": "security",
       "version": "0.2.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11136,7 +11136,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "top": "browser tabs and address bar",
         "center": "web page"
       },
-      "category": "Workspace",
+      "category": "workspace",
       "version": "0.2.6",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11200,7 +11200,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "right": "Live task artifact: free HTML the agent maintains about its run",
         "third_pane_justification": "The agent's self-published progress artifact must stay visible while chatting — hiding it would blind the user to the running task."
       },
-      "category": "Development",
+      "category": "development",
       "version": "0.2.6",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11259,7 +11259,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "center": "Transcode report and module details",
         "right": "Install into local-modules"
       },
-      "category": "Development",
+      "category": "development",
       "version": "0.1.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11321,7 +11321,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "center": "Set, rotate and remove credentials",
         "right": "Security notes"
       },
-      "category": "Security",
+      "category": "security",
       "version": "0.1.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11399,7 +11399,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "System",
+      "category": "system",
       "version": "1.1.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11471,7 +11471,7 @@ const OFFLINE_FALLBACK_CATALOG = {
           "bottom": "diagnostics, export evidence, and selected document context"
         }
       },
-      "category": "Knowledge",
+      "category": "knowledge",
       "version": "1.0.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11543,7 +11543,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "center": "Dashboards of automation widgets (the three CTOX-programmed parts: trigger logic, widget code, order prompt), Karten ⇄ Liste",
         "right": ""
       },
-      "category": "Operations",
+      "category": "operations",
       "version": "1.0.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11632,7 +11632,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 360,
         "min_height": 480
       },
-      "category": "Knowledge",
+      "category": "knowledge",
       "version": "1.1.7",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11695,7 +11695,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "right": "Command dashboard and formatting shortcuts",
         "third_pane_justification": "Editor-type app (IA-Karte): left = books/tags nav + note list, main = rich-text editor; the third pane is the justified reference/metadata surface of the editor layout."
       },
-      "category": "Productivity",
+      "category": "productivity",
       "version": "1.0.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11767,7 +11767,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "Governance",
+      "category": "governance",
       "version": "1.1.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11841,7 +11841,7 @@ const OFFLINE_FALLBACK_CATALOG = {
           "bottom": "Knowledge table diagnostics and raw row evidence"
         }
       },
-      "category": "Research",
+      "category": "research",
       "version": "1.0.14",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11912,7 +11912,7 @@ const OFFLINE_FALLBACK_CATALOG = {
           "bottom": "diagnostics, export evidence, and selected spreadsheet context"
         }
       },
-      "category": "Analytics",
+      "category": "analytics",
       "version": "1.0.1",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -11985,7 +11985,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "System",
+      "category": "system",
       "version": "0.2.4",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -12062,7 +12062,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "Operations",
+      "category": "operations",
       "version": "1.0.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
@@ -12135,7 +12135,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_width": 640,
         "min_height": 480
       },
-      "category": "Operations",
+      "category": "operations",
       "version": "0.1.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
