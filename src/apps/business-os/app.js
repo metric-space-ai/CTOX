@@ -1,6 +1,6 @@
 import { CtoxResizer } from './shared/resizer.js?v=20260816-browser-sync-guards-v141';
 import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260816-browser-sync-guards-v141';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260830-shell-v2-consolidated-v302';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260830-live-catalog-recovery-v303';
 import { createAppActions } from './shared/app-actions.js?v=20260816-browser-sync-guards-v141';
 import {
   appLifecycleBadge,
@@ -28,7 +28,7 @@ import {
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260830-shell-v2-consolidated-v302';
+} from './shared/presentation.js?v=20260830-live-catalog-recovery-v303';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
