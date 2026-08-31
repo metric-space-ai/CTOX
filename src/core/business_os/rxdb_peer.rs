@@ -2582,6 +2582,25 @@ where
     })
 }
 
+/// Release an opened database after a bring-up that will not reach `Running`.
+///
+/// `RxCollection` holds a strong `Arc` back to its database, and only
+/// `RxDatabase::close` breaks that cycle. Letting a failed attempt unwind
+/// therefore strands the whole database — including one SQLite connection per
+/// registered collection, each caching the fully parsed schema — for the rest
+/// of the process. The supervisor respawns the peer on every failure, so an
+/// unreachable signaling endpoint used to add roughly a gigabyte per attempt
+/// until the machine's swap was exhausted.
+async fn release_database_after_failed_bring_up(
+    database: &Arc<RxDatabase>,
+    error: anyhow::Error,
+) -> anyhow::Error {
+    if let Err(close_error) = database.close().await {
+        eprintln!("[business-os] closing RxDB after failed peer bring-up failed: {close_error}");
+    }
+    error
+}
+
 async fn run_native_peer(
     root: PathBuf,
     sync_room: String,
@@ -2649,17 +2668,30 @@ async fn run_native_peer(
     // collection is logged and skipped; a failing REQUIRED collection still
     // aborts the peer (the daemon depends on those). The strict
     // all-or-nothing `add_collections` is no longer used here.
-    let (collections, failed_collections) = database
+    let (collections, failed_collections) = match database
         .add_collections_tolerant(collection_creators_for_root(&root))
         .await
-        .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
+    {
+        Ok(registered) => registered,
+        Err(err) => {
+            return Err(release_database_after_failed_bring_up(
+                &database,
+                anyhow::anyhow!("register Business OS RxDB collections: {err}"),
+            )
+            .await);
+        }
+    };
     for (collection_name, err) in &failed_collections {
         if is_required_native_collection(collection_name) {
             // Drop the heartbeat handle + process lock before returning so the
             // lock is released for a clean restart.
-            return Err(anyhow::anyhow!(
-                "required Business OS RxDB collection `{collection_name}` failed to register: {err}"
-            ));
+            return Err(release_database_after_failed_bring_up(
+                &database,
+                anyhow::anyhow!(
+                    "required Business OS RxDB collection `{collection_name}` failed to register: {err}"
+                ),
+            )
+            .await);
         }
         eprintln!(
             "[business-os] skipping optional Business OS RxDB collection `{collection_name}` \
@@ -2671,8 +2703,11 @@ async fn run_native_peer(
     // persisted source row has been migrated and verified may the legacy sweep
     // remove old version tables. Migration failures are fatal: continuing would
     // publish a live heartbeat for a peer whose runtime collections are empty.
-    migrate_additive_native_rxdb_collection_versions(&root)
-        .context("migrate native Business OS RxDB collection schema versions")?;
+    if let Err(err) = migrate_additive_native_rxdb_collection_versions(&root)
+        .context("migrate native Business OS RxDB collection schema versions")
+    {
+        return Err(release_database_after_failed_bring_up(&database, err).await);
+    }
     match repair_stale_rxdb_collection_schema_versions(&root) {
         Ok(result) => {
             let repaired_tables = result
@@ -2723,8 +2758,11 @@ async fn run_native_peer(
         .iter()
         .map(|(name, _)| name.to_string())
         .collect();
-    store::ensure_legacy_collection_grants(&root, &collection_names)
-        .context("materialize exact legacy collection grants")?;
+    if let Err(err) = store::ensure_legacy_collection_grants(&root, &collection_names)
+        .context("materialize exact legacy collection grants")
+    {
+        return Err(release_database_after_failed_bring_up(&database, err).await);
+    }
     let collection_list: Vec<Arc<RxCollection>> = collections
         .into_iter()
         .map(|(_, collection)| collection)
@@ -2907,14 +2945,22 @@ async fn run_native_peer(
                 pools.push(pool);
             }
             Ok(Ok(Err(err))) => {
-                return Err(native_peer_bring_up_failure(format!(
-                    "multiplexed WebRTC replication bring-up failed: {err}"
-                )));
+                return Err(release_database_after_failed_bring_up(
+                    &database,
+                    native_peer_bring_up_failure(format!(
+                        "multiplexed WebRTC replication bring-up failed: {err}"
+                    )),
+                )
+                .await);
             }
             Ok(Err(join_err)) => {
-                return Err(native_peer_bring_up_failure(format!(
-                    "multiplexed WebRTC replication bring-up task panicked: {join_err}"
-                )));
+                return Err(release_database_after_failed_bring_up(
+                    &database,
+                    native_peer_bring_up_failure(format!(
+                        "multiplexed WebRTC replication bring-up task panicked: {join_err}"
+                    )),
+                )
+                .await);
             }
             Err(_) => {
                 // Abort the in-flight attempt: letting it run detached used
@@ -2922,10 +2968,14 @@ async fn run_native_peer(
                 // room under this peer's session id, answering handshakes,
                 // no demand-file sources, uncancelable).
                 bringup.abort();
-                return Err(native_peer_bring_up_failure(format!(
-                    "multiplexed WebRTC replication bring-up timed out after {}s",
-                    NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS
-                )));
+                return Err(release_database_after_failed_bring_up(
+                    &database,
+                    native_peer_bring_up_failure(format!(
+                        "multiplexed WebRTC replication bring-up timed out after {}s",
+                        NATIVE_COLLECTION_BRINGUP_TIMEOUT_SECS
+                    )),
+                )
+                .await);
             }
         }
     }

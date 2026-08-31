@@ -2937,7 +2937,18 @@ async fn run_instance_codex_proxy_supervisor(root: PathBuf) {
         set_instance_codex_proxy_status(&root, InstanceCodexProxyPhase::Starting, None);
         let routes = match build_instance_provider_routes(&root) {
             Ok(Some(routes)) => routes,
-            Ok(None) => continue,
+            Ok(None) => {
+                // The configuration is re-read here, so it can disappear
+                // between the check above and this call. Without the same
+                // backoff every other branch uses, that race turns the
+                // supervisor into a busy loop that reopens the runtime SQLite
+                // databases as fast as the CPU allows.
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    INSTANCE_CODEX_PROXY_RETRY_SECONDS,
+                ))
+                .await;
+                continue;
+            }
             Err(error) => {
                 set_instance_codex_proxy_status(
                     &root,

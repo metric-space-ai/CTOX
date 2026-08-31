@@ -2210,7 +2210,6 @@ mod tests {
             "file-backed storage must reuse one read-only connection per instance"
         );
 
-        let opens_before = runtime_counter("read_only_open_calls");
         instance
             .find_documents_by_id(&["a".to_string()], false)
             .await
@@ -2219,9 +2218,18 @@ mod tests {
             .get_changed_documents_since(10, None)
             .await
             .unwrap();
-        let opens_after = runtime_counter("read_only_open_calls");
-        assert_eq!(
-            opens_after, opens_before,
+
+        // Anchored to this instance's cached connection rather than the
+        // process-wide `read_only_open_calls` counter: that counter is shared
+        // by every test in the binary, so a zero delta across these two reads
+        // silently assumed no other parallel test opened a read-only
+        // connection in the same window. Comparing the cached handle proves
+        // the same property — the hot read paths did not reopen and re-cache
+        // this instance's read-only connection — without depending on what
+        // the rest of the suite happens to be doing.
+        let after_reads = instance.open_read_only_connection().unwrap();
+        assert!(
+            std::sync::Arc::ptr_eq(&first, &after_reads),
             "hot read paths must not reopen read-only SQLite connections"
         );
     }

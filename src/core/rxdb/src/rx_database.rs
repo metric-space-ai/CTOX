@@ -436,8 +436,23 @@ impl RxDatabase {
         let _ = DB_COUNT.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
             Some(current.saturating_sub(1))
         });
-        let collections: Vec<Arc<RxCollection>> =
-            self.collections.lock().values().cloned().collect();
+        // `RxCollection` holds a strong `Arc` back to its database, so
+        // database -> collections -> database is a reference cycle. Upstream
+        // RxDB is garbage collected and can leave that cycle in place; in Rust
+        // it keeps the whole database alive for the rest of the process,
+        // including every collection's storage instance and the open SQLite
+        // connection caching the fully parsed schema. Draining the map (rather
+        // than cloning out of it) hands the last database-owned references to
+        // this loop, so a closed database is actually reclaimed once callers
+        // drop their own `Arc`s. Draining before the loop also means an early
+        // `?` return still releases the remaining collections while unwinding.
+        let collections: Vec<Arc<RxCollection>> = {
+            let mut registered = self.collections.lock();
+            registered
+                .drain()
+                .map(|(_, collection)| collection)
+                .collect()
+        };
         for collection in collections {
             collection.close();
             collection.storage_instance.close().await?;
@@ -1202,6 +1217,54 @@ mod tests {
             Some(json!("alice"))
         );
         database.close().await.unwrap();
+    }
+
+    /// A closed database must actually be reclaimed. `RxCollection` keeps a
+    /// strong `Arc` back to its database, so without `close()` breaking that
+    /// cycle every opened database stays resident together with each
+    /// collection's storage instance. A native peer that respawns on failed
+    /// bring-up opens a fresh database per attempt, which grew the daemon by
+    /// roughly a gigabyte per attempt until system swap was exhausted.
+    #[tokio::test]
+    async fn closing_a_database_breaks_the_collection_reference_cycle() {
+        let storage = get_rx_storage_memory(());
+        let database = create_rx_database(RxDatabaseCreator {
+            name: "cycle-db".to_string(),
+            storage,
+            multi_instance: false,
+            password: None,
+            hash_function: Arc::new(TestHashFunction),
+            options: HashMap::new(),
+            ignore_duplicate: false,
+            close_duplicates: false,
+            event_reduce: true,
+            allow_slow_count: false,
+        })
+        .await
+        .unwrap();
+
+        let collections = database
+            .add_collections(HashMap::from([(
+                "humans".to_string(),
+                RxCollectionCreator {
+                    schema: test_schema(),
+                    conflict_handler: None,
+                    options: HashMap::new(),
+                },
+            )]))
+            .await
+            .unwrap();
+
+        let observer = Arc::downgrade(&database);
+        database.close().await.unwrap();
+        drop(collections);
+        drop(database);
+
+        assert!(
+            observer.upgrade().is_none(),
+            "closed RxDatabase stayed alive: RxCollection holds a strong Arc back to its \
+             database, so database -> collections -> database never drops"
+        );
     }
 
     #[tokio::test]
