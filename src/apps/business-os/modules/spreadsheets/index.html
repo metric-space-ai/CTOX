@@ -20,4 +20,101 @@
       </section>
     </div>
   </div>
+
+  <!-- ===================================================================
+       Shell-V2-Rahmen (Vorbild: modules/knowledge, modules/tickets).
+
+       Die Koepfe der drei Panes sind STATISCHES Markup und leben hier, nicht
+       in index.js. Der Renderer klont die Vorlage und fuellt nur noch Texte,
+       Icons und Zustaende (`data-sheet-text|label|placeholder|icon`). Damit
+       ist die Rahmen-Geometrie im Markup lesbar und der statische Pruefstand
+       sieht dieselbe Struktur wie der Browser.
+
+       Reservierte Zonen (Vertrag §3/§7): die 80x74-Ecke oben links gehoert
+       dem Shell-Icon, die 74x74-Ecke oben rechts der Fenstersteuerung. Die
+       Kopfzeile 1 JEDES Panes ist genau eine --shell-v2-header-row-size hoch;
+       die Suchleiste des Explorers ist Kopfzeile 2 und liegt damit weiterhin
+       neben dem Icon — beide Zeilen ruecken in index.css ein.
+       =================================================================== -->
+  <template data-spreadsheets-head="explorer">
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-sheet-text="explorerKicker|Dateien">Dateien</span>
+          <h2 class="ctox-pane-title" data-sheet-text="spreadsheetsTitle|CTOX Spreadsheets">CTOX Spreadsheets</h2>
+        </div>
+        <div class="ctox-pane-actions">
+          <button class="ctox-pane-icon" type="button" data-spreadsheets-new
+                  data-sheet-label="createWordDocument|Neue Tabelle erstellen" data-sheet-icon="add"></button>
+          <button class="ctox-pane-icon" type="button" data-spreadsheets-import-open
+                  data-sheet-label="importDocument|Tabelle importieren" data-sheet-icon="upload"></button>
+          <button class="ctox-pane-icon" type="button" data-spreadsheets-export
+                  data-sheet-label="exportSelected|Ausgewählte Tabelle exportieren" data-sheet-icon="export"></button>
+        </div>
+      </div>
+    </header>
+    <!-- Kopfzeile 2 des Explorers: genau eine Shell-Kopfzeile hoch, damit
+         Titelzeile + Suchleiste zusammen exakt die 74px des Icons abdecken. -->
+    <div class="ctox-pane-tools spreadsheets-search-bar">
+      <input class="ctox-pane-search" type="search" data-spreadsheets-search
+             data-sheet-placeholder="searchPlaceholder|Tabelle suchen..."
+             data-sheet-label="searchLabel|Tabellen suchen">
+    </div>
+    <div class="ctox-pane-tools spreadsheets-filter-bar">
+      <select class="ctox-pane-filter" data-spreadsheets-sort data-sheet-label="sortLabel|Tabellen sortieren">
+        <option value="updated_desc" data-sheet-text="sortByNewest|Neueste zuerst">Neueste zuerst</option>
+        <option value="updated_asc" data-sheet-text="sortByOldest|Älteste zuerst">Älteste zuerst</option>
+        <option value="title_asc" data-sheet-text="sortByTitle|Titel A-Z">Titel A-Z</option>
+        <option value="status" data-sheet-text="sortByStatus|Status">Status</option>
+      </select>
+      <select class="ctox-pane-filter" data-spreadsheets-status data-sheet-label="statusFilterLabel|Tabellenstatus filtern">
+        <option value="all" data-sheet-text="filterAll|Alle">Alle</option>
+        <option value="Imported">Imported</option>
+        <option value="Draft">Draft</option>
+        <option value="Review">Review</option>
+        <option value="Final">Final</option>
+      </select>
+      <select class="ctox-pane-filter" data-spreadsheets-tag data-sheet-label="tagFilterLabel|Tabellen-Tags filtern"></select>
+    </div>
+  </template>
+
+  <!-- Der Editor-Kopf bleibt auch OHNE Auswahl stehen: Shell V2 haengt das
+       Versionsmenue an `.ctox-pane-header .ctox-pane-title` des Modul-Hosts.
+       Ohne Auswahl entfernt der Renderer nur die Aktionen und den Kicker. -->
+  <template data-spreadsheets-head="editor">
+    <header class="ctox-pane-header ctox-pane-band spreadsheets-editor-header">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-spreadsheets-editor-kicker></span>
+          <h2 class="ctox-pane-title" data-spreadsheets-editor-title
+              data-sheet-text="spreadsheetsTitle|CTOX Spreadsheets">CTOX Spreadsheets</h2>
+        </div>
+        <div class="ctox-pane-actions" data-spreadsheets-editor-actions>
+          <span class="ctox-badge spreadsheets-dirty-badge" data-spreadsheets-dirty-indicator>
+            <i class="indicator-dot"></i>
+            <span data-spreadsheets-dirty-label></span>
+          </span>
+          <button class="ctox-pane-icon" type="button" data-spreadsheets-add-row
+                  data-sheet-label="addRowLabel|Zeile hinzufügen" data-sheet-icon="addRow"></button>
+          <button class="ctox-pane-icon" type="button" data-spreadsheets-add-col
+                  data-sheet-label="addColumnLabel|Spalte hinzufügen" data-sheet-icon="addColumn"></button>
+          <button class="ctox-pane-icon" type="button" data-spreadsheets-toggle-actions aria-pressed="false"
+                  data-sheet-label="toggleRunbooks|Runbooks &amp; Prompt einblenden">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16"></path></svg>
+          </button>
+        </div>
+      </div>
+    </header>
+  </template>
+
+  <template data-spreadsheets-head="runbooks">
+    <header class="ctox-pane-header ctox-pane-band">
+      <div class="ctox-pane-title-row">
+        <div class="ctox-pane-titles">
+          <span class="ctox-pane-kicker" data-sheet-text="runbookKicker|Automatisierung">Automatisierung</span>
+          <h2 class="ctox-pane-title" data-sheet-text="runbook|Runbook">Runbook</h2>
+        </div>
+      </div>
+    </header>
+  </template>
 </section>

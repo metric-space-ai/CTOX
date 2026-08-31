@@ -132,42 +132,75 @@
 /* ---------------------------------------------------------------------------
    Shell V2 window contract (docs/business-os-shell-v2-contract.md).
    `.shell-window-content` gets `inset: 0`, so the app itself must keep the
-   three overlaid shell zones free: the 80px app icon (top left, exactly two
-   header rows tall), the 37px header band, and the 74x74 window controls
-   (top right). Knowledge is the reference; these rules copy its solution.
-   Geometry only — nothing here changes what the panes render.
+   three overlaid shell zones free:
+     - app icon, top left, 80px wide and two header rows (74px) tall,
+     - the header band across the full width, at most two 37px rows,
+     - the 74x74 window control, top right.
+   The measurement is taken on `.ctox-pane-header` itself, so the reservations
+   are the HEAD's own padding — not the padding of a row inside it.
+   References: modules/tickets, modules/knowledge. Geometry only.
    ------------------------------------------------------------------------- */
 
-/* Both pane heads: the band's own padding moves onto the individual header
-   rows so row 1 can be exactly one shell header row tall. */
-.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-header {
+.shell-window[data-shell-contract="v2"] .invoices-module {
+  /* The window control is exactly two header rows wide and high. */
+  --invoices-v2-control-inset: calc(var(--shell-v2-header-row-size, 37px) * 2);
   padding: 0;
 }
 
-.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title-row {
-  box-sizing: border-box;
-  min-height: var(--shell-v2-header-row-size, 37px);
-  height: var(--shell-v2-header-row-size, 37px);
-  padding: 0 14px;
+/* The v2 frame already draws the window edge; pane borders would push the
+   first header row one pixel out of the shell band. */
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane {
+  border: 0;
+  border-radius: 0;
 }
 
-/* The icon covers the rail's first TWO rows (80px = 2 x 37px), so the title
-   row and the filterbar below it are both indented past it. */
-.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-pane-title-row,
-.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-filterbar {
-  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
-}
-
-.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-filterbar {
-  box-sizing: border-box;
-  min-height: var(--shell-v2-header-row-size, 37px);
+/* Both heads start flush at the top; the band's own padding moves onto the
+   individual rows so row 1 is exactly one shell header row tall. */
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-header.ctox-pane-band {
   padding-top: 0;
   padding-bottom: 0;
 }
 
-/* Right-most head reserves the window controls. */
-.shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-header > .ctox-pane-title-row {
-  padding-right: 70px;
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title-row {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+}
+
+/* FIRST head of the top row: keep the 80px icon zone free. The head's own
+   inset already indents the title row, filterbar and tray, so those drop
+   their local horizontal padding. */
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+}
+
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail .ctox-filterbar,
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail .ctox-filter-tray {
+  padding-inline: 0;
+}
+
+/* Second row of the rail head: the filterbar is exactly one shell header row,
+   so title row + filterbar together fill the two-row band (2 x 37px). */
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+  padding-block: 0;
+}
+
+/* LAST head of the top row: keep the 74x74 window control free. */
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-header {
+  padding-right: var(--invoices-v2-control-inset);
+}
+
+/* The centre head is static markup and visible in EVERY state (empty state
+   included). It matches the rail head's two-row height so all heads of the
+   top row measure identically. content-box: two content rows plus the kit's
+   1px band border, exactly like the rail head's natural flow. */
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-header {
+  box-sizing: content-box;
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
 /* The title slot is load-bearing: the shell mounts its version menu on the
@@ -199,7 +232,8 @@
 /* Header controls stay inside the 37px row (the coarse-pointer 44px rule
    below must not inflate the reserved header band). */
 .shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title-row .ctox-pane-icon,
-.shell-window[data-shell-contract="v2"] .invoices-module .ctox-filterbar .ctox-pane-icon {
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-filterbar .ctox-pane-icon,
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-filterbar .ctox-sort-dir {
   width: 30px;
   min-width: 30px;
   height: 30px;
@@ -209,6 +243,14 @@
 .shell-window[data-shell-contract="v2"] .invoices-module .ctox-filterbar .ctox-pane-search {
   min-height: 30px;
   height: 30px;
+}
+
+/* Pane bodies below the static heads take the remaining pane height; the
+   empty state renders on the kit's .ctox-empty step. */
+.shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-body {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
 }
 
 /* Narrow windows: stack the two panes and drop the resizer. 768px is the
@@ -238,14 +280,14 @@
     max-width: none;
   }
 
-  /* Stacked: the rail is now the pane under the window controls, the main
-     pane is no longer. */
-  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-pane-title-row,
-  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header > .ctox-filterbar {
-    padding-right: 70px;
+  /* Stacked: the rail head is now the only head of the top row, so it carries
+     BOTH reservations — icon zone left, window control right. The centre head
+     has moved out of the top row and releases the control inset. */
+  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-rail > .ctox-pane-header {
+    padding-right: var(--invoices-v2-control-inset);
   }
 
-  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-header > .ctox-pane-title-row {
+  .shell-window[data-shell-contract="v2"] .invoices-module .invoices-main > .ctox-pane-header {
     padding-right: 14px;
   }
 }
@@ -274,44 +316,21 @@
   }
 }
 
-/* Shell-v2 frame: invoices gets identity and window controls from the shared
-   shell. Keep the list/editor headers compact and reserve both shell corners. */
+/* Shell-v2 surfaces: identity, frame edge and window controls belong to the
+   shell, so the panes drop their own chrome and take the shell surfaces. */
 .shell-window[data-shell-contract="v2"] .invoices-shell {
   background: var(--shell-v2-surface, var(--bg));
 }
 .shell-window[data-shell-contract="v2"] .invoices-module {
-  padding: 0;
   background: var(--shell-v2-surface, var(--bg));
 }
 .shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane {
-  border: 0;
-  border-radius: 0;
   background: var(--shell-v2-surface-alt, var(--surface));
   box-shadow: none;
 }
-.shell-window[data-shell-contract="v2"] .invoices-rail > .ctox-pane-header,
-.shell-window[data-shell-contract="v2"] .invoices-main > .ctox-pane-header { padding: 0; background: var(--shell-v2-surface-alt, var(--surface)); }
-.shell-window[data-shell-contract="v2"] .invoices-rail > .ctox-pane-header > [data-shell-v2-header-row="1"] {
-  height: var(--shell-v2-header-row-size, 37px);
-  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
+.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-header.ctox-pane-band {
+  background: var(--shell-v2-surface-alt, var(--surface));
 }
-.shell-window[data-shell-contract="v2"] .invoices-main > .ctox-pane-header > [data-shell-v2-header-row="1"] {
-  height: var(--shell-v2-header-row-size, 37px);
-  padding: 0 62px 0 8px;
-}
-.shell-window[data-shell-contract="v2"] .invoices-module [data-shell-v2-header-row="2"] {
-  box-sizing: border-box;
-  min-height: var(--shell-v2-header-row-size, 37px);
-  height: var(--shell-v2-header-row-size, 37px);
-  padding: 0 8px 0 calc(var(--shell-v2-icon-size, 80px) + 8px);
-  overflow-x: auto;
-  overflow-y: hidden;
-  white-space: nowrap;
-}
+/* The rail's kicker duplicates the app identity the shell already paints next
+   to the icon; only the centre head keeps its record kicker. */
 .shell-window[data-shell-contract="v2"] .invoices-rail .ctox-pane-kicker { display: none; }
-.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title-row { height: 100%; }
-.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-title { margin-top: 0; line-height: 1.1; }
-.shell-window[data-shell-contract="v2"] .invoices-module .ctox-pane-icon {
-  width: min(26px, var(--shell-v2-header-row-size, 37px));
-  height: min(26px, var(--shell-v2-header-row-size, 37px));
-}

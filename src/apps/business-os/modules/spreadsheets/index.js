@@ -869,50 +869,63 @@ async function loadSelectedVersion(state) {
   return state.selectedVersion;
 }
 
+/* --------------------------------------------------------------------------
+   Shell-V2-Rahmen: die Pane-Koepfe sind STATISCHES Markup in index.html
+   (Vorbild: modules/knowledge, modules/tickets). Der Renderer klont die
+   Vorlage und fuellt nur noch Texte, Beschriftungen, Icons und Zustaende —
+   die Rahmen-Geometrie steht damit im Markup, nicht in JS-Zeichenketten.
+   -------------------------------------------------------------------------- */
+function sheetLabelParts(raw) {
+  const value = String(raw || '');
+  const separator = value.indexOf('|');
+  return separator === -1 ? [value, value] : [value.slice(0, separator), value.slice(separator + 1)];
+}
+
+function fillPaneHead(state, root) {
+  root.querySelectorAll('[data-sheet-text]').forEach((el) => {
+    const [key, fallback] = sheetLabelParts(el.dataset.sheetText);
+    el.textContent = state.t(key, fallback);
+  });
+  root.querySelectorAll('[data-sheet-placeholder]').forEach((el) => {
+    const [key, fallback] = sheetLabelParts(el.dataset.sheetPlaceholder);
+    el.setAttribute('placeholder', state.t(key, fallback));
+  });
+  root.querySelectorAll('[data-sheet-label]').forEach((el) => {
+    const [key, fallback] = sheetLabelParts(el.dataset.sheetLabel);
+    const label = state.t(key, fallback);
+    el.setAttribute('aria-label', label);
+    if (el.tagName === 'BUTTON') el.setAttribute('title', label);
+  });
+  root.querySelectorAll('[data-sheet-icon]').forEach((el) => {
+    el.insertAdjacentHTML('afterbegin', actionIcon(state, el.dataset.sheetIcon));
+  });
+  return root;
+}
+
+function paneHeadFragment(state, name) {
+  const template = state.ctx.host.querySelector(`template[data-spreadsheets-head="${name}"]`);
+  if (!template) return document.createDocumentFragment();
+  return fillPaneHead(state, template.content.cloneNode(true));
+}
+
 function renderLeft(state) {
   const wrap = document.createElement('div');
   wrap.className = 'spreadsheets-explorer';
   const visible = visibleSpreadsheets(state);
   const selected = selectedRecord(state);
 
-  wrap.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">Dateien</span>
-          <h2 class="ctox-pane-title">${escapeHtml(state.t('spreadsheetsTitle', 'CTOX Spreadsheets'))}</h2>
-        </div>
-        <div class="ctox-pane-actions">
-          <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('createWordDocument', 'Neue Tabelle erstellen'))}" title="${escapeHtml(state.t('createWordDocument', 'Neue Tabelle erstellen'))}" data-spreadsheets-new>${actionIcon(state, 'add')}</button>
-          <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('importDocument', 'Tabelle importieren'))}" title="${escapeHtml(state.t('importDocument', 'Tabelle importieren'))}" data-spreadsheets-import-open>${actionIcon(state, 'upload')}</button>
-          <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('exportSelected', 'Ausgewählte Tabelle exportieren'))}" title="${escapeHtml(state.t('exportSelected', 'Ausgewählte Tabelle exportieren'))}" data-spreadsheets-export ${selected ? '' : 'disabled'}>${actionIcon(state, 'export')}</button>
-        </div>
-      </div>
-    </header>
-    <!-- Shell V2: the pane head is exactly one shell header row tall, so the
-         search and filter strips are siblings below it, not header rows. -->
-    <div class="ctox-pane-tools spreadsheets-search-bar">
-        <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Tabelle suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Tabellen suchen'))}" data-spreadsheets-search value="${escapeHtml(state.searchQuery)}">
-    </div>
-    <div class="ctox-pane-tools spreadsheets-filter-bar">
-        <select class="ctox-pane-filter" aria-label="${escapeHtml(state.t('sortLabel', 'Tabellen sortieren'))}" data-spreadsheets-sort>
-          <option value="updated_desc" ${state.sortBy === 'updated_desc' ? 'selected' : ''}>${escapeHtml(state.t('sortByNewest', 'Neueste zuerst'))}</option>
-          <option value="updated_asc" ${state.sortBy === 'updated_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByOldest', 'Älteste zuerst'))}</option>
-          <option value="title_asc" ${state.sortBy === 'title_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByTitle', 'Titel A-Z'))}</option>
-          <option value="status" ${state.sortBy === 'status' ? 'selected' : ''}>${escapeHtml(state.t('sortByStatus', 'Status'))}</option>
-        </select>
-        <select class="ctox-pane-filter" aria-label="${escapeHtml(state.t('statusFilterLabel', 'Tabellenstatus filtern'))}" data-spreadsheets-status>
-          <option value="all" ${state.statusFilter === 'all' ? 'selected' : ''}>${escapeHtml(state.t('filterAll', 'Alle'))}</option>
-          <option value="Imported" ${state.statusFilter === 'Imported' ? 'selected' : ''}>Imported</option>
-          <option value="Draft" ${state.statusFilter === 'Draft' ? 'selected' : ''}>Draft</option>
-          <option value="Review" ${state.statusFilter === 'Review' ? 'selected' : ''}>Review</option>
-          <option value="Final" ${state.statusFilter === 'Final' ? 'selected' : ''}>Final</option>
-        </select>
-        <select class="ctox-pane-filter" aria-label="${escapeHtml(state.t('tagFilterLabel', 'Tabellen-Tags filtern'))}" data-spreadsheets-tag>
-          ${tagFilterOptions(state)}
-        </select>
-    </div>
-  `;
+  wrap.append(paneHeadFragment(state, 'explorer'));
+
+  const exportButton = wrap.querySelector('[data-spreadsheets-export]');
+  if (exportButton) exportButton.disabled = !selected;
+  const search = wrap.querySelector('[data-spreadsheets-search]');
+  if (search) search.value = state.searchQuery;
+  const sortSelect = wrap.querySelector('[data-spreadsheets-sort]');
+  if (sortSelect) sortSelect.value = state.sortBy;
+  const statusSelect = wrap.querySelector('[data-spreadsheets-status]');
+  if (statusSelect) statusSelect.value = state.statusFilter;
+  const tagSelect = wrap.querySelector('[data-spreadsheets-tag]');
+  if (tagSelect) tagSelect.innerHTML = tagFilterOptions(state);
 
   const list = document.createElement('div');
   list.className = 'ctox-list spreadsheets-list';
@@ -1189,55 +1202,49 @@ async function renderCenter(state) {
     // The pane head stays even without a selection: shell V2 hangs the version
     // menu on `.ctox-pane-header .ctox-pane-title` of the module host, so the
     // empty state must not drop the head or the app loses version history and
-    // source access.
-    shell.innerHTML = `
-      <header class="ctox-pane-header ctox-pane-band spreadsheets-editor-header">
-        <div class="ctox-pane-title-row">
-          <div class="ctox-pane-titles">
-            <h2 class="ctox-pane-title">${escapeHtml(state.t('spreadsheetsTitle', 'CTOX Spreadsheets'))}</h2>
-          </div>
-        </div>
-      </header>
-      <div class="ctox-empty">
-        <strong>${escapeHtml(hasFilters ? state.t('noMatches', 'Keine Treffer') : state.t('noDocumentSelected', 'Keine Tabelle ausgewählt.'))}</strong>
-        <span>${escapeHtml(hasFilters ? state.t('adjustSearchFilter', 'Suche oder Filter anpassen.') : state.t('noDocumentSelectedPrompt', 'Links eine Tabelle importieren oder auswählen.'))}</span>
-      </div>
+    // source access. Only the kicker and the record actions fall away.
+    const emptyHead = paneHeadFragment(state, 'editor');
+    emptyHead.querySelector('[data-spreadsheets-editor-kicker]')?.remove();
+    emptyHead.querySelector('[data-spreadsheets-editor-actions]')?.remove();
+    const empty = document.createElement('div');
+    empty.className = 'ctox-empty';
+    empty.innerHTML = `
+      <strong>${escapeHtml(hasFilters ? state.t('noMatches', 'Keine Treffer') : state.t('noDocumentSelected', 'Keine Tabelle ausgewählt.'))}</strong>
+      <span>${escapeHtml(hasFilters ? state.t('adjustSearchFilter', 'Suche oder Filter anpassen.') : state.t('noDocumentSelectedPrompt', 'Links eine Tabelle importieren oder auswählen.'))}</span>
     `;
+    shell.replaceChildren(emptyHead, empty);
     return;
   }
 
   // Load editor UI frame
-  const isDirtyClass = state.dirty ? 'is-dirty' : '';
   const saveLabel = state.saving ? state.t('saving', 'Speichert...') : (state.dirty ? state.t('unsavedChanges', 'Ungespeicherte Änderungen') : state.t('saved', 'Gespeichert'));
-  const addRowLabel = state.t('addRowLabel', 'Zeile hinzufügen');
-  const addColumnLabel = state.t('addColumnLabel', 'Spalte hinzufügen');
 
-  shell.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band spreadsheets-editor-header">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">${escapeHtml(record.filename)}</span>
-          <h2 class="ctox-pane-title" title="${escapeHtml(record.title)}">${escapeHtml(record.title)}</h2>
-        </div>
-        <div class="ctox-pane-actions">
-          <span class="ctox-badge spreadsheets-dirty-badge ${isDirtyClass} ${state.saving ? 'is-saving' : ''}" data-spreadsheets-dirty-indicator>
-            <i class="indicator-dot"></i>
-            <span>${escapeHtml(saveLabel)}</span>
-          </span>
-          <button class="ctox-pane-icon" type="button" data-spreadsheets-add-row aria-label="${escapeHtml(addRowLabel)}" title="${escapeHtml(addRowLabel)}">${actionIcon(state, 'addRow')}</button>
-          <button class="ctox-pane-icon" type="button" data-spreadsheets-add-col aria-label="${escapeHtml(addColumnLabel)}" title="${escapeHtml(addColumnLabel)}">${actionIcon(state, 'addColumn')}</button>
-          <button class="ctox-pane-icon" type="button" data-spreadsheets-toggle-actions aria-pressed="${state.rightPaneHidden ? 'false' : 'true'}" aria-label="${escapeHtml(state.t('toggleRunbooks', 'Runbooks & Prompt einblenden'))}" title="${escapeHtml(state.t('toggleRunbooks', 'Runbooks & Prompt einblenden'))}">
-            ${rightPaneToggleIconSvg()}
-          </button>
-        </div>
-      </div>
-    </header>
-    <div class="spreadsheets-editor-canvas" data-spreadsheets-canvas>
+  const head = paneHeadFragment(state, 'editor');
+  const kicker = head.querySelector('[data-spreadsheets-editor-kicker]');
+  if (kicker) kicker.textContent = record.filename;
+  const titleEl = head.querySelector('[data-spreadsheets-editor-title]');
+  if (titleEl) {
+    titleEl.textContent = record.title;
+    titleEl.setAttribute('title', record.title);
+  }
+  const badge = head.querySelector('[data-spreadsheets-dirty-indicator]');
+  if (badge) {
+    badge.classList.toggle('is-dirty', state.dirty);
+    badge.classList.toggle('is-saving', state.saving);
+    badge.querySelector('[data-spreadsheets-dirty-label]').textContent = saveLabel;
+  }
+  head.querySelector('[data-spreadsheets-toggle-actions]')
+    ?.setAttribute('aria-pressed', state.rightPaneHidden ? 'false' : 'true');
+
+  const editorCanvas = document.createElement('div');
+  editorCanvas.className = 'spreadsheets-editor-canvas';
+  editorCanvas.setAttribute('data-spreadsheets-canvas', '');
+  editorCanvas.innerHTML = `
       <div class="ctox-empty">
         <strong>${escapeHtml(state.t('loadingEditor', 'Editor wird geladen...'))}</strong>
       </div>
-    </div>
   `;
+  shell.replaceChildren(head, editorCanvas);
 
   // Bind center actions
   shell.querySelector('[data-spreadsheets-add-row]').addEventListener('click', () => {
@@ -1379,15 +1386,8 @@ function renderRight(state) {
     `;
   }
 
-  wrap.innerHTML = `
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">Automatisierung</span>
-          <h2 class="ctox-pane-title">${escapeHtml(state.t('runbook', 'Runbook'))}</h2>
-        </div>
-      </div>
-    </header>
+  const body = document.createElement('div');
+  body.innerHTML = `
     <div class="ctox-list spreadsheets-runbook-list" data-spreadsheets-runbooks-list>
       ${listHtml}
     </div>
@@ -1398,6 +1398,7 @@ function renderRight(state) {
       </button>
     </div>
   `;
+  wrap.append(paneHeadFragment(state, 'runbooks'), ...body.childNodes);
 
   // Bind right runbook controls
   wrap.addEventListener('pointerdown', (event) => {
@@ -1499,12 +1500,6 @@ function syncRightPaneToggleUi(state) {
     : state.t('toggleRunbooks', 'Runbooks & Prompt einblenden');
   toggle.setAttribute('aria-label', label);
   toggle.title = label;
-}
-
-function rightPaneToggleIconSvg() {
-  // Mirrors the threads/invoices sidebar-toggle glyph: rectangle + divider,
-  // matching the kit's 1.8-stroke action-icon stroke style.
-  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"></rect><path d="M15 4v16"></path></svg>';
 }
 
 async function dispatchSpreadsheetRunbook(state, input) {

@@ -428,7 +428,18 @@ export async function mount(ctx) {
     renderDependencyBlocker();
     return () => {};
   }
-  await refresh();
+  // Frame FIRST, data second. A denied or unavailable collection is a data
+  // condition, not a mount failure: the app must keep its own Shell-V2 frame
+  // and report the problem in its error strip instead of throwing out of
+  // mount() and letting the shell replace the window with a generic recovery
+  // card (which has no pane heads at all).
+  render();
+  try {
+    await refresh();
+  } catch (error) {
+    console.error('invoices error:', error);
+    STATE.lastError = error?.message || String(error);
+  }
   render();
   STATE.cleanup.push(wireRealtime());
   STATE.cleanup.push(wireInvoiceReadiness());
@@ -477,12 +488,29 @@ function isReady() {
 
 function resolveCollection(name) {
   if (!STATE.ctx?.db) return null;
-  return STATE.ctx.db.collection?.(name) || null;
+  // The shell-delivered facade throws BusinessOsPermissionError for a
+  // collection this instance has not granted the app. That is a data
+  // condition, not a crash: callers treat a missing handle as "no rows" and
+  // the error strip explains it, so the frame stays on screen.
+  try {
+    return STATE.ctx.db.collection?.(name) || null;
+  } catch (error) {
+    if (!STATE.lastError) STATE.lastError = error?.message || String(error);
+    return null;
+  }
+}
+
+function subscribeCollection(name) {
+  try {
+    return resolveCollection(name)?.$?.subscribe?.(() => scheduleRefresh()) || null;
+  } catch {
+    return null;
+  }
 }
 
 function wireRealtime() {
   const subscriptions = WATCHED_COLLECTIONS
-    .map((name) => resolveCollection(name)?.$?.subscribe?.(() => scheduleRefresh()))
+    .map((name) => subscribeCollection(name))
     .filter(Boolean);
   return () => subscriptions.forEach((sub) => {
     try { sub.unsubscribe?.(); } catch {}
@@ -701,8 +729,95 @@ function buildLeftGrammar(leftPane) {
   return { listEl, countEls, footerEl };
 }
 
+// Adopt the STATIC Shell-V2 frame from index.html (reference: modules/tickets,
+// modules/knowledge). Both pane heads are markup, so they exist in every state —
+// empty, loading, selected, and even when the data plane denies a read. The JS
+// only fills texts, options, counters and actions. Returns null when the host
+// carries no static frame (the header-less node test shims), and the
+// programmatic builders below stay the fallback for exactly that case.
+function adoptFrame(root) {
+  if (!root?.querySelector) return null;
+  const workspace = root.querySelector('[data-invoices-workspace]');
+  const leftPane = root.querySelector('[data-invoices-rail]');
+  const mainPane = root.querySelector('[data-invoices-main]');
+  const listEl = root.querySelector('[data-invoices-list]');
+  if (!workspace || !leftPane || !mainPane || !listEl) return null;
+
+  // Static markup ships German defaults; t() re-labels it for the session locale.
+  for (const node of root.querySelectorAll('[data-copy]')) {
+    node.textContent = t(node.dataset.copy);
+  }
+  for (const node of root.querySelectorAll('[data-copy-label]')) {
+    const text = t(node.dataset.copyLabel);
+    node.setAttribute('aria-label', text);
+    if (node.title !== undefined && node.tagName === 'BUTTON') node.title = text;
+  }
+  for (const node of root.querySelectorAll('[data-copy-placeholder]')) {
+    node.setAttribute('placeholder', t(node.dataset.copyPlaceholder));
+    node.setAttribute('aria-label', t(node.dataset.copyPlaceholder));
+  }
+
+  // Option list and counted band come from the module constants so markup and
+  // filter logic cannot drift apart.
+  const typeFilter = root.querySelector('[data-invoices-type-filter]');
+  if (typeFilter && !typeFilter.options?.length) {
+    const allOption = createEl('option');
+    allOption.value = 'all';
+    allOption.textContent = t('allTypes');
+    typeFilter.appendChild(allOption);
+    for (const type of INVOICE_TYPES) {
+      const opt = createEl('option');
+      opt.value = type;
+      opt.textContent = typeLabel(type);
+      typeFilter.appendChild(opt);
+    }
+  }
+
+  const countEls = {};
+  const tabs = root.querySelector('[data-invoices-bands] .ctox-pane-tabs');
+  if (tabs) {
+    tabs.replaceChildren();
+    for (const band of BAND_ORDER) {
+      const tab = createEl('button', 'ctox-pane-tab' + (band === STATE.band ? ' is-active' : ''));
+      tab.type = 'button';
+      tab.setAttribute('role', 'tab');
+      tab.dataset.pgBand = band;
+      tab.setAttribute('aria-selected', band === STATE.band ? 'true' : 'false');
+      const label = createEl('span');
+      label.textContent = bandLabel(band);
+      const count = createEl('span', 'view-count');
+      count.dataset.pgCount = band;
+      add(tab, label, count);
+      tabs.appendChild(tab);
+      countEls[band] = count;
+    }
+  }
+
+  return {
+    workspace,
+    leftPane,
+    mainPane,
+    banner: root.querySelector('[data-invoices-banner]'),
+    listEl,
+    countEls,
+    footerEl: root.querySelector('[data-pg-footer]'),
+    mainKicker: root.querySelector('[data-invoices-main-kicker]'),
+    mainTitle: root.querySelector('[data-invoices-main-title]'),
+    mainActions: root.querySelector('[data-invoices-main-actions]'),
+    mainBody: root.querySelector('[data-invoices-main-body]'),
+    staticHead: true,
+  };
+}
+
 function ensureFrame(root) {
   if (STATE.frame) return STATE.frame;
+
+  const adopted = adoptFrame(root);
+  if (adopted) {
+    STATE.frame = adopted;
+    wireFrameEvents();
+    return STATE.frame;
+  }
 
   const workspace = createEl('main', 'ctox-workspace ctox-workspace--two-pane invoices-module');
   workspace.dataset.resizeFrame = '';
@@ -894,7 +1009,8 @@ function onGrammarChange(event) {
 // ---------------------------------------------------------------------------
 
 function renderMain() {
-  const pane = STATE.frame?.mainPane;
+  const f = STATE.frame;
+  const pane = f?.mainPane;
   if (!pane) return;
   const inv = selectedInvoice();
   const reveal = shouldRevealDetail(Boolean(inv), STATE.userCollapsed);
@@ -913,6 +1029,33 @@ function renderMain() {
   const title = inv && reveal
     ? `${inv.invoice_number || t('draft')} · ${partyName(inv.party_id)}`
     : t('invoice');
+
+  // Static head (index.html): only texts, actions and the body are refreshed —
+  // the head itself is never rebuilt, so its Shell-V2 geometry survives every
+  // state including a failed data read.
+  if (f.staticHead) {
+    if (f.mainKicker) f.mainKicker.textContent = kicker;
+    if (f.mainTitle) f.mainTitle.textContent = title;
+    if (f.mainActions) f.mainActions.replaceChildren(...actions.childNodes);
+    const body = f.mainBody;
+    if (body) {
+      if (!inv || !reveal) {
+        body.className = 'ctox-pane-body';
+        const empty = createEl('div', 'ctox-empty');
+        empty.textContent = t('emptyHint');
+        body.replaceChildren(empty);
+        delete pane.dataset.contextRecordId;
+        delete pane.dataset.contextLabel;
+      } else {
+        body.className = 'ctox-pane-scroll invoices-pane-scroll';
+        body.replaceChildren(inv.state === 'draft' ? renderEditor(inv) : renderDetail(inv));
+        pane.dataset.contextRecordId = inv.id;
+        pane.dataset.contextLabel = inv.invoice_number || inv.id;
+      }
+    }
+    return;
+  }
+
   const header = createEl('header', 'ctox-pane-header ctox-pane-band');
   const titleRow = buildTitleRow(kicker, title, actions, 'h1');
   titleRow.dataset.shellV2HeaderRow = '1';

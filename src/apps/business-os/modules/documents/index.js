@@ -118,15 +118,61 @@ const SYSTEMATIC_REPORT_RUNBOOKS = [
   },
 ];
 
+// Shell V2: the pane heads are static markup in index.html (reference:
+// modules/tickets, modules/knowledge). Everything language-dependent in that
+// markup is written here once, right after mount() injects the file — the head
+// itself is never rebuilt afterwards.
 function applyStaticLabels(host, t) {
-  const loadingTitle = host.querySelector('.module-loading-copy strong');
-  if (loadingTitle) {
-    loadingTitle.textContent = t('documentsTitle', 'Dokumente');
+  for (const placeholder of host.querySelectorAll('[data-documents-list-placeholder], .documents-editor-shell > .ctox-empty')) {
+    const title = placeholder.querySelector('strong');
+    if (title) title.textContent = t('documentsTitle', 'Dokumente');
+    const copy = placeholder.querySelector('span');
+    if (copy) copy.textContent = t('workspaceLoading', 'Workspace wird geladen.');
   }
-  const loadingText = host.querySelector('.module-loading-copy span');
-  if (loadingText) {
-    loadingText.textContent = t('workspaceLoading', 'Workspace wird geladen.');
+  const title = host.querySelector('[data-documents-title]');
+  if (title) title.textContent = t('documentsTitle', 'Dokumente');
+
+  const label = (selector, text) => {
+    const element = host.querySelector(selector);
+    if (!element) return;
+    element.setAttribute('aria-label', text);
+    element.setAttribute('title', text);
+  };
+  label('[data-documents-new-markdown]', t('createWordDocument', 'Word-Dokument erstellen'));
+  label('[data-documents-import-open]', t('importDocument', 'Dokument importieren'));
+  label('[data-documents-export]', t('exportSelected', 'Ausgewähltes Dokument exportieren'));
+  label('[data-documents-filter-toggle]', t('filters', 'Filter'));
+
+  const search = host.querySelector('[data-documents-search]');
+  if (search) {
+    search.placeholder = t('searchPlaceholder', 'Dokument suchen...');
+    search.setAttribute('aria-label', t('searchLabel', 'Dokumente suchen'));
   }
+  const ariaOnly = [
+    ['[data-documents-sort]', t('sortLabel', 'Dokumente sortieren')],
+    ['[data-documents-type]', t('typeFilterLabel', 'Dokumenttyp filtern')],
+    ['[data-documents-status]', t('statusFilterLabel', 'Dokumentstatus filtern')],
+    ['[data-documents-app]', t('appFilterLabel', 'Ersteller-App filtern')],
+    ['[data-documents-source]', t('sourceFilterLabel', 'Quelle filtern')],
+    ['[data-documents-tag]', t('tagFilterLabel', 'Dokument-Tags filtern')],
+    ['[data-documents-active-filters]', t('activeFilters', 'Aktive Filter')],
+  ];
+  for (const [selector, text] of ariaOnly) host.querySelector(selector)?.setAttribute('aria-label', text);
+
+  const sortLabels = [
+    ['updated_desc', t('sortByNewest', 'Zuletzt geändert')],
+    ['updated_asc', t('sortByOldest', 'Älteste zuerst')],
+    ['title_asc', t('sortByTitle', 'Titel A-Z')],
+    ['creator_app', t('sortByCreatorApp', 'Ersteller-App')],
+    ['status', t('sortByStatus', 'Status')],
+  ];
+  const sort = host.querySelector('[data-documents-sort]');
+  for (const [value, text] of sortLabels) {
+    const option = sort?.querySelector(`option[value="${value}"]`);
+    if (option) option.textContent = text;
+  }
+  const reset = host.querySelector('.documents-filter-panel [data-documents-clear-filters]');
+  if (reset) reset.textContent = t('clearFilters', 'Filter zurücksetzen');
 }
 
 export async function mount(ctx) {
@@ -430,7 +476,10 @@ function initDocumentsContextMenu(state) {
   const menu = document.createElement('div');
   menu.className = 'ctox-context-menu documents-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  // Nothing the app draws may leave the app window: the menu is positioned
+  // inside the module root, never on document.body.
+  const root = state.ctx.host.querySelector('[data-documents-module]') || state.ctx.host;
+  root.append(menu);
   state.contextMenu = menu;
 
   const handleContextMenu = (event) => {
@@ -515,11 +564,14 @@ function renderDocumentsContextMenu(state, context, x, y) {
   state.contextMenu.hidden = false;
   state.contextMenu.style.left = '0px';
   state.contextMenu.style.top = '0px';
+  // Positioned inside the module root, so the click point has to be converted
+  // from viewport coordinates into that root's own box and clamped to it.
   const rect = state.contextMenu.getBoundingClientRect();
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  state.contextMenu.style.left = `${clampNumber(x, 8, maxLeft)}px`;
-  state.contextMenu.style.top = `${clampNumber(y, 8, maxTop)}px`;
+  const rootRect = state.contextMenu.parentElement.getBoundingClientRect();
+  const maxLeft = Math.max(8, rootRect.width - rect.width - 8);
+  const maxTop = Math.max(8, rootRect.height - rect.height - 8);
+  state.contextMenu.style.left = `${clampNumber(x - rootRect.left, 8, maxLeft)}px`;
+  state.contextMenu.style.top = `${clampNumber(y - rootRect.top, 8, maxTop)}px`;
 
   const form = state.contextMenu.querySelector('[data-documents-context-chat-form]');
   const textarea = state.contextMenu.querySelector('[data-documents-context-message]');
@@ -1181,117 +1233,113 @@ function applyDocumentListSelection(state) {
   }
 }
 
+// Shell V2: the explorer head is static markup in index.html. This only fills
+// it — icons, data-derived option lists, filter state and the list body. It no
+// longer builds a head, so the head geometry is decidable from index.html and
+// the search input keeps focus and caret across every data tick.
 function renderLeft(state) {
-  const slot = state.ctx.host.querySelector('[data-documents-explorer-slot]');
-  if (!slot) return;
+  const explorer = state.ctx.host.querySelector('[data-documents-explorer]');
+  if (!explorer) return;
   const visible = visibleDocuments(state);
   const activeFilterCount = documentFilterCount(state);
-  const existing = slot.querySelector('.documents-explorer');
-  const headerSignature = JSON.stringify({
-    // searchQuery is live on the mounted input — never part of shell identity,
-    // or a data tick while typing rebuilds the explorer and steals focus.
-    sortBy: state.sortBy,
-    type: state.typeFilter,
-    status: state.statusFilter,
-    app: state.appFilter,
-    source: state.sourceFilter,
-    tag: state.tagFilter,
-    filtersOpen: Boolean(state.filtersOpen),
-    activeFilterCount,
-    lang: state.lang,
-    canExport: canExportDocument(state),
-  });
 
-  // Fast path: explorer shell already mounted and only list data/selection moved.
-  // Rebuilding the header would recreate the search input and steal focus while
-  // typing; rebuilding the list would clamp scrollTop to 0.
-  if (existing && existing.dataset.headerSig === headerSignature) {
-    const search = existing.querySelector('[data-documents-search]');
-    if (search && document.activeElement !== search && search.value !== (state.searchQuery || '')) {
-      search.value = state.searchQuery || '';
-    }
-    const exportBtn = existing.querySelector('[data-documents-export]');
-    if (exportBtn) {
-      const canExport = canExportDocument(state);
-      exportBtn.disabled = !canExport;
-      exportBtn.setAttribute('aria-disabled', String(!canExport));
-    }
-    const list = existing.querySelector('[data-documents-list]');
-    if (list) {
-      populateDocumentList(state, list, visible);
-      applyDocumentListSelection(state);
-    }
-    renderPaneVisibility(state);
-    return;
+  if (explorer.dataset.documentsHeadBound !== 'true') {
+    explorer.dataset.documentsHeadBound = 'true';
+    // The static SVGs in index.html are the offline fallback; the shell icon
+    // set (ctx.getActionIcon) wins as soon as the module is mounted.
+    replaceHeadIcon(state, explorer, '[data-documents-new-markdown]', 'add');
+    replaceHeadIcon(state, explorer, '[data-documents-import-open]', 'upload');
+    replaceHeadIcon(state, explorer, '[data-documents-export]', 'export');
+    replaceHeadIcon(state, explorer, '[data-documents-filter-toggle]', 'filter');
+    bindLeftControls(state, explorer);
   }
 
-  const wrap = document.createElement('div');
-  wrap.className = 'documents-explorer';
-  wrap.dataset.headerSig = headerSignature;
-  wrap.innerHTML = `
+  const exportButton = explorer.querySelector('[data-documents-export]');
+  if (exportButton) {
+    const canExport = canExportDocument(state);
+    exportButton.disabled = !canExport;
+    exportButton.setAttribute('aria-disabled', String(!canExport));
+  }
 
-    <header class="ctox-pane-header ctox-pane-band">
-      <div class="ctox-pane-title-row">
-        <div class="ctox-pane-titles">
-          <span class="ctox-pane-kicker">Dateien</span>
-          <h2 class="ctox-pane-title">${escapeHtml(state.t('documentsTitle', 'Dokumente'))}</h2>
-        </div>
-        <div class="ctox-pane-actions">
-          <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('createWordDocument', 'Word-Dokument erstellen'))}" title="${escapeHtml(state.t('createWordDocument', 'Word-Dokument erstellen'))}" data-documents-new-markdown>${actionIcon(state, 'add')}</button>
-          <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('importDocument', 'Dokument importieren'))}" title="${escapeHtml(state.t('importDocument', 'Dokument importieren'))}" data-documents-import-open>${actionIcon(state, 'upload')}</button>
-          <button class="ctox-pane-icon" type="button" aria-label="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" title="${escapeHtml(state.t('exportSelected', 'Ausgewähltes Dokument exportieren'))}" data-documents-export ${canExportDocument(state) ? '' : 'disabled aria-disabled="true"'}>${actionIcon(state, 'export')}</button>
-        </div>
-      </div>
-    </header>
-    <!-- Shell V2: the pane head is exactly one 37px header row, so the filter
-         tools form their own band below it (see Knowledge as the reference). -->
-    <div class="ctox-pane-tools documents-filter-bar">
-        <input class="ctox-pane-search" type="search" placeholder="${escapeHtml(state.t('searchPlaceholder', 'Dokument suchen...'))}" aria-label="${escapeHtml(state.t('searchLabel', 'Dokumente suchen'))}" data-documents-search value="${escapeHtml(state.searchQuery)}">
-        <div class="documents-filter-summary">
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sortLabel', 'Dokumente sortieren'))}" data-documents-sort>
-            <option value="updated_desc" ${state.sortBy === 'updated_desc' ? 'selected' : ''}>${escapeHtml(state.t('sortByNewest', 'Zuletzt geändert'))}</option>
-            <option value="updated_asc" ${state.sortBy === 'updated_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByOldest', 'Älteste zuerst'))}</option>
-            <option value="title_asc" ${state.sortBy === 'title_asc' ? 'selected' : ''}>${escapeHtml(state.t('sortByTitle', 'Titel A-Z'))}</option>
-            <option value="creator_app" ${state.sortBy === 'creator_app' ? 'selected' : ''}>${escapeHtml(state.t('sortByCreatorApp', 'Ersteller-App'))}</option>
-            <option value="status" ${state.sortBy === 'status' ? 'selected' : ''}>${escapeHtml(state.t('sortByStatus', 'Status'))}</option>
-          </select>
-          <button class="ctox-button documents-filter-toggle" type="button" data-documents-filter-toggle aria-expanded="${String(state.filtersOpen)}">
-            ${actionIcon(state, 'filter')}
-            <span>${escapeHtml(state.t('filters', 'Filter'))}</span>
-            ${activeFilterCount ? `<strong>${activeFilterCount}</strong>` : ''}
-          </button>
-        </div>
-        <div class="documents-filter-panel" data-documents-filter-panel ${state.filtersOpen ? '' : 'hidden'}>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('typeFilterLabel', 'Dokumenttyp filtern'))}" data-documents-type>
-            ${documentTypeFilterOptions(state)}
-          </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('statusFilterLabel', 'Dokumentstatus filtern'))}" data-documents-status>
-            ${documentStatusFilterOptions(state)}
-          </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('appFilterLabel', 'Ersteller-App filtern'))}" data-documents-app>
-            ${documentAppFilterOptions(state)}
-          </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('sourceFilterLabel', 'Quelle filtern'))}" data-documents-source>
-            ${documentSourceFilterOptions(state)}
-          </select>
-          <select class="ctox-pane-filter documents-filter-control" aria-label="${escapeHtml(state.t('tagFilterLabel', 'Dokument-Tags filtern'))}" data-documents-tag>
-            ${tagFilterOptions(state)}
-          </select>
-          <button class="ctox-button documents-filter-reset" type="button" data-documents-clear-filters ${activeFilterCount ? '' : 'disabled aria-disabled="true"'}>
-            ${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}
-          </button>
-        </div>
-        ${renderActiveDocumentFilters(state)}
-    </div>
-  `;
-  const list = document.createElement('div');
-  list.className = 'documents-list';
-  list.dataset.documentsList = 'true';
-  populateDocumentList(state, list, visible);
-  wrap.append(list);
-  bindLeftControls(state, wrap);
-  slot.replaceChildren(wrap);
+  const sort = explorer.querySelector('[data-documents-sort]');
+  if (sort) sort.value = state.sortBy || 'updated_desc';
+  const optionLists = [
+    ['[data-documents-type]', documentTypeFilterOptions],
+    ['[data-documents-status]', documentStatusFilterOptions],
+    ['[data-documents-app]', documentAppFilterOptions],
+    ['[data-documents-source]', documentSourceFilterOptions],
+    ['[data-documents-tag]', tagFilterOptions],
+  ];
+  for (const [selector, build] of optionLists) {
+    const select = explorer.querySelector(selector);
+    if (!select) continue;
+    const markup = build(state);
+    if (select.dataset.ctoxOptionSig === markup) continue;
+    select.dataset.ctoxOptionSig = markup;
+    select.innerHTML = markup;
+  }
+
+  const filterToggle = explorer.querySelector('[data-documents-filter-toggle]');
+  filterToggle?.setAttribute('aria-expanded', String(Boolean(state.filtersOpen)));
+  filterToggle?.classList.toggle('is-active', activeFilterCount > 0);
+  const filterCount = explorer.querySelector('[data-documents-filter-count]');
+  if (filterCount) {
+    filterCount.textContent = activeFilterCount ? String(activeFilterCount) : '';
+    filterCount.hidden = !activeFilterCount;
+  }
+  const filterPanel = explorer.querySelector('[data-documents-filter-panel]');
+  if (filterPanel) filterPanel.hidden = !state.filtersOpen;
+  const filterReset = explorer.querySelector('.documents-filter-panel [data-documents-clear-filters]');
+  if (filterReset) {
+    filterReset.disabled = !activeFilterCount;
+    filterReset.setAttribute('aria-disabled', String(!activeFilterCount));
+  }
+
+  const activeFilters = explorer.querySelector('[data-documents-active-filters]');
+  if (activeFilters) {
+    const markup = renderActiveDocumentFilters(state);
+    if (activeFilters.dataset.ctoxRenderSig !== markup) {
+      activeFilters.dataset.ctoxRenderSig = markup;
+      activeFilters.innerHTML = markup;
+      activeFilters.hidden = !markup;
+      activeFilters.querySelector('[data-documents-clear-filters]')
+        ?.addEventListener('click', () => clearDocumentFilters(state));
+    }
+  }
+
+  const search = explorer.querySelector('[data-documents-search]');
+  if (search && document.activeElement !== search && search.value !== (state.searchQuery || '')) {
+    search.value = state.searchQuery || '';
+  }
+
+  const list = explorer.querySelector('[data-documents-list]');
+  if (list) {
+    populateDocumentList(state, list, visible);
+    applyDocumentListSelection(state);
+  }
   renderPaneVisibility(state);
+}
+
+// Swaps the static fallback glyph of a head button for the shell icon while
+// leaving the rest of the button (e.g. the filter count badge) untouched.
+function replaceHeadIcon(state, scope, selector, name) {
+  const svg = scope.querySelector(`${selector} svg`);
+  if (!svg) return;
+  const template = document.createElement('template');
+  template.innerHTML = actionIcon(state, name).trim();
+  const replacement = template.content.firstElementChild;
+  if (replacement) svg.replaceWith(replacement);
+}
+
+function clearDocumentFilters(state, { resetSort = false } = {}) {
+  state.searchQuery = '';
+  state.typeFilter = 'all';
+  state.statusFilter = 'all';
+  state.appFilter = 'all';
+  state.sourceFilter = 'all';
+  state.tagFilter = 'all';
+  if (resetSort) state.sortBy = 'updated_desc';
+  renderLeft(state);
 }
 
 function populateDocumentList(state, list, records = visibleDocuments(state)) {
@@ -1345,34 +1393,29 @@ function populateDocumentList(state, list, records = visibleDocuments(state)) {
     }
     if (!records.length) {
       const empty = document.createElement('div');
-      empty.className = 'documents-empty';
+      // Shell V2 §7: empty states sit on the shared .ctox-empty step and carry
+      // exactly one filled primary action.
+      empty.className = 'ctox-empty documents-empty';
       empty.innerHTML = state.documents.length
         ? `
         <strong>${escapeHtml(state.t('noMatches', 'Keine Treffer'))}</strong>
         <span>${escapeHtml(state.t('adjustSearchFilter', 'Suche oder Filter anpassen.'))}</span>
         <div class="documents-empty-actions">
-          <button class="ctox-button" type="button" data-documents-clear-filters>${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}</button>
+          <button class="ctox-button is-primary" type="button" data-documents-clear-filters>${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}</button>
         </div>
       `
         : `
         <strong>${escapeHtml(state.t('noDocuments', 'Keine Dokumente'))}</strong>
         <span>${escapeHtml(state.t('importPrompt', 'DOCX oder Markdown importieren oder ein neues Word-Dokument anlegen.'))}</span>
         <div class="documents-empty-actions">
+          <button class="ctox-button is-primary" type="button" data-documents-empty-new>${actionIcon(state, 'add')} ${escapeHtml(state.t('createWordDocument', 'Word-Dokument erstellen'))}</button>
           <button class="ctox-button" type="button" data-documents-empty-import>${actionIcon(state, 'upload')} ${escapeHtml(state.t('importDocument', 'Dokument importieren'))}</button>
-          <button class="ctox-button" type="button" data-documents-empty-new>${actionIcon(state, 'add')} ${escapeHtml(state.t('createWordDocument', 'Word-Dokument erstellen'))}</button>
         </div>
       `;
       empty.querySelector('[data-documents-empty-import]')?.addEventListener('click', () => openImportDrawer(state));
       empty.querySelector('[data-documents-empty-new]')?.addEventListener('click', () => openNewDocumentDrawer(state));
       empty.querySelector('[data-documents-clear-filters]')?.addEventListener('click', () => {
-        state.searchQuery = '';
-        state.typeFilter = 'all';
-        state.statusFilter = 'all';
-        state.appFilter = 'all';
-        state.sourceFilter = 'all';
-        state.tagFilter = 'all';
-        state.sortBy = 'updated_desc';
-        renderLeft(state);
+        clearDocumentFilters(state, { resetSort: true });
       });
       list.append(empty);
     }
@@ -1512,7 +1555,7 @@ async function switchSelectedDocument(state, documentId, options = {}, lifecycle
   bindDocumentBlobByteCache(state, documentId);
   renderSelection(state);
   const host = state.ctx.host.querySelector('[data-documents-editor]');
-  if (host) host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocument', 'Lade Dokument'))}</strong><span>${escapeHtml(state.t('documentSwitchRunning', 'Dokumentwechsel läuft.'))}</span></div>`;
+  if (host) host.innerHTML = `<div class="ctox-empty documents-loading"><strong>${escapeHtml(state.t('loadingDocument', 'Lade Dokument'))}</strong><span>${escapeHtml(state.t('documentSwitchRunning', 'Dokumentwechsel läuft.'))}</span></div>`;
   try {
     await loadVersion(state);
   } catch (error) {
@@ -1568,16 +1611,8 @@ function bindLeftControls(state, wrap) {
     state.tagFilter = event.currentTarget.value || 'all';
     renderLeft(state);
   });
-  wrap.querySelectorAll('[data-documents-clear-filters]').forEach((button) => {
-    button.addEventListener('click', () => {
-      state.searchQuery = '';
-      state.typeFilter = 'all';
-      state.statusFilter = 'all';
-      state.appFilter = 'all';
-      state.sourceFilter = 'all';
-      state.tagFilter = 'all';
-      renderLeft(state);
-    });
+  wrap.querySelectorAll('.documents-filter-panel [data-documents-clear-filters]').forEach((button) => {
+    button.addEventListener('click', () => clearDocumentFilters(state));
   });
 }
 
@@ -2617,10 +2652,10 @@ function renderActiveDocumentFilters(state) {
   }
   if (state.tagFilter !== 'all') labels.push(state.tagFilter === 'untagged' ? state.t('untagged', 'Ohne Tags') : state.tagFilter);
   if (!labels.length) return '';
-  return `<div class="documents-active-filters" aria-label="${escapeHtml(state.t('activeFilters', 'Aktive Filter'))}">
-    ${labels.map((label) => `<span>${escapeHtml(label)}</span>`).join('')}
-    <button type="button" data-documents-clear-filters aria-label="${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}" title="${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}">${actionIcon(state, 'close')}</button>
-  </div>`;
+  // Inner markup only — the container is static in index.html so it stays part
+  // of the pane head instead of being rebuilt with it.
+  return `${labels.map((label) => `<span>${escapeHtml(label)}</span>`).join('')}
+    <button type="button" data-documents-clear-filters aria-label="${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}" title="${escapeHtml(state.t('clearFilters', 'Filter zurücksetzen'))}">${actionIcon(state, 'close')}</button>`;
 }
 
 function normalizeDocumentStatus(value, fallback = 'Draft') {
@@ -3223,11 +3258,11 @@ async function renderCenter(state) {
   if (!record) {
     state.mailMergeNavigation = null;
     renderDocumentStrip(state);
-    host.innerHTML = `<div class="documents-empty"><strong>${escapeHtml(state.t('noDocumentSelected', 'Kein Dokument ausgewählt.'))}</strong><span>${escapeHtml(state.t('noDocumentSelectedPrompt', 'Links ein DOCX importieren oder auswählen.'))}</span></div>`;
+    host.innerHTML = `<div class="ctox-empty documents-empty"><strong>${escapeHtml(state.t('noDocumentSelected', 'Kein Dokument ausgewählt.'))}</strong><span>${escapeHtml(state.t('noDocumentSelectedPrompt', 'Links ein DOCX importieren oder auswählen.'))}</span></div>`;
     return;
   }
   if (!version) {
-    host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocument', 'Lade Dokument'))}</strong><span>${escapeHtml(state.t('versionLoading', 'Version wird gelesen.'))}</span></div>`;
+    host.innerHTML = `<div class="ctox-empty documents-loading"><strong>${escapeHtml(state.t('loadingDocument', 'Lade Dokument'))}</strong><span>${escapeHtml(state.t('versionLoading', 'Version wird gelesen.'))}</span></div>`;
     loadSelectedVersion(state)
       .then((loadedVersion) => {
         if (state.renderSerial !== renderSerial) return;
@@ -3250,13 +3285,13 @@ async function renderCenter(state) {
   }
   if (isDocxDocumentRecord(record)) {
     const useCtoxDocuments = state.officeEngine === 'ctox_documents';
-    host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocxEditor', 'Lade Word-Editor'))}</strong><span>${escapeHtml(useCtoxDocuments ? state.t('documentEditorInitializing', 'Dokumenteditor wird initialisiert.') : state.t('superdocInitializing', 'SuperDoc wird initialisiert.'))}</span></div>`;
+    host.innerHTML = `<div class="ctox-empty documents-loading"><strong>${escapeHtml(state.t('loadingDocxEditor', 'Lade Word-Editor'))}</strong><span>${escapeHtml(useCtoxDocuments ? state.t('documentEditorInitializing', 'Dokumenteditor wird initialisiert.') : state.t('superdocInitializing', 'SuperDoc wird initialisiert.'))}</span></div>`;
     const mountEditor = useCtoxDocuments ? mountCtoxDocuments : mountSuperDocDocument;
     const mountPromise = mountWordEditor(state, host, record, version, renderSerial, renderKey, mountEditor, useCtoxDocuments);
     return trackEditorMount(state, renderKey, mountPromise);
   }
 
-  host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingEditor', 'Lade Editor'))}</strong><span>${escapeHtml(state.t('documentPreparing', 'Dokument wird vorbereitet.'))}</span></div>`;
+  host.innerHTML = `<div class="ctox-empty documents-loading"><strong>${escapeHtml(state.t('loadingEditor', 'Lade Editor'))}</strong><span>${escapeHtml(state.t('documentPreparing', 'Dokument wird vorbereitet.'))}</span></div>`;
   ensureDocumentFormatModule(state).then((formatModule) => {
     if (state.renderSerial !== renderSerial) return;
     mountMarkdownDocument(state, host, version, formatModule, renderKey);
@@ -3302,7 +3337,7 @@ async function mountWordEditor(state, host, record, version, renderSerial, rende
       isCurrent: () => isCurrentEditorRender(state, renderSerial),
       shouldRetry: (error) => useCtoxDocuments && isTransientOfficeStartupError(error),
       onRetry: async () => {
-        host.innerHTML = `<div class="documents-loading"><strong>${escapeHtml(state.t('loadingDocxEditor', 'Lade DOCX Editor'))}</strong><span>${escapeHtml(state.t('officeEditorRetry', 'Verbindung wird wiederhergestellt. Dokument wird erneut geöffnet.'))}</span></div>`;
+        host.innerHTML = `<div class="ctox-empty documents-loading"><strong>${escapeHtml(state.t('loadingDocxEditor', 'Lade DOCX Editor'))}</strong><span>${escapeHtml(state.t('officeEditorRetry', 'Verbindung wird wiederhergestellt. Dokument wird erneut geöffnet.'))}</span></div>`;
       },
       wait: delay,
       retryDelayMs: CTOX_DOCUMENTS_RECOVERY_DELAY_MS,
@@ -4271,7 +4306,7 @@ function clampNumber(value, min, max) {
 function renderError(state, message) {
   const host = state.ctx.host.querySelector('[data-documents-editor]');
   if (!host) return;
-  host.innerHTML = `<div class="documents-error"><strong>${escapeHtml(state.t('documentError', 'Dokumentfehler'))}</strong><span>${escapeHtml(message)}</span></div>`;
+  host.innerHTML = `<div class="ctox-empty documents-error"><strong>${escapeHtml(state.t('documentError', 'Dokumentfehler'))}</strong><span>${escapeHtml(message)}</span></div>`;
 }
 
 function isSupportedDocumentFile(file) {

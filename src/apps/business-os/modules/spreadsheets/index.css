@@ -75,14 +75,17 @@
   padding-bottom: 0;
 }
 
-.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .ctox-pane-header,
-.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .spreadsheets-search-bar {
+.shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .ctox-pane-header {
   padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
 }
 
+/* Reservierte Zone 3 (Vertrag §3): die Fenstersteuerung oben rechts ist exakt
+   zwei Kopfzeilen breit. Der jeweils letzte Kopf der obersten Zeile weicht um
+   genau diesen Betrag aus — 70px waren eine Schaetzung, die bei einer anderen
+   Icon-Groesse unter den Schliessen-Knopf gelaufen waere. */
 .shell-window[data-shell-contract="v2"] .spreadsheets-editor > .ctox-pane-header,
 .shell-window[data-shell-contract="v2"] .spreadsheets-runbooks > .ctox-pane-header {
-  padding-right: 70px;
+  padding-right: calc(var(--shell-v2-header-row-size, 37px) * 2);
 }
 
 /* Head content centered in the single row; the title yields, the actions do
@@ -147,11 +150,21 @@
   padding: 6px 14px;
 }
 
+/* Icon-Zone (Vertrag §7, iconZone): die 80x74-Ecke oben links gehoert dem
+   Shell-Icon, und das Icon ist ZWEI Kopfzeilen hoch. Die Suchleiste ist die
+   zweite Kopfzeile des Explorers und muss deshalb genauso einruecken wie der
+   Kopf darueber. Die Einrueckung steht bewusst NACH der `.ctox-pane-tools`-
+   Regel oben: deren `padding`-Kurzform hat die Einrueckung bis 31.08.2026 bei
+   gleicher Spezifitaet ueberschrieben, der Suchschlitz lief unter dem Icon.
+   Die Flaeche selbst bleibt unbemalt (kein eigener Hintergrund), damit dort
+   wirklich nichts gezeichnet wird — Einruecken allein genuegt nicht. */
 .shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .spreadsheets-search-bar {
   height: var(--shell-v2-header-row-size, 37px);
   min-height: var(--shell-v2-header-row-size, 37px);
   padding-top: 0;
   padding-bottom: 0;
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
+  background-color: transparent;
 }
 
 .shell-window[data-shell-contract="v2"] .spreadsheets-explorer > .spreadsheets-filter-bar {

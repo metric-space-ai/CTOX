@@ -4,12 +4,81 @@
   --imp-accent-soft: var(--app-accent-soft);
   display: grid;
   grid-template-columns: 230px minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
   height: 100%;
   min-height: 0;
   overflow: hidden;
   background: var(--surface);
   color: var(--text);
+}
+
+/* Kopfband ueber beide Spalten. Traegt den Titel-Slot und - in der Shell -
+   die drei reservierten V2-Zonen. Ausserhalb der Shell (Design-Lab,
+   Standalone-Fixture) bleibt es ein gewoehnlicher Modulkopf. */
+.imp-head {
+  box-sizing: border-box;
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 2px;
+  padding: 10px 22px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--surface-2) 86%, var(--surface));
+}
+
+.imp-head .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
+}
+
+.imp-head .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.imp-head .ctox-pane-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.imp-head-note {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Genau eine gefuellte Primaeraktion je Kopf: die Vorwaertsaktion der
+   aktuellen Stufe. Die Quellstufe hat keine - dort stehen zwei gleichrangige
+   Quellen im Arbeitsbereich. Die Sichtbarkeit haengt allein am Zustand des
+   Wurzelelements, damit index.js keine Kopfzustaende nachfuehren muss. */
+.imp-head-action {
+  display: none;
+  min-height: 28px;
+  padding-inline: 14px;
+  white-space: nowrap;
+}
+
+.importer-module[data-imp-stage="review"] .imp-head-action[data-imp-install],
+.importer-module[data-imp-stage="done"] .imp-head-action[data-imp-open] {
+  display: inline-flex;
 }
 
 .importer-module [hidden] {
@@ -25,7 +94,7 @@
   display: flex;
   min-height: 0;
   flex-direction: column;
-  padding: 26px 22px 22px;
+  padding: 18px 22px 22px;
   background:
     linear-gradient(160deg, color-mix(in srgb, var(--imp-accent) 7%, transparent), transparent 45%),
     color-mix(in srgb, var(--surface-2) 86%, var(--surface));
@@ -89,7 +158,7 @@
 .imp-steps {
   display: grid;
   gap: 4px;
-  margin: 42px 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
@@ -148,11 +217,22 @@
   line-height: 1.25;
 }
 
+/* Der AKTIVE Schritt ist der lesbarste: der Akzent traegt die Flaeche, die
+   Schrift bleibt Textfarbe. Vorher erbte sie --imp-accent-strong und war damit
+   blasser als die bereits erledigten Schritte - die Fortschrittsanzeige las
+   sich rueckwaerts. */
 .importer-module[data-imp-stage="source"] [data-imp-step="source"],
 .importer-module[data-imp-stage="review"] [data-imp-step="review"],
 .importer-module[data-imp-stage="done"] [data-imp-step="done"] {
   background: var(--imp-accent-soft);
-  color: var(--imp-accent-strong);
+  color: var(--text);
+}
+
+.importer-module[data-imp-stage="source"] [data-imp-step="source"] > span:first-child,
+.importer-module[data-imp-stage="review"] [data-imp-step="review"] > span:first-child,
+.importer-module[data-imp-stage="done"] [data-imp-step="done"] > span:first-child {
+  border-color: var(--imp-accent);
+  color: var(--text-strong, var(--text));
 }
 
 .importer-module[data-imp-stage="review"] [data-imp-step="source"] > span:first-child,
@@ -169,14 +249,6 @@
 .importer-module[data-imp-stage="done"] [data-imp-step="review"] > span:first-child::before {
   content: "✓";
   font-size: 12px;
-}
-
-.imp-rail-claim {
-  max-width: 22ch;
-  margin: auto 0 0;
-  color: var(--muted);
-  font-size: 10px;
-  line-height: 1.55;
 }
 
 .imp-workspace {
@@ -377,8 +449,11 @@
   gap: 2px;
 }
 
+/* Gleiche Regel wie beim Schrittpfad: der Akzent traegt die Flaeche und das
+   Zeichen, die Aussage bleibt Textfarbe. Auf der akzentgetoenten Flaeche war
+   --imp-accent-strong sonst kaum vom Untergrund zu unterscheiden. */
 .imp-report-status strong {
-  color: var(--imp-accent-strong);
+  color: var(--text);
   font-size: 12px;
 }
 
@@ -424,7 +499,7 @@
 
 .imp-actions {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   margin-top: 24px;
 }
@@ -433,8 +508,6 @@
   min-height: 42px;
   border-radius: 9px;
 }
-
-.imp-install { margin-left: auto; padding-inline: 20px; }
 
 .imp-done-stage {
   display: flex;
@@ -468,27 +541,25 @@
 
 .imp-done-copy p { margin: 0; }
 
-.imp-open {
-  display: inline-flex;
-  min-height: 44px;
-  align-items: center;
-  gap: 18px;
-  padding-inline: 20px;
-  border-radius: 10px;
-}
-
 @container business-app-window (max-width: 768px) {
-  .importer-module { grid-template-columns: 1fr; }
+  /* Einspaltig stehen Kopf, Schrittpfad und Arbeitsbereich UNTEREINANDER - drei
+     Zeilen. Ohne die dritte Spur landet der Arbeitsbereich in einer impliziten
+     auto-Zeile und druckt den Schrittpfad auf 1.6px zusammen (live gemessen bei
+     620px Fensterbreite). */
+  .importer-module {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto minmax(0, 1fr);
+  }
   .imp-rail {
     display: grid;
-    grid-template-columns: auto 1fr;
+    grid-template-columns: 1fr;
     align-items: center;
     gap: 18px;
-    padding: 14px 16px;
+    padding: 12px 16px;
     border-right: 0;
     border-bottom: 1px solid var(--border);
   }
-  .imp-steps { display: flex; justify-content: flex-end; gap: 8px; margin: 0; }
+  .imp-steps { display: flex; justify-content: flex-start; gap: 8px; margin: 0; }
   .imp-steps li {
     display: block;
     min-height: auto;
@@ -497,7 +568,6 @@
   .imp-steps li::after,
   .imp-steps li > span:last-child { display: none; }
   .imp-steps li > span:first-child { width: 24px; height: 24px; }
-  .imp-rail-claim { display: none; }
   .imp-workspace { padding: 26px 18px; }
 }
 
@@ -523,17 +593,15 @@
   .imp-actions .ctox-button {
     flex: 1 1 140px;
   }
-
-  .imp-install {
-    margin-left: 0;
-  }
 }
 
+/* Grobzeiger bekommen die 44px-Tippflaeche - aber NICHT im Kopfband: dort ist
+   die Zeilenhoehe Vertragsgroesse (--shell-v2-header-row-size), kein Stilwert. */
 @media (pointer: coarse) {
-  .importer-module button,
-  .importer-module input,
-  .importer-module select,
-  .importer-module textarea {
+  .importer-module .imp-workspace button,
+  .importer-module .imp-workspace input,
+  .importer-module .imp-workspace select,
+  .importer-module .imp-workspace textarea {
     min-height: 44px;
   }
 
@@ -542,27 +610,58 @@
   }
 }
 
-/* Shell-v2 surface contract. The app title, icon, drag affordance and close
-   control live in the shared window chrome; the importer keeps only its
-   workflow content. Reserve the icon corner in the rail and let the content
-   stage use the full remaining window without a second local titlebar. */
+/* ---------------------------------------------------------------------------
+   Shell-V2-Kopfgeometrie (Referenz: modules/tickets, modules/knowledge).
+   Die V2-Shell legt drei Zonen ueber den App-Inhalt, ohne ihn einzuruecken:
+   das App-Icon oben links (80px, davon 74px im Inhalt), das Kopfband ueber die
+   Breite (eine 37px-Zeile) und die 74x74-Fenstersteuerung oben rechts. Die App
+   haelt diese Zonen selbst frei. Der Importer hat genau EINEN Kopf; er ist
+   deshalb zugleich erster und letzter Kopf der obersten Zeile und traegt beide
+   Einrueckungen. Zwei Kopfzeilen hoch, weil das Icon per Definition zwei
+   Kopfzeilen hoch ist - sonst ragt der Schrittpfad in die Icon-Ecke.
+   Nur Geometrie; Farben, Typografie und Inhalt bleiben wie oben.
+   -------------------------------------------------------------------------- */
 .shell-window[data-shell-contract="v2"] .importer-module {
   --imp-accent: var(--shell-v2-accent, var(--app-accent));
   --imp-accent-strong: var(--shell-v2-accent, var(--app-accent-foreground));
   --imp-accent-soft: color-mix(in srgb, var(--shell-v2-accent, var(--app-accent)) 14%, transparent);
   grid-template-columns: minmax(190px, 230px) minmax(0, 1fr);
+  padding: 0;
   background: var(--shell-v2-surface, var(--surface));
+}
+
+.shell-window[data-shell-contract="v2"] .imp-head {
+  box-sizing: border-box;
+  grid-template-rows: var(--shell-v2-header-row-size, 37px) minmax(0, 1fr);
+  align-content: stretch;
+  gap: 0;
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  /* Links die Icon-Zone, rechts die Fenstersteuerung (zwei Kopfzeilen breit). */
+  padding: 0 calc(var(--shell-v2-header-row-size, 37px) * 2) 0
+    calc(var(--shell-v2-icon-size, 80px) + 14px);
+  border-bottom-color: var(--line);
+  background: var(--shell-v2-surface, var(--surface));
+}
+
+/* Erste Kopfzeile ist exakt eine Shell-Kopfzeile hoch. */
+.shell-window[data-shell-contract="v2"] .imp-head .ctox-pane-title-row {
+  box-sizing: border-box;
+  min-width: 0;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  height: var(--shell-v2-header-row-size, 37px);
+}
+
+.shell-window[data-shell-contract="v2"] .imp-head-note {
+  align-self: center;
+  padding-bottom: 4px;
 }
 
 .shell-window[data-shell-contract="v2"] .imp-rail {
   min-width: 0;
-  padding: calc(var(--shell-v2-icon-size, 80px) + 8px) 16px 16px;
+  padding: 16px;
   border-right-color: var(--line);
   background: var(--shell-v2-surface, var(--surface));
-}
-
-.shell-window[data-shell-contract="v2"] .imp-steps {
-  margin-top: 0;
 }
 
 .shell-window[data-shell-contract="v2"] .imp-workspace {
@@ -589,9 +688,12 @@
   padding-bottom: 2px;
 }
 
-@media (max-width: 767px) {
+/* Das Fenster ist kein Bildschirm: der schmale Zustand haengt am Container,
+   und der Haltepunkt gehoert der Shell (768px = zwei Spalten -> eine). */
+@container business-app-window (max-width: 768px) {
   .shell-window[data-shell-contract="v2"] .importer-module {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr);
   }
 
   .shell-window[data-shell-contract="v2"] .imp-rail {

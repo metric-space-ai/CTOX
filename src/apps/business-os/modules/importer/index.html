@@ -1,6 +1,34 @@
 <main class="importer-module" data-importer-root data-imp-stage="source">
+  <!-- Shell-V2-Kopf. STATISCHES Markup nach dem Vorbild von modules/tickets und
+       modules/knowledge: der Renderer erzeugt hier nichts, index.js fuellt nur
+       Texte und schaltet Zustaende. Der Kopf ist zwei Kopfzeilen hoch, laesst
+       links die 80x74-Icon-Zone und rechts die 74x74-Fenstersteuerung frei und
+       traegt den Titel-Slot .ctox-pane-title - das ist der Fenstertitel und der
+       Ausloeser des Versionsmenues (wireShellV2ModuleTitle in app.js).
+       Genau EINE gefuellte Primaeraktion je Kopf: die Vorwaertsaktion der
+       aktuellen Stufe. In der Quellstufe gibt es keine - dort stehen die zwei
+       gleichrangigen Quellen (GitHub, Ordner) im Arbeitsbereich. -->
+  <header class="ctox-pane-header imp-head" data-shell-v2-header-row="1">
+    <div class="ctox-pane-title-row">
+      <div class="ctox-pane-titles">
+        <span class="ctox-pane-kicker">CTOX</span>
+        <h2 class="ctox-pane-title" data-imp-title>App Importer</h2>
+      </div>
+      <div class="ctox-pane-actions">
+        <button type="button" class="ctox-button is-primary imp-head-action" data-imp-install>Install app</button>
+        <button type="button" class="ctox-button is-primary imp-head-action" data-imp-open>
+          <span data-imp-open-label>Open app</span>
+          <span aria-hidden="true">→</span>
+        </button>
+      </div>
+    </div>
+    <p class="imp-head-note" data-imp-subtitle>
+      Conceived in a prompt. Born with the first deploy. Raised in CTOX.
+    </p>
+  </header>
+
   <aside class="imp-rail">
-    <ol class="imp-steps" aria-label="Import progress" data-shell-v2-header-row="1">
+    <ol class="imp-steps" aria-label="Import progress" data-shell-v2-header-row="2">
       <li data-imp-step="source">
         <span>1</span>
         <span><strong data-imp-source-step>Source</strong><small data-imp-source-step-note>Choose an app</small></span>
@@ -14,10 +42,6 @@
         <span><strong data-imp-done-step>Install</strong><small data-imp-done-step-note>Open in CTOX</small></span>
       </li>
     </ol>
-
-    <p class="imp-rail-claim" data-imp-subtitle>
-      Conceived in a prompt. Born with the first deploy. Raised in CTOX.
-    </p>
   </aside>
 
   <section class="imp-workspace">
@@ -87,9 +111,10 @@
         </label>
       </div>
 
+      <!-- Die gefuellte Primaeraktion dieser Stufe ("App installieren") steht im
+           Kopf; hier bleibt nur der Rueckweg als ruhige Sekundaeraktion. -->
       <div class="imp-actions">
         <button type="button" class="ctox-button imp-back" data-imp-back>Back</button>
-        <button type="button" class="ctox-button is-primary imp-install" data-imp-install>Install app</button>
       </div>
     </section>
 
@@ -98,10 +123,6 @@
       <span class="imp-eyebrow" data-imp-done-eyebrow>Import complete</span>
       <h2 data-imp-done-heading>Your app is in CTOX.</h2>
       <div class="imp-done-copy" data-imp-done></div>
-      <button type="button" class="ctox-button is-primary imp-open" data-imp-open>
-        <span data-imp-open-label>Open app</span>
-        <span aria-hidden="true">→</span>
-      </button>
     </section>
   </section>
 </main>

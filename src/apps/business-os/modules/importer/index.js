@@ -219,8 +219,11 @@ export async function mount(ctx) {
     openLabel: root.querySelector('[data-imp-open-label]'),
   };
 
-  // The shared v2 window header owns the app title. Keep this optional for
-  // older standalone fixtures without introducing a second local titlebar.
+  // The module head is STATIC markup in index.html; this mount only fills in
+  // texts and stage state. Its .ctox-pane-title is the shell-v2 title slot:
+  // app.js turns exactly this element into the window title and the version
+  // menu trigger (wireShellV2ModuleTitle), so it must carry the localized app
+  // name before mount returns. Kept tolerant for standalone fixtures.
   if (refs.title) refs.title.textContent = t('title', FALLBACK_LABELS.title);
   refs.subtitle.textContent = t('subtitle', FALLBACK_LABELS.subtitle);
   refs.sourceStep.textContent = t('sourceStep', 'Source');

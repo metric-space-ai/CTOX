@@ -1,3 +1,92 @@
 <div id="invoices-root" class="invoices-shell">
-  <div class="ctox-empty">Rechnungen werden geladen…</div>
+  <!-- Shell-V2-Rahmen als STATISCHES Markup (Vorbild: modules/tickets,
+       modules/knowledge). Beide Pane-Koepfe existieren in JEDEM Zustand -
+       leer, ladend, gewaehlt und auch dann, wenn der Datenzugriff scheitert.
+       index.js adoptiert dieses Geruest und fuellt nur noch Texte, Optionen,
+       Zaehler und Aktionen; es baut keine Koepfe mehr selbst.
+
+       Erste Zeile der obersten Kopfzeile: die Icon-Zone (80x74) links und die
+       Fenstersteuerung (74x74) rechts bleiben frei - dafuer sorgt index.css
+       ueber die Kopf-Innenabstaende, nicht dieses Markup. -->
+  <main class="ctox-workspace ctox-workspace--two-pane invoices-module"
+        data-invoices-workspace data-resize-frame>
+
+    <!-- LINKS: Rechnungsliste auf der kanonischen Spalten-Grammatik. Suche,
+         Ansichtswechsel, Filterfach, Reset und das gezaehlte Band sind
+         shell-verdrahtet ueber die data-pg-*-Attribute; das Modul schreibt
+         dafuer weder CSS noch JS. -->
+    <aside class="ctox-pane invoices-rail"
+           data-invoices-rail
+           data-left-content
+           data-context-module="invoices"
+           data-context-submodule="list"
+           data-context-record-type="accounting_invoices"
+           aria-label="Rechnungen">
+      <header class="ctox-pane-header ctox-pane-band" data-invoices-rail-head>
+        <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
+          <div class="ctox-pane-titles">
+            <span class="ctox-pane-kicker" data-copy="kicker">CTOX</span>
+            <h2 class="ctox-pane-title" data-copy="invoices">Rechnungen</h2>
+          </div>
+          <!-- Genau EINE gefuellte Primaeraktion pro Kopf: "Neue Rechnung". -->
+          <div class="ctox-pane-actions" data-invoices-rail-actions>
+            <button class="ctox-pane-icon is-primary" type="button" data-action="new" data-copy-label="newInvoice" aria-label="Neue Rechnung" title="Neue Rechnung"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button>
+            <button class="ctox-pane-icon" type="button" data-action="import" data-copy-label="import" aria-label="Importieren" title="Importieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M12 15l-4-4M12 15l4-4M5 21h14"/></svg></button>
+            <button class="ctox-pane-icon" type="button" data-action="export" data-copy-label="export" aria-label="Exportieren" title="Exportieren"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 21V9M12 9l-4 4M12 9l4 4M5 3h14"/></svg></button>
+          </div>
+        </div>
+        <div class="ctox-filterbar" data-shell-v2-header-row="2">
+          <input class="ctox-pane-search" type="search" data-pg-search data-copy-placeholder="search" placeholder="Suchen..." aria-label="Suchen..." />
+          <div class="ctox-view-toggle" role="group" data-copy-label="view" aria-label="Darstellung">
+            <button class="ctox-pane-icon" type="button" data-pg-view="cards" aria-pressed="true" data-copy-label="cardsView" aria-label="Kachelansicht" title="Kachelansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="7" rx="1.5"/><rect x="4" y="14" width="16" height="7" rx="1.5"/></svg></button>
+            <button class="ctox-pane-icon" type="button" data-pg-view="list" aria-pressed="false" data-copy-label="listView" aria-label="Listenansicht" title="Listenansicht"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/></svg></button>
+          </div>
+          <button class="ctox-pane-icon ctox-filter-toggle" type="button" data-pg-tray-toggle aria-expanded="false" data-copy-label="filter" aria-label="Filter" title="Filter"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="4" y1="7" x2="20" y2="7"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="17" x2="20" y2="17"/><circle cx="9" cy="7" r="2.4" fill="var(--surface-2)"/><circle cx="15" cy="12" r="2.4" fill="var(--surface-2)"/><circle cx="8" cy="17" r="2.4" fill="var(--surface-2)"/></svg></button>
+        </div>
+        <div class="ctox-filter-tray" data-pg-tray hidden>
+          <div class="ctox-filter-row">
+            <!-- Die Typ-Optionen kommen aus INVOICE_TYPES; index.js fuellt sie. -->
+            <select class="ctox-select" data-pg-filter data-pg-name="type" data-pg-default="all" data-invoices-type-filter data-copy-label="filterType" aria-label="Typ"></select>
+            <button class="ctox-sort-dir" type="button" data-pg-reset data-copy-label="resetFilters" aria-label="Filter zurücksetzen" title="Filter zurücksetzen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 10a8 8 0 1 1 2 7"/><path d="M4 5v5h5"/></svg></button>
+          </div>
+        </div>
+      </header>
+      <!-- Gezaehltes Ansichtsband; die Beschriftungen setzt index.js aus
+           BAND_ORDER, damit Band und Filterlogik nicht auseinanderlaufen. -->
+      <nav class="ctox-view-switch" data-shell-v2-header-row="3" data-invoices-bands data-copy-label="view" aria-label="Darstellung">
+        <div class="ctox-pane-tabs"></div>
+      </nav>
+      <div class="ctox-pane-body ctox-well">
+        <div class="ctox-record-list" data-invoices-list><div class="ctox-empty" data-copy="emptyHint">Wähle eine Rechnung aus der Liste oder erstelle einen neuen Entwurf.</div></div>
+      </div>
+      <footer class="ctox-pane-footer"><span data-pg-footer></span></footer>
+    </aside>
+
+    <button class="ctox-column-resizer" type="button" data-resizer="left" data-resizer-var="--ctox-left-width" data-resizer-min="260" data-resizer-max="480" data-copy-label="resizeColumn" aria-label="Spaltenbreite anpassen"></button>
+
+    <!-- MITTE: Detail bzw. Entwurfs-Editor. Der Kopf ist statisch und in jedem
+         Zustand vorhanden; index.js schreibt nur Kicker, Titel und die
+         Elementaktionen und ersetzt den Rumpf. -->
+    <section class="ctox-pane invoices-main"
+             data-invoices-main
+             data-context-module="invoices"
+             data-context-submodule="center"
+             data-context-record-type="accounting_invoices"
+             aria-label="Rechnung">
+      <header class="ctox-pane-header ctox-pane-band" data-invoices-main-head>
+        <div class="ctox-pane-title-row" data-shell-v2-header-row="1">
+          <div class="ctox-pane-titles">
+            <span class="ctox-pane-kicker" data-invoices-main-kicker data-copy="invoices">Rechnungen</span>
+            <h1 class="ctox-pane-title" data-invoices-main-title data-copy="invoice">Rechnung</h1>
+          </div>
+          <div class="ctox-pane-actions" data-invoices-main-actions></div>
+        </div>
+      </header>
+      <div class="ctox-pane-body" data-invoices-main-body><p class="ctox-empty" data-copy="emptyHint">Wähle eine Rechnung aus der Liste oder erstelle einen neuen Entwurf.</p></div>
+    </section>
+  </main>
+
+  <!-- Modulweiter Befehls-/Datenfehlerstreifen. Bleibt versteckt, solange
+       nichts fehlschlaegt, und ersetzt niemals den Rahmen. -->
+  <div class="invoices-error-banner" data-invoices-banner hidden></div>
 </div>

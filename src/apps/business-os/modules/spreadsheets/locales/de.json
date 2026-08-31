@@ -1,6 +1,8 @@
 {
   "workspaceLoading": "Spreadsheets Workspace wird geladen.",
   "spreadsheetsTitle": "CTOX Spreadsheets",
+  "explorerKicker": "Dateien",
+  "runbookKicker": "Automatisierung",
   "searchPlaceholder": "Tabelle suchen...",
   "searchLabel": "Tabellen suchen",
   "sortLabel": "Tabellen sortieren",

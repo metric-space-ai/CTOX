@@ -1,6 +1,8 @@
 {
   "workspaceLoading": "Loading spreadsheets workspace.",
   "spreadsheetsTitle": "CTOX Spreadsheets",
+  "explorerKicker": "Files",
+  "runbookKicker": "Automation",
   "searchPlaceholder": "Search spreadsheet...",
   "searchLabel": "Search spreadsheets",
   "sortLabel": "Sort spreadsheets",
