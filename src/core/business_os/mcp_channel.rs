@@ -4547,7 +4547,7 @@ pub fn propose_action(
             "status_field": "research_status",
             "terminal_statuses": ["completed", "needs_review", "failed", "cancelled", "blocked"],
             "review_required_status": "needs_review",
-            "result_fields": ["contacts", "evidence", "research_summary", "research_status"],
+            "result_fields": ["contacts", "evidence", "recommended_contact_id", "selection_reason", "research_summary", "research_status"],
             "workspace": &context.workspace
         });
     }
@@ -7204,7 +7204,29 @@ fn person_research_action_descriptor(module_id: &str) -> BusinessOsActionDescrip
                     },
                     "fields": { "type": "array", "items": { "type": "string" } },
                     "include_private": { "type": "array", "items": { "type": "string" } },
-                    "auto_browser_capture": { "type": "boolean" }
+                    "auto_browser_capture": { "type": "boolean" },
+                    "research_loop": {
+                        "type": "object",
+                        "required": ["max_iterations", "max_candidates", "min_independent_sources", "select_best", "public_sources_only", "respect_robots", "selection_criteria"],
+                        "properties": {
+                            "max_iterations": { "type": "integer", "minimum": 1, "maximum": 8 },
+                            "max_candidates": { "type": "integer", "minimum": 1, "maximum": 50 },
+                            "min_independent_sources": { "type": "integer", "minimum": 1, "maximum": 5 },
+                            "select_best": { "const": true },
+                            "public_sources_only": { "const": true },
+                            "respect_robots": { "const": true },
+                            "selection_criteria": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 10,
+                                "items": {
+                                    "type": "string",
+                                    "enum": ["decision_authority", "role_relevance", "source_quality", "recency", "business_contactability"]
+                                }
+                            }
+                        },
+                        "additionalProperties": false
+                    }
                 },
                 "additionalProperties": false
             }
@@ -7298,6 +7320,9 @@ fn validate_person_research_action_arguments(
             )
         );
     }
+    if let Some(value) = object.get("research_loop") {
+        validate_person_research_loop(value)?;
+    }
     let allowed = [
         "operation_id",
         "company",
@@ -7306,6 +7331,7 @@ fn validate_person_research_action_arguments(
         "fields",
         "include_private",
         "auto_browser_capture",
+        "research_loop",
     ];
     if let Some(field) = object
         .keys()
@@ -7316,6 +7342,86 @@ fn validate_person_research_action_arguments(
             format!("unsupported web_stack.person_research payload field `{field}`"),
         )));
     }
+    Ok(())
+}
+
+fn validate_person_research_loop(value: &Value) -> anyhow::Result<()> {
+    let object = value.as_object().ok_or_else(|| {
+        anyhow::Error::new(BusinessOsMcpError::validation(
+            "payload.research_loop",
+            "web_stack.person_research research_loop must be an object",
+        ))
+    })?;
+    let bounded_integer = |field: &str, minimum: u64, maximum: u64| -> anyhow::Result<()> {
+        let valid = object
+            .get(field)
+            .and_then(Value::as_u64)
+            .is_some_and(|value| value >= minimum && value <= maximum);
+        anyhow::ensure!(
+            valid,
+            BusinessOsMcpError::validation(
+                &format!("payload.research_loop.{field}"),
+                format!("web_stack.person_research research_loop `{field}` is outside its allowed range"),
+            )
+        );
+        Ok(())
+    };
+    bounded_integer("max_iterations", 1, 8)?;
+    bounded_integer("max_candidates", 1, 50)?;
+    bounded_integer("min_independent_sources", 1, 5)?;
+    for field in ["select_best", "public_sources_only", "respect_robots"] {
+        anyhow::ensure!(
+            object.get(field).and_then(Value::as_bool) == Some(true),
+            BusinessOsMcpError::validation(
+                &format!("payload.research_loop.{field}"),
+                format!("web_stack.person_research research_loop `{field}` must be true"),
+            )
+        );
+    }
+    let criteria = object
+        .get("selection_criteria")
+        .and_then(Value::as_array)
+        .filter(|items| !items.is_empty() && items.len() <= 10)
+        .ok_or_else(|| {
+            anyhow::Error::new(BusinessOsMcpError::validation(
+                "payload.research_loop.selection_criteria",
+                "web_stack.person_research research_loop requires selection criteria",
+            ))
+        })?;
+    let allowed_criteria = [
+        "decision_authority",
+        "role_relevance",
+        "source_quality",
+        "recency",
+        "business_contactability",
+    ];
+    anyhow::ensure!(
+        criteria.iter().all(|criterion| criterion
+            .as_str()
+            .is_some_and(|criterion| allowed_criteria.contains(&criterion))),
+        BusinessOsMcpError::validation(
+            "payload.research_loop.selection_criteria",
+            "web_stack.person_research research_loop contains an unsupported selection criterion",
+        )
+    );
+    let allowed_fields = [
+        "max_iterations",
+        "max_candidates",
+        "min_independent_sources",
+        "select_best",
+        "public_sources_only",
+        "respect_robots",
+        "selection_criteria",
+    ];
+    anyhow::ensure!(
+        object
+            .keys()
+            .all(|field| allowed_fields.contains(&field.as_str())),
+        BusinessOsMcpError::validation(
+            "payload.research_loop",
+            "web_stack.person_research research_loop contains an unsupported field",
+        )
+    );
     Ok(())
 }
 
@@ -12089,7 +12195,16 @@ mod tests {
             "operation_id": "lead_1",
             "company": "Acme GmbH",
             "country": "DE",
-            "mode": "new_record"
+            "mode": "new_record",
+            "research_loop": {
+                "max_iterations": 4,
+                "max_candidates": 20,
+                "min_independent_sources": 2,
+                "select_best": true,
+                "public_sources_only": true,
+                "respect_robots": true,
+                "selection_criteria": ["decision_authority", "role_relevance", "source_quality"]
+            }
         });
         let proposal = propose_action(
             root,
@@ -12119,7 +12234,7 @@ mod tests {
                 "status_field": "research_status",
                 "terminal_statuses": ["completed", "needs_review", "failed", "cancelled", "blocked"],
                 "review_required_status": "needs_review",
-                "result_fields": ["contacts", "evidence", "research_summary", "research_status"],
+                "result_fields": ["contacts", "evidence", "recommended_contact_id", "selection_reason", "research_summary", "research_status"],
                 "workspace": "test-workspace"
             })
         );
@@ -12174,6 +12289,17 @@ mod tests {
                 .pointer("/properties/payload/properties/auto_browser_capture/type")
                 .and_then(Value::as_str),
             Some("boolean")
+        );
+        assert_eq!(
+            proposal.payload["research_loop"]["select_best"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            research_action
+                .input_schema
+                .pointer("/properties/payload/properties/research_loop/properties/max_iterations/maximum")
+                .and_then(Value::as_u64),
+            Some(8)
         );
         Ok(())
     }
