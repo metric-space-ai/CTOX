@@ -1652,11 +1652,16 @@ pub(super) fn complete_and_project_business_control_command(
 
 #[cfg(test)]
 mod tests {
-    use super::super::store::{business_command_core_claim, rxdb_store_path};
+    use super::super::store::{
+        business_command_core_claim, load_rxdb_collection_record, rxdb_store_path,
+    };
     use super::super::store_projections::tests::create_repair_rxdb_tables;
+    use super::super::store_workjet_projects::tests::create_workjet_rxdb_projection_tables;
     use super::*;
     use rusqlite::Connection;
+    use serde_json::json;
     use std::collections::BTreeSet;
+    use std::time::{Duration, Instant};
     use tempfile::tempdir;
 
     fn rust_brace_depth_after(mut depth: usize, line: &str) -> usize {
@@ -1732,6 +1737,129 @@ mod tests {
             "unterminated string-literal dispatcher arm: {arm_pattern}"
         );
         exact_types
+    }
+
+    #[test]
+    fn workjet_command_documents_project_into_native_rxdb_before_return() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        drop(create_repair_rxdb_tables(root.path())?);
+        create_workjet_rxdb_projection_tables(root.path())?;
+
+        let project_id = "project-command-plane-e2e";
+        let project_command_id = "cmd-workjet-project-command-plane-e2e";
+        let working_copy_command_id = "cmd-workjet-working-copy-command-plane-e2e";
+        let actor = json!({
+            "id": "owner-1",
+            "role": "admin",
+            "is_admin": true,
+            "display_name": "owner-1",
+            "email": "",
+            "login": ""
+        });
+        let project_document = json!({
+            "id": project_command_id,
+            "command_id": project_command_id,
+            "inbound_channel": "ctox",
+            "contract_version": 2,
+            "idempotency_key": project_command_id,
+            "status": "pending_sync",
+            "module": "ctox",
+            "command_type": "ctox.workjet.project.upsert",
+            "record_id": project_id,
+            "payload": {
+                "project_id": project_id,
+                "name": "Command Plane Project",
+                "inbound_channel": "ctox"
+            },
+            "client_context": {
+                "source": "workjet-project-control",
+                "inbound_channel": "ctox",
+                "dispatch_transport": "rxdb-command-bus",
+                "actor": actor.clone()
+            }
+        });
+        let working_copy_document = json!({
+            "id": working_copy_command_id,
+            "command_id": working_copy_command_id,
+            "inbound_channel": "ctox",
+            "contract_version": 2,
+            "idempotency_key": working_copy_command_id,
+            "status": "pending_sync",
+            "module": "ctox",
+            "command_type": "ctox.workjet.working_copy.upsert",
+            "record_id": project_id,
+            "payload": {
+                "project_id": project_id,
+                "computer_id": "computer-command-plane-e2e",
+                "path": "/workspace/command-plane-e2e",
+                "active": true,
+                "inbound_channel": "ctox"
+            },
+            "client_context": {
+                "source": "workjet-project-control",
+                "inbound_channel": "ctox",
+                "dispatch_transport": "rxdb-command-bus",
+                "actor": actor
+            }
+        });
+
+        let started = Instant::now();
+        let project_outcome = accept_rxdb_business_command(root.path(), project_document.clone())?;
+        let working_copy_outcome =
+            accept_rxdb_business_command(root.path(), working_copy_document.clone())?;
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed <= Duration::from_secs(5),
+            "Workjet command-plane projection took {elapsed:?}, expected at most 5s"
+        );
+        assert_eq!(project_outcome["result"]["project"]["id"], project_id);
+
+        let project = load_rxdb_collection_record(root.path(), "workjet_projects", project_id)?
+            .context("missing native RxDB workjet_projects row after command return")?;
+        assert_eq!(project["name"], "Command Plane Project");
+        assert_eq!(project["status"], "active");
+        assert_eq!(project["owner_user_id"], "owner-1");
+        assert_eq!(project["is_deleted"], false);
+
+        let working_copy_id = working_copy_outcome["result"]["working_copy"]["id"]
+            .as_str()
+            .context("working-copy command outcome has no result.working_copy.id")?;
+        assert!(working_copy_id.starts_with("workjet_wc_"));
+        let working_copy =
+            load_rxdb_collection_record(root.path(), "workjet_working_copies", working_copy_id)?
+                .context("missing native RxDB workjet_working_copies row after command return")?;
+        assert_eq!(working_copy["project_id"], project_id);
+        assert_eq!(working_copy["computer_id"], "computer-command-plane-e2e");
+        assert_eq!(working_copy["path"], "/workspace/command-plane-e2e");
+        assert_eq!(working_copy["status"], "active");
+        assert_eq!(working_copy["owner_user_id"], "owner-1");
+
+        for command_id in [project_command_id, working_copy_command_id] {
+            let command =
+                load_rxdb_collection_record(root.path(), "business_commands", command_id)?
+                    .with_context(|| {
+                        format!("missing business_commands projection for {command_id}")
+                    })?;
+            assert_eq!(command["inbound_channel"], "ctox");
+        }
+
+        accept_rxdb_business_command(root.path(), project_document)?;
+        accept_rxdb_business_command(root.path(), working_copy_document)?;
+
+        let replayed_project =
+            load_rxdb_collection_record(root.path(), "workjet_projects", project_id)?
+                .context("project projection disappeared after identical command replay")?;
+        assert_eq!(replayed_project["id"], project["id"]);
+        assert_eq!(replayed_project["updated_at_ms"], project["updated_at_ms"]);
+        let replayed_working_copy =
+            load_rxdb_collection_record(root.path(), "workjet_working_copies", working_copy_id)?
+                .context("working-copy projection disappeared after identical command replay")?;
+        assert_eq!(replayed_working_copy["id"], working_copy["id"]);
+        assert_eq!(
+            replayed_working_copy["updated_at_ms"],
+            working_copy["updated_at_ms"]
+        );
+        Ok(())
     }
 
     #[test]

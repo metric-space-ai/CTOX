@@ -452,7 +452,7 @@ fn validate_bounded(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::business_os::store::{load_rxdb_collection_record, rxdb_store_path, CommandOrigin};
     use serde_json::json;
@@ -482,7 +482,7 @@ mod tests {
         )
     }
 
-    fn create_workjet_rxdb_projection_tables(root: &Path) -> anyhow::Result<()> {
+    pub(crate) fn create_workjet_rxdb_projection_tables(root: &Path) -> anyhow::Result<()> {
         fs::create_dir_all(root.join("runtime"))?;
         let conn = Connection::open(rxdb_store_path(root))?;
         for collection in [PROJECTS_COLLECTION, WORKING_COPIES_COLLECTION] {
