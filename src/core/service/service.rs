@@ -7191,6 +7191,10 @@ fn start_prompt_worker(
                             founder_email_worker_error_is_retryable(&job, &err_text);
                         let retry_runtime_message =
                             runtime_error_is_transient_api_failure(&err_text);
+                        let consume_app_validation_repair =
+                            worker_error_may_consume_business_os_app_validation_repair(
+                                &err_text,
+                            );
                         let timeout_worker_message =
                             matches!(agent_outcome, lcm::AgentOutcome::TurnTimeout);
                         let timeout_retry_message =
@@ -7249,6 +7253,16 @@ fn start_prompt_worker(
                             && business_os_app_validation_may_own_completion(&job)
                         {
                             match business_os_app_module_validation_feedback(&root, &job) {
+                                Ok(Some(feedback)) if !consume_app_validation_repair => {
+                                    push_event_locked(
+                                        &mut shared,
+                                        format!(
+                                            "Deferred Business OS app validation rework for {} because the worker error is a transient runtime/API failure: {}",
+                                            job.source_label,
+                                            clip_text(&feedback, 220)
+                                        ),
+                                    );
+                                }
                                 Ok(Some(feedback))
                                     if !business_os_app_validation_repair_exhausted(
                                         &job.prompt,
@@ -18141,6 +18155,10 @@ fn runtime_error_is_transient_api_failure(error: &str) -> bool {
         // match the same prefix or the worker burns the item instead of holding
         // it for retry.
         || normalized.contains("failed to ensure local chat backend")
+}
+
+fn worker_error_may_consume_business_os_app_validation_repair(error: &str) -> bool {
+    !runtime_error_is_transient_api_failure(error)
 }
 
 fn founder_email_reply_message_key(job: &QueuedPrompt) -> Option<&str> {
@@ -36688,6 +36706,16 @@ Use shell tools to create or update these files."
             Some(300)
         );
         assert!(runtime_error_is_transient_api_failure(error));
+    }
+
+    #[test]
+    fn transient_runtime_error_does_not_consume_app_validation_repair_budget() {
+        assert!(!worker_error_may_consume_business_os_app_validation_repair(
+            "CTOX chat could not continue because the model API is temporarily unavailable",
+        ));
+        assert!(worker_error_may_consume_business_os_app_validation_repair(
+            "worker returned invalid application source",
+        ));
     }
 
     #[test]
