@@ -1030,7 +1030,8 @@ function openWidgetEditor(widgetId) {
     }
   });
   draw();
-  (state.ctx?.host || document.body).appendChild(host);
+  const mountTarget = state.ctx?.host;
+  if (mountTarget) mountTarget.appendChild(host);
 }
 
 /* ---------- mutations (all real commands; CTOX programs the watcher) ---------- */
