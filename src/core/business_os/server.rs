@@ -3387,19 +3387,23 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         // Do not reveal whether a customer package exists on this instance.
         return respond_status(request, 404, "not found");
     }
+    let mut selected_app_root = app_root.to_path_buf();
     if let Some((requested, active)) =
         business_os_shell_generation_mismatch(app_root, rel, request.url())?
     {
-        return respond_shell_generation_mismatch(request, &requested, &active);
+        match super::shell_update::verified_shell_root_for_build(root, &requested)? {
+            Some((_build, historical_root)) => selected_app_root = historical_root,
+            None => return respond_shell_generation_mismatch(request, &requested, &active),
+        }
     }
-    let file = resolve_business_os_static_file(root, app_root, rel);
+    let file = resolve_business_os_static_file(root, &selected_app_root, rel);
     let target = if file.is_dir() {
         file.join("index.html")
     } else {
         file
     };
     let target = if !target.is_file() && should_serve_app_shell(rel) {
-        app_root.join("index.html")
+        selected_app_root.join("index.html")
     } else {
         target
     };
@@ -3408,7 +3412,7 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
     }
     let mut bytes = fs::read(&target)?;
     let mime = mime_for(&target);
-    let is_index = target == app_root.join("index.html");
+    let is_index = target == selected_app_root.join("index.html");
     if is_index {
         // The launch context is injected server-side, exactly as it was before
         // the client-first attempt. That attempt shipped a hard cutover: the
@@ -3478,7 +3482,7 @@ fn business_os_shell_generation_mismatch(
     }
     let app_js = fs::read_to_string(app_root.join("app.js"))
         .context("failed to read the active Business OS shell generation")?;
-    let active = business_os_shell_build_from_app_js(&app_js)
+    let active = super::shell_update::shell_build_from_app_js(&app_js)
         .context("active Business OS app.js does not declare APP_BUILD")?;
     let suffix = requested.strip_prefix(&active);
     let matches = suffix.is_some_and(|suffix| suffix.is_empty() || suffix.starts_with('_'));
@@ -3493,27 +3497,9 @@ fn business_os_shell_generation_guarded_asset(rel: &str) -> bool {
     matches!(
         rel,
         "app.js" | "app.css" | "mobile-host.js" | "mobile-host.css" | "system-apps.json"
-    ) || [
-        "shared/",
-        "modules/",
-        "desktop-apps/",
-        "installed-modules/",
-        "local-modules/",
-        "themes/",
-    ]
-    .iter()
-    .any(|prefix| rel.starts_with(prefix))
-}
-
-fn business_os_shell_build_from_app_js(source: &str) -> Option<String> {
-    ["const APP_BUILD = '", "const APP_BUILD = \""]
-        .into_iter()
-        .find_map(|marker| {
-            let tail = source.split_once(marker)?.1;
-            let quote = marker.chars().last()?;
-            let build = tail.split_once(quote)?.0.trim();
-            (!build.is_empty()).then(|| build.to_owned())
-        })
+    ) || ["shared/", "modules/", "desktop-apps/", "themes/"]
+        .iter()
+        .any(|prefix| rel.starts_with(prefix))
 }
 
 fn respond_shell_generation_mismatch(
@@ -4694,6 +4680,15 @@ mod tests {
                 "/assets/ctox-app-icon.png?v=legacy-icon-revision"
             )?,
             None
+        );
+        assert_eq!(
+            business_os_shell_generation_mismatch(
+                root.path(),
+                "installed-modules/customer-app/app.js",
+                "/installed-modules/customer-app/app.js?v=20260830-shell-v2-consolidated-v302"
+            )?,
+            None,
+            "runtime-installed apps are instance state, not versioned shell-slot assets"
         );
         Ok(())
     }
