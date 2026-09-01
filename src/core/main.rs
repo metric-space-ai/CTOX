@@ -338,6 +338,10 @@ fn skips_cli_startup_db(args: &[String]) -> bool {
 }
 
 fn skips_cli_turn_ledger(args: &[String]) -> bool {
+    if service::sandboxed_cli_command_allowed(args) {
+        return true;
+    }
+
     // Diagnostic and administrative commands MUST NOT block on the CLI
     // turn ledger. Opening the ledger requires an fcntl write lock on
     // runtime/ctox.sqlite3, and on macOS a previous CTOX CLI process
@@ -743,6 +747,9 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
         Some("plan") => plan::handle_plan_command(&root, &args[1..]),
         Some("queue") => queue::handle_queue_command(&root, &args[1..]),
         Some("report") => report::cli::handle_command(&root, &args[1..]),
+        Some("scrape") if service::sandboxed_cli_command_allowed(args) => {
+            service::run_sandboxed_cli(root, args)
+        }
         Some("scrape") => scrape::handle_scrape_command(&root, &args[1..]),
         Some("secret") => secrets::handle_secret_command(&root, &args[1..]),
         Some("skills") => handle_skills_command(&root, &args[1..]),
@@ -1020,7 +1027,7 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&result)?);
             Ok(())
         }
-        Some("continuity-update") => handle_continuity_update(&args[1..]),
+        Some("continuity-update") => service::run_sandboxed_cli(root, args),
         Some("continuity-log") => {
             let db_path = args.get(1).context(
                 "usage: ctox continuity-log <db-path> <conversation-id> [narrative|anchors|focus]",
@@ -4376,6 +4383,22 @@ fn build_chat_prompt(raw_prompt: &str, workspace: Option<&Path>) -> anyhow::Resu
 ///   ctox continuity-update --db <path> --conversation-id <id> --kind <kind> --mode diff
 ///       -- the `+`/`-` diff is read from stdin (legacy path)
 fn handle_continuity_update(args: &[String]) -> anyhow::Result<()> {
+    println!("{}", execute_continuity_update(args, None)?);
+    Ok(())
+}
+
+pub(crate) fn handle_continuity_update_with_stdin(
+    args: &[String],
+    stdin_override: Option<&str>,
+) -> anyhow::Result<serde_json::Value> {
+    let stdout = execute_continuity_update(args, stdin_override)?;
+    serde_json::from_str(&stdout).context("continuity-update output is not valid JSON")
+}
+
+fn execute_continuity_update(
+    args: &[String],
+    stdin_override: Option<&str>,
+) -> anyhow::Result<String> {
     // Default to the conventional runtime DB if --db is not supplied. Codex-
     // exec children inherit CTOX_ROOT so this usually just works.
     let ctox_root_env = std::env::var("CTOX_ROOT").ok();
@@ -4396,9 +4419,15 @@ fn handle_continuity_update(args: &[String]) -> anyhow::Result<()> {
     let db = Path::new(&db_path);
     let result = match mode {
         "full" => {
-            let mut content = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut content)
-                .context("failed to read continuity document body from stdin")?;
+            let content = match stdin_override {
+                Some(content) => content.to_string(),
+                None => {
+                    let mut content = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut content)
+                        .context("failed to read continuity document body from stdin")?;
+                    content
+                }
+            };
             context::lcm::run_continuity_full_replace(db, conversation_id, kind, &content)?
         }
         "replace" => {
@@ -4408,9 +4437,15 @@ fn handle_continuity_update(args: &[String]) -> anyhow::Result<()> {
             context::lcm::run_continuity_string_replace(db, conversation_id, kind, find, replace)?
         }
         "diff" => {
-            let mut diff = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut diff)
-                .context("failed to read continuity diff from stdin")?;
+            let diff = match stdin_override {
+                Some(diff) => diff.to_string(),
+                None => {
+                    let mut diff = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut diff)
+                        .context("failed to read continuity diff from stdin")?;
+                    diff
+                }
+            };
             let engine = context::lcm::LcmEngine::open(db, context::lcm::LcmConfig::default())?;
             engine.continuity_apply_diff(
                 conversation_id,
@@ -4420,8 +4455,7 @@ fn handle_continuity_update(args: &[String]) -> anyhow::Result<()> {
         }
         other => anyhow::bail!("unknown continuity-update mode: {other}"),
     };
-    println!("{}", serde_json::to_string_pretty(&result)?);
-    Ok(())
+    serde_json::to_string_pretty(&result).context("failed to serialize continuity-update result")
 }
 
 fn resolve_workspace_root() -> anyhow::Result<PathBuf> {
@@ -5157,6 +5191,47 @@ mod tests {
             assert!(
                 super::skips_cli_turn_ledger(&args),
                 "agent-facing command must not open the caller-side ledger: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sandboxed_cli_commands_skip_caller_side_turn_ledger() {
+        for args in [
+            vec!["scrape", "register-script", "--target-key", "fixture"],
+            vec![
+                "scrape",
+                "register-source-module",
+                "--target-key",
+                "fixture",
+            ],
+            vec!["scrape", "execute", "--target-key", "fixture"],
+            vec![
+                "continuity-update",
+                "--conversation-id",
+                "1",
+                "--kind",
+                "focus",
+                "--mode",
+                "replace",
+            ],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(
+                super::skips_cli_turn_ledger(&args),
+                "sandboxed daemon relay must skip the caller ledger: {args:?}"
+            );
+        }
+
+        for args in [
+            vec!["scrape", "list"],
+            vec!["scrape", "delete-target"],
+            vec!["queue", "list"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(
+                !super::skips_cli_turn_ledger(&args),
+                "non-allowlisted command unexpectedly skipped the ledger: {args:?}"
             );
         }
     }

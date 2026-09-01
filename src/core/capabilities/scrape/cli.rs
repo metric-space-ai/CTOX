@@ -9,8 +9,48 @@ use super::{
     upsert_target, DEFAULT_RUNTIME_ROOT,
 };
 use anyhow::{Context, Result};
-use serde_json::json;
+use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::io::Write;
 use std::path::Path;
+
+thread_local! {
+    static CAPTURE: RefCell<Option<Vec<u8>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn dispatch_capturing(root: &Path, args: &[String]) -> Result<Value> {
+    CAPTURE.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+    let result = handle_scrape_command(root, args);
+    let captured = CAPTURE.with(|cell| cell.borrow_mut().take().unwrap_or_default());
+
+    if let Ok(payload) = serde_json::from_slice::<Value>(&captured) {
+        return Ok(payload);
+    }
+
+    let stdout = String::from_utf8_lossy(&captured).into_owned();
+    match result {
+        Ok(()) => Ok(json!({"ok": true, "stdout": stdout})),
+        Err(err) => Ok(json!({
+            "ok": false,
+            "stdout": stdout,
+            "error": err.to_string(),
+        })),
+    }
+}
+
+pub(super) fn write_json(value: &Value) -> Result<()> {
+    let serialized = serde_json::to_string_pretty(value)?;
+    CAPTURE.with(|cell| -> Result<()> {
+        let mut sink = cell.borrow_mut();
+        match sink.as_mut() {
+            Some(buffer) => writeln!(buffer, "{serialized}").context("write scrape capture buffer"),
+            None => {
+                println!("{serialized}");
+                Ok(())
+            }
+        }
+    })
+}
 
 pub fn handle_scrape_command(root: &Path, args: &[String]) -> Result<()> {
     let command = args.first().map(String::as_str).unwrap_or("");

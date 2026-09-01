@@ -897,6 +897,11 @@ enum ServiceIpcRequest {
     KnowledgeData {
         argv: Vec<String>,
     },
+    /// Relay the small set of CLI mutations that sandboxed workers must run
+    /// in the daemon process, where the protected runtime store is writable.
+    SandboxedCli {
+        argv: Vec<String>,
+    },
     /// Execute browser-backed Business OS web-stack commands inside the
     /// daemon process that owns the persistent browser runtime.
     BusinessOsWebStack {
@@ -2868,6 +2873,123 @@ pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
     submit_chat_prompt_with_thread_key(root, prompt, None)
 }
 
+const SANDBOXED_CLI_STDIN_ARG: &str = "--__ctox-sandboxed-stdin";
+
+pub(crate) fn sandboxed_cli_command_allowed(argv: &[String]) -> bool {
+    match (
+        argv.first().map(String::as_str),
+        argv.get(1).map(String::as_str),
+    ) {
+        (Some("scrape"), Some("register-script" | "register-source-module" | "execute")) => true,
+        (Some("continuity-update"), _) => true,
+        _ => false,
+    }
+}
+
+fn sandboxed_cli_flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a str> {
+    let index = argv.iter().position(|arg| arg == flag)?;
+    argv.get(index + 1).map(String::as_str)
+}
+
+fn sandboxed_cli_request_argv(argv: &[String]) -> Result<Vec<String>> {
+    let mut request_argv = argv.to_vec();
+    if argv.first().map(String::as_str) == Some("continuity-update")
+        && matches!(
+            sandboxed_cli_flag_value(argv, "--mode"),
+            Some("full" | "diff")
+        )
+    {
+        let mut stdin = String::new();
+        std::io::stdin()
+            .read_to_string(&mut stdin)
+            .context("failed to read continuity-update stdin for daemon relay")?;
+        request_argv.push(SANDBOXED_CLI_STDIN_ARG.to_string());
+        request_argv.push(stdin);
+    }
+    Ok(request_argv)
+}
+
+fn sandboxed_cli_raw_stdout(payload: &Value) -> Option<&str> {
+    let object = payload.as_object()?;
+    if !object.contains_key("stdout")
+        || !object
+            .keys()
+            .all(|key| matches!(key.as_str(), "ok" | "stdout" | "error"))
+    {
+        return None;
+    }
+    object.get("stdout").and_then(Value::as_str)
+}
+
+fn print_sandboxed_cli_payload(payload: &Value) -> Result<()> {
+    if let Some(stdout) = sandboxed_cli_raw_stdout(payload) {
+        print!("{stdout}");
+    } else {
+        println!("{}", serde_json::to_string_pretty(payload)?);
+    }
+
+    if payload.get("ok").and_then(Value::as_bool) == Some(false) {
+        let message = payload
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or("sandboxed cli command reported ok=false");
+        anyhow::bail!(message.to_string());
+    }
+    Ok(())
+}
+
+fn run_sandboxed_cli_direct(root: &Path, argv: &[String]) -> Result<()> {
+    match argv {
+        [command, rest @ ..] if command == "scrape" => {
+            crate::scrape::handle_scrape_command(root, rest)
+        }
+        [command, rest @ ..] if command == "continuity-update" => {
+            crate::handle_continuity_update(rest)
+        }
+        _ => anyhow::bail!("sandboxed cli command is not allowlisted: {argv:?}"),
+    }
+}
+
+/// Execute worker-facing CLI mutations in the daemon when its socket exists.
+/// A missing socket retains the intentional offline direct-dispatch fallback;
+/// a present but unreachable socket is authoritative and must not fall back to
+/// a forbidden caller-side runtime write.
+pub fn run_sandboxed_cli(root: &Path, argv: &[String]) -> Result<()> {
+    anyhow::ensure!(
+        sandboxed_cli_command_allowed(argv),
+        "sandboxed cli command is not allowlisted: {argv:?}"
+    );
+
+    #[cfg(unix)]
+    {
+        let socket_path = service_socket_path(root);
+        if socket_path.exists() {
+            let request_argv = sandboxed_cli_request_argv(argv)?;
+            let response = send_service_ipc_request(
+                root,
+                ServiceIpcRequest::SandboxedCli { argv: request_argv },
+            )
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "ctox daemon not reachable at {}; sandboxed callers need the running service",
+                    socket_path.display()
+                )
+            })?;
+            return match response {
+                ServiceIpcResponse::Json { payload, .. } => print_sandboxed_cli_payload(&payload),
+                ServiceIpcResponse::Error { message } => {
+                    anyhow::bail!("daemon rejected sandboxed cli request: {message}")
+                }
+                other => anyhow::bail!(
+                    "daemon rejected sandboxed cli request: unexpected response {other:?}"
+                ),
+            };
+        }
+    }
+
+    run_sandboxed_cli_direct(root, argv)
+}
+
 /// Entry point for `ctox knowledge data …` from the CLI.
 ///
 /// If the daemon is reachable on its Unix socket, route the request to it
@@ -3579,6 +3701,17 @@ fn handle_service_ipc_request(
                 }),
             }
         }
+        ServiceIpcRequest::SandboxedCli { argv } => {
+            if !sandboxed_cli_command_allowed(&argv) {
+                return Ok(ServiceIpcResponse::Error {
+                    message: format!("sandboxed cli command is not allowlisted: {argv:?}"),
+                });
+            }
+            Ok(ServiceIpcResponse::Json {
+                status: 200,
+                payload: dispatch_sandboxed_cli_capturing(root, &argv),
+            })
+        }
         ServiceIpcRequest::BusinessOsWebStack { argv } => {
             match crate::service::business_os::run_business_os_web_stack_cli_json_local(root, &argv)
             {
@@ -3602,6 +3735,37 @@ fn handle_service_ipc_request(
                 }),
             }
         }
+    }
+}
+
+fn sandboxed_cli_error_payload(error: anyhow::Error) -> Value {
+    serde_json::json!({
+        "ok": false,
+        "stdout": "",
+        "error": error.to_string(),
+    })
+}
+
+fn dispatch_sandboxed_cli_capturing(root: &Path, argv: &[String]) -> Value {
+    match argv {
+        [command, rest @ ..] if command == "scrape" => {
+            crate::scrape::dispatch_capturing(root, rest)
+                .unwrap_or_else(sandboxed_cli_error_payload)
+        }
+        [command, rest @ ..] if command == "continuity-update" => {
+            let stdin = sandboxed_cli_flag_value(rest, SANDBOXED_CLI_STDIN_ARG);
+            let mode = sandboxed_cli_flag_value(rest, "--mode");
+            if matches!(mode, Some("full" | "diff")) && stdin.is_none() {
+                return sandboxed_cli_error_payload(anyhow::anyhow!(
+                    "continuity-update mode {mode:?} requires relayed stdin"
+                ));
+            }
+            crate::handle_continuity_update_with_stdin(rest, stdin)
+                .unwrap_or_else(sandboxed_cli_error_payload)
+        }
+        _ => sandboxed_cli_error_payload(anyhow::anyhow!(
+            "sandboxed cli command is not allowlisted: {argv:?}"
+        )),
     }
 }
 
@@ -4238,6 +4402,17 @@ fn service_ipc_timeout(request: &ServiceIpcRequest) -> Duration {
         // Knowledge writes hit Polars + Parquet; bulk imports can run for
         // seconds even on modest tables. 30s is conservative.
         ServiceIpcRequest::KnowledgeData { .. } => Duration::from_secs(30),
+        ServiceIpcRequest::SandboxedCli { argv } => {
+            if matches!(argv, [command, subcommand, ..] if command == "scrape" && subcommand == "execute")
+            {
+                let timeout_seconds = sandboxed_cli_flag_value(argv, "--timeout-seconds")
+                    .and_then(|value| value.parse::<u64>().ok())
+                    .unwrap_or(120);
+                Duration::from_secs(timeout_seconds.saturating_add(90).max(180))
+            } else {
+                Duration::from_secs(60)
+            }
+        }
         // Business commands include browser automation, deployment audits, and
         // report generation. Those commands are intentionally synchronous and
         // can outlive a short request timeout; disconnecting the CLI does not
@@ -7193,9 +7368,7 @@ fn start_prompt_worker(
                         let retry_runtime_message =
                             runtime_error_is_transient_api_failure(&err_text);
                         let consume_app_validation_repair =
-                            worker_error_may_consume_business_os_app_validation_repair(
-                                &err_text,
-                            );
+                            worker_error_may_consume_business_os_app_validation_repair(&err_text);
                         let timeout_worker_message =
                             matches!(agent_outcome, lcm::AgentOutcome::TurnTimeout);
                         let timeout_retry_message =
@@ -22503,6 +22676,109 @@ mod tests {
         assert!(serialized.contains("source_catalog"));
         assert!(!serialized.contains("search bearings"));
         assert!(!serialized.contains("capability_token"));
+    }
+
+    #[test]
+    fn sandboxed_cli_allowlist_accepts_exact_command_set() {
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        for argv in [
+            args(&["scrape", "register-script"]),
+            args(&["scrape", "register-source-module"]),
+            args(&["scrape", "execute"]),
+            args(&["continuity-update"]),
+        ] {
+            assert!(
+                sandboxed_cli_command_allowed(&argv),
+                "expected allowlisted command: {argv:?}"
+            );
+        }
+        for argv in [
+            args(&["scrape", "delete-target"]),
+            args(&["queue", "list"]),
+            args(&["scrape"]),
+        ] {
+            assert!(
+                !sandboxed_cli_command_allowed(&argv),
+                "unexpected allowlisted command: {argv:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sandboxed_cli_ipc_rejects_non_allowlisted_command() {
+        let root = temp_root("sandboxed-cli-rejection");
+        let response = handle_service_ipc_request(
+            ServiceIpcRequest::SandboxedCli {
+                argv: vec!["queue".to_string(), "list".to_string()],
+            },
+            &root,
+            Arc::new(Mutex::new(SharedState::default())),
+        )
+        .expect("daemon should return a typed rejection");
+
+        match response {
+            ServiceIpcResponse::Error { message } => {
+                assert!(message.contains("not allowlisted"));
+            }
+            other => panic!("unexpected response: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandboxed_cli_request_serde_round_trip() {
+        let request = ServiceIpcRequest::SandboxedCli {
+            argv: vec![
+                "scrape".to_string(),
+                "execute".to_string(),
+                "--target-key".to_string(),
+                "fixture".to_string(),
+            ],
+        };
+        let encoded = serde_json::to_string(&request).expect("request serializes");
+        assert!(encoded.contains("\"kind\":\"sandboxed_cli\""));
+        let decoded: ServiceIpcRequest =
+            serde_json::from_str(&encoded).expect("request deserializes");
+        match decoded {
+            ServiceIpcRequest::SandboxedCli { argv } => assert_eq!(
+                argv,
+                ["scrape", "execute", "--target-key", "fixture"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            ),
+            other => panic!("unexpected request after round trip: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandboxed_cli_timeout_tracks_scrape_execute_budget() {
+        let request = |argv: &[&str]| ServiceIpcRequest::SandboxedCli {
+            argv: argv.iter().map(|value| value.to_string()).collect(),
+        };
+
+        assert_eq!(
+            service_ipc_timeout(&request(&["scrape", "execute"])),
+            Duration::from_secs(210)
+        );
+        assert_eq!(
+            service_ipc_timeout(&request(&["scrape", "execute", "--timeout-seconds", "30"])),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            service_ipc_timeout(&request(&["scrape", "register-script"])),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            service_ipc_timeout(&request(&["continuity-update"])),
+            Duration::from_secs(60)
+        );
     }
 
     #[test]

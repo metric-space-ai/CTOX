@@ -24,6 +24,7 @@ mod queries;
 use queries::{count_filtered_rows, query_records, summary_payload};
 pub(crate) use queries::{service_query_records, service_show_api, show_latest};
 mod cli;
+pub(crate) use cli::dispatch_capturing;
 pub use cli::handle_scrape_command;
 mod classify;
 use classify::Classification;
@@ -1923,8 +1924,7 @@ fn parse_where_filters(args: &[String]) -> Result<Vec<(String, String)>> {
 }
 
 fn print_json(value: &Value) -> Result<()> {
-    println!("{}", serde_json::to_string_pretty(value)?);
-    Ok(())
+    cli::write_json(value)
 }
 
 #[cfg(test)]
