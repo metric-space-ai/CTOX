@@ -1622,7 +1622,7 @@ async function flushSyncBridge(bridge, documents = []) {
         retryable: true,
       });
     }
-    await withTimeout(
+    const acknowledgement = await withTimeout(
       () => resolvedBridge.flush(),
       followerSyncFlushTimeoutMs(resolvedBridge),
       {
@@ -1630,12 +1630,12 @@ async function flushSyncBridge(bridge, documents = []) {
         message: 'CTOX Sync Engine could not complete multi-tab command failover before the deadline.',
       },
     );
-    return true;
+    return acknowledgement?.ok === true;
   }
   const state = resolvedBridge?.state;
   if (!state) return false;
   let pushesCurrentDocuments = false;
-  await withTimeout(
+  const acknowledgement = await withTimeout(
     () => {
       if (documents.length && typeof state.pushDocumentsToRemotePeers === 'function') {
         pushesCurrentDocuments = true;
@@ -1655,7 +1655,7 @@ async function flushSyncBridge(bridge, documents = []) {
       message: 'CTOX Sync Engine could not push command dependencies before the deadline.',
     },
   );
-  return pushesCurrentDocuments;
+  return pushesCurrentDocuments && acknowledgement === true;
 }
 
 function followerSyncFlushTimeoutMs(bridge) {

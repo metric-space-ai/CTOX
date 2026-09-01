@@ -67,7 +67,9 @@ export function validModuleId(id) {
 
 export function isRecoverableDispatchError(error) {
   const message = String(error?.message || error || '');
-  return RECOVERABLE_DISPATCH_PATTERNS.some((pattern) => pattern.test(message));
+  const commandId = String(error?.receipt?.command_id || error?.command_id || '').trim();
+  return RECOVERABLE_DISPATCH_PATTERNS.some((pattern) => pattern.test(message))
+    || (Boolean(commandId) && error?.transient === true);
 }
 
 export function moduleIdFromSource(value) {

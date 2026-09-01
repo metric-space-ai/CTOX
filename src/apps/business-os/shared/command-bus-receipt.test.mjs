@@ -53,6 +53,7 @@ test('native observation makes a pending_sync legacy row an accepted receipt', a
         execution_task_id: 'queue-native-observed-1',
       };
       listeners.forEach((listener) => listener({ toJSON: () => ({ ...stored }) }));
+      return true;
     },
     async pullFromRemotePeers() {},
   };

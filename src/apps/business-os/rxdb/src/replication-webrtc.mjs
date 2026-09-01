@@ -1562,7 +1562,7 @@ class CtoxWebRtcReplicationState {
   }
 
   async pushDocumentsToRemotePeers(documents = []) {
-    if (!this.push || this.cancelled || !documents.length) return;
+    if (!this.push || this.cancelled || !documents.length) return false;
     const peerIds = this.openPeerIds();
     const results = await Promise.allSettled(
       peerIds.map((peerId) => this.pushDocumentsToPeer(peerId, documents)),
@@ -1576,6 +1576,10 @@ class CtoxWebRtcReplicationState {
     // Documents handed in with no open peer were dropped without a trace: the
     // caller saw a resolved promise and assumed they were sent.
     if (!peerIds.length) this.schedulePushRetry();
+    // A resolved targeted push is only a transport acknowledgement when at
+    // least one native peer answered masterWrite. Keep the browser-local row
+    // retryable when the peer list vanished between readiness and dispatch.
+    return peerIds.length > 0;
   }
 
   async pushDocumentsToPeer(peerId, documents) {

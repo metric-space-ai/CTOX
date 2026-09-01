@@ -1,6 +1,6 @@
 {
   "schema": "ctox.business_os.command_consumer_inventory.v1",
-  "generated_at": "2026-07-16",
+  "generated_at": "2026-09-01",
   "dispatch_consumers": [
     "app.js",
     "desktop-apps/code-editor/app.js",
@@ -19,6 +19,8 @@
     "modules/desktop/index.js",
     "modules/documents/index.js",
     "modules/esign/index.js",
+    "modules/file-viewer/index.js",
+    "modules/importer/index.js",
     "modules/intake/index.js",
     "modules/invoices/index.js",
     "modules/knowledge/index.js",
@@ -52,6 +54,7 @@
     "modules/credentials/index.js",
     "modules/customers/index.js",
     "modules/desktop/index.js",
+    "modules/file-viewer/index.js",
     "modules/mail/index.js",
     "modules/outbound/active-outreach.js",
     "modules/outbound/index.js",

@@ -10315,7 +10315,7 @@ var CtoxWebRtcReplicationState = class {
     return this.pushInProgressPromise;
   }
   async pushDocumentsToRemotePeers(documents = []) {
-    if (!this.push || this.cancelled || !documents.length) return;
+    if (!this.push || this.cancelled || !documents.length) return false;
     const peerIds = this.openPeerIds();
     const results = await Promise.allSettled(
       peerIds.map((peerId) => this.pushDocumentsToPeer(peerId, documents))
@@ -10327,6 +10327,7 @@ var CtoxWebRtcReplicationState = class {
       throw rejected.reason;
     }
     if (!peerIds.length) this.schedulePushRetry();
+    return peerIds.length > 0;
   }
   async pushDocumentsToPeer(peerId, documents) {
     const unique = /* @__PURE__ */ new Map();

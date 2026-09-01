@@ -57,6 +57,18 @@ test('native-peer acknowledgement timeouts keep the durable job observable', () 
   assert.equal(isRecoverableDispatchError(
     new Error('WebRTC native peer did not open for business_commands within 25000ms; reconnect repair is scheduled.'),
   ), true);
+  assert.equal(isRecoverableDispatchError(Object.assign(
+    new Error('CTOX wartet noch auf die Rueckmeldung. Der Vorgang bleibt verfolgbar.'),
+    {
+      code: 'projection_delayed',
+      transient: true,
+      receipt: { command_id: 'app-import-radio-42' },
+    },
+  )), true);
+  assert.equal(isRecoverableDispatchError(Object.assign(
+    new Error('temporary pre-insert failure'),
+    { transient: true },
+  )), false);
   assert.equal(isRecoverableDispatchError(new Error('permission denied')), false);
   assert.equal(isRecoverableDispatchError(new Error('command_bus_unavailable')), false);
 });

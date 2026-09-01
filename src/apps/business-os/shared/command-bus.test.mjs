@@ -527,6 +527,7 @@ test('submit can push a new command before historical command pull is complete',
                 targetedPushCount += 1;
                 assert.equal(documents.length, 1);
                 assert.equal(documents[0].id, 'cmd_cold_history_push');
+                return true;
               },
             },
           },
@@ -548,6 +549,45 @@ test('submit can push a new command before historical command pull is complete',
   assert.equal(initialReplicationAwaited, false);
   assert.equal(targetedPushCount, 1);
   assert.equal(pushCount, 0);
+  assert.equal(receipt.code, 'push_confirmed');
+});
+
+test('submit keeps the local command pending when no native peer acknowledges it', async () => {
+  let stored = null;
+  const collection = {
+    async insert(doc) { stored = { ...doc }; },
+    findOne() { return { async exec() { return null; } }; },
+  };
+  const bus = createCommandBus({
+    db: { raw: { business_commands: collection, ctox_queue_tasks: collection } },
+    sync: {
+      async startCollection() {
+        return {
+          bridge: {
+            state: {
+              getTransportStatus() {
+                return { demandLoading: { peerConnected: true } };
+              },
+              async pushDocumentsToRemotePeers() { return false; },
+            },
+          },
+        };
+      },
+    },
+  });
+
+  const receipt = await bus.submit({
+    id: 'cmd-no-native-ack',
+    module: 'notes',
+    command_type: 'business_os.context.ask',
+    record_id: 'note_2',
+    payload: { prompt: 'read only' },
+  });
+
+  assert.equal(stored.id, 'cmd-no-native-ack');
+  assert.equal(receipt.code, 'push_unconfirmed');
+  assert.equal(receipt.pushConfirmed, false);
+  assert.equal(receipt.transient, true);
 });
 
 test('submit waits for the negotiated collection peer before inserting the command', async () => {
@@ -1132,6 +1172,7 @@ test('command timing probe records seven correlated marks only when requested', 
                 },
               };
               listeners.forEach((listener) => listener({ toJSON: () => ({ ...stored }) }));
+              return true;
             },
           },
         };

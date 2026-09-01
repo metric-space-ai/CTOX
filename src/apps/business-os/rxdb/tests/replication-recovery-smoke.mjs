@@ -177,10 +177,17 @@ const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
   state.demandSidecar = { markDirty: async () => new Promise(() => {}) };
   state.pushInProgressPromise = new Promise(() => {});
 
-  await state.pushDocumentsToRemotePeers([{ id: 'cmd-urgent', status: 'pending_sync' }]);
+  const confirmed = await state.pushDocumentsToRemotePeers([{ id: 'cmd-urgent', status: 'pending_sync' }]);
 
   assert(pushed.length === 1, `targeted push must write one command, got ${pushed.length}`);
   assert(pushed[0].id === 'cmd-urgent', 'targeted push wrote the wrong command');
+  assert(confirmed === true, 'targeted push must confirm an answered native masterWrite');
+  let retryScheduled = false;
+  state.openPeerIds = () => [];
+  state.schedulePushRetry = () => { retryScheduled = true; };
+  const unconfirmed = await state.pushDocumentsToRemotePeers([{ id: 'cmd-offline' }]);
+  assert(unconfirmed === false, 'targeted push without an open peer must stay unconfirmed');
+  assert(retryScheduled, 'targeted push without an open peer must schedule retry');
   await state.cancel();
 }
 

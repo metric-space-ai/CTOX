@@ -188,6 +188,7 @@ function makeSync(state) {
   let pushedId = '';
   const state = connectedState(async (documents) => {
     pushedId = documents[0]?.id || '';
+    return true;
   });
   const bus = createCommandBus({ db: makeDb(collection), sync: makeSync(state) });
   const receipt = await bus.submit({
