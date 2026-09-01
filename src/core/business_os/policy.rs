@@ -367,9 +367,14 @@ pub fn evaluate(
             }
             BusinessOsRole::User => false,
         },
-        BusinessOsPermission::DataRead | BusinessOsPermission::DataWrite => {
+        BusinessOsPermission::DataRead => {
             matches!(actor.role, BusinessOsRole::Chef | BusinessOsRole::Admin)
                 || scope.assigned_to_actor
+        }
+        BusinessOsPermission::DataWrite => {
+            matches!(actor.role, BusinessOsRole::Chef | BusinessOsRole::Admin)
+                || scope.assigned_to_actor
+                || (scope.scope_type == BusinessOsScopeType::Record && scope.owned_by_actor)
         }
         BusinessOsPermission::CtoxTaskCreate => true,
         BusinessOsPermission::CtoxTaskManage => {
@@ -413,6 +418,64 @@ pub fn evaluate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn record_owned_data_write_allows_owner_only_on_record_scope() {
+        let actor = BusinessOsActor::new(Some("owner-1".to_owned()), "user");
+        let owned_record = BusinessOsScope {
+            scope_type: BusinessOsScopeType::Record,
+            scope_id: Some("workjet_sessions/session-1".to_owned()),
+            assigned_to_actor: false,
+            owned_by_actor: true,
+        };
+        assert!(evaluate(&actor, BusinessOsPermission::DataWrite, &owned_record).allowed);
+
+        for scope_type in [
+            BusinessOsScopeType::Workspace,
+            BusinessOsScopeType::Module,
+            BusinessOsScopeType::Collection,
+        ] {
+            let non_record = BusinessOsScope {
+                scope_type,
+                scope_id: Some("scope-1".to_owned()),
+                assigned_to_actor: false,
+                owned_by_actor: true,
+            };
+            assert!(
+                !evaluate(&actor, BusinessOsPermission::DataWrite, &non_record).allowed,
+                "owned_by_actor must not expand DataWrite on {} scope",
+                scope_type.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn record_owned_data_write_denies_foreign_user_and_allows_chef_admin() {
+        let foreign_record = BusinessOsScope {
+            scope_type: BusinessOsScopeType::Record,
+            scope_id: Some("workjet_sessions/session-foreign".to_owned()),
+            assigned_to_actor: false,
+            owned_by_actor: false,
+        };
+        assert!(
+            !evaluate(
+                &BusinessOsActor::new(Some("user-2".to_owned()), "user"),
+                BusinessOsPermission::DataWrite,
+                &foreign_record,
+            )
+            .allowed
+        );
+        for role in ["chef", "admin"] {
+            assert!(
+                evaluate(
+                    &BusinessOsActor::new(Some(role.to_owned()), role),
+                    BusinessOsPermission::DataWrite,
+                    &foreign_record,
+                )
+                .allowed
+            );
+        }
+    }
 
     #[test]
     fn per_collection_read_authz_denies_admin_only_to_non_admins() {

@@ -3,7 +3,10 @@
 
 use super::app_runtime;
 use super::control_command_types::ActiveExternalSqlControlCommand;
-use super::policy::{BusinessOsPermission, BusinessOsScope, BusinessOsScopeType};
+use super::policy::{
+    policy_actor_from_session, BusinessOsPermission, BusinessOsRole, BusinessOsScope,
+    BusinessOsScopeType,
+};
 use super::session::{session_user_id, BusinessOsSession};
 use super::store::{
     appsec_business_command_requires_data_write, authorize_recoverable_background_control_command,
@@ -263,7 +266,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 60] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 66] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -319,8 +322,14 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 60] = [
     "ctox.subscription_auth.start",
     "ctox.task.delete",
     "ctox.task.update",
+    "ctox.workjet.computer.assign",
+    "ctox.workjet.computer.list",
+    "ctox.workjet.computer.unassign",
     "ctox.workjet.project.list",
     "ctox.workjet.project.upsert",
+    "ctox.workjet.session.create",
+    "ctox.workjet.session.delete",
+    "ctox.workjet.session.list",
     "ctox.workjet.working_copy.upsert",
     "knowledge.command",
     "web_stack.person_research",
@@ -756,6 +765,7 @@ impl CommandAuthorizationStage {
 enum CentralCommandPolicyRequirement {
     Fixed(CommandPolicyRequirement),
     ThreadExternalApproval,
+    WorkjetSessionDataWrite,
 }
 
 impl CentralCommandPolicyRequirement {
@@ -795,17 +805,30 @@ impl CentralCommandPolicyRequirement {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::IntegrationsManage,
             ))
-        } else if command_type == "ctox.workjet.project.list" {
+        } else if matches!(
+            command_type,
+            "ctox.workjet.project.list"
+                | "ctox.workjet.computer.list"
+                | "ctox.workjet.session.list"
+        ) {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::DataRead,
             ))
         } else if matches!(
             command_type,
-            "ctox.workjet.project.upsert" | "ctox.workjet.working_copy.upsert"
+            "ctox.workjet.project.upsert"
+                | "ctox.workjet.working_copy.upsert"
+                | "ctox.workjet.computer.assign"
+                | "ctox.workjet.computer.unassign"
         ) {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::DataWrite,
             ))
+        } else if matches!(
+            command_type,
+            "ctox.workjet.session.create" | "ctox.workjet.session.delete"
+        ) {
+            return Some(Self::WorkjetSessionDataWrite);
         } else if is_appsec_business_command(command_type) {
             let permission = if appsec_business_command_requires_data_write(command_type) {
                 BusinessOsPermission::DataWrite
@@ -863,6 +886,21 @@ impl CentralCommandPolicyRequirement {
     ) -> anyhow::Result<CommandPolicyRequirement> {
         match self {
             Self::Fixed(requirement) => Ok(requirement),
+            Self::WorkjetSessionDataWrite => {
+                let owner_user_id = session_user_id(session)
+                    .context("authorized Workjet session command is missing a user identity")?;
+                let owner_email = rxdb_verified_identity_email(root, command, owner_user_id);
+                let scope = super::store_workjet_sessions::workjet_session_record_policy_scope(
+                    root,
+                    command,
+                    owner_user_id,
+                    owner_email.as_deref(),
+                )?;
+                Ok(CommandPolicyRequirement::scoped(
+                    BusinessOsPermission::DataWrite,
+                    scope,
+                ))
+            }
             Self::ThreadExternalApproval => {
                 let approval_id = command
                     .payload
@@ -1056,6 +1094,59 @@ fn dispatch_business_command(
                 command,
                 owner_user_id,
                 owner_email.as_deref(),
+            ) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    None,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
+        }
+        "ctox.workjet.computer.assign"
+        | "ctox.workjet.computer.list"
+        | "ctox.workjet.computer.unassign" => {
+            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
+            let owner_user_id = session_user_id(session)
+                .context("authorized Workjet computer command is missing a user identity")?;
+            let owner_email = rxdb_verified_identity_email(root, command, owner_user_id);
+            match super::store_workjet_computers::handle_workjet_computer_store_command(
+                root,
+                command,
+                owner_user_id,
+                owner_email.as_deref(),
+            ) {
+                Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
+                Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
+                    None,
+                    serde_json::json!({
+                        "ok": false,
+                        "error": error.to_string(),
+                    }),
+                    error,
+                )),
+            }
+        }
+        "ctox.workjet.session.create"
+        | "ctox.workjet.session.list"
+        | "ctox.workjet.session.delete" => {
+            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
+            let owner_user_id = session_user_id(session)
+                .context("authorized Workjet session command is missing a user identity")?;
+            let owner_email = rxdb_verified_identity_email(root, command, owner_user_id);
+            let can_manage_all_records = matches!(
+                policy_actor_from_session(session).role,
+                BusinessOsRole::Chef | BusinessOsRole::Admin
+            );
+            match super::store_workjet_sessions::handle_workjet_session_store_command(
+                root,
+                command,
+                owner_user_id,
+                owner_email.as_deref(),
+                can_manage_all_records,
             ) {
                 Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
                 Err(error) => Ok(BusinessCommandDispatchOutcome::failed(
@@ -1653,10 +1744,12 @@ pub(super) fn complete_and_project_business_control_command(
 #[cfg(test)]
 mod tests {
     use super::super::store::{
-        business_command_core_claim, load_rxdb_collection_record, rxdb_store_path,
+        business_command_core_claim, issue_business_os_capability_token_for_managed_user,
+        load_rxdb_collection_record, rxdb_store_path,
     };
     use super::super::store_projections::tests::create_repair_rxdb_tables;
     use super::super::store_workjet_projects::tests::create_workjet_rxdb_projection_tables;
+    use super::super::store_workjet_sessions::tests::create_workjet_session_rxdb_projection_tables;
     use super::*;
     use rusqlite::Connection;
     use serde_json::json;
@@ -1859,6 +1952,171 @@ mod tests {
             replayed_working_copy["updated_at_ms"],
             working_copy["updated_at_ms"]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn record_owned_data_write_workjet_session_owner_allowed_foreign_denied_and_admin_allowed(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        drop(create_repair_rxdb_tables(root.path())?);
+        create_workjet_rxdb_projection_tables(root.path())?;
+        create_workjet_session_rxdb_projection_tables(root.path())?;
+        let issued_at_ms = now_ms() as i64;
+        issue_business_os_capability_token_for_managed_user(
+            root.path(),
+            "session-owner",
+            "Session Owner",
+            "admin",
+            issued_at_ms,
+        )?;
+        issue_business_os_capability_token_for_managed_user(
+            root.path(),
+            "foreign-user",
+            "Foreign User",
+            "user",
+            issued_at_ms,
+        )?;
+        issue_business_os_capability_token_for_managed_user(
+            root.path(),
+            "admin-operator",
+            "Admin Operator",
+            "admin",
+            issued_at_ms,
+        )?;
+        let owner_actor = json!({
+            "id": "session-owner",
+            "role": "admin",
+            "is_admin": true,
+            "display_name": "Session Owner",
+            "email": "",
+            "login": ""
+        });
+        let project = json!({
+            "id": "cmd-record-owned-project",
+            "command_id": "cmd-record-owned-project",
+            "module": "ctox",
+            "command_type": "ctox.workjet.project.upsert",
+            "record_id": "record-owned-project",
+            "payload": {
+                "project_id": "record-owned-project",
+                "name": "Record-owned Project"
+            },
+            "client_context": { "actor": owner_actor.clone() }
+        });
+        accept_rxdb_business_command(root.path(), project)?;
+        let copy = accept_rxdb_business_command(
+            root.path(),
+            json!({
+                "id": "cmd-record-owned-copy",
+                "command_id": "cmd-record-owned-copy",
+                "module": "ctox",
+                "command_type": "ctox.workjet.working_copy.upsert",
+                "payload": {
+                    "project_id": "record-owned-project",
+                    "computer_id": "record-owned-computer",
+                    "path": "opaque://record-owned/project",
+                    "active": true
+                },
+                "client_context": { "actor": owner_actor }
+            }),
+        )?;
+        let working_copy_id = copy["result"]["working_copy"]["id"]
+            .as_str()
+            .context("working copy id")?;
+        issue_business_os_capability_token_for_managed_user(
+            root.path(),
+            "session-owner",
+            "Session Owner",
+            "user",
+            issued_at_ms,
+        )?;
+        let owner_create = accept_rxdb_business_command(
+            root.path(),
+            json!({
+                "id": "cmd-record-owned-session-create",
+                "command_id": "cmd-record-owned-session-create",
+                "module": "ctox",
+                "command_type": "ctox.workjet.session.create",
+                "payload": {
+                    "project_id": "record-owned-project",
+                    "working_copy_id": working_copy_id
+                },
+                "client_context": {
+                    "actor": {
+                        "id": "session-owner",
+                        "role": "user",
+                        "is_admin": false,
+                        "display_name": "Session Owner",
+                        "email": "",
+                        "login": ""
+                    }
+                }
+            }),
+        )?;
+        assert_eq!(owner_create["ok"], true);
+        assert_eq!(
+            owner_create["result"]["session"]["owner_user_id"],
+            "session-owner"
+        );
+        let session_id = owner_create["result"]["session"]["id"]
+            .as_str()
+            .context("session id")?;
+        let projected = load_rxdb_collection_record(root.path(), "workjet_sessions", session_id)?
+            .context("session projection must exist before command return")?;
+        assert_eq!(projected["id"], session_id);
+        assert_eq!(projected["owner_user_id"], "session-owner");
+
+        let foreign_delete = accept_rxdb_business_command(
+            root.path(),
+            json!({
+                "id": "cmd-record-owned-session-foreign-delete",
+                "command_id": "cmd-record-owned-session-foreign-delete",
+                "module": "ctox",
+                "command_type": "ctox.workjet.session.delete",
+                "record_id": session_id,
+                "payload": {},
+                "client_context": {
+                    "actor": {
+                        "id": "foreign-user",
+                        "role": "user",
+                        "is_admin": false,
+                        "display_name": "Foreign User",
+                        "email": "",
+                        "login": ""
+                    }
+                }
+            }),
+        )?;
+        assert_eq!(foreign_delete["ok"], false);
+        assert_eq!(
+            foreign_delete["result"]["policy_decision"]["reason_code"],
+            "role_or_scope_denied"
+        );
+
+        let admin_delete = accept_rxdb_business_command(
+            root.path(),
+            json!({
+                "id": "cmd-record-owned-session-admin-delete",
+                "command_id": "cmd-record-owned-session-admin-delete",
+                "module": "ctox",
+                "command_type": "ctox.workjet.session.delete",
+                "record_id": session_id,
+                "payload": {},
+                "client_context": {
+                    "actor": {
+                        "id": "admin-operator",
+                        "role": "admin",
+                        "is_admin": true,
+                        "display_name": "Admin Operator",
+                        "email": "",
+                        "login": ""
+                    }
+                }
+            }),
+        )?;
+        assert_eq!(admin_delete["ok"], true);
+        assert_eq!(admin_delete["result"]["session"]["is_deleted"], true);
         Ok(())
     }
 

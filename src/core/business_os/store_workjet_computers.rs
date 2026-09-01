@@ -9,7 +9,7 @@
 
 use super::store::{
     open_store, outbound_load_record, outbound_load_records_by_string_field,
-    upsert_business_record, BusinessCommand,
+    upsert_business_record, upsert_rxdb_collection_record, BusinessCommand,
 };
 use anyhow::Context;
 use rusqlite::Connection;
@@ -24,6 +24,8 @@ pub(super) const SELF_HOST_COLOCATION_CONFIRMATION: &str = "workjet-self-host-co
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ComputerListPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -31,6 +33,8 @@ struct ComputerListPayload {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ComputerAssignPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
     computer_id: String,
     display_name: String,
     hosting_mode: String,
@@ -45,6 +49,8 @@ struct ComputerAssignPayload {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ComputerUnassignPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
     computer_id: String,
 }
 
@@ -52,7 +58,9 @@ pub(super) fn handle_workjet_computer_store_command(
     root: &Path,
     command: &BusinessCommand,
     authorized_owner_user_id: &str,
+    authorized_owner_email: Option<&str>,
 ) -> anyhow::Result<Value> {
+    migrate_signed_owner_alias(root, authorized_owner_user_id, authorized_owner_email)?;
     match command.command_type.as_str() {
         "ctox.workjet.computer.list" => {
             handle_workjet_computer_list_command(root, command, authorized_owner_user_id)
@@ -65,6 +73,55 @@ pub(super) fn handle_workjet_computer_store_command(
         }
         other => anyhow::bail!("unsupported Workjet computer command type: {other}"),
     }
+}
+
+fn migrate_signed_owner_alias(
+    root: &Path,
+    authorized_owner_user_id: &str,
+    authorized_owner_email: Option<&str>,
+) -> anyhow::Result<()> {
+    let owner_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
+    let Some(owner_email) = authorized_owner_email else {
+        return Ok(());
+    };
+    let owner_email = bounded_required(owner_email, "owner_email", 320)?.to_ascii_lowercase();
+    anyhow::ensure!(
+        owner_email.contains('@'),
+        "owner_email must be an email address"
+    );
+    if owner_email == owner_user_id.to_ascii_lowercase() {
+        return Ok(());
+    }
+
+    let conn = open_store(root)?;
+    let now = super::store::now_ms() as i64;
+    let records = outbound_load_records_by_string_field(
+        &conn,
+        COMPUTERS_COLLECTION,
+        "owner_user_id",
+        &owner_email,
+    )?;
+    for mut record in records {
+        if record.get("is_deleted").and_then(Value::as_bool) == Some(true) {
+            continue;
+        }
+        let record_id = record
+            .get("id")
+            .and_then(Value::as_str)
+            .context("workjet_computers owner migration record has no id")?
+            .to_owned();
+        record["owner_user_id"] = Value::String(owner_user_id.clone());
+        record["updated_at_ms"] = Value::from(now);
+        persist_and_project_idempotently(
+            root,
+            &conn,
+            COMPUTERS_COLLECTION,
+            &record_id,
+            now,
+            record,
+        )?;
+    }
+    Ok(())
 }
 
 fn handle_workjet_computer_list_command(
@@ -114,7 +171,7 @@ fn handle_workjet_computer_assign_command(
     let payload: ComputerAssignPayload = serde_json::from_value(command.payload.clone())
         .context("invalid ctox.workjet.computer.assign payload")?;
     let owner_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
-    let computer_id = bounded_required(&payload.computer_id, "computer_id", 160)?;
+    let computer_id = bounded_required(&payload.computer_id, "computer_id", 256)?;
     let display_name = bounded_required(&payload.display_name, "display_name", 256)?;
     let hosting_mode = bounded_required(&payload.hosting_mode, "hosting_mode", 64)?;
     anyhow::ensure!(
@@ -162,6 +219,26 @@ fn handle_workjet_computer_assign_command(
         .and_then(|record| record.get("created_at_ms"))
         .and_then(Value::as_i64)
         .unwrap_or(now);
+    let device_binding_id = existing
+        .as_ref()
+        .and_then(|record| record.get("device_binding_id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let actor_epoch = existing
+        .as_ref()
+        .and_then(|record| record.get("actor_epoch"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let last_seen_at_ms = existing
+        .as_ref()
+        .and_then(|record| record.get("last_seen_at_ms"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    let replication_up = existing
+        .as_ref()
+        .and_then(|record| record.get("replication_up"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let computer = serde_json::json!({
         "id": computer_id,
         "display_name": display_name,
@@ -169,12 +246,23 @@ fn handle_workjet_computer_assign_command(
         "status": "assigned",
         "capabilities": capabilities,
         "self_hosted_colocation": payload.self_hosted_colocation,
+        "device_binding_id": device_binding_id,
+        "actor_epoch": actor_epoch,
+        "last_seen_at_ms": last_seen_at_ms,
+        "replication_up": replication_up,
         "owner_user_id": owner_user_id,
         "created_at_ms": created_at_ms,
         "updated_at_ms": now,
         "is_deleted": false,
     });
-    let computer = persist_idempotently(&conn, COMPUTERS_COLLECTION, &computer_id, now, computer)?;
+    let computer = persist_and_project_idempotently(
+        root,
+        &conn,
+        COMPUTERS_COLLECTION,
+        &computer_id,
+        now,
+        computer,
+    )?;
     Ok(serde_json::json!({
         "ok": true,
         "collection": COMPUTERS_COLLECTION,
@@ -190,7 +278,7 @@ fn handle_workjet_computer_unassign_command(
     let payload: ComputerUnassignPayload = serde_json::from_value(command.payload.clone())
         .context("invalid ctox.workjet.computer.unassign payload")?;
     let owner_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
-    let computer_id = bounded_required(&payload.computer_id, "computer_id", 160)?;
+    let computer_id = bounded_required(&payload.computer_id, "computer_id", 256)?;
     let conn = open_store(root)?;
     let existing = outbound_load_record(&conn, COMPUTERS_COLLECTION, &computer_id)?
         .context("Workjet computer assignment not found")?;
@@ -207,7 +295,14 @@ fn handle_workjet_computer_unassign_command(
     computer["status"] = Value::String("unassigned".to_owned());
     computer["updated_at_ms"] = Value::from(now);
     computer["unassigned_at_ms"] = Value::from(now);
-    let computer = persist_idempotently(&conn, COMPUTERS_COLLECTION, &computer_id, now, computer)?;
+    let computer = persist_and_project_idempotently(
+        root,
+        &conn,
+        COMPUTERS_COLLECTION,
+        &computer_id,
+        now,
+        computer,
+    )?;
     Ok(serde_json::json!({
         "ok": true,
         "collection": COMPUTERS_COLLECTION,
@@ -251,6 +346,23 @@ fn persist_idempotently(
         .with_context(|| format!("failed to reload {collection} record {record_id}"))
 }
 
+fn persist_and_project_idempotently(
+    root: &Path,
+    conn: &Connection,
+    collection: &str,
+    record_id: &str,
+    now: i64,
+    desired: Value,
+) -> anyhow::Result<Value> {
+    let record = persist_idempotently(conn, collection, record_id, now, desired)?;
+    let updated_at_ms = record
+        .get("updated_at_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or(now);
+    upsert_rxdb_collection_record(root, collection, record_id, updated_at_ms, record.clone())?;
+    Ok(record)
+}
+
 fn stable_record_content(value: &Value) -> Value {
     let mut value = value.clone();
     if let Some(object) = value.as_object_mut() {
@@ -288,8 +400,10 @@ fn bounded_required(value: &str, field: &str, max_chars: usize) -> anyhow::Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::business_os::store::CommandOrigin;
+    use crate::business_os::store::{load_rxdb_collection_record, rxdb_store_path, CommandOrigin};
+    use rusqlite::Connection;
     use serde_json::json;
+    use std::fs;
     use tempfile::tempdir;
 
     fn command(command_type: &str, payload: Value) -> BusinessCommand {
@@ -302,6 +416,22 @@ mod tests {
             client_context: json!({}),
             origin: CommandOrigin::TrustedLocal,
         }
+    }
+
+    pub(crate) fn create_workjet_computer_rxdb_projection_table(root: &Path) -> anyhow::Result<()> {
+        fs::create_dir_all(root.join("runtime"))?;
+        let conn = Connection::open(rxdb_store_path(root))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS ctox_business_os__workjet_computers__v0 (
+                id TEXT PRIMARY KEY NOT NULL,
+                revision TEXT,
+                deleted INTEGER NOT NULL DEFAULT 0,
+                lastWriteTime REAL NOT NULL DEFAULT 0,
+                data TEXT NOT NULL
+            )",
+            [],
+        )?;
+        Ok(())
     }
 
     fn assign(root: &Path, computer_id: &str) -> anyhow::Result<Value> {
@@ -333,6 +463,10 @@ mod tests {
             json!(["claude", "codex"])
         );
         assert_eq!(first["computer"]["self_hosted_colocation"], false);
+        assert_eq!(first["computer"]["device_binding_id"], "");
+        assert_eq!(first["computer"]["actor_epoch"], 0);
+        assert_eq!(first["computer"]["last_seen_at_ms"], 0);
+        assert_eq!(first["computer"]["replication_up"], false);
         assert!(first["computer"].get("hostname").is_none());
         assert!(first["computer"].get("environment_id").is_none());
         assert!(first["computer"].get("presentation_id").is_none());
@@ -349,6 +483,53 @@ mod tests {
             "owner-2",
         )
         .is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_computer_projects_actor_fields_before_return() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        create_workjet_computer_rxdb_projection_table(root.path())?;
+        let assigned = assign(root.path(), "computer-projected")?;
+        let projected =
+            load_rxdb_collection_record(root.path(), COMPUTERS_COLLECTION, "computer-projected")?
+                .context("workjet computer projection")?;
+        assert_eq!(projected["id"], assigned["computer"]["id"]);
+        assert_eq!(projected["device_binding_id"], "");
+        assert_eq!(projected["actor_epoch"], 0);
+        assert_eq!(projected["last_seen_at_ms"], 0);
+        assert_eq!(projected["replication_up"], false);
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_computer_signed_owner_alias_migrates_core_and_projection() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        create_workjet_computer_rxdb_projection_table(root.path())?;
+        let email = "owner@example.test";
+        let stable = "stable-owner-id";
+        assign(root.path(), "computer-email")?;
+        let conn = open_store(root.path())?;
+        let mut record = outbound_load_record(&conn, COMPUTERS_COLLECTION, "computer-email")?
+            .context("computer record")?;
+        record["owner_user_id"] = Value::String(email.to_owned());
+        upsert_business_record(&conn, COMPUTERS_COLLECTION, "computer-email", 10, record)?;
+        drop(conn);
+        migrate_signed_owner_alias(root.path(), stable, Some(email))?;
+        assert_eq!(
+            outbound_load_record(
+                &open_store(root.path())?,
+                COMPUTERS_COLLECTION,
+                "computer-email"
+            )?
+            .context("migrated computer")?["owner_user_id"],
+            stable
+        );
+        assert_eq!(
+            load_rxdb_collection_record(root.path(), COMPUTERS_COLLECTION, "computer-email")?
+                .context("migrated computer projection")?["owner_user_id"],
+            stable
+        );
         Ok(())
     }
 
