@@ -11,7 +11,7 @@ use std::sync::Mutex;
 
 // Re-export PersistentSession so callers (main.rs, service.rs) can hold one.
 pub(crate) use super::direct_session::{
-    PersistentSession, TurnRuntimeError, TurnRuntimeErrorClass, turn_runtime_error_class,
+    turn_runtime_error_class, PersistentSession, TurnRuntimeError, TurnRuntimeErrorClass,
 };
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -54,6 +54,10 @@ pub(crate) struct ChatTurnSessionOptions {
     pub(crate) plain_prompt: bool,
     pub(crate) turn_timeout_secs_override: Option<u64>,
     pub(crate) required_initial_tool: Option<String>,
+    /// App-authoring turns may write only their exact runtime module target.
+    pub(crate) additional_writable_roots: Vec<PathBuf>,
+    /// App validators need read access to the persistent CTOX runtime state.
+    pub(crate) additional_readable_roots: Vec<PathBuf>,
     /// Service-owned durable completion marker. When present, the successful
     /// reply is bound to this attempt before any assistant-message effect.
     pub(crate) worker_attempt: Option<WorkerAttemptContext>,
@@ -810,6 +814,17 @@ where
         } else if let Some(session) = owned_session.as_mut() {
             session.set_turn_cwd(workspace_root);
         }
+    }
+    if let Some(session) = session.as_deref_mut() {
+        session.set_turn_file_system_roots(
+            &options.additional_writable_roots,
+            &options.additional_readable_roots,
+        );
+    } else if let Some(session) = owned_session.as_mut() {
+        session.set_turn_file_system_roots(
+            &options.additional_writable_roots,
+            &options.additional_readable_roots,
+        );
     }
     emit("session-ready");
     let selected_model = runtime.state.active_or_selected_model().unwrap_or_default();
@@ -1819,7 +1834,11 @@ pub fn conversation_id_for_thread_key(thread_key: Option<&str>) -> i64 {
     let mut bytes = [0u8; 8];
     bytes.copy_from_slice(&digest[..8]);
     let value = (u64::from_be_bytes(bytes) & 0x3fff_ffff_ffff_ffff) as i64;
-    if value < 2 { 2 } else { value }
+    if value < 2 {
+        2
+    } else {
+        value
+    }
 }
 
 fn responses_api_base_url(base_url: &str) -> String {
@@ -2733,13 +2752,11 @@ mod tests {
         assert!(run(vec![warning("recent_user_turn_repeated", Critical)]).is_ok());
         assert!(run(vec![warning("blocked_status_loop", Critical)]).is_ok());
         // NEGATIVE: both present but only Warning severity -> still invocable.
-        assert!(
-            run(vec![
-                warning("recent_user_turn_repeated", Warning),
-                warning("blocked_status_loop", Warning),
-            ])
-            .is_ok()
-        );
+        assert!(run(vec![
+            warning("recent_user_turn_repeated", Warning),
+            warning("blocked_status_loop", Warning),
+        ])
+        .is_ok());
 
         // The marker cools down like the other context bails (60s).
         assert_eq!(

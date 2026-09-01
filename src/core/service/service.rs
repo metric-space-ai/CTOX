@@ -5660,6 +5660,7 @@ fn start_prompt_worker(
                         &job,
                         &mut session_options,
                     )?;
+                    configure_business_os_app_file_system_scope(&root, &job, &mut session_options)?;
                     if queue_job_reuses_persistent_session(&session_options) {
                         let session_slot = {
                             let shared = lock_shared_state(&state);
@@ -10224,6 +10225,8 @@ fn chat_turn_session_options_for_queue_job(
             // exists, so discovery remains iterative instead of being pinned
             // to a research-specific first read.
             required_initial_tool: Some("update_plan".to_string()),
+            additional_writable_roots: Vec::new(),
+            additional_readable_roots: Vec::new(),
             worker_attempt: None,
         };
     }
@@ -10237,6 +10240,8 @@ fn chat_turn_session_options_for_queue_job(
             plain_prompt: true,
             turn_timeout_secs_override: Some(BUSINESS_OS_APP_AUTHORING_TURN_TIMEOUT_SECS),
             required_initial_tool: Some("update_plan".to_string()),
+            additional_writable_roots: Vec::new(),
+            additional_readable_roots: Vec::new(),
             worker_attempt: None,
         };
     }
@@ -30067,6 +30072,7 @@ Business OS command:
         );
 
         job.prompt = "Write a short implementation note.".to_string();
+        job.queue_task_metadata = json!({});
         let options = chat_turn_session_options_for_queue_job(&job);
         assert!(!options.disable_mcp_servers);
         assert!(options.force_isolated_session);

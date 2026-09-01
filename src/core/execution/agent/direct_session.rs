@@ -11,14 +11,14 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ctox_app_server_client::{
-    DEFAULT_IN_PROCESS_CHANNEL_CAPACITY, InProcessAppServerClient, InProcessClientStartArgs,
-    InProcessServerEvent, TypedRequestError,
+    InProcessAppServerClient, InProcessClientStartArgs, InProcessServerEvent, TypedRequestError,
+    DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
 };
 use ctox_app_server_protocol::{
     ClientRequest, JSONRPCNotification, RequestId, ServerNotification, ThreadCompactStartParams,
@@ -29,12 +29,12 @@ use ctox_app_server_protocol::{
 };
 use ctox_arg0::Arg0DispatchPaths;
 use ctox_cloud_requirements::cloud_requirements_loader;
-use ctox_core::AuthManager;
-use ctox_core::ThreadManager;
 use ctox_core::config::{
-    ConfigBuilder, ConfigOverrides, find_codex_home, load_config_as_toml_with_cli_overrides,
+    find_codex_home, load_config_as_toml_with_cli_overrides, ConfigBuilder, ConfigOverrides,
 };
 use ctox_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
+use ctox_core::AuthManager;
+use ctox_core::ThreadManager;
 use ctox_feedback::CodexFeedback;
 use ctox_protocol::config_types::SandboxMode;
 use ctox_protocol::openai_models::ReasoningEffort;
@@ -166,14 +166,37 @@ fn configure_managed_linux_sandbox(cli_overrides: &mut Vec<(String, toml::Value)
     let _ = cli_overrides;
 }
 
-fn managed_worker_sandbox_policy(read_only_sandbox: bool) -> SandboxPolicy {
+fn managed_worker_sandbox_policy(
+    read_only_sandbox: bool,
+    additional_writable_roots: &[PathBuf],
+    additional_readable_roots: &[PathBuf],
+) -> SandboxPolicy {
     if read_only_sandbox {
         return SandboxPolicy::new_read_only_policy();
     }
 
     let mut policy = SandboxPolicy::new_workspace_write_policy();
-    if let SandboxPolicy::WorkspaceWrite { network_access, .. } = &mut policy {
+    if let SandboxPolicy::WorkspaceWrite {
+        writable_roots,
+        read_only_access,
+        network_access,
+        ..
+    } = &mut policy
+    {
         *network_access = true;
+        *writable_roots = additional_writable_roots
+            .iter()
+            .filter_map(|path| AbsolutePathBuf::from_absolute_path(path.clone()).ok())
+            .collect();
+        if !additional_readable_roots.is_empty() {
+            *read_only_access = ctox_protocol::protocol::ReadOnlyAccess::Restricted {
+                include_platform_defaults: true,
+                readable_roots: additional_readable_roots
+                    .iter()
+                    .filter_map(|path| AbsolutePathBuf::from_absolute_path(path.clone()).ok())
+                    .collect(),
+            };
+        }
     }
     #[cfg(target_os = "linux")]
     if let SandboxPolicy::WorkspaceWrite {
@@ -183,10 +206,15 @@ fn managed_worker_sandbox_policy(read_only_sandbox: bool) -> SandboxPolicy {
         ..
     } = &mut policy
     {
-        *read_only_access = ctox_protocol::protocol::ReadOnlyAccess::Restricted {
-            include_platform_defaults: true,
-            readable_roots: Vec::new(),
-        };
+        if matches!(
+            read_only_access,
+            ctox_protocol::protocol::ReadOnlyAccess::FullAccess
+        ) {
+            *read_only_access = ctox_protocol::protocol::ReadOnlyAccess::Restricted {
+                include_platform_defaults: true,
+                readable_roots: Vec::new(),
+            };
+        }
         *exclude_tmpdir_env_var = true;
         *exclude_slash_tmp = true;
     }
@@ -613,6 +641,8 @@ pub(crate) struct PersistentSession {
     disable_mcp_servers: bool,
     thread_config: Option<HashMap<String, JsonValue>>,
     read_only_sandbox: bool,
+    additional_writable_roots: Vec<PathBuf>,
+    additional_readable_roots: Vec<PathBuf>,
     persistent_worker: bool,
     /// Set when a turn ended ambiguously (e.g. `turn/start` timed out with
     /// the request still detached server-side). A poisoned session refuses
@@ -721,6 +751,21 @@ impl PersistentSession {
     /// records the cwd change in rollout state for restart-safe resume.
     pub(crate) fn set_turn_cwd(&mut self, cwd: &Path) {
         self.cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+    }
+
+    pub(crate) fn set_turn_file_system_roots(
+        &mut self,
+        writable_roots: &[PathBuf],
+        readable_roots: &[PathBuf],
+    ) {
+        self.additional_writable_roots = writable_roots
+            .iter()
+            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+            .collect();
+        self.additional_readable_roots = readable_roots
+            .iter()
+            .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+            .collect();
     }
 
     /// Start a persistent session with explicit base instructions and optional
@@ -902,6 +947,8 @@ impl PersistentSession {
             disable_mcp_servers,
             thread_config,
             read_only_sandbox,
+            additional_writable_roots: Vec::new(),
+            additional_readable_roots: Vec::new(),
             persistent_worker,
             poisoned: false,
         })
@@ -979,6 +1026,8 @@ impl PersistentSession {
         let disable_mcp_servers = self.disable_mcp_servers;
         let thread_config = self.thread_config.clone();
         let read_only_sandbox = self.read_only_sandbox;
+        let additional_writable_roots = self.additional_writable_roots.clone();
+        let additional_readable_roots = self.additional_readable_roots.clone();
         let persistent_worker = self.persistent_worker;
         let required_initial_tool = required_initial_tool.map(str::to_string);
         self.ctx_log.log(
@@ -1011,6 +1060,8 @@ impl PersistentSession {
                 disable_mcp_servers,
                 thread_config.as_ref(),
                 read_only_sandbox,
+                &additional_writable_roots,
+                &additional_readable_roots,
                 persistent_worker,
                 exact_prompt_preflight,
                 progress,
@@ -1451,6 +1502,8 @@ impl PersistentSession {
         disable_mcp_servers: bool,
         thread_config: Option<&HashMap<String, JsonValue>>,
         read_only_sandbox: bool,
+        additional_writable_roots: &[PathBuf],
+        additional_readable_roots: &[PathBuf],
         persistent_worker: bool,
         exact_prompt_preflight: Option<ExactPromptTokenCount>,
         progress: &mut dyn FnMut(&JsonValue),
@@ -1548,19 +1601,24 @@ impl PersistentSession {
         // if the thread genuinely went away (defensive; see comment above).
         let turn_start_params = |thread_id: &str| TurnStartParams {
             thread_id: thread_id.to_string(),
-            input: vec![
-                UserInput::Text {
-                    text: prompt.to_string(),
-                    text_elements: Vec::new(),
-                }
-                .into(),
-            ],
+            input: vec![UserInput::Text {
+                text: prompt.to_string(),
+                text_elements: Vec::new(),
+            }
+            .into()],
             required_initial_tool: required_initial_tool.map(str::to_string),
             developer_instructions: developer_instructions.map(str::to_string),
             cwd: Some(cwd.to_path_buf()),
             approval_policy: Some(AskForApproval::Never.into()),
             approvals_reviewer: None,
-            sandbox_policy: Some(managed_worker_sandbox_policy(read_only_sandbox).into()),
+            sandbox_policy: Some(
+                managed_worker_sandbox_policy(
+                    read_only_sandbox,
+                    additional_writable_roots,
+                    additional_readable_roots,
+                )
+                .into(),
+            ),
             model: None,
             service_tier: None,
             effort: reasoning_effort,
@@ -2139,14 +2197,12 @@ mod tests {
                 .map(Vec::len),
             Some(BUSINESS_OS_MCP_SESSION_TOOLS.len())
         );
-        assert!(
-            !server
-                .get("enabled_tools")
-                .and_then(JsonValue::as_array)
-                .expect("enabled tools")
-                .iter()
-                .any(|tool| tool.as_str() == Some("business_os.upsert_record"))
-        );
+        assert!(!server
+            .get("enabled_tools")
+            .and_then(JsonValue::as_array)
+            .expect("enabled tools")
+            .iter()
+            .any(|tool| tool.as_str() == Some("business_os.upsert_record")));
         assert_eq!(
             config.get("features.apps").and_then(JsonValue::as_bool),
             Some(false)
@@ -2155,10 +2211,12 @@ mod tests {
 
     #[test]
     fn business_os_mcp_thread_config_rejects_remote_urls_and_empty_tokens() {
-        assert!(
-            business_os_mcp_thread_config("https://example.com/mcp", "secret", "command-session")
-                .is_err()
-        );
+        assert!(business_os_mcp_thread_config(
+            "https://example.com/mcp",
+            "secret",
+            "command-session"
+        )
+        .is_err());
         assert!(business_os_mcp_thread_config("127.0.0.1:8788", " ", "command-session").is_err());
         assert!(business_os_mcp_thread_config("127.0.0.1:8788", "secret", " ").is_err());
     }
@@ -2195,7 +2253,7 @@ mod tests {
     fn managed_linux_workers_cannot_read_sibling_workspaces() {
         use ctox_protocol::protocol::ReadOnlyAccess;
 
-        let policy = managed_worker_sandbox_policy(false);
+        let policy = managed_worker_sandbox_policy(false, &[], &[]);
 
         #[cfg(target_os = "linux")]
         assert!(matches!(
@@ -2218,6 +2276,31 @@ mod tests {
                 read_only_access: ReadOnlyAccess::FullAccess,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn managed_worker_scope_adds_exact_app_roots() {
+        use ctox_protocol::protocol::ReadOnlyAccess;
+
+        let writable = std::env::temp_dir().join("ctox-app-authoring-target");
+        let readable = std::env::temp_dir().join("ctox-app-authoring-state");
+        let policy = managed_worker_sandbox_policy(
+            false,
+            std::slice::from_ref(&writable),
+            std::slice::from_ref(&readable),
+        );
+        assert!(matches!(
+            policy,
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                read_only_access: ReadOnlyAccess::Restricted {
+                    include_platform_defaults: true,
+                    readable_roots,
+                },
+                ..
+            } if writable_roots.iter().any(|root| root.as_path() == writable)
+                && readable_roots.iter().any(|root| root.as_path() == readable)
         ));
     }
 

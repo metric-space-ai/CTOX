@@ -88,6 +88,62 @@ fn business_os_app_workspace_root_looks_valid(path: &Path) -> bool {
         || path.join("runtime/business-os/installed-modules").is_dir()
 }
 
+fn configure_business_os_app_file_system_scope(
+    root: &Path,
+    job: &QueuedPrompt,
+    options: &mut turn_loop::ChatTurnSessionOptions,
+) -> Result<()> {
+    let Some(target) = business_os_app_module_target_from_metadata(&job.queue_task_metadata) else {
+        return Ok(());
+    };
+    if target.install_target != "runtime-installed-module" {
+        return Ok(());
+    }
+    let mut components = std::path::Path::new(&target.module_id).components();
+    let single_normal_component = matches!(
+        (components.next(), components.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    anyhow::ensure!(
+        single_normal_component && !target.module_id.starts_with('.'),
+        "refusing unsafe Business OS app module target `{}`",
+        target.module_id
+    );
+
+    let workspace_root = business_os_app_workspace_root(root, job);
+    let module_dir = workspace_root
+        .join("runtime/business-os/installed-modules")
+        .join(&target.module_id);
+    std::fs::create_dir_all(&module_dir).with_context(|| {
+        format!(
+            "failed to prepare Business OS app authoring target {}",
+            module_dir.display()
+        )
+    })?;
+    let module_dir = module_dir.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve Business OS app authoring target {}",
+            module_dir.display()
+        )
+    })?;
+    let runtime_root = crate::paths::runtime_dir(root);
+    let runtime_root = runtime_root.canonicalize().with_context(|| {
+        format!(
+            "failed to resolve persistent CTOX runtime root {}",
+            runtime_root.display()
+        )
+    })?;
+    anyhow::ensure!(
+        module_dir.starts_with(&runtime_root),
+        "Business OS app authoring target {} escapes persistent runtime root {}",
+        module_dir.display(),
+        runtime_root.display()
+    );
+    options.additional_writable_roots = vec![module_dir];
+    options.additional_readable_roots = vec![runtime_root];
+    Ok(())
+}
+
 fn business_os_app_artifact_tree_stamp(path: &Path) -> u64 {
     let mut hasher = DefaultHasher::new();
     let mut visited = 0usize;
