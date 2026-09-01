@@ -9124,6 +9124,7 @@ var DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
 var KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 var LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 var DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
+var REMOTE_MASTER_READY_TIMEOUT_MS = 65e3;
 var CTOX_BROWSER_LIVE_CAPABILITY = "ctox-browser-live-v1";
 var CTOX_BROWSER_LIVE_CHANNEL = "ctox-browser-live-v1";
 var CTOX_WORKJET_DEVICE_CONTROL_CAPABILITY = "ctox-workjet-device-control-v1";
@@ -9881,7 +9882,7 @@ var SharedRoomPeer = class {
     });
   }
   async awaitRemoteMasterReady(peerId) {
-    await this.peer.waitForRequest?.(peerId, "token", 15e3);
+    await this.peer.waitForRequest?.(peerId, "token", REMOTE_MASTER_READY_TIMEOUT_MS);
     await delay2(100);
   }
   getTransportStatus() {

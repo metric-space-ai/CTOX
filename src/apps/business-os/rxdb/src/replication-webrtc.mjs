@@ -71,6 +71,11 @@ export const DEFAULT_QUERY_META_BUDGET_BYTES = 6 * 1024 * 1024;
 export const KNOWLEDGE_TABLE_QUERY_META_BUDGET_BYTES = 16 * 1024 * 1024;
 const LOCAL_WRITE_PUSH_DEBOUNCE_MS = 50;
 const DIRECT_PUSH_BATCH_MAX_BYTES = 2 * 1024 * 1024;
+// Native allows a full minute for the symmetric request/answer leg because
+// the protocol exchange can frame hundreds of collection schemas first. The
+// browser must expire second; otherwise a busy tenant tears down the peer at
+// 15 seconds while native is still completing the valid handshake.
+export const REMOTE_MASTER_READY_TIMEOUT_MS = 65_000;
 export const CTOX_BROWSER_LIVE_CAPABILITY = 'ctox-browser-live-v1';
 const CTOX_BROWSER_LIVE_CHANNEL = 'ctox-browser-live-v1';
 const CTOX_OUTBOUND_SELLIFY_LOOKUP_METHOD = 'ctox.outbound.sellify_lookup.v1';
@@ -1014,7 +1019,7 @@ class SharedRoomPeer {
     // registering the shared room; proceeding after a short timeout creates a
     // half-authorized connection whose collection calls churn indefinitely.
     // Missing authorization therefore fails closed instead of being ignored.
-    await this.peer.waitForRequest?.(peerId, 'token', 15_000);
+    await this.peer.waitForRequest?.(peerId, 'token', REMOTE_MASTER_READY_TIMEOUT_MS);
     await delay(100);
   }
 
