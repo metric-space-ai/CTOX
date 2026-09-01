@@ -110,8 +110,10 @@ export function buildAppImportCommand({
     content_hash: file.sha256,
     required: true,
   }));
+  const commandId = `app-import-${moduleId}-${now}`;
   return {
-    command_id: `app-import-${moduleId}-${now}`,
+    id: commandId,
+    command_id: commandId,
     module: 'importer',
     command_type: 'ctox.business_os.app.create',
     record_id: moduleId,
@@ -412,14 +414,14 @@ export async function mount(ctx) {
     state.moduleId = moduleId;
     state.live = false;
     const command = buildAppImportCommand({ moduleId, appTitle, importSource, actor: actorContext() });
-    state.commandId = command.command_id;
-    refs.commandId.textContent = command.command_id;
+    state.commandId = command.id;
+    refs.commandId.textContent = command.id;
     refs.moduleId.textContent = moduleId;
     refs.progressTitle.textContent = t('progressHeading', 'CTOX is porting the app.');
     refs.progressNote.textContent = t('queueing', 'Sending the durable app job…');
     setStage('progress');
     setPhase(0);
-    state.subscription = ctx.commandBus.subscribe(command.command_id, renderProjection);
+    state.subscription = ctx.commandBus.subscribe(command.id, renderProjection);
     try {
       await state.subscription.ready;
       const accepted = await ctx.commandBus.dispatch(command, { until: 'accepted', timeoutMs: 60_000 });
@@ -434,7 +436,7 @@ export async function mount(ctx) {
         'The durable job is secured locally. CTOX is reconnecting and will continue it automatically.',
       ));
     }
-    const current = await ctx.commandBus.getStatus(command.command_id).catch(() => null);
+    const current = await ctx.commandBus.getStatus(command.id).catch(() => null);
     if (current) renderProjection(current);
   }
 

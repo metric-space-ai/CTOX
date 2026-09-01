@@ -339,6 +339,7 @@ pub struct BusinessOsAppSourceWrite {
     pub ok: bool,
     pub module_id: String,
     pub path: String,
+    pub app_directory: String,
     pub source_file_id: String,
     pub source_file_ids: Vec<String>,
     pub size_bytes: u64,
@@ -348,6 +349,10 @@ pub struct BusinessOsAppSourceWrite {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     pub changed: bool,
+    pub asset_revision: String,
+    pub catalog_revision: String,
+    pub catalog_fingerprint: String,
+    pub live: bool,
     pub validation_tool: String,
 }
 
@@ -2309,8 +2314,12 @@ pub fn write_app_file(
             content,
         },
     )?;
+    store::write_module_catalog_projection_to_rxdb_for_module(root, &module_id)?;
+    let (asset_revision, catalog_revision, catalog_fingerprint) =
+        store::runtime_app_delivery_evidence(root, &module_id)?;
     Ok(BusinessOsAppSourceWrite {
         ok: outcome.get("ok").and_then(Value::as_bool).unwrap_or(false),
+        app_directory: format!("runtime/business-os/installed-modules/{module_id}"),
         module_id,
         path,
         source_file_id: string_field(&outcome, "source_file_id").unwrap_or_default(),
@@ -2336,6 +2345,10 @@ pub fn write_app_file(
             .get("changed")
             .and_then(Value::as_bool)
             .unwrap_or(false),
+        asset_revision,
+        catalog_revision,
+        catalog_fingerprint,
+        live: true,
         validation_tool: "business_os.validate_app".to_string(),
     })
 }
@@ -10044,6 +10057,23 @@ mod tests {
             write.get("path").and_then(Value::as_str),
             Some("lib/math.mjs")
         );
+        assert_eq!(
+            write.get("app_directory").and_then(Value::as_str),
+            Some("runtime/business-os/installed-modules/mcp-source")
+        );
+        assert!(write
+            .get("asset_revision")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty()));
+        assert!(write
+            .get("catalog_revision")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty()));
+        assert!(write
+            .get("catalog_fingerprint")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.is_empty()));
+        assert_eq!(write.get("live").and_then(Value::as_bool), Some(true));
 
         let read = call_tool(
             root,

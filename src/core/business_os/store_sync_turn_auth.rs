@@ -1479,6 +1479,8 @@ fn explicit_permission_grants_projection(conn: &Connection) -> anyhow::Result<Va
         "SELECT grant_id, subject_type, subject_id, permission, scope_type,
                 scope_id, active, reason, created_by, created_at_ms, updated_at_ms
          FROM business_permission_grants
+         WHERE active = 1
+           AND grant_id NOT LIKE 'migration.sync.%'
          ORDER BY scope_type ASC, scope_id ASC, permission ASC, subject_type ASC, subject_id ASC",
     )?;
     let rows = stmt.query_map([], |row| {

@@ -585,18 +585,21 @@ async function runDeclaredScenario(page, options, scenario) {
   const evidence = [];
   for (let index = 0; index < scenario.steps.length; index += 1) {
     const step = scenario.steps[index];
+    const stepTimeoutMs = Number.isFinite(Number(step.timeout_ms)) && Number(step.timeout_ms) > 0
+      ? Number(step.timeout_ms)
+      : options.timeoutMs;
     const selector = step.target ? `${rootSelector} ${scenarioTargetSelector(step.target)}` : null;
     if (step.op === 'click') {
-      await page.locator(selector).click({ timeout: step.timeout_ms });
+      await page.locator(selector).click({ timeout: stepTimeoutMs });
     } else if (step.op === 'fill') {
       const value = renderScenarioValue(step.value, options.marker);
       const locator = page.locator(selector);
-      await locator.waitFor({ state: 'visible', timeout: step.timeout_ms });
+      await locator.waitFor({ state: 'visible', timeout: stepTimeoutMs });
       const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
       if (tagName === 'select') await locator.selectOption(value);
       else await locator.fill(value);
     } else if (step.op === 'assert_visible') {
-      await page.locator(selector).waitFor({ state: 'visible', timeout: step.timeout_ms });
+      await page.locator(selector).waitFor({ state: 'visible', timeout: stepTimeoutMs });
     } else if (step.op === 'assert_text') {
       const contains = renderScenarioValue(step.contains, options.marker);
       await page.waitForFunction(({ rootSelector: root, targetSelector, expected }) => {
@@ -607,10 +610,10 @@ async function runDeclaredScenario(page, options, scenario) {
         rootSelector,
         targetSelector: scenarioTargetSelector(step.target),
         expected: contains,
-      }, { timeout: step.timeout_ms, polling: 250 });
+      }, { timeout: stepTimeoutMs, polling: 250 });
     } else if (step.op === 'reload') {
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: step.timeout_ms });
-      rootSelector = await openModule(page, options.moduleId, options.url, step.timeout_ms);
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: stepTimeoutMs });
+      rootSelector = await openModule(page, options.moduleId, options.url, stepTimeoutMs);
     }
     evidence.push({
       index,
@@ -786,7 +789,9 @@ async function runE2e(options) {
       options.moduleId,
       `[data-module-root="${options.moduleId}"]`,
     );
-    result.failures.push(String(error.stack || error.message || error).split('\n')[0]);
+    const errorStack = String(error.stack || error.message || error);
+    result.evidence.error_stack = errorStack.slice(0, 4000);
+    result.failures.push(errorStack.split('\n')[0]);
   } finally {
     const moduleErrors = consoleErrors.filter((message) => message.includes(options.moduleId) || message.includes('[business-os] mount failed'));
     if (moduleErrors.length > 0) {

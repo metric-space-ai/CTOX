@@ -186,7 +186,10 @@ filesystem or SQL access. A coding agent that should edit source itself uses
 `runtime/business-os/installed-modules/<module_id>` source root. Browser ESM
 dependencies are checked in as relative `.mjs` files such as `vendor/<name>.mjs`
 or `lib/<name>.mjs`; MCP does not expose npm, shell, SQL, or raw RxDB fallback
-paths. The agent validates with `business_os.validate_app` and can run
+paths. A successful `business_os.write_app_file` response includes the target
+`app_directory`, file `sha256`, live module `asset_revision`, catalog revision
+and fingerprint, and `live=true`. The agent validates with
+`business_os.validate_app` and can run
 `business_os.smoke_app` / `business_os.e2e_app` for browser behavior.
 
 `business_os.create_app` and `business_os.modify_app` remain delegated app-work

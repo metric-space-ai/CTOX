@@ -57,7 +57,7 @@ pub use super::store_catalog_projections::{
 pub(crate) use super::store_catalog_projections::{
     module_catalog_projection_stamp, ModuleCatalogProjectionStamp,
 };
-use super::store_catalog_projections::{
+pub(super) use super::store_catalog_projections::{
     module_release_ids_for_projection_repair, rxdb_module_catalog_status,
     write_module_catalog_projection_to_rxdb_for_module,
 };
@@ -9194,7 +9194,7 @@ pub fn complete_cv_print_command_from_reply(
     Ok(Some(accepted_value))
 }
 
-fn runtime_app_delivery_evidence(
+pub(super) fn runtime_app_delivery_evidence(
     root: &Path,
     module_id: &str,
 ) -> anyhow::Result<(String, String, String)> {
@@ -26778,6 +26778,15 @@ pub(super) mod tests {
                 now
             ],
         )?;
+        conn.execute(
+            "INSERT INTO business_permission_grants
+                (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
+                 active, reason, created_by, created_at_ms, updated_at_ms)
+             VALUES ('migration.sync.inventory.viewer', 'role', 'user', ?1,
+                 'collection', 'inventory_records', 1, 'legacy compatibility',
+                 'migration', ?2, ?2)",
+            params![BusinessOsPermission::DataRead.as_str(), now],
+        )?;
         drop(conn);
 
         let governance = module_governance_map(root, &chef_session())?;
@@ -26824,6 +26833,9 @@ pub(super) mod tests {
                 && grant.get("permission").and_then(Value::as_str)
                     == Some(BusinessOsPermission::ExternalApprove.as_str())
                 && grant.get("scope_id").and_then(Value::as_str) == Some("inventory")
+        }));
+        assert!(!explicit_grants.iter().any(|grant| {
+            grant.get("grant_id").and_then(Value::as_str) == Some("migration.sync.inventory.viewer")
         }));
         Ok(())
     }
