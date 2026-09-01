@@ -590,7 +590,12 @@ async function runDeclaredScenario(page, options, scenario) {
       : options.timeoutMs;
     const selector = step.target ? `${rootSelector} ${scenarioTargetSelector(step.target)}` : null;
     if (step.op === 'click') {
-      await page.locator(selector).click({ timeout: stepTimeoutMs });
+      const locator = page.locator(selector);
+      await locator.waitFor({ state: 'visible', timeout: stepTimeoutMs });
+      await locator.scrollIntoViewIfNeeded({ timeout: stepTimeoutMs });
+      const box = await locator.boundingBox({ timeout: stepTimeoutMs });
+      if (!box) throw new Error(`scenario target ${step.target} has no clickable bounds`);
+      await page.mouse.click(box.x + (box.width / 2), box.y + (box.height / 2));
     } else if (step.op === 'fill') {
       const value = renderScenarioValue(step.value, options.marker);
       const locator = page.locator(selector);

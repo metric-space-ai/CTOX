@@ -335,7 +335,14 @@ async function runSmoke(options) {
       };
     });
 
-    await page.locator(actionSelector).click({ timeout: options.timeoutMs });
+    const actionLocator = page.locator(actionSelector);
+    await actionLocator.scrollIntoViewIfNeeded({ timeout: options.timeoutMs });
+    const actionBox = await actionLocator.boundingBox({ timeout: options.timeoutMs });
+    if (!actionBox) throw new Error(`primary create action ${action} has no clickable bounds`);
+    await page.mouse.click(
+      actionBox.x + (actionBox.width / 2),
+      actionBox.y + (actionBox.height / 2),
+    );
     await page.waitForTimeout(600);
 
     result.evidence.after = await page.evaluate(() => {
