@@ -1,7 +1,7 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
-import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260831-ctox-desktopapp-ports-v328';
+import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260831-crew-telemetry-v332';
 
 const FLOW_WIDTH = 1760;
 const FLOW_HEIGHT = 1050;
@@ -18,7 +18,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260831-ctox-desktopapp-ports-v328';
+const CTOX_STYLE_BUILD = '20260831-crew-telemetry-v332';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -81,8 +81,18 @@ const labels = {
     inputTokens: 'Input Tokens',
     outputTokens: 'Output Tokens',
     toolCalls: 'Tool Calls',
+    reasoningTurns: 'Reasoning',
     elapsed: 'Zeit',
     notCaptured: 'nicht erfasst',
+    executionProgress: 'Fortschritt',
+    step: 'Schritt',
+    activityTurnSingular: 'Turn',
+    activityTurnPlural: 'Turns',
+    executionPhases: {
+      working: 'Modellarbeit',
+      review: 'Review',
+      completed: 'Abgeschlossen',
+    },
     agentPreparing: 'Agent wird vorbereitet',
     agentWorking: 'Agent arbeitet',
     agentCompleted: 'Agent-Durchlauf abgeschlossen',
@@ -261,8 +271,18 @@ const labels = {
     inputTokens: 'Input tokens',
     outputTokens: 'Output tokens',
     toolCalls: 'Tool calls',
+    reasoningTurns: 'Reasoning',
     elapsed: 'Time',
     notCaptured: 'not captured',
+    executionProgress: 'Progress',
+    step: 'Step',
+    activityTurnSingular: 'turn',
+    activityTurnPlural: 'turns',
+    executionPhases: {
+      working: 'Model work',
+      review: 'Review',
+      completed: 'Completed',
+    },
     agentPreparing: 'Preparing agent',
     agentWorking: 'Agent is working',
     agentCompleted: 'Agent turn completed',
@@ -519,8 +539,9 @@ export async function mount(ctx) {
     // therefore survive reactive re-renders for this mount session only.
     pinnedTaskIds: new Set(),
     userNavigatedTimeline: false,
-    liveBaseSeconds: 0,
-    liveStartedAt: Date.now(),
+    // Epoch ms of a real persisted execution start, or null when nothing is
+    // measurably running. Only a finite anchor may drive the live clock.
+    liveAnchorMs: null,
     liveTicker: null,
     refreshTimer: null,
     localSubscriptionCleanup: null,
@@ -606,9 +627,6 @@ async function renderFromLocalCache(state) {
   state.flow = await loadHarnessFlowSnapshot(state.ctx).catch(() => emptyHarnessFlow('harness_flow_unavailable'));
   if (state.disposed) return;
   const bundle = mergeBundleWithCommands(ctoxSeed, commands, queueTasks, bugReports);
-  const metrics = aggregateFlowMetrics(state.flow);
-  state.liveBaseSeconds = Number.isFinite(metrics.seconds) ? metrics.seconds : 0;
-  state.liveStartedAt = Date.now();
   state.model = buildHarnessModel(bundle, state.flow, state.lang);
   state.harnessHealth = deriveHarnessHealth(state);
   state.focusTask = readFocusTask();
@@ -666,9 +684,6 @@ async function refresh(state) {
     if (state.disposed) return;
     const bundle = mergeBundleWithCommands(ctoxSeed, commands, queueTasks, bugReports);
     state.flow = nextFlow;
-    const metrics = aggregateFlowMetrics(nextFlow);
-    state.liveBaseSeconds = Number.isFinite(metrics.seconds) ? metrics.seconds : 0;
-    state.liveStartedAt = Date.now();
     state.model = buildHarnessModel(bundle, nextFlow, state.lang);
     state.harnessHealth = deriveHarnessHealth(state);
     state.focusTask = readFocusTask();
@@ -715,8 +730,26 @@ function render(state) {
   renderTaskList(state);
   renderMain(state);
   syncHarnessHealthUiState(state);
-  updateLiveIndicators(state);
+  // renderMain() has just recomputed state.liveAnchorMs from the persisted
+  // telemetry, so arm or disarm the clock to match what is actually running.
+  syncLiveTicker(state);
   updateHarnessHealthAlerts(state);
+}
+
+// Arms the 1s clock only while a real anchor exists, and disarms it the moment
+// the work settles. Idempotent: re-rendering with an unchanged anchor keeps the
+// existing interval instead of restarting it.
+function syncLiveTicker(state) {
+  const anchored = Number.isFinite(state?.liveAnchorMs);
+  if (anchored && state.liveTicker) {
+    updateLiveIndicators(state);
+    return;
+  }
+  if (!anchored && !state.liveTicker) {
+    updateLiveIndicators(state);
+    return;
+  }
+  startLiveTicker(state);
 }
 
 function deriveHarnessHealth(state) {
@@ -1663,6 +1696,11 @@ function wireWebStackPanel(state, root) {
 function taskSteps(task, state) {
   if (!task) return [];
   if (isExactCommunicationFlow(task, state)) return communicationTaskSteps(task, state);
+  // The persisted execution plan outranks the audit stream: it is the durable
+  // record of what the model actually planned and completed, with a per-step
+  // activity-turn count.
+  const planSteps = executionPlanSteps(task, state);
+  if (planSteps.length) return planSteps;
   const timeline = state.model?.timeline || [];
   if (timeline.length && taskMatchesHarnessFlow(task, state)) {
     const steps = timeline.map((node, index) => ({
@@ -1677,6 +1715,39 @@ function taskSteps(task, state) {
     return withRouteStatusStep(steps, task, state);
   }
   return taskStatusSteps(task, state);
+}
+
+// Renders `execution_progress.steps` — the plan revision the harness persisted.
+// Step status is authoritative (completed prefix, at most one in_progress, a
+// pending suffix); the per-step activity-turn count is the real, deduplicated
+// number of model turns attributed to that step.
+function executionPlanSteps(task, state) {
+  const progress = taskExecutionProgress(task);
+  if (!progress?.steps?.length) return [];
+  const t = labels[state.lang] || labels.de;
+  const activePosition = Number.isFinite(progress.currentStep)
+    ? progress.currentStep
+    : (progress.steps.find((step) => step.status === 'in_progress')?.position ?? null);
+  return progress.steps.map((step, index) => {
+    const turns = Number.isFinite(step.activityTurns) ? step.activityTurns : null;
+    return {
+      id: `plan-${progress.revision ?? 0}-${step.position ?? index + 1}`,
+      label: step.label || `${t.step} ${step.position ?? index + 1}`,
+      detail: clip(cleanUiCopy(step.label || ''), 180),
+      // Plan steps carry no per-step timestamp; say so rather than borrow one.
+      timestamp: '',
+      metrics: turns === null
+        ? t.notCaptured
+        : `${turns} ${turns === 1 ? t.activityTurnSingular : t.activityTurnPlural}`,
+      status: step.status,
+      activityTurns: turns,
+      active: activePosition === null
+        ? index === progress.steps.length - 1
+        : step.position === activePosition,
+      timelineIndex: -1,
+      flowKind: 'execution_plan',
+    };
+  });
 }
 
 function communicationTaskSteps(task, state) {
@@ -1798,9 +1869,16 @@ function renderMain(state) {
     : taskStepView
       ? buildVisibleTraceFromSteps(model, taskStepView.steps, taskStepView.index)
       : buildVisibleTrace(model.timeline, timelineIndex);
+  // Metrics describe the task the operator is looking at. The previous build
+  // aggregated the flow only for a *running* active task and rendered
+  // emptyMetrics() otherwise, so the strip read "nicht erfasst" permanently.
   const metricSubject = metricSubjectTask(state, selectedTask);
-  const live = isLiveMetricSubject(metricSubject, state);
-  const metrics = metricSubject ? aggregateFlowMetrics(state.flow) : emptyMetrics();
+  const metrics = metricSubject ? taskTelemetry(metricSubject, state) : emptyTelemetry();
+  const live = metrics.live;
+  state.liveAnchorMs = live ? metrics.startedAtMs : null;
+  // A settled task shows its measured duration; a genuinely working task with a
+  // real start timestamp shows a clock anchored to that timestamp. No anchor
+  // means no number — never a free-running animation.
   const elapsedSeconds = live ? liveElapsedSeconds(state) : metrics.seconds;
   const flowSource = flowSourceView(state);
   const main = state.ctx.host.querySelector('[data-ctox-main]');
@@ -1823,9 +1901,11 @@ function renderMain(state) {
     <section class="ctox-metrics-strip" aria-label="${escapeAttr(t.measurements)}">
       ${metricCard(t.inputTokens, metrics.inputTokens, 'tokens', state.lang)}
       ${metricCard(t.outputTokens, metrics.outputTokens, 'tokens', state.lang)}
+      ${metricCard(t.reasoningTurns, metrics.thinkingTurns, 'count', state.lang)}
       ${metricCard(t.toolCalls, metrics.toolCalls, 'count', state.lang)}
       ${metricCard(t.elapsed, elapsedSeconds, 'seconds', state.lang, { live })}
     </section>
+    ${executionProgressBar(metrics, state)}
     <div class="ctox-canvas-container ctox-flow-well">
       <div class="ctox-flow-toolbar" aria-label="Flow chart controls" data-flow-control>
         <button type="button" class="ctox-pane-icon" data-zoom="-" aria-label="Zoom out" title="Zoom out" ${state.zoom <= MIN_ZOOM ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
@@ -1914,6 +1994,43 @@ function emptyMetrics() {
   return { inputTokens: null, outputTokens: null, toolCalls: null, seconds: null };
 }
 
+// The execution bar renders the SERVER-COMPUTED percent only. Plan steps own
+// the first 90 percent (round(90 * completed / total)); completed model work
+// holds at 90 through review; validated review sets 100 (HARNESS.md). When no
+// plan has been persisted the bar carries no fill and says so — there is
+// deliberately no indeterminate/marquee state.
+function executionProgressBar(metrics, state) {
+  const t = labels[state.lang];
+  const measured = Number.isFinite(metrics?.percent);
+  const percent = measured ? clampMetric(metrics.percent, 0, 100) : 0;
+  const stepsKnown = Number.isFinite(metrics?.totalSteps) && metrics.totalSteps > 0;
+  const stepLabel = stepsKnown
+    ? `${t.step} ${clampMetric(metrics.currentStep ?? ((metrics.completedSteps || 0) + 1), 1, metrics.totalSteps)}/${metrics.totalSteps}`
+    : t.notCaptured;
+  const phaseLabel = metrics?.phase ? (t.executionPhases?.[metrics.phase] || metrics.phase) : t.notCaptured;
+  return `
+    <section class="ctox-execution-progress ${measured ? '' : 'is-unmeasured'}"
+      aria-label="${escapeAttr(t.executionProgress)}"
+      style="--execution-progress:${escapeAttr(String(percent))}%">
+      <div class="ctox-execution-progress-head">
+        <span class="ctox-pane-kicker">${escapeHtml(t.executionProgress)}</span>
+        <strong>${escapeHtml(measured ? `${percent}%` : t.notCaptured)}</strong>
+      </div>
+      <div class="ctox-execution-progress-track"
+        role="progressbar"
+        aria-valuemin="0"
+        aria-valuemax="100"
+        ${measured ? `aria-valuenow="${percent}"` : `aria-valuetext="${escapeAttr(t.notCaptured)}"`}>
+        <i aria-hidden="true"></i>
+      </div>
+      <div class="ctox-execution-progress-meta">
+        <span>${escapeHtml(stepLabel)}</span>
+        <span>${escapeHtml(phaseLabel)}</span>
+      </div>
+    </section>
+  `;
+}
+
 function timelinePanel(state, selectedTask, selectedNode, metrics) {
   const t = labels[state.lang];
   if (!selectedTask) {
@@ -1978,6 +2095,12 @@ function timelinePanel(state, selectedTask, selectedNode, metrics) {
   `;
 }
 
+// Scrub POSITION within the event range — not a progress measurement. With a
+// single event (max <= 0) the position is trivially the end, hence 100.
+// That value must never paint a full bar: both call sites set `is-disabled`
+// on exactly that condition (hasRange = max > 0), and the disabled rule in
+// index.css forces the scrub fill to width 0. So an unmeasurable timeline
+// renders an EMPTY track, never a full one.
 function progressPercent(value, max) {
   if (!Number.isFinite(max) || max <= 0) return 100;
   return Math.round((clampMetric(value, 0, max) / max) * 100);
@@ -3343,6 +3466,12 @@ function mergeBundleWithCommands(bundle, commands, queueTasks = [], bugReports =
     browserContextArtifact: doc.browser_context_artifact || null,
     result: doc.result || null,
     resultSummary: resultSummary(doc.result),
+    // Durable execution telemetry from the service projection. Without this the
+    // metric strip and the progress bar have no measured input at all.
+    executionProgress: normalizeExecutionProgress(doc.execution_progress || doc.executionProgress),
+    leasedAt: doc.leased_at || '',
+    ackedAt: doc.acked_at || '',
+    updatedAtMs: Number.isFinite(Number(doc.updated_at_ms)) ? Number(doc.updated_at_ms) : null,
     createdAt: new Date(doc.updated_at_ms || Date.now()).toISOString(),
     updatedAt: new Date(doc.updated_at_ms || Date.now()).toISOString(),
   })).filter((item) => item.id);
@@ -3417,6 +3546,14 @@ function commandTaskFromProjection(doc, runtimeByTaskId, runtimeByCommandId) {
     terminal_status: lifecycle ? String(doc.terminal_status || 'none') : '',
     projectionVersion: lifecycle ? Number(doc.projection_version || 0) : null,
     target: doc.command_type || queueTask?.target || 'business_os.command',
+    // The service projects `execution_progress` onto business_commands as well;
+    // prefer the command copy, fall back to the queue-task copy.
+    executionProgress: normalizeExecutionProgress(doc.execution_progress || doc.executionProgress)
+      || queueTask?.executionProgress
+      || null,
+    updatedAtMs: Number.isFinite(Number(doc.updated_at_ms))
+      ? Number(doc.updated_at_ms)
+      : (queueTask?.updatedAtMs ?? null),
     browserExtractArtifact: extractArtifact,
     result: doc.result || queueTask?.result || null,
     resultSummary: (extractArtifact ? browserExtractSummary(extractArtifact.fields) : '')
@@ -3621,14 +3758,16 @@ function isFocusedTask(item, focusTask) {
 
 function authoritativeTaskStatus(task = {}) {
   task = task || {};
-  const phase = String(task.executionPhase || task.execution_phase || '').trim().toLowerCase();
+  const durablePhase = taskExecutionProgress(task)?.phase || '';
+  const phase = String(task.executionPhase || task.execution_phase || durablePhase).trim().toLowerCase();
   if (!phase) return '';
   if (phase === 'terminal') {
     return normalizeCommandStatus(task.terminalStatus || task.terminal_status || task.status || 'completed');
   }
   if (['waiting_dependencies', 'waiting-dependencies', 'accepted', 'queued', 'retry_wait', 'retry-wait'].includes(phase)) return 'queued';
-  if (phase === 'leased' || phase === 'running') return 'running';
-  if (['awaiting_review', 'awaiting-review', 'validating'].includes(phase)) return 'review';
+  if (['leased', 'running', 'work', 'working'].includes(phase)) return 'running';
+  if (['review', 'awaiting_review', 'awaiting-review', 'validating'].includes(phase)) return 'review';
+  if (phase === 'completed') return 'completed';
   if (phase === 'blocked') return 'blocked';
   return normalizeCommandStatus(phase);
 }
@@ -4019,10 +4158,26 @@ function stepMetaLabel(step, state) {
   return timestamp || t.notLogged;
 }
 
+// The ticker exists only to advance a clock that is already anchored to a real
+// persisted start timestamp on a task the harness reports as `working`. With no
+// anchor there is nothing to advance, so no interval is armed at all — the
+// previous build ticked unconditionally every second from a `liveStartedAt`
+// that was reset to Date.now() on every refresh, which is an animation, not a
+// measurement.
 function startLiveTicker(state) {
   window.clearInterval(state.liveTicker);
+  state.liveTicker = null;
   updateLiveIndicators(state);
-  state.liveTicker = window.setInterval(() => updateLiveIndicators(state), 1000);
+  if (!Number.isFinite(state.liveAnchorMs)) return;
+  state.liveTicker = window.setInterval(() => {
+    if (!Number.isFinite(state.liveAnchorMs)) {
+      window.clearInterval(state.liveTicker);
+      state.liveTicker = null;
+      updateLiveIndicators(state);
+      return;
+    }
+    updateLiveIndicators(state);
+  }, 1000);
 }
 
 function updateLiveIndicators(state) {
@@ -4032,15 +4187,20 @@ function updateLiveIndicators(state) {
   });
 }
 
+// Returns null (-> "nicht erfasst") unless a real start timestamp is anchored.
 function liveElapsedSeconds(state) {
-  const base = Number.isFinite(state.liveBaseSeconds) ? state.liveBaseSeconds : 0;
-  const startedAt = Number.isFinite(state.liveStartedAt) ? state.liveStartedAt : Date.now();
-  return base + Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  const anchor = state?.liveAnchorMs;
+  if (!Number.isFinite(anchor)) return null;
+  return Math.max(0, Math.floor((Date.now() - anchor) / 1000));
 }
 
-function metricSubjectTask(state) {
+// The operator reads the strip for whichever task is selected. Restricting the
+// subject to a *running* active task was why the strip was permanently empty:
+// a settled task carries perfectly good persisted telemetry and must show it.
+function metricSubjectTask(state, selectedTask = null) {
+  if (selectedTask) return selectedTask;
   const activeTask = state?.model?.activeTask;
-  if (taskOwnsCurrentHarnessMetrics(activeTask, state)) return activeTask;
+  if (activeTask) return activeTask;
   return null;
 }
 
@@ -4114,6 +4274,136 @@ function nodeLiveFactMarkup(node, task, state) {
   if (task && normalizeCommandStatus(task.status) !== 'running') return '';
   const t = labels[state.lang];
   return `<dt>${escapeHtml(t.live)}</dt><dd>${liveStatusMarkup(state, { compact: true })}</dd>`;
+}
+
+// ---------------------------------------------------------------------------
+// Durable execution telemetry (HARNESS.md "Durable Execution Plans and Activity
+// Turns"). The service projects `execution_progress` onto `ctox_queue_tasks`
+// and `business_commands`; it is the PERSISTENCE AUTHORITY for progress and for
+// the deduplicated thinking/tool turn counters. The older harness-flow stream
+// stays an audit projection and is the only source of token counts.
+//
+// Everything below fails to `null`, never to a plausible-looking number: an
+// unknown metric must render as "nicht erfasst" and a bar with no measured
+// progress must stand still.
+// ---------------------------------------------------------------------------
+function normalizeExecutionProgress(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const int = (value) => (Number.isFinite(Number(value)) ? Math.trunc(Number(value)) : null);
+  const totalSteps = int(raw.total_steps ?? raw.totalSteps);
+  const completedSteps = int(raw.completed_steps ?? raw.completedSteps);
+  const rawPercent = int(raw.percent);
+  const percent = rawPercent === null ? null : clampMetric(rawPercent, 0, 100);
+  const steps = Array.isArray(raw.steps)
+    ? raw.steps.map((step, index) => ({
+      position: int(step?.position) ?? index + 1,
+      label: String(step?.label || '').trim(),
+      status: String(step?.status || '').trim().toLowerCase(),
+      activityTurns: int(step?.activity_turns ?? step?.activityTurns),
+    })).filter((step) => step.label || step.status)
+    : [];
+  const turns = raw.activity_turns || raw.activityTurns || null;
+  const thinkingTurns = int(turns?.thinking);
+  const toolTurns = int(turns?.tools);
+  const totalTurns = int(turns?.total)
+    ?? (thinkingTurns === null && toolTurns === null ? null : (thinkingTurns || 0) + (toolTurns || 0));
+  const phase = String(raw.phase || '').trim().toLowerCase();
+  const reviewStatus = String(raw.review?.status || raw.review_status || '').trim().toLowerCase();
+  const updatedAtMs = int(raw.updated_at_ms ?? raw.updatedAtMs);
+  // A payload that carries none of the load-bearing fields is not telemetry.
+  if (percent === null && totalSteps === null && !steps.length && totalTurns === null) return null;
+  return {
+    version: int(raw.version) ?? 1,
+    revision: int(raw.revision),
+    phase,
+    percent,
+    currentStep: int(raw.current_step ?? raw.currentStep),
+    completedSteps,
+    totalSteps,
+    steps,
+    reviewStatus,
+    thinkingTurns,
+    toolTurns,
+    totalTurns,
+    lastActivityKind: String(turns?.last_kind || turns?.lastKind || '').trim().toLowerCase(),
+    updatedAtMs,
+  };
+}
+
+function taskExecutionProgress(task) {
+  if (!task) return null;
+  return task.executionProgress || normalizeExecutionProgress(task.execution_progress) || null;
+}
+
+// The phase is authoritative for "is this still moving?". Only `working` means
+// the model is still producing turns; `review` and `completed` are settled and
+// must never drive a running clock.
+function executionProgressIsWorking(progress) {
+  return Boolean(progress) && progress.phase === 'working';
+}
+
+function executionStartedAtMs(task) {
+  const candidates = [task?.leasedAt, task?.leased_at, task?.ackedAt, task?.acked_at, task?.startedAt, task?.started_at];
+  for (const candidate of candidates) {
+    const parsed = Date.parse(String(candidate || ''));
+    if (Number.isFinite(parsed)) return parsed;
+  }
+  return null;
+}
+
+// The single source for the metric strip. Tokens come from the harness-flow
+// audit projection and ONLY when that projection actually describes this task;
+// tool calls and reasoning turns come from the durable activity-turn counters.
+function taskTelemetry(task, state) {
+  const progress = taskExecutionProgress(task);
+  const flowMatches = Boolean(task) && taskMatchesHarnessFlow(task, state);
+  const flowMetrics = flowMatches ? aggregateFlowMetrics(state?.flow) : emptyMetrics();
+  const startedAtMs = executionStartedAtMs(task);
+  const updatedAtMs = Number.isFinite(Number(task?.updatedAtMs))
+    ? Number(task.updatedAtMs)
+    : (progress?.updatedAtMs ?? null);
+  let seconds = flowMetrics.seconds;
+  if (seconds === null && Number.isFinite(startedAtMs) && Number.isFinite(updatedAtMs) && updatedAtMs >= startedAtMs) {
+    seconds = Math.round((updatedAtMs - startedAtMs) / 1000);
+  }
+  const live = executionProgressIsWorking(progress) && Number.isFinite(startedAtMs);
+  return {
+    inputTokens: flowMetrics.inputTokens,
+    outputTokens: flowMetrics.outputTokens,
+    // `activity_turns.tools` is the deduplicated durable count and outranks the
+    // audit stream; fall back to the flow only when no plan has been persisted.
+    toolCalls: progress?.toolTurns ?? flowMetrics.toolCalls,
+    thinkingTurns: progress?.thinkingTurns ?? null,
+    seconds,
+    percent: progress?.percent ?? null,
+    completedSteps: progress?.completedSteps ?? null,
+    totalSteps: progress?.totalSteps ?? null,
+    currentStep: progress?.currentStep ?? null,
+    phase: progress?.phase || '',
+    reviewStatus: progress?.reviewStatus || '',
+    startedAtMs,
+    live,
+    progress,
+  };
+}
+
+function emptyTelemetry() {
+  return {
+    inputTokens: null,
+    outputTokens: null,
+    toolCalls: null,
+    thinkingTurns: null,
+    seconds: null,
+    percent: null,
+    completedSteps: null,
+    totalSteps: null,
+    currentStep: null,
+    phase: '',
+    reviewStatus: '',
+    startedAtMs: null,
+    live: false,
+    progress: null,
+  };
 }
 
 function aggregateFlowMetrics(flowResult) {
@@ -4540,6 +4830,13 @@ function escapeAttr(value) {
 
 export const __ctoxTestHooks = {
   aggregateFlowMetrics,
+  normalizeExecutionProgress,
+  taskTelemetry,
+  emptyTelemetry,
+  executionProgressBar,
+  executionPlanSteps,
+  liveElapsedSeconds,
+  metricSubjectTask,
   authoritativeTaskNodeId,
   authoritativeTaskStatus,
   buildHarnessModel,

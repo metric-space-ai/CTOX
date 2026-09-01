@@ -1167,9 +1167,118 @@
 }
 
 .ctox-timeline-scrub {
+  position: relative;
   display: grid;
   gap: 5px;
   min-width: 0;
+}
+
+/* Execution progress bar — driven ONLY by execution_progress.percent from the
+   durable plan projection. There is deliberately no indeterminate/marquee
+   variant: when nothing is measured the track is simply empty and the header
+   reads "nicht erfasst". No transition on the unmeasured state so an empty bar
+   never appears to animate toward a value. */
+.ctox-execution-progress {
+  display: grid;
+  gap: 6px;
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.ctox-execution-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ctox-execution-progress-head strong {
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ctox-execution-progress.is-unmeasured .ctox-execution-progress-head strong {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ctox-execution-progress-track {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.ctox-execution-progress-track > i {
+  display: block;
+  height: 100%;
+  width: var(--execution-progress, 0%);
+  border-radius: inherit;
+  background: var(--accent, currentColor);
+  transition: width 320ms ease;
+}
+
+.ctox-execution-progress.is-unmeasured .ctox-execution-progress-track > i {
+  width: 0;
+  transition: none;
+}
+
+.ctox-execution-progress-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ctox-execution-progress-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ctox-execution-progress-track > i {
+    transition: none;
+  }
+}
+
+/* The scrubber fill reflects the SELECTED event index (a navigation position),
+   which is why it is visually quieter than the execution bar above it. The
+   --timeline-progress variable is set on .ctox-timeline-panel and was
+   previously consumed by no rule at all, leaving the native track permanently
+   unfilled. Two flat solid layers, no gradient: this module stays shell-native
+   (guarded by "Presentation layer stays compact and shell-native"). ::before is
+   the full-width track, ::after the measured fill laid exactly over it. */
+.ctox-timeline-scrub::before {
+  content: "";
+  display: block;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.ctox-timeline-scrub::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: var(--timeline-progress, 0%);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, currentColor) 62%, transparent);
+}
+
+/* No measurable range -> no fill at all, never a decorative remnant. */
+.ctox-timeline-panel.is-disabled .ctox-timeline-scrub::after {
+  width: 0;
 }
 
 .ctox-timeline-panel input[type="range"] {

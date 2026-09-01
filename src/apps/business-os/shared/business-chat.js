@@ -2240,21 +2240,22 @@ function normalizeExecutionProgress(value) {
         position: Number(step?.position) || index + 1,
         label: String(step?.label || `Schritt ${index + 1}`),
         status: String(step?.status || 'pending').toLowerCase(),
-        activity_turns: Math.max(0, Number(step?.activity_turns) || 0),
+        activity_turns: Math.max(0, Number(step?.activity_turns ?? step?.activityTurns) || 0),
       }))
     : [];
   if (!steps.length) return null;
-  const activity = value.activity_turns && typeof value.activity_turns === 'object'
-    ? value.activity_turns
+  const rawActivity = value.activity_turns || value.activityTurns;
+  const activity = rawActivity && typeof rawActivity === 'object'
+    ? rawActivity
     : {};
   return {
     version: Number(value.version) || 1,
     revision: Math.max(1, Number(value.revision) || 1),
     phase: String(value.phase || 'work'),
     percent: Math.max(0, Math.min(100, Number(value.percent) || 0)),
-    current_step: Number(value.current_step) || null,
-    completed_steps: Math.max(0, Number(value.completed_steps) || 0),
-    total_steps: Math.max(steps.length, Number(value.total_steps) || 0),
+    current_step: Number(value.current_step ?? value.currentStep) || null,
+    completed_steps: Math.max(0, Number(value.completed_steps ?? value.completedSteps) || 0),
+    total_steps: Math.max(steps.length, Number(value.total_steps ?? value.totalSteps) || 0),
     steps,
     review: value.review && typeof value.review === 'object'
       ? { status: String(value.review.status || 'pending').toLowerCase() }
@@ -2263,9 +2264,9 @@ function normalizeExecutionProgress(value) {
       total: Math.max(0, Number(activity.total) || 0),
       thinking: Math.max(0, Number(activity.thinking) || 0),
       tools: Math.max(0, Number(activity.tools) || 0),
-      last_kind: String(activity.last_kind || '').toLowerCase(),
+      last_kind: String(activity.last_kind || activity.lastKind || value.lastActivityKind || '').toLowerCase(),
     },
-    updated_at_ms: Math.max(0, Number(value.updated_at_ms) || 0),
+    updated_at_ms: Math.max(0, Number(value.updated_at_ms ?? value.updatedAtMs) || 0),
   };
 }
 

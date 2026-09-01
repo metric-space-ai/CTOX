@@ -169,6 +169,34 @@ test('review progress selects a distinct creature mode with durable activity tel
   assert.equal(review, __businessChatTestInternals.crewCreatureHtml(reviewChat, 'running', 'window'));
 });
 
+test('CTOX normalized camel-case telemetry drives map creature turns and progress', () => {
+  const mapTask = {
+    id: 'queue-active',
+    status: 'running',
+    executionProgress: {
+      phase: 'working',
+      percent: 60,
+      currentStep: 2,
+      completedSteps: 2,
+      totalSteps: 3,
+      steps: [
+        { position: 1, label: 'Lesen', status: 'completed', activityTurns: 2 },
+        { position: 2, label: 'Prüfen', status: 'in_progress', activityTurns: 5 },
+        { position: 3, label: 'Schreiben', status: 'pending', activityTurns: 0 },
+      ],
+      activityTurns: { total: 7, thinking: 4, tools: 3, lastKind: 'tool' },
+      lastActivityKind: 'tool',
+      updatedAtMs: 1720000000123,
+    },
+  };
+  const creature = __businessChatTestInternals.crewCreatureHtml(mapTask, 'running', 'map');
+  assert.match(creature, /is-running is-working/);
+  assert.match(creature, /data-activity-turns="7"/);
+  assert.match(creature, /data-activity-kind="tool"/);
+  assert.match(creature, /data-activity-updated-at="1720000000123"/);
+  assert.match(creature, /--ctox-progress-angle:216deg/);
+});
+
 test('crew motion is triggered only by durable turns, finite, and reduced-motion safe', () => {
   assert.match(businessChatSource, /function syncCrewProceduralMotion/);
   assert.match(businessChatSource, /now - state\.lastFrameAt < 33/);

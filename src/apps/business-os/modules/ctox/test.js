@@ -63,7 +63,26 @@ test('Missing authoritative task telemetry remains a safe empty state', () => {
 });
 
 test('CTOX flow map places the same crew on waiting, working, and failed task nodes', () => {
-  const working = { id: 'task-working', commandId: 'cmd-working', title: 'Working task', status: 'running', executionPhase: 'running' };
+  const working = {
+    id: 'task-working',
+    commandId: 'cmd-working',
+    title: 'Working task',
+    status: 'queued',
+    executionProgress: {
+      phase: 'working',
+      percent: 60,
+      currentStep: 2,
+      completedSteps: 2,
+      totalSteps: 3,
+      steps: [
+        { position: 1, label: 'Read', status: 'completed', activityTurns: 2 },
+        { position: 2, label: 'Check', status: 'in_progress', activityTurns: 5 },
+        { position: 3, label: 'Write', status: 'pending', activityTurns: 0 },
+      ],
+      activityTurns: { total: 7, thinking: 4, tools: 3, lastKind: 'tool' },
+      updatedAtMs: 1720000000123,
+    },
+  };
   const waiting = { id: 'task-waiting', commandId: 'cmd-waiting', title: 'Waiting task', status: 'queued', executionPhase: 'queued' };
   const failed = { id: 'task-failed', commandId: 'cmd-failed', title: 'Failed task', status: 'failed', executionPhase: 'terminal', terminalStatus: 'failed' };
   const model = {
@@ -82,9 +101,13 @@ test('CTOX flow map places the same crew on waiting, working, and failed task no
   assert.match(html, /data-task-id="task-waiting"[^>]+data-creature-node-id="queued"/);
   assert.match(html, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
   assert.match(html, /is-working/);
+  assert.match(html, /data-activity-turns="7"/);
+  assert.match(html, /data-activity-kind="tool"/);
+  assert.match(html, /--ctox-progress-angle:216deg/);
   assert.match(html, /is-sleeping/);
   assert.match(html, /is-failed/);
   assert.equal(taskCrewNodeId(working, model), 'running');
+  assert.equal(taskCrewStatus(working), 'running');
   assert.equal(taskCrewStatus(waiting), 'queued');
 });
 
