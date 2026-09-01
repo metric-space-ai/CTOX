@@ -18,9 +18,10 @@ use super::store::{
     project_iot_business_command_outcome, pull_collection_record,
     record_business_module_lifecycle_event, record_command, record_report_command,
     recoverable_background_control_claim_authorization, run_channel_command,
-    rxdb_authenticated_session, rxdb_command_session, stored_rxdb_business_command_outcome,
-    upsert_rxdb_collection_record, write_rxdb_failed_control_command_outcome, BusinessCommand,
-    BusinessOsReportMutation, ChannelCommandRequest, CommandOrigin, APPSEC_MODULE_ID,
+    rxdb_authenticated_session, rxdb_command_session, rxdb_verified_identity_email,
+    stored_rxdb_business_command_outcome, upsert_rxdb_collection_record,
+    write_rxdb_failed_control_command_outcome, BusinessCommand, BusinessOsReportMutation,
+    ChannelCommandRequest, CommandOrigin, APPSEC_MODULE_ID,
 };
 use super::store_appsec_commands::handle_appsec_business_command;
 use super::store_ats_commands::{handle_ats_active_command, handle_ats_mutating_command};
@@ -1049,10 +1050,12 @@ fn dispatch_business_command(
             let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
             let owner_user_id = session_user_id(session)
                 .context("authorized Workjet project command is missing a user identity")?;
+            let owner_email = rxdb_verified_identity_email(root, command, owner_user_id);
             match super::store_workjet_projects::handle_workjet_project_store_command(
                 root,
                 command,
                 owner_user_id,
+                owner_email.as_deref(),
             ) {
                 Ok(outcome) => Ok(BusinessCommandDispatchOutcome::completed(outcome, None)),
                 Err(error) => Ok(BusinessCommandDispatchOutcome::failed(

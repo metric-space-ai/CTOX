@@ -15476,6 +15476,24 @@ fn issue_business_os_capability_token_until_with_binding(
     expires_at_ms: i64,
     device_binding: Option<&super::capability::CapabilityDeviceBinding>,
 ) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_until_with_identity(
+        root,
+        user_id,
+        None,
+        now_ms,
+        expires_at_ms,
+        device_binding,
+    )
+}
+
+fn issue_business_os_capability_token_until_with_identity(
+    root: &Path,
+    user_id: &str,
+    email: Option<&str>,
+    now_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&super::capability::CapabilityDeviceBinding>,
+) -> anyhow::Result<(String, i64)> {
     anyhow::ensure!(
         expires_at_ms > now_ms,
         "capability expiry must be in the future"
@@ -15499,9 +15517,10 @@ fn issue_business_os_capability_token_until_with_binding(
         |row| row.get(0),
     )?;
     let secret = capability_signing_secret(root)?;
-    let token = super::capability::issue_capability_token_with_epoch_and_binding(
+    let token = super::capability::issue_capability_token_with_epoch_and_identity(
         &secret,
         &user.id,
+        email,
         &normalize_business_role(&user.role),
         actor_epoch,
         now_ms,
@@ -15569,8 +15588,36 @@ pub fn issue_business_os_capability_token_for_managed_user(
     role: &str,
     now_ms: i64,
 ) -> anyhow::Result<(String, i64)> {
+    issue_business_os_capability_token_for_managed_user_with_email(
+        root,
+        user_id,
+        None,
+        display_name,
+        role,
+        now_ms,
+    )
+}
+
+pub fn issue_business_os_capability_token_for_managed_user_with_email(
+    root: &Path,
+    user_id: &str,
+    email: Option<&str>,
+    display_name: &str,
+    role: &str,
+    now_ms: i64,
+) -> anyhow::Result<(String, i64)> {
     let user_id = user_id.trim();
     anyhow::ensure!(!user_id.is_empty(), "user id is required");
+    let email = email
+        .map(str::trim)
+        .filter(|email| !email.is_empty())
+        .map(str::to_ascii_lowercase);
+    if let Some(email) = email.as_deref() {
+        anyhow::ensure!(
+            email.len() <= 320 && email.contains('@') && !email.chars().any(char::is_control),
+            "email must be a bounded email address"
+        );
+    }
     let role = normalize_business_role(role);
     anyhow::ensure!(
         matches!(role.as_str(), "chef" | "admin" | "founder" | "user"),
@@ -15595,7 +15642,15 @@ pub fn issue_business_os_capability_token_for_managed_user(
             updated_at_ms = excluded.updated_at_ms",
         params![user_id, display_name, role.as_str(), now_ms],
     )?;
-    issue_business_os_capability_token(root, user_id, now_ms)
+    drop(conn);
+    issue_business_os_capability_token_until_with_identity(
+        root,
+        user_id,
+        email.as_deref(),
+        now_ms,
+        now_ms + CAPABILITY_TOKEN_TTL_MS,
+        None,
+    )
 }
 
 pub fn issue_business_os_capability_token_for_managed_user_with_binding(
@@ -15805,6 +15860,31 @@ pub(super) fn authorize_rxdb_browser_command(
 // spoofed chef/admin id cannot escalate. In-process commands (`TrustedLocal`:
 // operator CLI, server-side handlers that already authenticated a session,
 // internal projections) may trust their claimed actor. See `capability.rs`.
+pub(super) fn rxdb_verified_identity_email(
+    root: &Path,
+    command: &BusinessCommand,
+    expected_user_id: &str,
+) -> Option<String> {
+    let client_ctx = if let Value::String(ref value) = command.client_context {
+        serde_json::from_str(value).unwrap_or_else(|_| command.client_context.clone())
+    } else {
+        command.client_context.clone()
+    };
+    let token = client_ctx
+        .get("capability_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())?;
+    let claims = if matches!(&command.origin, CommandOrigin::ReplicatedPeer) {
+        verified_webrtc_capability_claims(root, token)
+    } else {
+        verified_capability_claims(root, token)
+    }?;
+    if claims.user_id != expected_user_id {
+        return None;
+    }
+    claims.email
+}
+
 fn rxdb_session_from_command(
     root: &Path,
     command: &BusinessCommand,
