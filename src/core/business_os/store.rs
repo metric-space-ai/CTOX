@@ -12886,6 +12886,12 @@ pub(super) fn handle_app_lifecycle_command(
                         }),
                         now,
                     )?;
+                    // The shell authorizes runtime-app database facades from
+                    // the governance snapshot embedded in module-catalog.
+                    // Persisting the grant without refreshing that projection
+                    // leaves an already-open app denied until an unrelated
+                    // catalog refresh or daemon restart.
+                    write_module_catalog_projection_to_rxdb_for_module(root, module_id)?;
                     return write_rxdb_control_command_outcome(
                         root,
                         &command,
@@ -25476,6 +25482,55 @@ pub(super) mod tests {
             module_dir.join("tests/basic.test.mjs"),
             "import assert from 'node:assert/strict';\nassert.equal(1, 1);\n",
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn app_access_grant_refreshes_catalog_governance_projection() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let module_id = "grantrefreshapp";
+        let collection = "grantrefreshapp_records";
+        fs::write(root.path().join("index.html"), "<main></main>\n")?;
+        write_minimal_runtime_app_artifacts(root.path(), module_id)?;
+        seed_business_user(root.path(), "admin1", "admin")?;
+
+        let outcome = accept_rxdb_business_command(
+            root.path(),
+            serde_json::json!({
+                "id": "cmd-grant-refresh",
+                "command_id": "cmd-grant-refresh",
+                "module": module_id,
+                "command_type": "ctox.app.access.grant",
+                "payload": {
+                    "module_id": module_id,
+                    "subject_type": "role",
+                    "subject_id": "admin",
+                    "permission": "data.read",
+                    "collection": collection,
+                    "reason": "reviewed test collection"
+                },
+                "client_context": {
+                    "actor": {"id": "admin1", "role": "admin"}
+                }
+            }),
+        )?;
+        assert_eq!(
+            outcome.get("status").and_then(Value::as_str),
+            Some("completed")
+        );
+
+        let catalog =
+            load_rxdb_collection_record(root.path(), "business_module_catalog", "module-catalog")?
+                .context("module catalog projection is missing")?;
+        let grants = catalog
+            .pointer("/governance/permission_model/explicit_grants")
+            .and_then(Value::as_array)
+            .context("catalog governance grants are missing")?;
+        assert!(grants.iter().any(|grant| {
+            grant.get("grant_id").and_then(Value::as_str)
+                == Some("app-access:grantrefreshapp:role:admin:data.read:grantrefreshapp_records")
+                && grant.get("active").and_then(Value::as_bool) == Some(true)
+        }));
         Ok(())
     }
 
