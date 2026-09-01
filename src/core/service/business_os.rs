@@ -1620,6 +1620,14 @@ fn handle_business_os_commands(root: &Path, args: &[String]) -> anyhow::Result<(
                 crate::business_os::store::process_source_parse_command(root, command_id)?;
             print_json(&serde_json::to_value(accepted)?)
         }
+        Some("retry") => {
+            let command_id = args
+                .get(1)
+                .context("usage: ctox business-os commands retry <command-id>")?;
+            print_json(&crate::business_os::store::retry_failed_app_create_command(
+                root, command_id,
+            )?)
+        }
         Some("dispatch") => {
             // Agent-facing entry point for writeback commands (e.g. the
             // `outbound.pipeline.write_outreach_draft` draft writeback). The
@@ -3989,6 +3997,10 @@ fn business_os_usage() -> String {
             "  ctox business-os backup inspect-manifest --manifest <path>\n  ctox business-os backup key-escrow-status\n  ctox business-os backup prune-drills [--dry-run]",
         )
         .replace(
+            "  ctox business-os commands process <command-id>",
+            "  ctox business-os commands process <command-id>\n  ctox business-os commands retry <command-id>",
+        )
+        .replace(
             "  ctox business-os commands dispatch (--input <path> | --json <json> | <json>)",
             "  ctox business-os commands dispatch (--input <path> | --json <json> | <json>)\n  ctox business-os commands diagnostics --json\n  ctox business-os commands inspect <command-id>\n  ctox business-os commands gc (--dry-run | --apply)\n  ctox business-os commands reconcile (--dry-run | --apply)\n  ctox business-os harness-bench catalog\n  ctox business-os harness-bench run (--dry-run | --confirm-live) [--run-id <id>] [--actor <user-id>] [--reviewer <user-id>] [--family <id>] [--case <H001>] [--limit <n>]\n  ctox business-os harness-bench status --run-id <id> [--fail-on-inflight]",
         )
@@ -6299,6 +6311,11 @@ mod tests {
             "source-capture --source-id <dnbhoovers.com|leadfeeder.com|rocketreach.com|xing.com>"
         ));
         assert!(usage.contains("[--credential-ref <ctox-secret://scope/name>]"));
+    }
+
+    #[test]
+    fn business_os_usage_documents_terminal_app_create_retry() {
+        assert!(business_os_usage().contains("ctox business-os commands retry <command-id>"));
     }
 
     #[test]

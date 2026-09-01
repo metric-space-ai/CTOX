@@ -4,17 +4,17 @@
 // storage audits and one-time legacy-data migrations.
 
 use super::{
-    BusinessCommandClaimRequest, BusinessCommandControlClaim, BusinessCommandOutboxEvent,
-    BusinessCommandQueueClaim, QueueRouteStatus, QueueTaskCreateRequest, TerminalPolicyGrant,
     attach_queue_projection_store, canonical_queue_route_status,
     create_queue_task_with_metadata_tx, current_queue_route_status, ensure_queue_account,
     epoch_millis, load_queue_task_from_conn, now_iso_string, open_channel_db,
     refresh_queue_projection_tasks, resolve_db_path, sanitize_path_component, set_routing_status,
-    sha256_hex,
+    sha256_hex, BusinessCommandClaimRequest, BusinessCommandControlClaim,
+    BusinessCommandOutboxEvent, BusinessCommandQueueClaim, QueueRouteStatus,
+    QueueTaskCreateRequest, TerminalPolicyGrant,
 };
-use anyhow::{Context, Result, anyhow, bail};
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use serde_json::{Value, json};
+use anyhow::{anyhow, bail, Context, Result};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1298,6 +1298,139 @@ pub(super) fn transition_business_command_for_task_in_transaction(
         now_ms,
     )?;
     Ok(true)
+}
+
+pub(crate) fn retry_failed_app_create_business_command(
+    root: &Path,
+    command_id: &str,
+) -> Result<Value> {
+    let db_path = resolve_db_path(root, None);
+    let mut conn = open_channel_db(&db_path)?;
+    ensure_queue_account(&mut conn)?;
+    attach_queue_projection_store(root, &conn)?;
+    let tx = conn.transaction()?;
+    let (task_id, command_type, from_phase, terminal_status, projection_version) = tx
+        .query_row(
+            "SELECT link.task_id, aggregate.command_type, aggregate.execution_phase,
+                    aggregate.terminal_status, aggregate.projection_version
+             FROM business_command_aggregates aggregate
+             JOIN business_command_task_links link ON link.command_id = aggregate.command_id
+             WHERE aggregate.command_id = ?1",
+            params![command_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )
+        .optional()?
+        .with_context(|| format!("business command `{command_id}` was not found"))?;
+    anyhow::ensure!(
+        command_type == "ctox.business_os.app.create",
+        "business command `{command_id}` is not an app-create command"
+    );
+    anyhow::ensure!(
+        from_phase == "terminal" && terminal_status == "failed",
+        "business command `{command_id}` is not a terminal failed app-create command"
+    );
+    let route_status = canonical_queue_route_status(&current_queue_route_status(&tx, &task_id)?)?;
+    anyhow::ensure!(
+        route_status == QueueRouteStatus::Failed,
+        "app-create command `{command_id}` has non-failed queue task `{task_id}` ({})",
+        route_status.as_str()
+    );
+
+    let now = now_iso_string();
+    let now_ms = epoch_millis();
+    let next_version = projection_version.saturating_add(1);
+    let reason =
+        "operator retried terminal app-create command after recoverable infrastructure failure";
+    set_routing_status(
+        &tx,
+        &task_id,
+        QueueRouteStatus::Pending.as_str(),
+        &now,
+        "business-command-app-retry",
+        reason,
+        Some(reason),
+        None,
+    )?;
+    tx.execute(
+        "UPDATE communication_routing_state
+         SET failure_attempt_count = 0, failure_class = NULL, retry_not_before = NULL,
+             hold_reason = NULL, last_error = NULL
+         WHERE message_key = ?1",
+        params![task_id],
+    )?;
+    tx.execute(
+        "UPDATE communication_messages
+         SET observed_at = ?2,
+             metadata_json = json_set(metadata_json, '$.status_note', ?3, '$.sort_at', ?2)
+         WHERE message_key = ?1",
+        params![task_id, now, reason],
+    )?;
+    tx.execute(
+        "UPDATE business_command_aggregates
+         SET execution_phase = 'queued', terminal_status = 'none',
+             projection_version = ?2, result_json = NULL, error_code = NULL,
+             error_message = NULL, retryable = 0, updated_at_ms = ?3
+         WHERE command_id = ?1",
+        params![command_id, next_version, now_ms],
+    )?;
+    tx.execute(
+        "UPDATE business_command_effects
+         SET status = 'claimed', result_json = NULL, error_message = NULL, updated_at_ms = ?2
+         WHERE command_id = ?1 AND effect_key = ?3",
+        params![command_id, now_ms, format!("queue:{task_id}")],
+    )?;
+    tx.execute(
+        "INSERT INTO business_command_transitions
+            (command_id, projection_version, from_phase, to_phase, terminal_status,
+             reason, evidence_json, created_at_ms)
+         VALUES (?1, ?2, 'terminal', 'queued', 'none', ?3, ?4, ?5)",
+        params![
+            command_id,
+            next_version,
+            reason,
+            serde_json::to_string(&json!({
+                "task_id": task_id,
+                "previous_terminal_status": terminal_status,
+                "retry_kind": "operator_app_create_retry"
+            }))?,
+            now_ms,
+        ],
+    )?;
+    insert_business_command_outbox_rows(
+        &tx,
+        command_id,
+        next_version,
+        "command.progress",
+        &json!({
+            "command_id": command_id,
+            "execution_task_id": task_id,
+            "execution_phase": "queued",
+            "terminal_status": "none",
+            "projection_version": next_version,
+            "retry_kind": "operator_app_create_retry"
+        }),
+        now_ms,
+    )?;
+    let task = load_queue_task_from_conn(&tx, &task_id)?
+        .with_context(|| format!("failed to reload app-create queue task `{task_id}`"))?;
+    refresh_queue_projection_tasks(root, &tx, std::slice::from_ref(&task))?;
+    tx.commit()?;
+    Ok(json!({
+        "ok": true,
+        "command_id": command_id,
+        "task_id": task_id,
+        "status": "queued",
+        "task_status": "pending",
+        "projection_version": next_version
+    }))
 }
 
 pub(crate) fn persist_business_command_worker_result(

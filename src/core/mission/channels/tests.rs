@@ -1457,6 +1457,83 @@ fn terminal_command_orphaned_queue_lease_settles_to_terminal_route() {
 }
 
 #[test]
+fn failed_app_create_command_can_retry_with_same_command_and_queue_ids() {
+    let root = std::env::temp_dir().join(format!(
+        "ctox-app-create-terminal-retry-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&root).expect("failed to create temp test root");
+    let created = create_queue_task(
+        &root,
+        QueueTaskCreateRequest {
+            title: "retry app import".to_string(),
+            prompt: "Retry the immutable app import.".to_string(),
+            thread_key: "queue/app-create-terminal-retry".to_string(),
+            workspace_root: None,
+            priority: "normal".to_string(),
+            suggested_skill: Some("business-os-app-module-development".to_string()),
+            parent_message_key: None,
+            extra_metadata: None,
+        },
+    )
+    .expect("failed to create queue task");
+    update_queue_task(
+        &root,
+        QueueTaskUpdateRequest {
+            message_key: created.message_key.clone(),
+            route_status: Some("failed".to_string()),
+            status_note: Some("model API unavailable".to_string()),
+            ..Default::default()
+        },
+    )
+    .expect("failed to terminalize app queue task");
+    let conn = open_channel_db(&resolve_db_path(&root, None)).expect("open channel db");
+    conn.execute(
+        "INSERT INTO business_command_aggregates (
+            command_id, idempotency_key, payload_hash, module, command_type,
+            execution_mode, execution_phase, terminal_status, projection_version,
+            intent_json, error_code, error_message, created_at_ms, updated_at_ms
+         ) VALUES (?1, ?2, 'hash', 'importer', 'ctox.business_os.app.create',
+                   'queue', 'terminal', 'failed', 4, '{}', 'runtime_api',
+                   'model API unavailable', 1, 1)",
+        params!["cmd-app-retry-1", "idem-app-retry-1"],
+    )
+    .expect("seed terminal app command aggregate");
+    conn.execute(
+        "INSERT INTO business_command_task_links (command_id, task_id, created_at_ms)
+         VALUES (?1, ?2, 1)",
+        params!["cmd-app-retry-1", created.message_key],
+    )
+    .expect("link app command to queue task");
+    drop(conn);
+
+    let retried = retry_failed_app_create_business_command(&root, "cmd-app-retry-1")
+        .expect("retry failed app-create command");
+    assert_eq!(retried["command_id"], "cmd-app-retry-1");
+    assert_eq!(retried["task_id"], created.message_key);
+    assert_eq!(retried["status"], "queued");
+    let task = load_queue_task(&root, &created.message_key)
+        .expect("load retried queue task")
+        .expect("retried queue task exists");
+    assert_eq!(task.route_status, "pending");
+    assert!(task.lease_owner.is_none());
+    let inspected = inspect_business_command(&root, "cmd-app-retry-1")
+        .expect("inspect retried app command")
+        .expect("retried app command exists");
+    assert_eq!(inspected["command"]["execution_phase"], "queued");
+    assert_eq!(inspected["command"]["terminal_status"], "none");
+    assert_eq!(inspected["command"]["projection_version"], 5);
+
+    let second = retry_failed_app_create_business_command(&root, "cmd-app-retry-1")
+        .expect_err("queued app command must not be retried twice");
+    assert!(second.to_string().contains("not a terminal failed"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn queue_lease_worker_identity_persists_and_clears_on_recovery() {
     let root = std::env::temp_dir().join(format!(
         "ctox-queue-lease-worker-{}",

@@ -21395,7 +21395,9 @@ fn materialize_business_os_app_import_source(
         install_target == "runtime-installed-module",
         "Business OS app imports require install_target=runtime-installed-module"
     );
-    let snapshots_root = root.join("runtime").join("business-os").join("app-imports");
+    let snapshots_root = crate::paths::runtime_dir(root)
+        .join("business-os")
+        .join("app-imports");
     fs::create_dir_all(&snapshots_root).with_context(|| {
         format!(
             "failed to create app import snapshot root {}",
@@ -21792,6 +21794,103 @@ fn business_os_app_import_prompt_block(manifest: &Value) -> anyhow::Result<Strin
         manifest.get("file_count").and_then(Value::as_u64).unwrap_or(0),
         manifest.get("total_bytes").and_then(Value::as_u64).unwrap_or(0),
     ))
+}
+
+fn app_import_prompt_evidence(prompt: &str, key: &str) -> Option<String> {
+    let prefix = format!("- {key}:");
+    prompt.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix(&prefix)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    })
+}
+
+fn replace_app_import_prompt_block(prompt: &str, replacement: &str) -> anyhow::Result<String> {
+    let start_marker = "Imported application source (immutable evidence):";
+    let end_marker = "Business OS app request summary:";
+    let start = prompt
+        .find(start_marker)
+        .context("app-create queue prompt has no immutable import evidence block")?;
+    let end = prompt[start..]
+        .find(end_marker)
+        .map(|offset| start + offset)
+        .context("app-create queue prompt has no request summary after import evidence")?;
+    Ok(format!(
+        "{}{}\n\n{}",
+        &prompt[..start],
+        replacement.trim_matches('\n'),
+        &prompt[end..]
+    ))
+}
+
+pub fn retry_failed_app_create_command(root: &Path, command_id: &str) -> anyhow::Result<Value> {
+    let conn = open_store(root)?;
+    let command = load_business_command(&conn, command_id)?;
+    anyhow::ensure!(
+        command.command_type == "ctox.business_os.app.create",
+        "business command {command_id} is not an app-create command"
+    );
+    let task_id = find_queue_task_for_command(root, command_id)
+        .with_context(|| format!("app-create command {command_id} has no durable queue task"))?;
+    let task = channels::load_queue_task(root, &task_id)?
+        .with_context(|| format!("app-create queue task {task_id} was not found"))?;
+    anyhow::ensure!(
+        task.route_status == "failed",
+        "app-create queue task {task_id} is not failed"
+    );
+    let expected_revision = app_import_prompt_evidence(&task.prompt, "resolved_revision")
+        .context("failed app-create prompt has no resolved source revision")?;
+    let expected_manifest = app_import_prompt_evidence(&task.prompt, "manifest_sha256")
+        .context("failed app-create prompt has no source manifest fingerprint")?;
+
+    let mut retry_command = command.clone();
+    let import_source = retry_command
+        .payload
+        .get_mut("import_source")
+        .and_then(Value::as_object_mut)
+        .context("failed app-create command has no import_source payload")?;
+    import_source.insert("ref".to_string(), Value::String(expected_revision.clone()));
+    let replacement = materialize_business_os_app_import_source(root, command_id, &retry_command)?
+        .context("failed app-create command did not materialize an import snapshot")?;
+    anyhow::ensure!(
+        app_import_prompt_evidence(&replacement, "resolved_revision").as_deref()
+            == Some(expected_revision.as_str()),
+        "rematerialized app import revision does not match immutable command evidence"
+    );
+    anyhow::ensure!(
+        app_import_prompt_evidence(&replacement, "manifest_sha256").as_deref()
+            == Some(expected_manifest.as_str()),
+        "rematerialized app import manifest does not match immutable command evidence"
+    );
+    let source_directory = app_import_prompt_evidence(&replacement, "source_directory")
+        .context("rematerialized app import has no source directory")?;
+    let prompt = replace_app_import_prompt_block(&task.prompt, &replacement)?;
+    channels::update_queue_task(
+        root,
+        channels::QueueTaskUpdateRequest {
+            message_key: task_id.clone(),
+            prompt: Some(prompt),
+            ..Default::default()
+        },
+    )?;
+    let mut result = channels::retry_failed_app_create_business_command(root, command_id)?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert(
+            "resolved_revision".to_string(),
+            Value::String(expected_revision),
+        );
+        object.insert(
+            "manifest_sha256".to_string(),
+            Value::String(expected_manifest),
+        );
+        object.insert(
+            "source_directory".to_string(),
+            Value::String(source_directory),
+        );
+    }
+    Ok(result)
 }
 
 fn create_ctox_queue_task(
