@@ -595,7 +595,11 @@ async function runDeclaredScenario(page, options, scenario) {
       const value = renderScenarioValue(step.value, options.marker);
       const locator = page.locator(selector);
       await locator.waitFor({ state: 'visible', timeout: stepTimeoutMs });
-      const tagName = await locator.evaluate((element) => element.tagName.toLowerCase());
+      const tagName = await locator.evaluate(
+        (element) => element.tagName.toLowerCase(),
+        undefined,
+        { timeout: stepTimeoutMs },
+      );
       if (tagName === 'select') await locator.selectOption(value);
       else await locator.fill(value);
     } else if (step.op === 'assert_visible') {
