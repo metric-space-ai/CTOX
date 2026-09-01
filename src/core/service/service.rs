@@ -4403,7 +4403,7 @@ fn service_ipc_timeout(request: &ServiceIpcRequest) -> Duration {
         // seconds even on modest tables. 30s is conservative.
         ServiceIpcRequest::KnowledgeData { .. } => Duration::from_secs(30),
         ServiceIpcRequest::SandboxedCli { argv } => {
-            if matches!(argv, [command, subcommand, ..] if command == "scrape" && subcommand == "execute")
+            if matches!(argv.as_slice(), [command, subcommand, ..] if command == "scrape" && subcommand == "execute")
             {
                 let timeout_seconds = sandboxed_cli_flag_value(argv, "--timeout-seconds")
                     .and_then(|value| value.parse::<u64>().ok())
