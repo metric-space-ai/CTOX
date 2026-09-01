@@ -9,7 +9,7 @@
 
 use super::store::{
     open_store, outbound_load_record, outbound_load_records_by_string_field,
-    upsert_business_record, BusinessCommand,
+    upsert_business_record, upsert_rxdb_collection_record, BusinessCommand,
 };
 use anyhow::Context;
 use rusqlite::Connection;
@@ -173,7 +173,14 @@ pub(super) fn handle_workjet_project_upsert_command(
         project["archived_at_ms"] = Value::from(archived_at_ms);
     }
 
-    let project = persist_idempotently(&conn, PROJECTS_COLLECTION, &project_id, now, project)?;
+    let project = persist_and_project_idempotently(
+        root,
+        &conn,
+        PROJECTS_COLLECTION,
+        &project_id,
+        now,
+        project,
+    )?;
     Ok(serde_json::json!({
         "ok": true,
         "collection": PROJECTS_COLLECTION,
@@ -277,7 +284,8 @@ pub(super) fn handle_workjet_working_copy_upsert_command(
         working_copy["label"] = Value::String(label);
     }
 
-    let working_copy = persist_idempotently(
+    let working_copy = persist_and_project_idempotently(
+        root,
         &conn,
         WORKING_COPIES_COLLECTION,
         &working_copy_id,
@@ -315,6 +323,23 @@ fn persist_idempotently(
     upsert_business_record(conn, collection, record_id, now, desired)?;
     outbound_load_record(conn, collection, record_id)?
         .with_context(|| format!("failed to reload {collection} record {record_id}"))
+}
+
+fn persist_and_project_idempotently(
+    root: &Path,
+    conn: &Connection,
+    collection: &str,
+    record_id: &str,
+    now: i64,
+    desired: Value,
+) -> anyhow::Result<Value> {
+    let record = persist_idempotently(conn, collection, record_id, now, desired)?;
+    let updated_at_ms = record
+        .get("updated_at_ms")
+        .and_then(Value::as_i64)
+        .unwrap_or(now);
+    upsert_rxdb_collection_record(root, collection, record_id, updated_at_ms, record.clone())?;
+    Ok(record)
 }
 
 fn stable_record_content(value: &Value) -> Value {
@@ -382,8 +407,9 @@ fn validate_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::business_os::store::CommandOrigin;
+    use crate::business_os::store::{load_rxdb_collection_record, rxdb_store_path, CommandOrigin};
     use serde_json::json;
+    use std::fs;
     use tempfile::tempdir;
 
     fn command(command_type: &str, payload: Value) -> BusinessCommand {
@@ -407,6 +433,26 @@ mod tests {
             ),
             "owner-1",
         )
+    }
+
+    fn create_workjet_rxdb_projection_tables(root: &Path) -> anyhow::Result<()> {
+        fs::create_dir_all(root.join("runtime"))?;
+        let conn = Connection::open(rxdb_store_path(root))?;
+        for collection in [PROJECTS_COLLECTION, WORKING_COPIES_COLLECTION] {
+            conn.execute(
+                &format!(
+                    "CREATE TABLE ctox_business_os__{collection}__v0 (
+                        id TEXT PRIMARY KEY NOT NULL,
+                        revision TEXT,
+                        deleted INTEGER NOT NULL DEFAULT 0,
+                        lastWriteTime REAL NOT NULL DEFAULT 0,
+                        data TEXT NOT NULL
+                    )"
+                ),
+                [],
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -441,6 +487,62 @@ mod tests {
         assert_eq!(first["status"], "active");
         assert_eq!(first["_rev"], second["_rev"]);
         assert_eq!(first["updated_at_ms"], second["updated_at_ms"]);
+        Ok(())
+    }
+
+    #[test]
+    fn project_and_working_copy_upserts_repair_native_rxdb_projection() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        create_workjet_rxdb_projection_tables(root.path())?;
+        create_project(root.path())?;
+        let working_copy = handle_workjet_working_copy_upsert_command(
+            root.path(),
+            &command(
+                "ctox.workjet.working_copy.upsert",
+                json!({
+                    "project_id": "project-1",
+                    "computer_id": "computer-1",
+                    "path": "/workspace/project-1",
+                    "active": true
+                }),
+            ),
+            "owner-1",
+        )?;
+        let working_copy_id = working_copy["working_copy"]["id"]
+            .as_str()
+            .context("working copy id")?;
+
+        let projected_project =
+            load_rxdb_collection_record(root.path(), PROJECTS_COLLECTION, "project-1")?
+                .context("project projection")?;
+        assert_eq!(projected_project["owner_user_id"], "owner-1");
+        let projected_working_copy =
+            load_rxdb_collection_record(root.path(), WORKING_COPIES_COLLECTION, working_copy_id)?
+                .context("working copy projection")?;
+        assert_eq!(projected_working_copy["project_id"], "project-1");
+        assert_eq!(projected_working_copy["computer_id"], "computer-1");
+        assert_eq!(projected_working_copy["path"], "/workspace/project-1");
+
+        create_project(root.path())?;
+        handle_workjet_working_copy_upsert_command(
+            root.path(),
+            &command(
+                "ctox.workjet.working_copy.upsert",
+                json!({
+                    "project_id": "project-1",
+                    "computer_id": "computer-1",
+                    "path": "/workspace/project-1",
+                    "active": true
+                }),
+            ),
+            "owner-1",
+        )?;
+        assert!(load_rxdb_collection_record(
+            root.path(),
+            WORKING_COPIES_COLLECTION,
+            working_copy_id,
+        )?
+        .is_some());
         Ok(())
     }
 
