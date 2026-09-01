@@ -3279,6 +3279,8 @@ fn run_person_research(
             mode,
             fields,
             include_private: Vec::new(),
+            person_priorities: Vec::new(),
+            known_person_records: Vec::new(),
             workspace: None,
             persist_workspace: false,
         },

@@ -1,6 +1,6 @@
 use anyhow::Context;
 use ctox_web_stack::sources::{Country, FieldKey, ResearchMode};
-use ctox_web_stack::PersonResearchRequest;
+use ctox_web_stack::{KnownPersonRecord, PersonResearchRequest};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
@@ -31,6 +31,12 @@ struct PersonResearchCommandRequest {
     include_private: Vec<String>,
     #[serde(default)]
     auto_browser_capture: bool,
+    #[serde(default)]
+    person_priorities: Vec<String>,
+    #[serde(default)]
+    known_person_records: Vec<serde_json::Value>,
+    #[serde(default)]
+    research_instructions: String,
     #[serde(default)]
     source_policy: RuntimeResearchSourcePolicy,
 }
@@ -338,6 +344,16 @@ fn outbound_lead_generation_research_outcome_patch(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let lead_locations = lead_location_values(existing);
+    set_known_person_contacts(
+        &mut contacts,
+        outcome
+            .get("known_person_records")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+        &lead_locations,
+    );
     let mut contact = contacts
         .first()
         .filter(|value| value.is_object())
@@ -397,6 +413,7 @@ fn outbound_lead_generation_research_outcome_patch(
                 "confidence": candidate.get("confidence").cloned().unwrap_or(Value::Null),
                 "source_id": source_id,
                 "source_url": source_url,
+                "person_key": candidate.get("person_key").cloned().unwrap_or(Value::Null),
                 "tier": candidate.get("tier").cloned().unwrap_or(Value::Null),
                 "via": candidate.get("via").cloned().unwrap_or(Value::Null),
                 "label": if source_id.trim().is_empty() { source_url } else { source_id },
@@ -404,14 +421,45 @@ fn outbound_lead_generation_research_outcome_patch(
         }
     }
 
+    for record in &person_records {
+        for candidate in record
+            .get("evidence")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let source_id = candidate
+                .get("source_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let source_url = candidate
+                .get("source_url")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            evidence.push(serde_json::json!({
+                "field_key": candidate.get("field").cloned().unwrap_or(Value::Null),
+                "value": candidate.get("value").cloned().unwrap_or(Value::Null),
+                "confidence": candidate.get("confidence").cloned().unwrap_or(Value::Null),
+                "source_id": source_id,
+                "source_url": source_url,
+                "person_key": candidate.get("person_key").cloned().unwrap_or_else(|| record.get("person_key").cloned().unwrap_or(Value::Null)),
+                "tier": candidate.get("tier").cloned().unwrap_or(Value::Null),
+                "via": candidate.get("via").cloned().unwrap_or(Value::Null),
+                "label": if source_id.trim().is_empty() { source_url } else { source_id },
+            }));
+        }
+    }
     evidence = deduplicate_research_evidence(evidence);
     if has_person_records {
-        merge_researched_person_records(
+        merge_researched_person_records_with_context(
             existing.get("id").and_then(Value::as_str).unwrap_or("lead"),
             &mut contacts,
             person_records,
+            &lead_locations,
         );
-    } else if let Some(normalized) = normalize_researched_contact(contact) {
+    } else if let Some(normalized) =
+        normalize_researched_contact_with_context(contact, &lead_locations)
+    {
         let normalized = with_stable_contact_id(
             existing.get("id").and_then(Value::as_str).unwrap_or("lead"),
             normalized,
@@ -419,8 +467,21 @@ fn outbound_lead_generation_research_outcome_patch(
         );
         if contacts.is_empty() {
             contacts.push(normalized);
+        } else if let Some(existing_index) = contacts
+            .iter()
+            .position(|existing| contacts_match(existing, &normalized))
+        {
+            if contacts[existing_index]
+                .get("crm_known")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                merge_research_into_known_contact(&mut contacts[existing_index], &normalized);
+            } else {
+                contacts[existing_index] = normalized;
+            }
         } else {
-            contacts[0] = normalized;
+            contacts.push(normalized);
         }
     }
     let contact_ids = contacts
@@ -461,6 +522,7 @@ fn outbound_lead_generation_research_outcome_patch(
             "unverified_field_keys": unverified_field_keys,
             "research_finished_at_ms": now,
             "research_tool": outcome.get("tool").cloned().unwrap_or(Value::Null),
+            "research_instructions_len": outcome.get("research_instructions_len").cloned().unwrap_or(Value::Null),
             "browser_assist_tasks": outcome.get("browser_assist_tasks").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
             "authenticated_source_capture_runs": outcome.get("authenticated_source_capture_runs").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
         }
@@ -472,30 +534,275 @@ fn merge_researched_person_records(
     contacts: &mut Vec<Value>,
     person_records: Vec<Value>,
 ) {
+    merge_researched_person_records_with_context(lead_id, contacts, person_records, &[]);
+}
+
+fn merge_researched_person_records_with_context(
+    lead_id: &str,
+    contacts: &mut Vec<Value>,
+    person_records: Vec<Value>,
+    locations: &[String],
+) {
     for (index, record) in person_records.into_iter().enumerate() {
-        let Some(mut normalized) = normalize_researched_contact(record) else {
+        let Some(mut normalized) = normalize_researched_contact_with_context(record, locations)
+        else {
             continue;
         };
         normalized = with_stable_contact_id(lead_id, normalized, index);
-        let id = normalized.get("id").and_then(Value::as_str);
-        let profile = contact_string(
-            &normalized,
-            &["person_linkedin", "person_xing", "linkedin", "xing"],
-        );
         let existing_index = contacts.iter().position(|existing| {
-            existing.get("id").and_then(Value::as_str) == id
-                || (!profile.is_empty()
-                    && contact_string(
-                        existing,
-                        &["person_linkedin", "person_xing", "linkedin", "xing"],
-                    ) == profile)
+            existing.get("id").and_then(Value::as_str)
+                == normalized.get("id").and_then(Value::as_str)
+                || profiles_match(existing, &normalized)
+                || (existing.get("crm_known").and_then(Value::as_bool) == Some(true)
+                    && contacts_match(existing, &normalized))
         });
         if let Some(existing_index) = existing_index {
-            merge_json_object_values(&mut contacts[existing_index], &normalized);
+            if contacts[existing_index]
+                .get("crm_known")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                merge_research_into_known_contact(&mut contacts[existing_index], &normalized);
+            } else {
+                merge_json_object_values(&mut contacts[existing_index], &normalized);
+            }
         } else {
             contacts.push(normalized);
         }
     }
+}
+
+fn set_known_person_contacts(
+    contacts: &mut Vec<Value>,
+    known_person_records: Vec<Value>,
+    locations: &[String],
+) {
+    for known in known_person_records {
+        let Some(mut contact) = known_person_contact(known, locations) else {
+            continue;
+        };
+        let existing_index = contacts
+            .iter()
+            .position(|existing| contacts_match(existing, &contact));
+        if let Some(existing_index) = existing_index {
+            merge_known_contact_values(&mut contact, &contacts[existing_index]);
+            contacts[existing_index] = contact;
+        } else {
+            contacts.push(contact);
+        }
+    }
+}
+
+fn known_person_contact(known: Value, locations: &[String]) -> Option<Value> {
+    let first_name = contact_string(&known, &["vorname", "person_vorname", "first_name"]);
+    let last_name = contact_string(&known, &["nachname", "person_nachname", "last_name"]);
+    let function = contact_string(&known, &["funktion", "person_funktion", "role"]);
+    let email = contact_string(&known, &["email", "person_email"]);
+    let phone = contact_string(&known, &["telefon", "person_telefon", "phone"]);
+    let sellify_contact_id = contact_string(&known, &["sellify_contact_id"]);
+    let known_source_url = contact_string(&known, &["source"]);
+    let known_source_url = url::Url::parse(&known_source_url)
+        .ok()
+        .filter(|url| matches!(url.scheme(), "http" | "https"))
+        .map(|url| url.to_string())
+        .unwrap_or_default();
+    let name = format!("{first_name} {last_name}").trim().to_string();
+    if name.is_empty() && email.is_empty() && phone.is_empty() {
+        return None;
+    }
+    let id_suffix = if sellify_contact_id.is_empty() {
+        javascript_fingerprint(&name)
+    } else {
+        sellify_contact_id.clone()
+    };
+    let mut contact = serde_json::json!({
+        "id": format!("contact_sellify_{id_suffix}"),
+        "person_vorname": first_name,
+        "person_nachname": last_name,
+        "person_funktion": function,
+        "person_email": email,
+        "person_telefon": phone,
+        "sellify_contact_id": sellify_contact_id,
+        "source_url": known_source_url,
+        "source": "sellify",
+        "crm_known": true,
+    });
+    contact = normalize_researched_contact_with_context(contact, locations)?;
+    contact["source"] = Value::String("sellify".to_string());
+    contact["crm_known"] = Value::Bool(true);
+    Some(contact)
+}
+
+fn merge_known_contact_values(known: &mut Value, existing: &Value) {
+    let (Some(known), Some(existing)) = (known.as_object_mut(), existing.as_object()) else {
+        return;
+    };
+    for (key, value) in existing {
+        let known_missing = known.get(key).map(json_value_is_empty).unwrap_or(true);
+        if known_missing {
+            known.insert(key.clone(), value.clone());
+        }
+    }
+    known.insert("source".to_string(), Value::String("sellify".to_string()));
+    known.insert("crm_known".to_string(), Value::Bool(true));
+}
+
+fn merge_research_into_known_contact(known: &mut Value, researched: &Value) {
+    let source_url = contact_string(researched, &["source_url"]);
+    let (Some(known_object), Some(researched_object)) =
+        (known.as_object_mut(), researched.as_object())
+    else {
+        return;
+    };
+    let mut conflicts = known_object
+        .remove("conflicts")
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+    for (field, value) in researched_object {
+        if matches!(field.as_str(), "id" | "conflicts" | "crm_known" | "source")
+            || researched_alias_has_canonical_value(field, researched_object)
+        {
+            continue;
+        }
+        let known_value = known_object.get(field);
+        if known_value.is_none_or(json_value_is_empty) {
+            known_object.insert(field.clone(), value.clone());
+        } else if !json_value_is_empty(value) && known_value != Some(value) {
+            let conflict = serde_json::json!({
+                "field": field,
+                "value": value,
+                "source_url": source_url,
+            });
+            if !conflicts.iter().any(|existing| existing == &conflict) {
+                conflicts.push(conflict);
+            }
+        }
+    }
+    known_object.insert("conflicts".to_string(), Value::Array(conflicts));
+    known_object.insert("source".to_string(), Value::String("sellify".to_string()));
+    known_object.insert("crm_known".to_string(), Value::Bool(true));
+}
+
+fn researched_alias_has_canonical_value(
+    field: &str,
+    researched: &serde_json::Map<String, Value>,
+) -> bool {
+    match field {
+        "person_funktion" => researched
+            .get("role")
+            .is_some_and(|value| !json_value_is_empty(value)),
+        "person_position" => researched
+            .get("position")
+            .is_some_and(|value| !json_value_is_empty(value)),
+        "person_email" => researched
+            .get("email")
+            .is_some_and(|value| !json_value_is_empty(value)),
+        "person_telefon" => researched
+            .get("phone")
+            .is_some_and(|value| !json_value_is_empty(value)),
+        "person_vorname" | "person_nachname" => researched
+            .get("name")
+            .is_some_and(|value| !json_value_is_empty(value)),
+        _ => false,
+    }
+}
+
+fn contacts_match(left: &Value, right: &Value) -> bool {
+    let left_email = normalized_email(&contact_string(left, &["person_email", "email"]));
+    let right_email = normalized_email(&contact_string(right, &["person_email", "email"]));
+    if !left_email.is_empty() && left_email == right_email {
+        return true;
+    }
+    if profiles_match(left, right) {
+        return true;
+    }
+    let left_name = normalized_contact_name(left);
+    let right_name = normalized_contact_name(right);
+    !left_name.is_empty() && left_name == right_name
+}
+
+fn profiles_match(left: &Value, right: &Value) -> bool {
+    let profile = |contact: &Value| {
+        normalized_profile(&contact_string(
+            contact,
+            &[
+                "person_linkedin",
+                "person_xing",
+                "linkedin",
+                "xing",
+                "source_url",
+            ],
+        ))
+    };
+    let left = profile(left);
+    let right = profile(right);
+    !left.is_empty() && left == right
+}
+
+fn normalized_email(value: &str) -> String {
+    value.trim().to_lowercase()
+}
+
+fn normalized_profile(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_lowercase()
+}
+
+fn normalized_contact_name(contact: &Value) -> String {
+    let first = contact_string(contact, &["person_vorname", "first_name"]);
+    let last = contact_string(contact, &["person_nachname", "last_name"]);
+    let combined = if first.is_empty() && last.is_empty() {
+        contact_string(contact, &["name"])
+    } else {
+        format!("{first} {last}")
+    };
+    normalize_person_name_for_match(&combined)
+}
+
+fn normalize_person_name_for_match(value: &str) -> String {
+    const PARTICLES: &[&str] = &[
+        "da", "de", "del", "den", "der", "di", "du", "la", "le", "van", "von", "zu", "zum", "zur",
+    ];
+    value
+        .split(|ch: char| !ch.is_alphabetic())
+        .map(transliterate_name_token)
+        .filter(|token| !token.is_empty() && !PARTICLES.contains(&token.as_str()))
+        .collect::<String>()
+}
+
+fn transliterate_name_token(value: &str) -> String {
+    let mut out = String::new();
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        match ch {
+            'ä' => out.push_str("ae"),
+            'ö' => out.push_str("oe"),
+            'ü' => out.push_str("ue"),
+            'ß' => out.push_str("ss"),
+            ch if ch.is_alphabetic() => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn json_value_is_empty(value: &Value) -> bool {
+    value.is_null()
+        || value.as_str().is_some_and(|value| value.trim().is_empty())
+        || value.as_array().is_some_and(Vec::is_empty)
+}
+
+fn lead_location_values(existing: &Value) -> Vec<String> {
+    let mut locations = Vec::new();
+    for pointer in ["/city", "/firma_ort", "/data/city", "/data/firma_ort"] {
+        if let Some(value) = existing
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            locations.push(value.to_string());
+        }
+    }
+    locations
 }
 
 fn research_scalar_is_populated(value: &Value) -> bool {
@@ -530,6 +837,11 @@ fn deduplicate_research_evidence(entries: Vec<Value>) -> Vec<Value> {
                     .unwrap_or_default()
                     .to_string(),
                 entry.get("value").map(Value::to_string).unwrap_or_default(),
+                entry
+                    .get("person_key")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
             ]
             .join("|")
             .to_ascii_lowercase();
@@ -575,7 +887,14 @@ fn research_evidence_source_key(entry: &Value) -> Option<String> {
         .filter(|host| !host.is_empty())
 }
 
-fn normalize_researched_contact(mut contact: Value) -> Option<Value> {
+fn normalize_researched_contact(contact: Value) -> Option<Value> {
+    normalize_researched_contact_with_context(contact, &[])
+}
+
+fn normalize_researched_contact_with_context(
+    mut contact: Value,
+    locations: &[String],
+) -> Option<Value> {
     let first_name = contact
         .get("person_vorname")
         .and_then(Value::as_str)
@@ -602,7 +921,32 @@ fn normalize_researched_contact(mut contact: Value) -> Option<Value> {
     {
         return None;
     }
-    let role = contact_string(&contact, &["person_funktion", "person_position", "role"]);
+    let function_candidate = contact_string(&contact, &["person_funktion"]);
+    let role_candidates = [
+        function_candidate.clone(),
+        contact_string(&contact, &["person_position"]),
+        contact_string(&contact, &["role"]),
+    ];
+    let role = role_candidates
+        .iter()
+        .find(|candidate| {
+            ctox_web_stack::person_ranking::role_is_valid(candidate, &name, locations)
+        })
+        .cloned()
+        .unwrap_or_default();
+    if !function_candidate.is_empty()
+        && !ctox_web_stack::person_ranking::role_is_valid(&function_candidate, &name, locations)
+    {
+        contact["person_funktion_candidate"] = Value::String(function_candidate);
+        contact["person_funktion"] = Value::String(String::new());
+    } else if role.is_empty() {
+        if let Some(candidate) = role_candidates
+            .iter()
+            .find(|candidate| !candidate.is_empty())
+        {
+            contact["person_funktion_candidate"] = Value::String(candidate.clone());
+        }
+    }
     if let Some(object) = contact.as_object_mut() {
         object.insert("name".to_string(), Value::String(name));
         object.insert("role".to_string(), Value::String(role));
@@ -646,6 +990,8 @@ fn with_stable_contact_id(lead_id: &str, mut contact: Value, index: usize) -> Va
         "person_telefon",
         "linkedin",
         "xing",
+        "person_linkedin",
+        "person_xing",
     ]
     .iter()
     .map(|key| {
@@ -883,16 +1229,26 @@ fn execute(root: &Path, payload: &Value, client_context: &Value) -> anyhow::Resu
                     .unwrap_or(company),
             ));
     let auto_browser_capture = request.auto_browser_capture;
+    let research_instructions_len = request.research_instructions.len();
+    let known_person_records = request
+        .known_person_records
+        .into_iter()
+        .map(serde_json::from_value::<KnownPersonRecord>)
+        .collect::<Result<Vec<_>, _>>()
+        .context("invalid known_person_records entry")?;
     let research_request = PersonResearchRequest {
         company: company.to_string(),
         country,
         mode,
         fields,
         include_private: request.include_private,
+        person_priorities: request.person_priorities,
+        known_person_records,
         workspace: Some(workspace),
         persist_workspace: true,
     };
     let mut result = ctox_web_stack::run_ctox_person_research_tool(root, &research_request)?;
+    result["research_instructions_len"] = serde_json::json!(research_instructions_len);
     // Sellify is the contractual baseline of every lead research: the CRM
     // record is consulted first and its values must appear as visible
     // evidence candidates, not as invisible pre-knowledge. A lookup failure
@@ -1058,6 +1414,10 @@ fn execute(root: &Path, payload: &Value, client_context: &Value) -> anyhow::Resu
             }),
         );
     }
+    crate::service::business_os::repersist_augmented_person_research(
+        &research_request,
+        &mut result,
+    );
     Ok(result)
 }
 
@@ -1385,6 +1745,28 @@ mod tests {
     }
 
     #[test]
+    fn person_research_contract_accepts_priorities_known_people_and_instructions() {
+        let request: PersonResearchCommandRequest = serde_json::from_value(serde_json::json!({
+            "company": "Example AG",
+            "country": "DE",
+            "mode": "new_record",
+            "person_priorities": ["Geschäftsführung/Gesamtverantwortung", "Prokura"],
+            "known_person_records": [{
+                "vorname": "Eric",
+                "nachname": "Hahn",
+                "funktion": "Geschäftsführer",
+                "sellify_contact_id": "42"
+            }],
+            "research_instructions": "Only current leadership"
+        }))
+        .unwrap();
+
+        assert_eq!(request.person_priorities.len(), 2);
+        assert_eq!(request.known_person_records.len(), 1);
+        assert_eq!(request.research_instructions.len(), 23);
+    }
+
+    #[test]
     fn outbound_research_contract_accepts_all_32_canonical_fields() -> anyhow::Result<()> {
         let requested = ctox_web_stack::sources::OUTBOUND_RESEARCH_FIELDS
             .iter()
@@ -1538,6 +1920,166 @@ mod tests {
             patch["payload"]["verified_field_keys"],
             serde_json::json!(["firma_domain"])
         );
+    }
+
+    #[test]
+    fn beiersdorf_fixture_keeps_eight_profiles_and_rejects_false_roles() {
+        let existing = serde_json::json!({
+            "id": "lead_1awj3nw",
+            "data": {"firma_ort": "Leipzig"},
+            "contacts": [],
+            "selected_contact_ids": [],
+            "evidence": []
+        });
+        let people = [
+            ("Jana", "Laufer", Some("Geschäftsführerin"), "Jana_Laufer"),
+            ("Falk", "Herbst", None, "Falk_Herbst"),
+            ("Frederic", "Heilmann", Some("Leipzig"), "Frederic_Heilmann"),
+            ("Frederic", "Heilmann", None, "Frederic_Heilmann_2"),
+            ("Heiko", "Fischer", None, "Heiko_Fischer"),
+            ("Ringo", "Bergelt", None, "Ringo_Bergelt"),
+            ("Swantje", "Trinitz", None, "Swantje_Trinitz"),
+            (
+                "TimNils",
+                "Berner",
+                Some("Tim Nils Berner"),
+                "TimNils_Berner",
+            ),
+        ];
+        let records = people
+            .into_iter()
+            .map(|(first, last, function, slug)| {
+                let mut record = serde_json::json!({
+                    "person_vorname": first,
+                    "person_nachname": last,
+                    "person_xing": format!("https://www.xing.com/profile/{slug}"),
+                    "source_id": "xing.com",
+                    "source_url": format!("https://www.xing.com/profile/{slug}"),
+                });
+                if let Some(function) = function {
+                    record["person_funktion"] = Value::String(function.to_string());
+                }
+                record
+            })
+            .collect::<Vec<_>>();
+        let outcome = serde_json::json!({
+            "fields": {
+                "person_vorname": {"value": "Jana", "candidates": []},
+                "person_nachname": {"value": "Laufer", "candidates": []}
+            },
+            "person_records": records
+        });
+
+        let patch = outbound_lead_generation_research_outcome_patch(&existing, &outcome, 3_500);
+        let contacts = patch["contacts"].as_array().unwrap();
+        let heilmann = contacts
+            .iter()
+            .find(|contact| {
+                contact["source_url"] == "https://www.xing.com/profile/Frederic_Heilmann"
+            })
+            .unwrap();
+        let berner = contacts
+            .iter()
+            .find(|contact| contact["name"] == "TimNils Berner")
+            .unwrap();
+
+        assert_eq!(contacts.len(), 8);
+        assert!(!contacts.iter().any(|contact| contact["role"] == "Leipzig"));
+        assert_eq!(heilmann["person_funktion"], "");
+        assert_eq!(heilmann["person_funktion_candidate"], "Leipzig");
+        assert_eq!(berner["role"], "");
+        assert_eq!(berner["person_funktion_candidate"], "Tim Nils Berner");
+    }
+
+    #[test]
+    fn known_sellify_person_wins_role_conflict_and_research_merges_into_it() {
+        let existing = serde_json::json!({
+            "id": "lead-sellify",
+            "data": {},
+            "contacts": [],
+            "selected_contact_ids": [],
+            "evidence": []
+        });
+        let outcome = serde_json::json!({
+            "fields": {},
+            "known_person_records": [
+                {
+                    "vorname": "Eric",
+                    "nachname": "Hahn",
+                    "funktion": "Geschäftsführer",
+                    "sellify_contact_id": "eric-1",
+                    "source": "sellify"
+                },
+                {
+                    "vorname": "Heinz-Tristan",
+                    "nachname": "Gund",
+                    "funktion": "Prokurist",
+                    "sellify_contact_id": "heinz-2",
+                    "source": "sellify"
+                }
+            ],
+            "person_records": [{
+                "person_vorname": "Eric",
+                "person_nachname": "Hahn",
+                "person_funktion": "CEO",
+                "person_xing": "https://www.xing.com/profile/Eric_Hahn",
+                "source_id": "xing.com",
+                "source_url": "https://www.xing.com/profile/Eric_Hahn"
+            }]
+        });
+
+        let patch = outbound_lead_generation_research_outcome_patch(&existing, &outcome, 4_000);
+        let contacts = patch["contacts"].as_array().unwrap();
+        let hahn = contacts
+            .iter()
+            .filter(|contact| contact["name"] == "Eric Hahn")
+            .collect::<Vec<_>>();
+
+        assert_eq!(hahn.len(), 1);
+        assert_eq!(hahn[0]["id"], "contact_sellify_eric-1");
+        assert_eq!(hahn[0]["crm_known"], true);
+        assert_eq!(hahn[0]["role"], "Geschäftsführer");
+        assert!(hahn[0]["conflicts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|conflict| conflict["field"] == "role" && conflict["value"] == "CEO"));
+        assert!(
+            contacts
+                .iter()
+                .any(|contact| contact["name"] == "Heinz-Tristan Gund"
+                    && contact["crm_known"] == true)
+        );
+    }
+
+    #[test]
+    fn normalize_researched_contact_validates_roles_and_preserves_rejected_candidate() {
+        for (value, expected) in [
+            ("Leipzig", false),
+            ("Tim Nils Berner", false),
+            ("Geschäftsführer", true),
+            ("Head of Supply Chain", true),
+            ("Leiterin Einkauf", true),
+            ("Dr.", false),
+        ] {
+            let contact = normalize_researched_contact(serde_json::json!({
+                "person_vorname": "Tim",
+                "person_nachname": "Berner",
+                "person_funktion": value,
+            }))
+            .unwrap();
+            assert_eq!(
+                !contact["role"].as_str().unwrap().is_empty(),
+                expected,
+                "{value}"
+            );
+            if expected {
+                assert!(contact.get("person_funktion_candidate").is_none());
+            } else {
+                assert_eq!(contact["person_funktion"], "");
+                assert_eq!(contact["person_funktion_candidate"], value);
+            }
+        }
     }
 
     #[test]

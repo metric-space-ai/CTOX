@@ -10,6 +10,8 @@ pub mod deep_research;
 #[cfg(feature = "full")]
 pub(crate) mod egress;
 #[cfg(feature = "full")]
+pub mod person_ranking;
+#[cfg(feature = "full")]
 pub mod person_research;
 pub(crate) mod runtime_config;
 #[cfg(feature = "full")]
@@ -52,6 +54,8 @@ pub use person_research::merge_person_research_source_records;
 pub use person_research::persist_person_research_workspace;
 #[cfg(feature = "full")]
 pub use person_research::run_ctox_person_research_tool;
+#[cfg(feature = "full")]
+pub use person_research::KnownPersonRecord;
 #[cfg(feature = "full")]
 pub use person_research::PersonResearchRequest;
 #[cfg(feature = "full")]

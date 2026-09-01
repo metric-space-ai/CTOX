@@ -3231,6 +3231,8 @@ fn run_business_os_web_stack_person_research(
         mode,
         fields,
         include_private,
+        person_priorities: Vec::new(),
+        known_person_records: Vec::new(),
         workspace,
         persist_workspace,
     };
