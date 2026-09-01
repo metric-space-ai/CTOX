@@ -591,6 +591,7 @@ pub(super) fn claims_for_webrtc_invite_secret(
     };
     Some(super::capability::CapabilityClaims {
         user_id,
+        email: None,
         role,
         actor_epoch,
         issued_at_ms,

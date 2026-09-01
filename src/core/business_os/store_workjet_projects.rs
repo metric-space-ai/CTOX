@@ -4,8 +4,9 @@
 //! Native-owned Workjet project and working-copy command handlers.
 //!
 //! These handlers deliberately accept the authorized owner from their caller.
-//! Working-copy computer and path identifiers describe the Workjet guest and
-//! are opaque to CTOX: the backend must never interpret them as host paths.
+//! Working-copy computer and path identifiers describe the selected Workjet
+//! computer and are opaque to CTOX: the backend must never interpret them as
+//! host paths.
 
 use super::store::{
     open_store, outbound_load_record, outbound_load_records_by_string_field,
@@ -64,7 +65,9 @@ pub(super) fn handle_workjet_project_store_command(
     root: &Path,
     command: &BusinessCommand,
     authorized_owner_user_id: &str,
+    authorized_owner_email: Option<&str>,
 ) -> anyhow::Result<Value> {
+    migrate_signed_owner_alias(root, authorized_owner_user_id, authorized_owner_email)?;
     match command.command_type.as_str() {
         "ctox.workjet.project.list" => {
             handle_workjet_project_list_command(root, command, authorized_owner_user_id)
@@ -77,6 +80,50 @@ pub(super) fn handle_workjet_project_store_command(
         }
         other => anyhow::bail!("unsupported Workjet project command type: {other}"),
     }
+}
+
+fn migrate_signed_owner_alias(
+    root: &Path,
+    authorized_owner_user_id: &str,
+    authorized_owner_email: Option<&str>,
+) -> anyhow::Result<()> {
+    let owner_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
+    let Some(owner_email) = authorized_owner_email else {
+        return Ok(());
+    };
+    let owner_email = bounded_required(owner_email, "owner_email", 320)?.to_ascii_lowercase();
+    anyhow::ensure!(
+        owner_email.contains('@'),
+        "owner_email must be an email address"
+    );
+    if owner_email == owner_user_id.to_ascii_lowercase() {
+        return Ok(());
+    }
+
+    let conn = open_store(root)?;
+    let now = super::store::now_ms() as i64;
+    for collection in [PROJECTS_COLLECTION, WORKING_COPIES_COLLECTION] {
+        let records = outbound_load_records_by_string_field(
+            &conn,
+            collection,
+            "owner_user_id",
+            &owner_email,
+        )?;
+        for mut record in records {
+            if record.get("is_deleted").and_then(Value::as_bool) == Some(true) {
+                continue;
+            }
+            let record_id = record
+                .get("id")
+                .and_then(Value::as_str)
+                .with_context(|| format!("{collection} owner migration record has no id"))?
+                .to_owned();
+            record["owner_user_id"] = Value::String(owner_user_id.clone());
+            record["updated_at_ms"] = Value::from(now);
+            persist_and_project_idempotently(root, &conn, collection, &record_id, now, record)?;
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn handle_workjet_project_list_command(
@@ -543,6 +590,66 @@ mod tests {
             working_copy_id,
         )?
         .is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn signed_email_alias_migrates_projects_and_working_copies_to_stable_user_id(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        create_workjet_rxdb_projection_tables(root.path())?;
+        let email = "michael.welsch@metric-space.ai";
+        let stable_user_id = "196a89ba-ee86-4413-885c-04ca60e6f291";
+        handle_workjet_project_upsert_command(
+            root.path(),
+            &command(
+                "ctox.workjet.project.upsert",
+                json!({"project_id": "project-email", "name": "greppy"}),
+            ),
+            email,
+        )?;
+        let working_copy = handle_workjet_working_copy_upsert_command(
+            root.path(),
+            &command(
+                "ctox.workjet.working_copy.upsert",
+                json!({
+                    "project_id": "project-email",
+                    "computer_id": "computer-1",
+                    "path": "/workspace/greppy",
+                    "active": true
+                }),
+            ),
+            email,
+        )?;
+        let working_copy_id = working_copy["working_copy"]["id"]
+            .as_str()
+            .context("working copy id")?;
+
+        let listed = handle_workjet_project_store_command(
+            root.path(),
+            &command("ctox.workjet.project.list", json!({"limit": 100})),
+            stable_user_id,
+            Some(email),
+        )?;
+        assert_eq!(listed["count"], 1);
+
+        let conn = open_store(root.path())?;
+        let project = outbound_load_record(&conn, PROJECTS_COLLECTION, "project-email")?
+            .context("migrated project")?;
+        assert_eq!(project["owner_user_id"], stable_user_id);
+        let working_copy = outbound_load_record(&conn, WORKING_COPIES_COLLECTION, working_copy_id)?
+            .context("migrated working copy")?;
+        assert_eq!(working_copy["owner_user_id"], stable_user_id);
+        assert_eq!(
+            load_rxdb_collection_record(root.path(), PROJECTS_COLLECTION, "project-email")?
+                .context("project projection")?["owner_user_id"],
+            stable_user_id
+        );
+        assert_eq!(
+            load_rxdb_collection_record(root.path(), WORKING_COPIES_COLLECTION, working_copy_id,)?
+                .context("working-copy projection")?["owner_user_id"],
+            stable_user_id
+        );
         Ok(())
     }
 

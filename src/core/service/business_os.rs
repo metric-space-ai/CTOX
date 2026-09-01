@@ -1505,6 +1505,7 @@ fn handle_business_os_auth(root: &Path, args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("issue-capability") => {
             let mut user_id: Option<String> = None;
+            let mut email: Option<String> = None;
             let mut display_name: Option<String> = None;
             let mut role: Option<String> = None;
             let mut ensure_user = false;
@@ -1517,6 +1518,10 @@ fn handle_business_os_auth(root: &Path, args: &[String]) -> anyhow::Result<()> {
                     }
                     "--display-name" => {
                         display_name = args.get(idx + 1).cloned();
+                        idx += 2;
+                    }
+                    "--email" => {
+                        email = args.get(idx + 1).cloned();
                         idx += 2;
                     }
                     "--role" => {
@@ -1542,9 +1547,10 @@ fn handle_business_os_auth(root: &Path, args: &[String]) -> anyhow::Result<()> {
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let (token, expires_at_ms) = if ensure_user {
-                crate::business_os::store::issue_business_os_capability_token_for_managed_user(
+                crate::business_os::store::issue_business_os_capability_token_for_managed_user_with_email(
                     root,
                     &user_id,
+                    email.as_deref(),
                     display_name.as_deref().unwrap_or(&user_id),
                     role.as_deref().unwrap_or("user"),
                     now,

@@ -35,6 +35,7 @@ pub struct CapabilityDeviceBinding {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CapabilityClaims {
     pub user_id: String,
+    pub email: Option<String>,
     pub role: String,
     pub actor_epoch: i64,
     pub issued_at_ms: i64,
@@ -88,6 +89,31 @@ pub fn issue_capability_token_with_epoch_and_binding(
     expires_at_ms: i64,
     device_binding: Option<&CapabilityDeviceBinding>,
 ) -> String {
+    issue_capability_token_with_epoch_and_identity(
+        secret,
+        user_id,
+        None,
+        role,
+        actor_epoch,
+        issued_at_ms,
+        expires_at_ms,
+        device_binding,
+    )
+}
+
+/// Issue a capability token with an optional signed identity alias. Managed
+/// control planes use this to bind the authenticated email to the stable user
+/// id so native migrations never have to trust browser-asserted aliases.
+pub fn issue_capability_token_with_epoch_and_identity(
+    secret: &[u8],
+    user_id: &str,
+    email: Option<&str>,
+    role: &str,
+    actor_epoch: i64,
+    issued_at_ms: i64,
+    expires_at_ms: i64,
+    device_binding: Option<&CapabilityDeviceBinding>,
+) -> String {
     let mut payload = serde_json::json!({
         "uid": user_id,
         "role": role,
@@ -95,6 +121,9 @@ pub fn issue_capability_token_with_epoch_and_binding(
         "iat": issued_at_ms,
         "exp": expires_at_ms,
     });
+    if let Some(email) = email.map(str::trim).filter(|email| !email.is_empty()) {
+        payload["email"] = Value::String(email.to_ascii_lowercase());
+    }
     if let Some(binding) = device_binding {
         payload["device_pairing_id"] = Value::String(binding.device_pairing_id.clone());
         payload["device_id"] = Value::String(binding.device_id.clone());
@@ -157,6 +186,12 @@ pub(super) fn verify_capability_token_allow_expired(
     };
     Some(CapabilityClaims {
         user_id: payload.get("uid").and_then(Value::as_str)?.to_string(),
+        email: payload
+            .get("email")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|email| !email.is_empty())
+            .map(str::to_ascii_lowercase),
         role: payload.get("role").and_then(Value::as_str)?.to_string(),
         actor_epoch: payload.get("epoch").and_then(Value::as_i64).unwrap_or(0),
         issued_at_ms: payload.get("iat").and_then(Value::as_i64).unwrap_or(0),
@@ -178,10 +213,31 @@ mod tests {
         let token = issue_capability_token_with_epoch(SECRET, "chef1", "chef", 7, NOW, NOW + HOUR);
         let claims = verify_capability_token(SECRET, &token, NOW + 1000).expect("valid");
         assert_eq!(claims.user_id, "chef1");
+        assert_eq!(claims.email, None);
         assert_eq!(claims.role, "chef");
         assert_eq!(claims.actor_epoch, 7);
         assert_eq!(claims.expires_at_ms, NOW + HOUR);
         assert_eq!(claims.device_binding, None);
+    }
+
+    #[test]
+    fn signed_email_alias_round_trips() {
+        let token = issue_capability_token_with_epoch_and_identity(
+            SECRET,
+            "user-uuid",
+            Some("Michael.Welsch@Metric-Space.AI"),
+            "user",
+            4,
+            NOW,
+            NOW + HOUR,
+            None,
+        );
+        let claims = verify_capability_token(SECRET, &token, NOW).expect("valid");
+        assert_eq!(claims.user_id, "user-uuid");
+        assert_eq!(
+            claims.email.as_deref(),
+            Some("michael.welsch@metric-space.ai")
+        );
     }
 
     #[test]
