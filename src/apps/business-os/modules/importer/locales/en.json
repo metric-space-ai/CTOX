@@ -15,7 +15,7 @@
   "or": "or",
   "githubPlaceholder": "https://github.com/owner/repo",
   "startGithub": "Start porting",
-  "sourceHint": "Read-only selection; files sync through RxDB/WebRTC.",
+    "sourceHint": "Read-only selection; files are synced securely with CTOX.",
   "progressEyebrow": "Durable app job",
   "progressHeading": "CTOX is porting the app.",
   "commandLabel": "Command",

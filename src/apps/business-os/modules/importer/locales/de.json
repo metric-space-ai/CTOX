@@ -15,7 +15,7 @@
   "or": "oder",
   "githubPlaceholder": "https://github.com/owner/repo",
   "startGithub": "Portierung starten",
-  "sourceHint": "Nur lesend ausgewählt; Dateien synchronisieren über RxDB/WebRTC.",
+    "sourceHint": "Nur lesend ausgewählt; Dateien werden sicher mit CTOX synchronisiert.",
   "progressEyebrow": "Langlebiger App-Job",
   "progressHeading": "CTOX portiert die App.",
   "commandLabel": "Command",
