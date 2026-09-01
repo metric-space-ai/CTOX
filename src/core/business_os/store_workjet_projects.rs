@@ -24,6 +24,8 @@ const WORKING_COPIES_COLLECTION: &str = "workjet_working_copies";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectUpsertPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
     #[serde(default)]
     project_id: Option<String>,
     name: String,
@@ -36,6 +38,8 @@ struct ProjectUpsertPayload {
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProjectListPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
     #[serde(default)]
     limit: Option<usize>,
 }
@@ -43,6 +47,8 @@ struct ProjectListPayload {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkingCopyUpsertPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
     project_id: String,
     computer_id: String,
     #[serde(default)]
@@ -401,6 +407,27 @@ mod tests {
             ),
             "owner-1",
         )
+    }
+
+    #[test]
+    fn project_payloads_accept_command_bus_routing_metadata() -> anyhow::Result<()> {
+        serde_json::from_value::<ProjectListPayload>(json!({
+            "limit": 100,
+            "inbound_channel": "ctox"
+        }))?;
+        serde_json::from_value::<ProjectUpsertPayload>(json!({
+            "project_id": "project-1",
+            "name": "Project One",
+            "inbound_channel": "ctox"
+        }))?;
+        serde_json::from_value::<WorkingCopyUpsertPayload>(json!({
+            "project_id": "project-1",
+            "computer_id": "computer-1",
+            "path": "/workspace/project-1",
+            "active": true,
+            "inbound_channel": "ctox"
+        }))?;
+        Ok(())
     }
 
     #[test]
