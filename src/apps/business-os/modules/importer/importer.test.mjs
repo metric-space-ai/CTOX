@@ -1,108 +1,121 @@
-import test from "node:test";
-import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import {
+  buildAppImportCommand,
+  isImportableFile,
+  isTextFile,
+  moduleIdFromSource,
   parseGitHubUrl,
   shouldSkipPath,
-  isTextFile,
-  isImportableFile,
   validModuleId,
-} from "./index.js";
+} from './index.js';
 
-test("parseGitHubUrl handles repo, tree refs and subdirs", () => {
-  assert.deepEqual(parseGitHubUrl("https://github.com/acme/po-tracker"), {
-    owner: "acme", repo: "po-tracker", ref: null, subdir: "",
+test('parseGitHubUrl accepts only public GitHub repository URLs', () => {
+  assert.deepEqual(parseGitHubUrl('https://github.com/AksharP5/omarchy-radio-atlas'), {
+    owner: 'AksharP5',
+    repo: 'omarchy-radio-atlas',
+    ref: null,
+    repositoryUrl: 'https://github.com/AksharP5/omarchy-radio-atlas',
   });
-  assert.deepEqual(parseGitHubUrl("https://github.com/acme/po-tracker.git"), {
-    owner: "acme", repo: "po-tracker", ref: null, subdir: "",
+  assert.deepEqual(parseGitHubUrl('https://github.com/acme/app/tree/feature/radio'), {
+    owner: 'acme',
+    repo: 'app',
+    ref: 'feature/radio',
+    repositoryUrl: 'https://github.com/acme/app',
   });
-  assert.deepEqual(parseGitHubUrl("https://github.com/acme/mono/tree/main/apps/tracker"), {
-    owner: "acme", repo: "mono", ref: "main", subdir: "apps/tracker",
-  });
-  assert.equal(parseGitHubUrl("https://gitlab.com/acme/x"), null);
-  assert.equal(parseGitHubUrl("not a url"), null);
-  assert.equal(parseGitHubUrl("https://github.com/onlyowner"), null);
+  assert.equal(parseGitHubUrl('http://github.com/acme/x'), null);
+  assert.equal(parseGitHubUrl('https://gitlab.com/acme/x'), null);
+  assert.equal(parseGitHubUrl('https://github.com/acme/x/issues'), null);
+  assert.equal(parseGitHubUrl('not a url'), null);
 });
 
-test("shouldSkipPath drops build artifacts and vcs noise", () => {
-  for (const path of [
-    "node_modules/react/index.js",
-    "src/node_modules/x.js",
-    ".git/HEAD",
-    "dist/bundle.js",
-    "build/main.js",
-    ".next/app.js",
-    "yarn.lock",
-    "package-lock.json",
-    "src/main.js.map",
-  ]) {
+test('source filtering keeps agent-relevant runtimes and excludes generated trees', () => {
+  for (const path of ['node_modules/a.js', '.git/HEAD', 'dist/a.js', 'build/a', '.next/a', 'yarn.lock']) {
     assert.equal(shouldSkipPath(path), true, path);
   }
-  for (const path of ["src/main.tsx", "src/App.tsx", "index.html", "src/lib/format.ts"]) {
-    assert.equal(shouldSkipPath(path), false, path);
+  for (const path of ['shell.qml', 'main.py', 'install.sh', 'Makefile', 'src/radio']) {
+    assert.equal(isImportableFile(path), true, path);
+    assert.equal(isTextFile(path), true, path);
   }
+  assert.equal(isImportableFile('assets/globe.png'), true);
+  assert.equal(isTextFile('assets/globe.png'), false);
+  assert.equal(isImportableFile('dist/generated.js'), false);
 });
 
-test("isTextFile allows source and asset text, rejects binaries", () => {
-  assert.equal(isTextFile("src/main.tsx"), true);
-  assert.equal(isTextFile("styles/app.css"), true);
-  assert.equal(isTextFile("logo.svg"), true);
-  assert.equal(isTextFile("logo.png"), false);
-  assert.equal(isTextFile("font.woff2"), false);
-  assert.equal(isTextFile("Makefile"), false);
+test('module ids follow the launcher slug contract', () => {
+  assert.equal(moduleIdFromSource('omarchy-radio-atlas'), 'omarchy-radio-atlas');
+  assert.equal(moduleIdFromSource('Radio Atlas!'), 'radio-atlas');
+  assert.equal(validModuleId('radio-atlas'), true);
+  assert.equal(validModuleId('-bad'), false);
+  assert.equal(validModuleId('Bad'), false);
+  assert.equal(validModuleId('x'), false);
 });
 
-test("isImportableFile keeps browser image and font assets", () => {
-  assert.equal(isImportableFile("src/assets/hero.png"), true);
-  assert.equal(isImportableFile("src/fonts/ui.woff2"), true);
-  assert.equal(isImportableFile("archive.zip"), false);
+test('GitHub import creates one durable harness command with the porting skill', () => {
+  const command = buildAppImportCommand({
+    moduleId: 'omarchy-radio-atlas',
+    appTitle: 'Omarchy Radio Atlas',
+    now: 42,
+    importSource: {
+      kind: 'github',
+      repository_url: 'https://github.com/AksharP5/omarchy-radio-atlas',
+      ref: 'main',
+    },
+  });
+  assert.equal(command.command_id, 'app-import-omarchy-radio-atlas-42');
+  assert.equal(command.command_type, 'ctox.business_os.app.create');
+  assert.equal(command.payload.install_target, 'runtime-installed-module');
+  assert.deepEqual(command.payload.required_skills, ['business-os-app-module-development']);
+  assert.deepEqual(command.payload.import_source, {
+    kind: 'github',
+    repository_url: 'https://github.com/AksharP5/omarchy-radio-atlas',
+    ref: 'main',
+  });
+  assert.equal(command.client_context.source, 'business-os-app-importer');
 });
 
-test("validModuleId enforces the launcher slug contract", () => {
-  assert.equal(validModuleId("po-tracker"), true);
-  assert.equal(validModuleId("a1"), true);
-  assert.equal(validModuleId("-bad"), false);
-  assert.equal(validModuleId("Bad"), false);
-  assert.equal(validModuleId("x"), false);
-  assert.equal(validModuleId("with space"), false);
+test('folder imports declare exact RxDB dependencies', () => {
+  const command = buildAppImportCommand({
+    moduleId: 'local-radio',
+    now: 7,
+    importSource: {
+      kind: 'desktop-folder',
+      snapshot_id: 'snapshot-1',
+      files: [{
+        file_id: 'file-1', generation_id: 'gen-1', relative_path: 'main.qml', sha256: 'abc', size_bytes: 12,
+      }],
+    },
+  });
+  assert.deepEqual(command.sync_collections, ['desktop_files', 'desktop_file_chunks']);
+  assert.deepEqual(command.dependencies, [{
+    collection: 'desktop_files', record_id: 'file-1', generation_id: 'gen-1', content_hash: 'abc', required: true,
+  }]);
 });
 
-test("presentation is a focused windowed import flow", async () => {
-  const html = await readFile(new URL("./index.html", import.meta.url), "utf8");
-  const css = await readFile(new URL("./index.css", import.meta.url), "utf8");
-  const js = await readFile(new URL("./index.js", import.meta.url), "utf8");
-  const manifest = JSON.parse(await readFile(new URL("./module.json", import.meta.url), "utf8"));
-  const de = JSON.parse(await readFile(new URL("./locales/de.json", import.meta.url), "utf8"));
-  const en = JSON.parse(await readFile(new URL("./locales/en.json", import.meta.url), "utf8"));
+test('presentation is a one-click source, porting, live flow', async () => {
+  const html = await readFile(new URL('./index.html', import.meta.url), 'utf8');
+  const css = await readFile(new URL('./index.css', import.meta.url), 'utf8');
+  const js = await readFile(new URL('./index.js', import.meta.url), 'utf8');
+  const manifest = JSON.parse(await readFile(new URL('./module.json', import.meta.url), 'utf8'));
 
-  assert.match(html, /class="imp-rail"/);
   assert.match(html, /data-imp-step="source"/);
-  assert.match(html, /data-imp-step="review"/);
+  assert.match(html, /data-imp-step="progress"/);
   assert.match(html, /data-imp-step="done"/);
-  assert.match(html, /data-imp-open/);
-  assert.doesNotMatch(html, /class="ctox-card"/);
+  assert.equal((html.match(/data-imp-phase/g) || []).length, 5);
+  assert.doesNotMatch(html, /data-imp-install/);
+  assert.doesNotMatch(html, /data-imp-back/);
 
-  assert.match(css, /\.importer-module\s*\{[^}]*grid-template-columns:\s*230px/);
-  assert.match(css, /\.imp-stage\s*\{[^}]*width:\s*min\(100%,\s*650px\)/);
-  assert.match(css, /\.imp-done-stage/);
+  assert.match(css, /\.imp-job-phases/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
 
-  assert.match(js, /const setStage = \(stage\)/);
-  assert.match(js, /setStage\('review'\)/);
-  assert.match(js, /setStage\('done'\)/);
-  assert.match(js, /globalThis\.location\.hash = moduleId/);
-  assert.match(js, /globalThis\.location\.reload\(\)/);
-  assert.match(js, /globalThis\.location\.reload\(\)/);
+  assert.match(js, /commandBus\.dispatch\(command, \{ until: 'accepted'/);
+  assert.match(js, /showDirectoryPicker\(\{ mode: 'read' \}\)/);
+  assert.doesNotMatch(js, /transcodeApp|scaffoldModule|createWritable|mode: 'readwrite'/);
+  assert.match(js, /result\.live === true/);
+  assert.match(js, /result\.smoke_status/);
 
-  assert.equal(manifest.layout.shell, "windowed");
+  assert.equal(manifest.layout.shell, 'windowed');
   assert.deepEqual(manifest.presentation.initial_size, { width: 860, height: 600 });
   assert.deepEqual(manifest.presentation.minimum_size, { width: 640, height: 480 });
-
-  for (const locale of [de, en]) {
-    assert.equal(typeof locale.title, "string");
-    assert.equal(typeof locale.sourceHeading, "string");
-    assert.equal(typeof locale.reviewHeading, "string");
-    assert.equal(typeof locale.doneHeading, "string");
-    assert.equal(typeof locale.openApp, "string");
-  }
 });

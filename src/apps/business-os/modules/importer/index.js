@@ -1,29 +1,18 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
 import {
-  transcodeApp,
-  suggestedModuleId,
-  scaffoldModule,
-} from '../../shared/app-transcode.mjs?v=20260816-browser-sync-guards-v141';
-
-// The App Importer is the hand-over moment of the product story: a coding
-// agent conceived the app, the importer raises it. Source (folder or public
-// GitHub repo) -> transcode to plain ESM (vendored sucrase, once, at import
-// time) -> honest report -> write into runtime/business-os/local-modules/
-// through the user-picked directory (dropping is installing; the filesystem
-// stays the installation truth — no new HTTP data path).
+  FILE_CHUNK_HASH_SCHEME,
+  FILE_CONTENT_HASH_SCHEME,
+  sha256Hex,
+} from '../../shared/file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 const MAX_FILES = 400;
 const MAX_FILE_BYTES = 512 * 1024;
-const TEXT_EXTENSIONS = new Set([
-  '.ts', '.tsx', '.js', '.jsx', '.mjs', '.css', '.json', '.html', '.svg', '.md', '.txt',
-]);
-const ASSET_EXTENSIONS = new Set([
-  '.avif', '.gif', '.ico', '.jpeg', '.jpg', '.png', '.webp', '.woff', '.woff2',
-]);
+const CHUNK_SIZE = 16 * 1024;
+const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'blocked']);
 
 const FALLBACK_LABELS = {
   title: 'App Importer',
-  subtitle: 'Conceived in a prompt. Born with the first deploy. Raised in CTOX.',
+  subtitle: 'Source in. Durable CTOX app job out.',
 };
 
 export function parseGitHubUrl(raw) {
@@ -33,116 +22,263 @@ export function parseGitHubUrl(raw) {
   } catch {
     return null;
   }
-  if (url.hostname !== 'github.com') return null;
+  if (url.protocol !== 'https:' || url.hostname !== 'github.com' || url.port
+    || url.username || url.password || url.search || url.hash) return null;
   const parts = url.pathname.split('/').filter(Boolean);
-  if (parts.length < 2) return null;
-  const [owner, repo, marker, ref, ...rest] = parts;
+  if (parts.length !== 2 && !(parts.length >= 4 && parts[2] === 'tree')) return null;
+  const owner = parts[0];
+  const repo = String(parts[1] || '').replace(/\.git$/, '');
+  if (!/^[A-Za-z0-9_.-]+$/.test(owner) || !/^[A-Za-z0-9_.-]+$/.test(repo)) return null;
   return {
     owner,
-    repo: repo.replace(/\.git$/, ''),
-    ref: marker === 'tree' && ref ? ref : null,
-    subdir: marker === 'tree' && rest.length ? rest.join('/') : '',
+    repo,
+    ref: parts[2] === 'tree' ? parts.slice(3).join('/') : null,
+    repositoryUrl: `https://github.com/${owner}/${repo}`,
   };
 }
 
 export function shouldSkipPath(path) {
-  return /(^|\/)(node_modules|\.git|dist|build|out|coverage|\.next|\.cache)(\/|$)/.test(path)
-    || /(^|\/)\./.test(path) && !/^\.?[^/]*rc/.test(path.split('/').pop() || '')
-    || path.endsWith('.lock')
-    || path.endsWith('package-lock.json')
-    || path.endsWith('.map');
+  const normalized = String(path || '').replaceAll('\\', '/');
+  return /(^|\/)(node_modules|\.git|dist|build|out|coverage|\.next|\.cache)(\/|$)/.test(normalized)
+    || /(^|\/)\./.test(normalized) && !/^\.?[^/]*rc$/.test(normalized.split('/').pop() || '')
+    || normalized.endsWith('.lock')
+    || normalized.endsWith('package-lock.json')
+    || normalized.endsWith('.map');
 }
 
+// QML, Python, shell scripts and files without an extension are source
+// evidence for the porting agent, not executables the importer must understand.
 export function isTextFile(path) {
-  const dot = path.lastIndexOf('.');
-  if (dot === -1) return false;
-  return TEXT_EXTENSIONS.has(path.slice(dot).toLowerCase());
+  const name = String(path || '').split('/').pop() || '';
+  return !/\.(avif|gif|ico|jpe?g|png|webp|woff2?|zip|gz|mp3|mp4|ogg|wav)$/i.test(name);
 }
 
 export function isImportableFile(path) {
-  const dot = path.lastIndexOf('.');
-  if (dot === -1) return false;
-  const extension = path.slice(dot).toLowerCase();
-  return TEXT_EXTENSIONS.has(extension) || ASSET_EXTENSIONS.has(extension);
+  return Boolean(String(path || '').trim()) && !shouldSkipPath(path);
 }
 
 export function validModuleId(id) {
   return /^[a-z0-9][a-z0-9-]{1,63}$/.test(id);
 }
 
+export function moduleIdFromSource(value) {
+  const normalized = String(value || '')
+    .replace(/\.git$/i, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/g, '');
+  return validModuleId(normalized) ? normalized : `imported-app-${Date.now()}`;
+}
+
+function titleFromModuleId(moduleId) {
+  return String(moduleId || '').split('-')
+    .filter(Boolean)
+    .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
+    .join(' ');
+}
+
+export function buildAppImportCommand({
+  moduleId,
+  appTitle,
+  importSource,
+  actor = null,
+  now = Date.now(),
+}) {
+  if (!validModuleId(moduleId)) throw new Error('Invalid module id');
+  if (!importSource || !['github', 'desktop-folder'].includes(importSource.kind)) {
+    throw new Error('Invalid import source');
+  }
+  const title = String(appTitle || titleFromModuleId(moduleId)).trim() || moduleId;
+  const files = Array.isArray(importSource.files) ? importSource.files : [];
+  const dependencies = files.map((file) => ({
+    collection: 'desktop_files',
+    record_id: file.file_id,
+    generation_id: file.generation_id,
+    content_hash: file.sha256,
+    required: true,
+  }));
+  return {
+    command_id: `app-import-${moduleId}-${now}`,
+    module: 'importer',
+    command_type: 'ctox.business_os.app.create',
+    record_id: moduleId,
+    dependencies,
+    sync_collections: files.length ? ['desktop_files', 'desktop_file_chunks'] : [],
+    payload: {
+      title: `Import ${title}`,
+      instruction: `Port the complete supplied application into a functional Shell-V2 Business OS app named ${title}. Preserve its user workflows rather than translating framework syntax.`,
+      module_id: moduleId,
+      app_id: moduleId,
+      app_title: title,
+      description: `Shell-V2 port of ${title}`,
+      category: 'development',
+      desired_version: '0.1.0',
+      install_target: 'runtime-installed-module',
+      target: 'app',
+      mode: 'app',
+      required_skills: ['business-os-app-module-development'],
+      import_source: importSource,
+    },
+    client_context: {
+      source: 'business-os-app-importer',
+      target: 'app',
+      mode: 'app',
+      module_id: moduleId,
+      app_id: moduleId,
+      install_target: 'runtime-installed-module',
+      actor,
+    },
+  };
+}
+
 async function readDirectoryFiles(dirHandle) {
-  const files = {};
-  let count = 0;
+  const files = [];
   async function walk(handle, prefix) {
     for await (const [name, entry] of handle.entries()) {
-      const path = prefix ? `${prefix}/${name}` : name;
-      if (shouldSkipPath(path)) continue;
+      const relativePath = prefix ? `${prefix}/${name}` : name;
+      if (shouldSkipPath(relativePath)) continue;
       if (entry.kind === 'directory') {
-        await walk(entry, path);
-      } else if (isImportableFile(path)) {
-        count += 1;
-        if (count > MAX_FILES) throw Object.assign(new Error('too_many_files'), { count });
-        const file = await entry.getFile();
-        if (file.size > MAX_FILE_BYTES) continue;
-        files[path] = isTextFile(path)
-          ? await file.text()
-          : new Uint8Array(await file.arrayBuffer());
+        await walk(entry, relativePath);
+        continue;
       }
+      if (!isImportableFile(relativePath)) continue;
+      if (files.length >= MAX_FILES) {
+        throw Object.assign(new Error('too_many_files'), { count: files.length + 1 });
+      }
+      if (relativePath.length > 240 || relativePath.split('/').some((part) => !part || part === '..')) {
+        throw new Error(`invalid_path:${relativePath}`);
+      }
+      const file = await entry.getFile();
+      if (file.size > MAX_FILE_BYTES) {
+        throw Object.assign(new Error('file_too_large'), { path: relativePath, size: file.size });
+      }
+      files.push({ relativePath, file, bytes: new Uint8Array(await file.arrayBuffer()) });
     }
   }
   await walk(dirHandle, '');
+  if (!files.length) throw new Error('no_importable_files');
   return files;
 }
 
-async function fetchGitHubFiles(ref) {
-  const branch = ref.ref
-    || (await (await fetch(`https://api.github.com/repos/${ref.owner}/${ref.repo}`)).json()).default_branch
-    || 'main';
-  const treeRes = await fetch(
-    `https://api.github.com/repos/${ref.owner}/${ref.repo}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
-  );
-  if (!treeRes.ok) throw new Error(`GitHub API ${treeRes.status}`);
-  const tree = await treeRes.json();
-  const wanted = (tree.tree || [])
-    .filter((node) => node.type === 'blob')
-    .map((node) => node.path)
-    .filter((path) => (ref.subdir ? path.startsWith(`${ref.subdir}/`) : true))
-    .filter((path) => !shouldSkipPath(path) && isImportableFile(path));
-  if (wanted.length === 0) throw new Error('no importable files');
-  if (wanted.length > MAX_FILES) throw Object.assign(new Error('too_many_files'), { count: wanted.length });
-  const files = {};
-  for (const path of wanted) {
-    const rel = ref.subdir ? path.slice(ref.subdir.length + 1) : path;
-    const res = await fetch(
-      `https://raw.githubusercontent.com/${ref.owner}/${ref.repo}/${encodeURIComponent(branch)}/${path}`,
-    );
-    if (!res.ok) continue;
-    files[rel] = isTextFile(rel)
-      ? await res.text()
-      : new Uint8Array(await res.arrayBuffer());
+function uint8ToBase64(bytes) {
+  let binary = '';
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
   }
-  return files;
+  return btoa(binary);
 }
 
-async function writeModuleToDirectory(rootHandle, moduleId, moduleFiles, sourceFiles) {
-  const moduleDir = await rootHandle.getDirectoryHandle(moduleId, { create: true });
-  async function writeFile(dir, path, content) {
-    const parts = path.split('/');
-    let current = dir;
-    for (const part of parts.slice(0, -1)) {
-      current = await current.getDirectoryHandle(part, { create: true });
-    }
-    const fileHandle = await current.getFileHandle(parts.at(-1), { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(content);
-    await writable.close();
+async function writeChunkDocuments(collection, rows) {
+  if (typeof collection.bulkUpsert === 'function') return collection.bulkUpsert(rows);
+  if (typeof collection.bulkInsert === 'function') return collection.bulkInsert(rows);
+  for (const row of rows) await collection.upsert(row);
+  return undefined;
+}
+
+async function stageDesktopFolderSnapshot(ctx, dirHandle, onProgress = () => {}) {
+  const desktopFiles = ctx?.db?.collection?.('desktop_files');
+  const desktopChunks = ctx?.db?.collection?.('desktop_file_chunks');
+  if (!desktopFiles || !desktopChunks) throw new Error('desktop_file_sync_unavailable');
+  const sourceFiles = await readDirectoryFiles(dirHandle);
+  const now = Date.now();
+  const snapshotId = `app-import-${crypto.randomUUID()}`;
+  const folderId = `fs_${snapshotId}`;
+  const folderPath = `/Business OS/App Imports/${snapshotId}`;
+  await desktopFiles.upsert({
+    id: folderId,
+    parent_id: 'fs_root',
+    path: folderPath,
+    name: dirHandle.name || snapshotId,
+    kind: 'folder',
+    mime_type: 'inode/directory',
+    extension: '',
+    size_bytes: 0,
+    source: 'app-importer',
+    sort_index: now,
+    is_deleted: false,
+    created_at_ms: now,
+    updated_at_ms: now,
+  });
+
+  const manifest = [];
+  for (const [index, source] of sourceFiles.entries()) {
+    onProgress(index + 1, sourceFiles.length, source.relativePath);
+    const contentHash = await sha256Hex(source.bytes);
+    const fileId = `appimport_${crypto.randomUUID()}`;
+    const generationId = `gen_${now}_${contentHash.slice(0, 12)}`;
+    const base64 = uint8ToBase64(source.bytes);
+    const total = Math.max(1, Math.ceil(base64.length / CHUNK_SIZE));
+    const rows = await Promise.all(Array.from({ length: total }, async (_, chunkIndex) => {
+      const data = base64.slice(chunkIndex * CHUNK_SIZE, (chunkIndex + 1) * CHUNK_SIZE);
+      return {
+        id: `${fileId}_${generationId}_${chunkIndex}`,
+        file_id: fileId,
+        generation_id: generationId,
+        content_hash: contentHash,
+        content_hash_scheme: FILE_CONTENT_HASH_SCHEME,
+        idx: chunkIndex,
+        total,
+        encoding: 'base64',
+        data,
+        chunk_hash: await sha256Hex(data),
+        chunk_hash_scheme: FILE_CHUNK_HASH_SCHEME,
+        size_bytes: data.length,
+        created_at_ms: now,
+      };
+    }));
+    await writeChunkDocuments(desktopChunks, rows);
+    await desktopFiles.upsert({
+      id: fileId,
+      parent_id: folderId,
+      path: `${folderPath}/${source.relativePath}`,
+      name: source.relativePath.split('/').pop(),
+      kind: 'file',
+      mime_type: source.file.type || 'application/octet-stream',
+      extension: source.relativePath.includes('.') ? source.relativePath.split('.').pop().toLowerCase() : '',
+      size_bytes: source.bytes.byteLength,
+      source: 'app-importer',
+      content_ref: fileId,
+      content_state: 'available',
+      content_hash: contentHash,
+      content_hash_scheme: FILE_CONTENT_HASH_SCHEME,
+      content_generation_id: generationId,
+      content_synced_at_ms: now,
+      sort_index: now + index,
+      is_deleted: false,
+      created_at_ms: now,
+      updated_at_ms: now,
+    });
+    manifest.push({
+      file_id: fileId,
+      generation_id: generationId,
+      relative_path: source.relativePath,
+      sha256: contentHash,
+      size_bytes: source.bytes.byteLength,
+    });
   }
-  for (const [path, content] of Object.entries(moduleFiles)) {
-    await writeFile(moduleDir, path, content);
-  }
-  for (const [path, content] of Object.entries(sourceFiles)) {
-    await writeFile(moduleDir, `source/${path}`, content);
-  }
+  return {
+    kind: 'desktop-folder',
+    snapshot_id: snapshotId,
+    folder_name: dirHandle.name || 'Imported app',
+    files: manifest,
+  };
+}
+
+function commandStatus(command) {
+  return String(command?.status || command?.task_status || command?.terminal_status || '').toLowerCase();
+}
+
+function commandResult(command) {
+  if (command?.result && typeof command.result === 'object') return command.result;
+  if (command?.result_json && typeof command.result_json === 'object') return command.result_json;
+  try { return JSON.parse(command?.result_json || '{}'); } catch { return {}; }
+}
+
+function commandErrorText(command) {
+  return String(command?.error_message || command?.last_error || command?.error
+    || commandResult(command)?.error || 'The porting job did not complete.');
 }
 
 async function loadModuleMarkup() {
@@ -173,236 +309,182 @@ export async function mount(ctx) {
     for (const [name, value] of Object.entries(vars)) text = text.replaceAll(`{${name}}`, String(value));
     return text;
   };
-
+  const q = (selector) => root.querySelector(selector);
   const refs = {
-    title: root.querySelector('[data-imp-title]'),
-    subtitle: root.querySelector('[data-imp-subtitle]'),
-    sourceStep: root.querySelector('[data-imp-source-step]'),
-    sourceStepNote: root.querySelector('[data-imp-source-step-note]'),
-    reviewStep: root.querySelector('[data-imp-review-step]'),
-    reviewStepNote: root.querySelector('[data-imp-review-step-note]'),
-    doneStep: root.querySelector('[data-imp-done-step]'),
-    doneStepNote: root.querySelector('[data-imp-done-step-note]'),
-    notice: root.querySelector('[data-imp-notice]'),
-    sourceSection: root.querySelector('[data-imp-source-section]'),
-    sourceEyebrow: root.querySelector('[data-imp-source-eyebrow]'),
-    sourceHeading: root.querySelector('[data-imp-source-heading]'),
-    sourceIntro: root.querySelector('[data-imp-source-intro]'),
-    githubLabel: root.querySelector('[data-imp-github-label]'),
-    folderHeading: root.querySelector('[data-imp-folder-heading]'),
-    pickFolder: root.querySelector('[data-imp-pick-folder]'),
-    or: root.querySelector('[data-imp-or]'),
-    githubForm: root.querySelector('[data-imp-github-form]'),
-    githubUrl: root.querySelector('[data-imp-github-url]'),
-    githubBtn: root.querySelector('[data-imp-github-btn]'),
-    sourceHint: root.querySelector('[data-imp-source-hint]'),
-    reportSection: root.querySelector('[data-imp-report-section]'),
-    reviewEyebrow: root.querySelector('[data-imp-review-eyebrow]'),
-    reviewHeading: root.querySelector('[data-imp-review-heading]'),
-    reviewIntro: root.querySelector('[data-imp-review-intro]'),
-    reportStatus: root.querySelector('[data-imp-report-status]'),
-    reportStatusNote: root.querySelector('[data-imp-report-status-note]'),
-    report: root.querySelector('[data-imp-report]'),
-    reportHint: root.querySelector('[data-imp-report-hint]'),
-    details: root.querySelector('[data-imp-details]'),
-    idLabel: root.querySelector('[data-imp-id-label]'),
-    titleLabel: root.querySelector('[data-imp-title-label]'),
-    moduleId: root.querySelector('[data-imp-module-id]'),
-    moduleTitle: root.querySelector('[data-imp-module-title]'),
-    back: root.querySelector('[data-imp-back]'),
-    install: root.querySelector('[data-imp-install]'),
-    doneSection: root.querySelector('[data-imp-done-section]'),
-    doneEyebrow: root.querySelector('[data-imp-done-eyebrow]'),
-    doneHeading: root.querySelector('[data-imp-done-heading]'),
-    done: root.querySelector('[data-imp-done]'),
-    open: root.querySelector('[data-imp-open]'),
-    openLabel: root.querySelector('[data-imp-open-label]'),
+    title: q('[data-imp-title]'), subtitle: q('[data-imp-subtitle]'), notice: q('[data-imp-notice]'),
+    sourceSection: q('[data-imp-source-section]'), progressSection: q('[data-imp-progress-section]'),
+    doneSection: q('[data-imp-done-section]'), githubForm: q('[data-imp-github-form]'),
+    githubUrl: q('[data-imp-github-url]'), githubBtn: q('[data-imp-github-btn]'),
+    pickFolder: q('[data-imp-pick-folder]'), sourceHint: q('[data-imp-source-hint]'),
+    commandId: q('[data-imp-command-id]'), moduleId: q('[data-imp-module-id]'),
+    progressTitle: q('[data-imp-progress-title]'), progressNote: q('[data-imp-progress-note]'),
+    phases: [...root.querySelectorAll('[data-imp-phase]')], doneHeading: q('[data-imp-done-heading]'),
+    done: q('[data-imp-done]'), open: q('[data-imp-open]'), reset: q('[data-imp-reset]'),
   };
-
-  // The module head is STATIC markup in index.html; this mount only fills in
-  // texts and stage state. Its .ctox-pane-title is the shell-v2 title slot:
-  // app.js turns exactly this element into the window title and the version
-  // menu trigger (wireShellV2ModuleTitle), so it must carry the localized app
-  // name before mount returns. Kept tolerant for standalone fixtures.
-  if (refs.title) refs.title.textContent = t('title', FALLBACK_LABELS.title);
+  refs.title.textContent = t('title', FALLBACK_LABELS.title);
   refs.subtitle.textContent = t('subtitle', FALLBACK_LABELS.subtitle);
-  refs.sourceStep.textContent = t('sourceStep', 'Source');
-  refs.sourceStepNote.textContent = t('sourceStepNote', 'Choose an app');
-  refs.reviewStep.textContent = t('reviewStep', 'Review');
-  refs.reviewStepNote.textContent = t('reviewStepNote', 'Check portability');
-  refs.doneStep.textContent = t('doneStep', 'Install');
-  refs.doneStepNote.textContent = t('doneStepNote', 'Open in CTOX');
-  refs.sourceEyebrow.textContent = t('sourceEyebrow', 'Import source');
-  refs.sourceHeading.textContent = t('sourceHeading', 'Bring an existing app into CTOX.');
-  refs.sourceIntro.textContent = t('sourceIntro', 'Use a public GitHub repository or choose the project folder from this computer.');
-  refs.githubLabel.textContent = t('githubLabel', 'GitHub repository');
-  refs.folderHeading.textContent = t('folderHeading', 'Choose project folder');
-  refs.or.textContent = t('or', 'or');
-  refs.githubUrl.placeholder = t('githubPlaceholder', 'https://github.com/owner/repo');
-  refs.githubBtn.textContent = t('fetchGithub', 'Analyze repo');
-  refs.sourceHint.textContent = t('sourceHint', '');
-  refs.reviewEyebrow.textContent = t('reviewEyebrow', 'Import review');
-  refs.reviewHeading.textContent = t('reviewHeading', 'Ready to become a CTOX app.');
-  refs.reviewIntro.textContent = t('reviewIntro', 'Review the detected entry point and runtime dependencies before installation.');
-  refs.reportStatus.textContent = t('reportStatus', 'Portable');
-  refs.reportStatusNote.textContent = t('reportStatusNote', 'The app can run in CTOX.');
-  refs.idLabel.textContent = t('idLabel', 'Module id');
-  refs.titleLabel.textContent = t('titleLabel', 'Title');
-  refs.back.textContent = t('back', 'Back');
-  refs.install.textContent = t('install', 'Install app');
-  refs.doneEyebrow.textContent = t('doneEyebrow', 'Import complete');
-  refs.doneHeading.textContent = t('doneHeading', 'Your app is in CTOX.');
-  refs.openLabel.textContent = t('openApp', 'Open app');
-
-  const state = { files: null, result: null, installedModuleId: '' };
+  root.querySelectorAll('[data-imp-copy]').forEach((node) => {
+    node.textContent = t(node.dataset.impCopy, node.textContent);
+  });
+  refs.githubBtn.textContent = t('startGithub', 'Start porting');
+  const state = { commandId: '', moduleId: '', subscription: null, live: false };
   let disposed = false;
 
   const setStage = (stage) => {
     root.dataset.impStage = stage;
     refs.sourceSection.hidden = stage !== 'source';
-    refs.reportSection.hidden = stage !== 'review';
+    refs.progressSection.hidden = stage !== 'progress';
     refs.doneSection.hidden = stage !== 'done';
+    refs.open.hidden = stage !== 'done' || !state.live;
   };
-
   const notify = (text, isError = false) => {
     refs.notice.hidden = !text;
     refs.notice.textContent = text || '';
     refs.notice.classList.toggle('is-danger', isError);
   };
+  const setPhase = (activeIndex, failed = false) => {
+    refs.phases.forEach((phase, index) => {
+      phase.classList.toggle('is-complete', index < activeIndex && !failed);
+      phase.classList.toggle('is-active', index === activeIndex && !failed);
+      phase.classList.toggle('is-failed', index === activeIndex && failed);
+    });
+  };
+  const actorContext = () => {
+    const session = typeof ctx?.session === 'function' ? ctx.session() : ctx?.session;
+    const user = session?.user || {};
+    return user.id ? {
+      id: user.id,
+      display_name: user.display_name || user.name || user.id,
+      role: user.role || (user.is_admin ? 'admin' : 'user'),
+      is_admin: Boolean(user.is_admin),
+    } : null;
+  };
 
-  // Report rows render into a .ctox-fields <dl>: key -> dt, value -> dd.
-  const row = (key, value, cls = '') =>
-    `<dt>${key}</dt><dd${cls ? ` class="${cls}"` : ''}>${value}</dd>`;
-  const esc = (value) => String(value).replace(/[&<>"']/g, (c) => (
-    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
-  ));
-
-  const sucrase = await import('../../vendor/app-importer/sucrase.mjs');
-
-  function renderReport() {
-    const { files, result } = state;
-    if (!files || !result) return;
-    refs.reportHint.hidden = true;
-    refs.reportStatus.textContent = t('reportStatus', 'Portable');
-    refs.reportStatusNote.textContent = t('reportStatusNote', 'The app can run in CTOX.');
-    refs.reportStatus.closest('.imp-report-status')?.classList.remove('is-danger');
-    const lines = [row(t('filesRead', 'Files read'), Object.keys(files).length)];
-    if (result.report?.error === 'entry_not_found') {
-      lines.push(row(t('entry', 'Entry'), esc(t('entryMissing', 'No entry found.')), 'imp-bad'));
-      refs.details.hidden = true;
-      refs.reportStatus.textContent = t('reportBlocked', 'Needs attention');
-      refs.reportStatusNote.textContent = t('reportBlockedNote', 'CTOX could not find an app entry point.');
-      refs.reportStatus.closest('.imp-report-status')?.classList.add('is-danger');
-    } else {
-      lines.push(row(t('entry', 'Entry'), esc(result.entry), 'imp-good'));
-      lines.push(row(t('bareDeps', 'Runtime dependencies'), esc(result.report.bareImports.join(', ') || '—')));
-      lines.push(row(t('cssFiles', 'Stylesheets'), esc(result.cssFiles.join(', ') || '—')));
-      if (result.report.unsupported.length) {
-        lines.push(row(t('unsupported', 'Not portable'), esc(result.report.unsupported.join(', ')), 'imp-bad'));
-        const hint = t('unsupportedHint', '');
-        refs.reportHint.textContent = hint;
-        refs.reportHint.hidden = !hint;
-        refs.details.hidden = true;
-        refs.reportStatus.textContent = t('reportBlocked', 'Needs attention');
-        refs.reportStatusNote.textContent = t('reportBlockedNote', 'Some dependencies need to be replaced before installation.');
-        refs.reportStatus.closest('.imp-report-status')?.classList.add('is-danger');
-      } else {
-        lines.push(row(t('unsupported', 'Not portable'), t('ok', 'ready'), 'imp-good'));
-        refs.details.hidden = false;
-        refs.moduleId.value = suggestedModuleId(files);
-        refs.moduleTitle.value = refs.moduleId.value
-          .split('-').map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
-      }
+  function renderProjection(raw) {
+    if (disposed || !raw) return;
+    const command = raw?.toJSON?.() || raw;
+    const status = commandStatus(command);
+    const progress = command?.execution_progress || command?.progress || {};
+    const phaseText = String(progress.current_step || progress.phase || command?.execution_phase || status || 'queued');
+    refs.progressNote.textContent = phaseText;
+    let index = ['pending', 'queued', 'accepted'].includes(status) ? 1 : 2;
+    if (/validat|smoke|review/.test(phaseText.toLowerCase())) index = 3;
+    if (status === 'completed') index = 4;
+    setPhase(index);
+    if (!TERMINAL_STATUSES.has(status)) return;
+    state.subscription?.unsubscribe?.();
+    const result = commandResult(command);
+    const passed = status === 'completed'
+      && result.live === true
+      && String(result.validation_status || '').toLowerCase() === 'passed'
+      && String(result.smoke_status || '').toLowerCase() === 'passed';
+    state.live = passed;
+    setStage('done');
+    if (!passed) {
+      setPhase(Math.min(index, 3), true);
+      refs.doneHeading.textContent = t('failedHeading', 'Porting did not go live.');
+      refs.done.innerHTML = `<p>${escapeHtml(commandErrorText(command))}</p><p><code>${escapeHtml(state.commandId)}</code></p>`;
+      return;
     }
-    refs.report.innerHTML = lines.join('');
-    setStage('review');
+    refs.doneHeading.textContent = t('doneHeading', 'The ported app is live.');
+    refs.done.innerHTML = [
+      `<p>${escapeHtml(state.moduleId)}</p>`,
+      `<p>${escapeHtml(result.source_revision || 'source revision recorded')}</p>`,
+      `<p>${escapeHtml(`Asset ${result.asset_revision || '—'} · Catalog ${result.catalog_revision || '—'}`)}</p>`,
+      `<p><code>${escapeHtml(state.commandId)}</code></p>`,
+    ].join('');
+    refs.open.hidden = false;
   }
 
-  async function analyze(files) {
-    notify(t('transcoding', 'Transcoding…'));
-    state.files = files;
-    state.result = transcodeApp(sucrase, files, { vendorBase: '../../vendor/app-importer' });
-    notify('');
-    renderReport();
+  async function dispatchImport(moduleId, appTitle, importSource) {
+    if (!ctx?.commandBus?.dispatch) throw new Error('command_bus_unavailable');
+    state.moduleId = moduleId;
+    state.live = false;
+    const command = buildAppImportCommand({ moduleId, appTitle, importSource, actor: actorContext() });
+    state.commandId = command.command_id;
+    refs.commandId.textContent = command.command_id;
+    refs.moduleId.textContent = moduleId;
+    refs.progressTitle.textContent = t('progressHeading', 'CTOX is porting the app.');
+    refs.progressNote.textContent = t('queueing', 'Sending the durable app job…');
+    setStage('progress');
+    setPhase(0);
+    state.subscription = ctx.commandBus.subscribe(command.command_id, renderProjection);
+    await state.subscription.ready;
+    const accepted = await ctx.commandBus.dispatch(command, { until: 'accepted', timeoutMs: 60_000 });
+    renderProjection(accepted);
+    const current = await ctx.commandBus.getStatus(command.command_id).catch(() => null);
+    if (current) renderProjection(current);
   }
+
+  refs.githubForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const source = parseGitHubUrl(refs.githubUrl.value);
+    if (!source) {
+      notify(t('invalidGithub', 'Enter a public https://github.com/owner/repo URL.'), true);
+      return;
+    }
+    refs.githubBtn.disabled = true;
+    notify('');
+    try {
+      const moduleId = moduleIdFromSource(source.repo);
+      await dispatchImport(moduleId, titleFromModuleId(moduleId), {
+        kind: 'github', repository_url: source.repositoryUrl, ref: source.ref || 'HEAD',
+      });
+    } catch (error) {
+      notify(t('dispatchFailed', 'The import job could not be started: {error}', { error: error?.message || error }), true);
+      setStage('source');
+    } finally {
+      refs.githubBtn.disabled = false;
+    }
+  });
 
   refs.pickFolder.addEventListener('click', async () => {
     if (typeof globalThis.showDirectoryPicker !== 'function') {
       notify(t('noPicker', 'Folder dialog unsupported.'), true);
       return;
     }
+    refs.pickFolder.disabled = true;
     try {
       const handle = await globalThis.showDirectoryPicker({ mode: 'read' });
-      notify(t('reading', 'Reading source…'));
-      const files = await readDirectoryFiles(handle);
-      await analyze(files);
-    } catch (error) {
-      if (error?.name === 'AbortError') { notify(''); return; }
-      if (error?.message === 'too_many_files') notify(t('tooManyFiles', 'Too many files.', { count: error.count }), true);
-      else notify(t('readFailed', 'Could not read the folder.', { error: error?.message || error }), true);
-    }
-  });
-
-  refs.githubForm.addEventListener('submit', async (event) => {
-    event.preventDefault();
-    const ref = parseGitHubUrl(refs.githubUrl.value);
-    if (!ref) {
-      notify(t('fetchFailed', 'GitHub fetch failed.', { error: 'invalid URL' }), true);
-      return;
-    }
-    try {
-      notify(t('fetching', 'Fetching repo from GitHub…'));
-      const files = await fetchGitHubFiles(ref);
-      await analyze(files);
-    } catch (error) {
-      if (error?.message === 'too_many_files') notify(t('tooManyFiles', 'Too many files.', { count: error.count }), true);
-      else notify(t('fetchFailed', 'GitHub fetch failed.', { error: error?.message || error }), true);
-    }
-  });
-
-  refs.install.addEventListener('click', async () => {
-    const moduleId = refs.moduleId.value.trim();
-    if (!validModuleId(moduleId)) {
-      notify(t('idInvalid', 'Invalid module id.'), true);
-      return;
-    }
-    if (typeof globalThis.showDirectoryPicker !== 'function') {
-      notify(t('noPicker', 'Folder dialog unsupported.'), true);
-      return;
-    }
-    try {
-      notify(t('installPickHint', 'Pick the local-modules folder.'));
-      const rootHandle = await globalThis.showDirectoryPicker({ mode: 'readwrite' });
-      notify(t('writing', 'Writing module…'));
-      const moduleFiles = scaffoldModule(
-        { id: moduleId, title: refs.moduleTitle.value.trim() || moduleId },
-        state.result,
-      );
-      await writeModuleToDirectory(rootHandle, moduleId, moduleFiles, state.files);
+      notify(t('snapshotting', 'Securing the source snapshot…'));
+      const importSource = await stageDesktopFolderSnapshot(ctx, handle, (current, total, path) => {
+        refs.sourceHint.textContent = `${current}/${total} · ${path}`;
+      });
+      const moduleId = moduleIdFromSource(handle.name);
       notify('');
-      state.installedModuleId = moduleId;
-      refs.done.innerHTML = `<p>${esc(t('doneNote', 'Module written.', { id: moduleId }))}</p>`;
-      setStage('done');
+      await dispatchImport(moduleId, titleFromModuleId(moduleId), importSource);
     } catch (error) {
-      if (error?.name === 'AbortError') { notify(''); return; }
-      notify(t('writeFailed', 'Write failed.', { error: error?.message || error }), true);
+      if (error?.name !== 'AbortError') {
+        notify(t('folderFailed', 'The folder import could not be started: {error}', { error: error?.message || error }), true);
+      }
+    } finally {
+      refs.pickFolder.disabled = false;
     }
   });
 
-  refs.back.addEventListener('click', () => {
+  refs.open.addEventListener('click', () => {
+    if (!state.live || !state.moduleId) return;
+    globalThis.location.hash = state.moduleId;
+    globalThis.location.reload();
+  });
+  refs.reset.addEventListener('click', () => {
+    state.subscription?.unsubscribe?.();
+    state.commandId = '';
+    state.moduleId = '';
+    state.live = false;
     notify('');
     setStage('source');
   });
 
-  refs.open.addEventListener('click', async () => {
-    const moduleId = state.installedModuleId;
-    if (!moduleId) return;
-    // The install may replace an existing module manifest as well as create a
-    // new one. Reload the catalog in both cases, then let the shell launch the
-    // freshly written app contract rather than a stale in-memory descriptor.
-    globalThis.location.hash = moduleId;
-    globalThis.location.reload();
-  });
+  setStage('source');
+  return () => {
+    disposed = true;
+    state.subscription?.unsubscribe?.();
+  };
+}
 
-  return () => { disposed = true; void disposed; };
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]
+  ));
 }

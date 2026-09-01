@@ -6534,7 +6534,12 @@ fn maybe_materialize_and_complete_runtime_app_starter(
     command: &BusinessCommand,
     queue_task: Option<&channels::QueueTaskView>,
 ) -> anyhow::Result<Option<CommandAccepted>> {
-    if command.client_context.get("source").and_then(Value::as_str) == Some("business-os-mcp") {
+    if command.client_context.get("source").and_then(Value::as_str) == Some("business-os-mcp")
+        || command
+            .payload
+            .get("import_source")
+            .is_some_and(Value::is_object)
+    {
         return Ok(None);
     }
     let Some(queue_task) = queue_task else {
@@ -9189,6 +9194,122 @@ pub fn complete_cv_print_command_from_reply(
     Ok(Some(accepted_value))
 }
 
+fn runtime_app_delivery_evidence(
+    root: &Path,
+    module_id: &str,
+) -> anyhow::Result<(String, String, String)> {
+    let catalog = load_rxdb_collection_record(root, "business_module_catalog", "module-catalog")?
+        .context("live module catalog projection is missing")?;
+    let module = catalog
+        .get("modules")
+        .and_then(Value::as_array)
+        .and_then(|modules| {
+            modules
+                .iter()
+                .find(|module| module.get("id").and_then(Value::as_str) == Some(module_id))
+        })
+        .with_context(|| format!("live module catalog does not contain `{module_id}`"))?;
+    let asset_revision = module
+        .get("asset_revision")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("live module `{module_id}` has no asset revision"))?
+        .to_string();
+    let catalog_revision = catalog
+        .get("_rev")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .context("live module catalog has no RxDB revision")?
+        .to_string();
+    let catalog_fingerprint = format!("{:x}", Sha256::digest(serde_json::to_vec(&catalog)?));
+    Ok((asset_revision, catalog_revision, catalog_fingerprint))
+}
+
+fn business_os_app_import_source_revision(
+    root: &Path,
+    command_id: &str,
+    command: &BusinessCommand,
+) -> anyhow::Result<Option<String>> {
+    if !command
+        .payload
+        .get("import_source")
+        .is_some_and(Value::is_object)
+    {
+        return Ok(None);
+    }
+    let marker = root
+        .join("runtime")
+        .join("business-os")
+        .join("app-imports")
+        .join(sanitize_business_os_workspace_component(command_id))
+        .join("source-manifest.json");
+    let manifest: Value = serde_json::from_slice(&fs::read(&marker).with_context(|| {
+        format!(
+            "app import source evidence is missing at {}",
+            marker.display()
+        )
+    })?)?;
+    Ok(manifest
+        .get("resolved_revision")
+        .and_then(Value::as_str)
+        .map(str::to_string))
+}
+
+pub(crate) fn record_business_os_app_import_smoke_success(
+    root: &Path,
+    command_id: &str,
+    module_id: &str,
+    smoke_output: &[u8],
+) -> anyhow::Result<()> {
+    let snapshot_root = root
+        .join("runtime")
+        .join("business-os")
+        .join("app-imports")
+        .join(sanitize_business_os_workspace_component(command_id));
+    anyhow::ensure!(
+        snapshot_root.join("source-manifest.json").is_file(),
+        "app import source evidence is missing for `{command_id}`"
+    );
+    let evidence = serde_json::json!({
+        "command_id": command_id,
+        "module_id": module_id,
+        "status": "passed",
+        "smoke_output_sha256": format!("{:x}", Sha256::digest(smoke_output)),
+        "completed_at_ms": now_ms()
+    });
+    fs::write(
+        snapshot_root.join("smoke-result.json"),
+        serde_json::to_vec_pretty(&evidence)?,
+    )?;
+    Ok(())
+}
+
+fn verify_business_os_app_import_smoke_success(
+    root: &Path,
+    command_id: &str,
+    module_id: &str,
+) -> anyhow::Result<()> {
+    let evidence_path = root
+        .join("runtime")
+        .join("business-os")
+        .join("app-imports")
+        .join(sanitize_business_os_workspace_component(command_id))
+        .join("smoke-result.json");
+    let evidence: Value =
+        serde_json::from_slice(&fs::read(&evidence_path).with_context(|| {
+            format!(
+                "app import smoke evidence is missing at {}",
+                evidence_path.display()
+            )
+        })?)?;
+    anyhow::ensure!(
+        evidence.get("status").and_then(Value::as_str) == Some("passed")
+            && evidence.get("module_id").and_then(Value::as_str) == Some(module_id),
+        "app import smoke evidence does not match module `{module_id}`"
+    );
+    Ok(())
+}
+
 pub fn complete_business_command_from_app_validation_success(
     root: &Path,
     task_id: &str,
@@ -9222,14 +9343,30 @@ pub fn complete_business_command_from_app_validation_success(
         completed_at_ms,
     )?;
     write_module_catalog_projection_to_rxdb_for_module(root, &module_id)?;
+    let (asset_revision, catalog_revision, catalog_fingerprint) =
+        runtime_app_delivery_evidence(root, &module_id)?;
     let native_schema_refresh =
         refresh_native_peer_after_runtime_app_schema_change(root, &module_id, &install_target)?;
+    let import_source_revision =
+        business_os_app_import_source_revision(root, &command_id, &command)?;
+    let smoke_status = if import_source_revision.is_some() {
+        verify_business_os_app_import_smoke_success(root, &command_id, &module_id)?;
+        "passed"
+    } else {
+        "not_required"
+    };
     let result_payload = serde_json::json!({
             "module_id": module_id,
             "install_target": install_target,
             "artifact_directory": artifact_directory,
             "validator": "business_os_app_module_validator",
             "validation_status": "passed",
+            "smoke_status": smoke_status,
+            "live": true,
+            "source_revision": import_source_revision,
+            "asset_revision": asset_revision,
+            "catalog_revision": catalog_revision,
+            "catalog_fingerprint": catalog_fingerprint,
             "completion_reason": reason,
             "native_schema_refresh": native_schema_refresh
     });
@@ -21134,6 +21271,443 @@ fn extract_pdf_literal_text(bytes: &[u8]) -> String {
     output.join("\n")
 }
 
+const BUSINESS_OS_APP_IMPORT_MAX_FILES: usize = 400;
+const BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES: u64 = 512 * 1024;
+const BUSINESS_OS_APP_IMPORT_MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
+const BUSINESS_OS_APP_IMPORT_MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
+
+fn business_command_prompt_enrichment(
+    root: &Path,
+    command_id: &str,
+    command: &BusinessCommand,
+) -> anyhow::Result<Option<String>> {
+    let mut blocks = Vec::new();
+    if let Some(block) = cv_print_pdf_text_prompt_enrichment(root, command_id, command)? {
+        blocks.push(block);
+    }
+    if let Some(block) = materialize_business_os_app_import_source(root, command_id, command)? {
+        blocks.push(block);
+    }
+    Ok((!blocks.is_empty()).then(|| format!("\n{}\n", blocks.join("\n"))))
+}
+
+fn materialize_business_os_app_import_source(
+    root: &Path,
+    command_id: &str,
+    command: &BusinessCommand,
+) -> anyhow::Result<Option<String>> {
+    let Some(import_source) = command
+        .payload
+        .get("import_source")
+        .filter(|value| value.is_object())
+    else {
+        return Ok(None);
+    };
+    let (module_id, install_target, _) = business_os_app_command_target_metadata(command)
+        .context("Business OS app import is missing a valid module target")?;
+    anyhow::ensure!(
+        install_target == "runtime-installed-module",
+        "Business OS app imports require install_target=runtime-installed-module"
+    );
+    let snapshots_root = root.join("runtime").join("business-os").join("app-imports");
+    fs::create_dir_all(&snapshots_root).with_context(|| {
+        format!(
+            "failed to create app import snapshot root {}",
+            snapshots_root.display()
+        )
+    })?;
+    let snapshot_root = snapshots_root.join(sanitize_business_os_workspace_component(command_id));
+    let marker_path = snapshot_root.join("source-manifest.json");
+    if marker_path.is_file() && snapshot_root.join("source").is_dir() {
+        let manifest: Value = serde_json::from_slice(&fs::read(&marker_path)?)?;
+        return Ok(Some(business_os_app_import_prompt_block(&manifest)?));
+    }
+    anyhow::ensure!(
+        !runtime_app_starter_module_dir(root, &module_id).exists(),
+        "Business OS app module `{module_id}` already exists; use an explicit modify command"
+    );
+
+    let staging_root = snapshots_root.join(format!(
+        ".staging-{}-{}",
+        sanitize_business_os_workspace_component(command_id),
+        Uuid::new_v4()
+    ));
+    let source_root = staging_root.join("source");
+    fs::create_dir_all(&source_root)?;
+    let materialized = match import_source.get("kind").and_then(Value::as_str) {
+        Some("github") => materialize_github_app_import_source(import_source, &source_root),
+        Some("desktop-folder") => materialize_desktop_folder_app_import_source(
+            root,
+            command_id,
+            import_source,
+            &source_root,
+        ),
+        Some(kind) => anyhow::bail!("unsupported Business OS app import source kind `{kind}`"),
+        None => anyhow::bail!("Business OS app import source kind is required"),
+    };
+    let result = (|| -> anyhow::Result<String> {
+        let mut manifest = materialized?;
+        manifest["module_id"] = Value::String(module_id);
+        manifest["command_id"] = Value::String(command_id.to_string());
+        manifest["source_directory"] =
+            Value::String(snapshot_root.join("source").display().to_string());
+        manifest["created_at_ms"] = serde_json::json!(now_ms());
+        fs::write(
+            staging_root.join("source-manifest.json"),
+            serde_json::to_vec_pretty(&manifest)?,
+        )?;
+        fs::rename(&staging_root, &snapshot_root).with_context(|| {
+            format!(
+                "failed to publish app import snapshot {}",
+                snapshot_root.display()
+            )
+        })?;
+        business_os_app_import_prompt_block(&manifest)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging_root);
+    }
+    result.map(Some)
+}
+
+fn materialize_github_app_import_source(
+    import_source: &Value,
+    source_root: &Path,
+) -> anyhow::Result<Value> {
+    let repository_url = import_source
+        .get("repository_url")
+        .and_then(Value::as_str)
+        .context("GitHub import repository_url is required")?;
+    let repository = github_repository_slug_from_url(repository_url)?;
+    let requested_ref = sanitize_git_ref(
+        import_source
+            .get("ref")
+            .and_then(Value::as_str)
+            .unwrap_or("HEAD"),
+    )?;
+    let resolved_commit = resolve_github_commit_sha(&repository, &requested_ref)?;
+    let archive_url = github_archive_url(&repository, &resolved_commit);
+    let response = super::importer::fetch_url_guarded(&archive_url)
+        .with_context(|| format!("failed to fetch GitHub source archive {archive_url}"))?;
+    let mut archive_bytes = Vec::new();
+    response
+        .into_reader()
+        .take(BUSINESS_OS_APP_IMPORT_MAX_ARCHIVE_BYTES + 1)
+        .read_to_end(&mut archive_bytes)?;
+    anyhow::ensure!(
+        archive_bytes.len() as u64 <= BUSINESS_OS_APP_IMPORT_MAX_ARCHIVE_BYTES,
+        "GitHub source archive exceeds {} bytes",
+        BUSINESS_OS_APP_IMPORT_MAX_ARCHIVE_BYTES
+    );
+    let mut archive = zip::ZipArchive::new(Cursor::new(archive_bytes))
+        .context("GitHub source archive is not a valid zip")?;
+    let mut file_manifest = Vec::new();
+    let mut archive_root = None;
+    let mut seen_paths = HashSet::new();
+    let mut total_bytes = 0_u64;
+    for index in 0..archive.len() {
+        let mut file = archive.by_index(index)?;
+        if file.is_dir() {
+            continue;
+        }
+        if file
+            .unix_mode()
+            .is_some_and(|mode| mode & 0o170000 == 0o120000)
+        {
+            anyhow::bail!("GitHub source archive contains a symbolic link");
+        }
+        let enclosed = file
+            .enclosed_name()
+            .context("GitHub source archive contains an unsafe path")?;
+        let mut components = enclosed.components();
+        let root_component = components
+            .next()
+            .context("GitHub source archive entry has no repository root")?
+            .as_os_str()
+            .to_owned();
+        if let Some(expected_root) = archive_root.as_ref() {
+            anyhow::ensure!(
+                expected_root == &root_component,
+                "GitHub source archive contains multiple repository roots"
+            );
+        } else {
+            archive_root = Some(root_component);
+        }
+        let relative = components.collect::<PathBuf>();
+        if relative.as_os_str().is_empty() || should_skip_app_import_path(&relative) {
+            continue;
+        }
+        validate_app_import_relative_path(&relative)?;
+        anyhow::ensure!(
+            seen_paths.insert(relative.clone()),
+            "GitHub source archive contains duplicate path `{}`",
+            relative.display()
+        );
+        anyhow::ensure!(
+            file.size() <= BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES,
+            "app import file `{}` exceeds {} bytes",
+            relative.display(),
+            BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES
+        );
+        anyhow::ensure!(
+            file_manifest.len() < BUSINESS_OS_APP_IMPORT_MAX_FILES,
+            "app import exceeds {} files",
+            BUSINESS_OS_APP_IMPORT_MAX_FILES
+        );
+        let mut bytes = Vec::new();
+        file.by_ref()
+            .take(BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        anyhow::ensure!(
+            bytes.len() as u64 <= BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES,
+            "app import file `{}` exceeds {} bytes",
+            relative.display(),
+            BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES
+        );
+        total_bytes = total_bytes.saturating_add(bytes.len() as u64);
+        anyhow::ensure!(
+            total_bytes <= BUSINESS_OS_APP_IMPORT_MAX_TOTAL_BYTES,
+            "app import exceeds {} total bytes",
+            BUSINESS_OS_APP_IMPORT_MAX_TOTAL_BYTES
+        );
+        let destination = source_root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(&destination, &bytes)?;
+        file_manifest.push(serde_json::json!({
+            "relative_path": relative.to_string_lossy(),
+            "sha256": format!("{:x}", Sha256::digest(&bytes)),
+            "size_bytes": bytes.len()
+        }));
+    }
+    anyhow::ensure!(
+        !file_manifest.is_empty(),
+        "GitHub source archive contains no importable files"
+    );
+    file_manifest.sort_by(|left, right| {
+        left.get("relative_path")
+            .and_then(Value::as_str)
+            .cmp(&right.get("relative_path").and_then(Value::as_str))
+    });
+    let manifest_sha = format!("{:x}", Sha256::digest(serde_json::to_vec(&file_manifest)?));
+    Ok(serde_json::json!({
+        "kind": "github",
+        "repository_url": repository_url,
+        "requested_ref": requested_ref,
+        "resolved_revision": resolved_commit,
+        "manifest_sha256": manifest_sha,
+        "file_count": file_manifest.len(),
+        "total_bytes": total_bytes,
+        "files": file_manifest
+    }))
+}
+
+fn github_repository_slug_from_url(repository_url: &str) -> anyhow::Result<String> {
+    let url = Url::parse(repository_url).context("invalid GitHub repository URL")?;
+    anyhow::ensure!(
+        url.scheme() == "https"
+            && url.host_str() == Some("github.com")
+            && url.port().is_none()
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none(),
+        "only public https://github.com repositories are supported"
+    );
+    let segments = url
+        .path_segments()
+        .context("GitHub repository URL has no path")?
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        segments.len() == 2,
+        "GitHub repository URL must identify owner/repository"
+    );
+    let repository = format!("{}/{}", segments[0], segments[1].trim_end_matches(".git"));
+    validate_github_repo(&repository)
+}
+
+fn resolve_github_commit_sha(repository: &str, requested_ref: &str) -> anyhow::Result<String> {
+    let mut endpoint = Url::parse("https://api.github.com/")?;
+    {
+        let mut segments = endpoint
+            .path_segments_mut()
+            .map_err(|_| anyhow::anyhow!("GitHub API URL cannot carry path segments"))?;
+        let mut repository_parts = repository.split('/');
+        segments.extend([
+            "repos",
+            repository_parts.next().unwrap_or_default(),
+            repository_parts.next().unwrap_or_default(),
+            "commits",
+            requested_ref,
+        ]);
+    }
+    let response = super::importer::fetch_url_guarded(endpoint.as_str())
+        .with_context(|| format!("failed to resolve GitHub ref `{requested_ref}`"))?;
+    let mut body = Vec::new();
+    response
+        .into_reader()
+        .take(1024 * 1024 + 1)
+        .read_to_end(&mut body)?;
+    anyhow::ensure!(
+        body.len() <= 1024 * 1024,
+        "GitHub commit response is too large"
+    );
+    let payload: Value = serde_json::from_slice(&body).context("invalid GitHub commit response")?;
+    let sha = payload
+        .get("sha")
+        .and_then(Value::as_str)
+        .context("GitHub commit response is missing sha")?;
+    anyhow::ensure!(
+        sha.len() == 40 && sha.chars().all(|character| character.is_ascii_hexdigit()),
+        "GitHub returned an invalid commit sha"
+    );
+    Ok(sha.to_ascii_lowercase())
+}
+
+fn materialize_desktop_folder_app_import_source(
+    root: &Path,
+    command_id: &str,
+    import_source: &Value,
+    source_root: &Path,
+) -> anyhow::Result<Value> {
+    let snapshot_id = import_source
+        .get("snapshot_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("desktop-folder import snapshot_id is required")?;
+    let files = import_source
+        .get("files")
+        .and_then(Value::as_array)
+        .context("desktop-folder import files are required")?;
+    anyhow::ensure!(!files.is_empty(), "desktop-folder import is empty");
+    anyhow::ensure!(
+        files.len() <= BUSINESS_OS_APP_IMPORT_MAX_FILES,
+        "desktop-folder import exceeds {} files",
+        BUSINESS_OS_APP_IMPORT_MAX_FILES
+    );
+    let mut seen = HashSet::new();
+    let mut file_manifest = Vec::with_capacity(files.len());
+    let mut total_bytes = 0_u64;
+    for file_ref in files {
+        let file_id = attachment_ref_string(file_ref, &["file_id", "fileId"])
+            .context("desktop-folder import file is missing file_id")?;
+        let generation_id = attachment_ref_string(file_ref, &["generation_id", "generationId"])
+            .context("desktop-folder import file is missing generation_id")?;
+        let relative_path = attachment_ref_string(file_ref, &["relative_path", "relativePath"])
+            .context("desktop-folder import file is missing relative_path")?;
+        let relative = PathBuf::from(&relative_path);
+        validate_app_import_relative_path(&relative)?;
+        anyhow::ensure!(
+            seen.insert(relative.clone()),
+            "duplicate app import path `{relative_path}`"
+        );
+        let mut verified_ref = file_ref.clone();
+        if let Some(sha) = file_ref.get("sha256").cloned() {
+            verified_ref["content_hash"] = sha;
+        }
+        let materialized = materialize_business_chat_attachment(
+            root,
+            command_id,
+            &verified_ref,
+            &file_id,
+            Some(&generation_id),
+        )?;
+        anyhow::ensure!(
+            materialized.size_bytes <= BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES,
+            "app import file `{relative_path}` exceeds {} bytes",
+            BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES
+        );
+        total_bytes = total_bytes.saturating_add(materialized.size_bytes);
+        anyhow::ensure!(
+            total_bytes <= BUSINESS_OS_APP_IMPORT_MAX_TOTAL_BYTES,
+            "app import exceeds {} total bytes",
+            BUSINESS_OS_APP_IMPORT_MAX_TOTAL_BYTES
+        );
+        let destination = source_root.join(&relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(&materialized.local_path, &destination)?;
+        file_manifest.push(serde_json::json!({
+            "file_id": file_id,
+            "generation_id": generation_id,
+            "relative_path": relative_path,
+            "sha256": materialized.content_hash,
+            "size_bytes": materialized.size_bytes
+        }));
+    }
+    file_manifest.sort_by(|left, right| {
+        left.get("relative_path")
+            .and_then(Value::as_str)
+            .cmp(&right.get("relative_path").and_then(Value::as_str))
+    });
+    let manifest_sha = format!("{:x}", Sha256::digest(serde_json::to_vec(&file_manifest)?));
+    Ok(serde_json::json!({
+        "kind": "desktop-folder",
+        "snapshot_id": snapshot_id,
+        "folder_name": import_source.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
+        "resolved_revision": format!("desktop-folder:{manifest_sha}"),
+        "manifest_sha256": manifest_sha,
+        "file_count": file_manifest.len(),
+        "total_bytes": total_bytes,
+        "files": file_manifest
+    }))
+}
+
+fn validate_app_import_relative_path(path: &Path) -> anyhow::Result<()> {
+    anyhow::ensure!(!path.is_absolute(), "app import path must be relative");
+    anyhow::ensure!(
+        path.to_string_lossy().len() <= 240,
+        "app import path is longer than 240 characters"
+    );
+    anyhow::ensure!(
+        path.components()
+            .all(|component| matches!(component, Component::Normal(_))),
+        "app import path contains traversal or non-normal components"
+    );
+    Ok(())
+}
+
+fn should_skip_app_import_path(path: &Path) -> bool {
+    let components = path
+        .components()
+        .filter_map(|component| component.as_os_str().to_str())
+        .map(|component| component.to_ascii_lowercase())
+        .collect::<Vec<_>>();
+    components.iter().any(|component| {
+        matches!(
+            component.as_str(),
+            ".git" | "node_modules" | "dist" | "build" | "out" | "coverage" | ".next" | ".cache"
+        )
+    }) || path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.ends_with(".lock") || name == "package-lock.json" || name.ends_with(".map")
+        })
+}
+
+fn business_os_app_import_prompt_block(manifest: &Value) -> anyhow::Result<String> {
+    let source_directory = manifest
+        .get("source_directory")
+        .and_then(Value::as_str)
+        .context("app import manifest has no source directory")?;
+    let revision = manifest
+        .get("resolved_revision")
+        .and_then(Value::as_str)
+        .context("app import manifest has no resolved revision")?;
+    Ok(format!(
+        "\nImported application source (immutable evidence):\n- source_directory: {source_directory}\n- source_kind: {}\n- resolved_revision: {revision}\n- manifest_sha256: {}\n- file_count: {}\n- total_bytes: {}\n\nPorting contract:\n- Treat source_directory as read-only evidence. Write only the requested runtime-installed module target.\n- Reimplement the complete user workflows as a functional Shell-V2 app; do not translate framework syntax mechanically.\n- The delivered app must have no QML, Quickshell, mpv, Python, shell, or original native runtime dependency.\n- Use shell-provided database handles for app-owned RxDB collections; do not import upstream rxdb or create an HTTP data bridge.\n- Browser media playback must use HTMLAudioElement with HTTPS streams. Filter or clearly mark HTTP-only streams; do not add an SSRF/media proxy.\n- Add deterministic fixtures for external APIs and audio, then run static validation and the real browser smoke before claiming completion.\n",
+        manifest.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
+        manifest.get("manifest_sha256").and_then(Value::as_str).unwrap_or(""),
+        manifest.get("file_count").and_then(Value::as_u64).unwrap_or(0),
+        manifest.get("total_bytes").and_then(Value::as_u64).unwrap_or(0),
+    ))
+}
+
 fn create_ctox_queue_task(
     root: &Path,
     command_id: &str,
@@ -21141,7 +21715,7 @@ fn create_ctox_queue_task(
     native_authorization: Option<&Value>,
 ) -> anyhow::Result<Option<channels::QueueTaskView>> {
     let attachments = materialize_business_chat_attachments(root, command_id, command)?;
-    let prompt_enrichment = cv_print_pdf_text_prompt_enrichment(root, command_id, command)?;
+    let prompt_enrichment = business_command_prompt_enrichment(root, command_id, command)?;
     let title = command_title(command);
     let prompt = command_prompt(
         command_id,
@@ -21162,7 +21736,17 @@ fn create_ctox_queue_task(
         .unwrap_or("normal")
         .to_string();
     let thread_key = command_queue_thread_key(command_id, command);
-    let workspace_root = business_os_command_workspace_root(root, command_id)?;
+    let workspace_root = if is_business_os_app_module_command(command) {
+        root.to_path_buf()
+    } else {
+        business_os_command_workspace_root(root, command_id)?
+    };
+    let import_source = command
+        .payload
+        .get("import_source")
+        .and_then(|source| source.get("kind"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let claimed = channels::claim_business_command_with_queue(
         root,
         business_command_core_claim_with_authorization(command_id, command, native_authorization)?,
@@ -21183,6 +21767,7 @@ fn create_ctox_queue_task(
                 "business_os_command_type": command.command_type,
                 "business_os_record_id": command.record_id,
                 "business_os_attachments": attachments,
+                "business_os_import_source_kind": import_source,
                 "client_context": policy_audit_client_context(command)
             })),
         },
@@ -21287,7 +21872,7 @@ pub(crate) fn rebuild_business_command_queue_prompt_for_task(
         origin: CommandOrigin::TrustedLocal,
     };
     let attachments = materialize_business_chat_attachments(root, command_id, &command)?;
-    let prompt_enrichment = cv_print_pdf_text_prompt_enrichment(root, command_id, &command)?;
+    let prompt_enrichment = business_command_prompt_enrichment(root, command_id, &command)?;
     Ok(Some(command_prompt(
         command_id,
         &command,
@@ -28269,6 +28854,40 @@ pub(super) mod tests {
         assert!(sanitize_git_ref("a/../b").is_err());
         assert_eq!(source_relative_subpath("/modules/x/").unwrap(), "modules/x");
         assert!(source_relative_subpath("../x").is_err());
+        assert_eq!(
+            github_repository_slug_from_url("https://github.com/AksharP5/omarchy-radio-atlas")
+                .unwrap(),
+            "AksharP5/omarchy-radio-atlas"
+        );
+        assert!(github_repository_slug_from_url("http://github.com/acme/widgets").is_err());
+        assert!(github_repository_slug_from_url("https://github.com/acme/widgets/issues").is_err());
+        assert!(github_repository_slug_from_url("https://example.com/acme/widgets").is_err());
+        assert!(validate_app_import_relative_path(Path::new("src/main.qml")).is_ok());
+        assert!(validate_app_import_relative_path(Path::new("../secrets")).is_err());
+        assert!(should_skip_app_import_path(Path::new(
+            "node_modules/react/index.js"
+        )));
+        assert!(!should_skip_app_import_path(Path::new(
+            "quickshell/main.qml"
+        )));
+    }
+
+    #[test]
+    fn app_import_prompt_requires_functional_shell_v2_porting() {
+        let prompt = business_os_app_import_prompt_block(&serde_json::json!({
+            "kind": "github",
+            "source_directory": "/tmp/source",
+            "resolved_revision": "0123456789012345678901234567890123456789",
+            "manifest_sha256": "abc",
+            "file_count": 12,
+            "total_bytes": 3456
+        }))
+        .unwrap();
+        assert!(prompt.contains("source_directory: /tmp/source"));
+        assert!(prompt.contains("functional Shell-V2 app"));
+        assert!(prompt.contains("QML, Quickshell, mpv, Python, shell"));
+        assert!(prompt.contains("HTMLAudioElement with HTTPS streams"));
+        assert!(prompt.contains("shell-provided database handles"));
     }
 
     #[test]

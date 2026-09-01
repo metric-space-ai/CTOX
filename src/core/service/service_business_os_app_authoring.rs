@@ -553,7 +553,73 @@ fn business_os_app_module_validation_feedback(
         }
     };
     if output.status.success() {
-        return Ok(None);
+        let import_source_kind = job
+            .queue_task_metadata
+            .get("business_os_import_source_kind")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if import_source_kind.is_empty() {
+            return Ok(None);
+        }
+        if let Err(err) = crate::business_os::store::write_module_catalog_projection_to_rxdb(root) {
+            return Ok(Some(render_business_os_app_module_validation_feedback(
+                job,
+                &target,
+                &format!("App catalog projection before browser smoke failed: {err:#}"),
+            )));
+        }
+        let smoke_args = vec!["--installed".to_string(), "--json".to_string()];
+        let smoke = match super::business_os_app_testing::run_business_os_app_smoke(
+            root,
+            &target.module_id,
+            &smoke_args,
+        ) {
+            Ok(output) => output,
+            Err(err) => {
+                return Ok(Some(render_business_os_app_module_validation_feedback(
+                    job,
+                    &target,
+                    &format!("Business OS app browser smoke could not run: {err:#}"),
+                )));
+            }
+        };
+        if smoke.status.success() {
+            let command_id = job
+                .queue_task_metadata
+                .get("business_os_command_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            if let Err(err) = crate::business_os::store::record_business_os_app_import_smoke_success(
+                root,
+                command_id,
+                &target.module_id,
+                &smoke.stdout,
+            ) {
+                return Ok(Some(render_business_os_app_module_validation_feedback(
+                    job,
+                    &target,
+                    &format!(
+                        "Business OS app browser smoke evidence could not be persisted: {err:#}"
+                    ),
+                )));
+            }
+            return Ok(None);
+        }
+        let stderr = String::from_utf8_lossy(&smoke.stderr).trim().to_string();
+        let stdout = String::from_utf8_lossy(&smoke.stdout).trim().to_string();
+        let report = if !stderr.is_empty() {
+            stderr
+        } else if !stdout.is_empty() {
+            stdout
+        } else {
+            format!(
+                "Business OS app browser smoke exited with status {} and no output.",
+                smoke.status
+            )
+        };
+        return Ok(Some(render_business_os_app_module_validation_feedback(
+            job, &target, &report,
+        )));
     }
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();

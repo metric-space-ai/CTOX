@@ -76,9 +76,12 @@
   white-space: nowrap;
 }
 
-.importer-module[data-imp-stage="review"] .imp-head-action[data-imp-install],
 .importer-module[data-imp-stage="done"] .imp-head-action[data-imp-open] {
   display: inline-flex;
+}
+
+.importer-module[data-imp-stage="done"] .imp-head-action[data-imp-open][hidden] {
+  display: none;
 }
 
 .importer-module [hidden] {
@@ -222,33 +225,89 @@
    blasser als die bereits erledigten Schritte - die Fortschrittsanzeige las
    sich rueckwaerts. */
 .importer-module[data-imp-stage="source"] [data-imp-step="source"],
-.importer-module[data-imp-stage="review"] [data-imp-step="review"],
+.importer-module[data-imp-stage="progress"] [data-imp-step="progress"],
 .importer-module[data-imp-stage="done"] [data-imp-step="done"] {
   background: var(--imp-accent-soft);
   color: var(--text);
 }
 
 .importer-module[data-imp-stage="source"] [data-imp-step="source"] > span:first-child,
-.importer-module[data-imp-stage="review"] [data-imp-step="review"] > span:first-child,
+.importer-module[data-imp-stage="progress"] [data-imp-step="progress"] > span:first-child,
 .importer-module[data-imp-stage="done"] [data-imp-step="done"] > span:first-child {
   border-color: var(--imp-accent);
   color: var(--text-strong, var(--text));
 }
 
-.importer-module[data-imp-stage="review"] [data-imp-step="source"] > span:first-child,
+.importer-module[data-imp-stage="progress"] [data-imp-step="source"] > span:first-child,
 .importer-module[data-imp-stage="done"] [data-imp-step="source"] > span:first-child,
-.importer-module[data-imp-stage="done"] [data-imp-step="review"] > span:first-child {
+.importer-module[data-imp-stage="done"] [data-imp-step="progress"] > span:first-child {
   border-color: var(--imp-accent);
   background: var(--imp-accent);
   color: var(--app-accent-foreground);
   font-size: 0;
 }
 
-.importer-module[data-imp-stage="review"] [data-imp-step="source"] > span:first-child::before,
+.importer-module[data-imp-stage="progress"] [data-imp-step="source"] > span:first-child::before,
 .importer-module[data-imp-stage="done"] [data-imp-step="source"] > span:first-child::before,
-.importer-module[data-imp-stage="done"] [data-imp-step="review"] > span:first-child::before {
+.importer-module[data-imp-stage="done"] [data-imp-step="progress"] > span:first-child::before {
   content: "✓";
   font-size: 12px;
+}
+
+.imp-job-phases {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.imp-job-phases li {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-muted);
+}
+
+.imp-job-phases li > span {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+}
+
+.imp-job-phases li.is-active {
+  border-color: var(--imp-accent);
+  background: var(--imp-accent-soft);
+  color: var(--text-strong, var(--text));
+}
+
+.imp-job-phases li.is-complete {
+  color: var(--imp-accent-strong);
+}
+
+.imp-job-phases li.is-complete > span {
+  border-color: var(--imp-accent);
+  background: var(--imp-accent);
+  color: var(--app-accent-foreground);
+  font-size: 0;
+}
+
+.imp-job-phases li.is-complete > span::before {
+  content: "✓";
+  font-size: 12px;
+}
+
+.imp-job-phases li.is-failed {
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 .imp-workspace {
