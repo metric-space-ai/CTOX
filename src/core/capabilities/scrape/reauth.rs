@@ -252,6 +252,7 @@ pub(super) fn emit_reauthorization_handoff(
     root: &Path,
     run_id: &str,
     thread_key: Option<&str>,
+    owner_user_id: Option<&str>,
     reauthorization: &Value,
 ) -> Option<Value> {
     let source_id = reauthorization.get("source_id")?.as_str()?.to_string();
@@ -271,7 +272,7 @@ pub(super) fn emit_reauthorization_handoff(
         &task_id,
         "scrape_executor",
         "ctox scrape execute",
-        None,
+        owner_user_id,
         !task_id.trim().is_empty(),
         true,
     ) {

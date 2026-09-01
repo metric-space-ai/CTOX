@@ -434,6 +434,73 @@ pub fn accept_rxdb_business_command(root: &Path, document: Value) -> anyhow::Res
     accept_rxdb_business_command_with_origin(root, document, CommandOrigin::TrustedLocal)
 }
 
+fn client_context_has_user_identity(client_context: &Value) -> bool {
+    let client_context = if let Value::String(value) = client_context {
+        serde_json::from_str(value).unwrap_or_else(|_| client_context.clone())
+    } else {
+        client_context.clone()
+    };
+    ["/actor/id", "/owner_user_id", "/user_id"]
+        .into_iter()
+        .any(|pointer| {
+            client_context
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty())
+        })
+}
+
+fn stamp_verified_session_identity(
+    root: &Path,
+    command: &mut BusinessCommand,
+    session: &BusinessOsSession,
+) {
+    if client_context_has_user_identity(&command.client_context) {
+        return;
+    }
+    let Some(owner_user_id) = session_user_id(session)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return;
+    };
+    let verified_email = rxdb_verified_identity_email(root, command, owner_user_id);
+    let display_name = verified_email
+        .as_deref()
+        .or_else(|| {
+            session
+                .user
+                .as_ref()
+                .map(|user| user.display_name.trim())
+                .filter(|value| !value.is_empty() && *value != "rxdb-command")
+        })
+        .unwrap_or(owner_user_id)
+        .to_string();
+    let mut client_context = if let Value::String(value) = &command.client_context {
+        serde_json::from_str(value).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        command.client_context.clone()
+    };
+    if !client_context.is_object() {
+        client_context = serde_json::json!({});
+    }
+    let object = client_context
+        .as_object_mut()
+        .expect("client context was normalized to an object");
+    object.insert(
+        "owner_user_id".to_string(),
+        Value::String(owner_user_id.to_string()),
+    );
+    object.insert(
+        "actor".to_string(),
+        serde_json::json!({
+            "id": owner_user_id,
+            "display_name": display_name,
+        }),
+    );
+    command.client_context = client_context;
+}
+
 /// Accept a Business OS command, tagging it with its trust [`CommandOrigin`].
 /// `ReplicatedPeer` commands (arriving over the WebRTC/RxDB data plane) cannot
 /// authorize a privileged role from the browser-asserted actor; identity/role
@@ -451,7 +518,7 @@ pub fn accept_rxdb_business_command_with_origin(
         .filter(|value| !value.is_empty())
         .context("business command id is required")?
         .to_string();
-    let command = BusinessCommand {
+    let mut command = BusinessCommand {
         origin,
         id: Some(command_id.clone()),
         module: document
@@ -475,6 +542,12 @@ pub fn accept_rxdb_business_command_with_origin(
             .cloned()
             .unwrap_or(Value::Null),
     };
+    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
+        && !client_context_has_user_identity(&command.client_context)
+    {
+        let session = rxdb_authenticated_session(root, &command)?;
+        stamp_verified_session_identity(root, &mut command, &session);
+    }
     let _command_timing_probe = install_command_timing_probe(&command);
     let native_authorization = recoverable_background_control_claim_authorization(root, &command);
     let control_claim = if is_rxdb_control_command_type(&command.command_type) {
@@ -1756,6 +1829,81 @@ mod tests {
     use std::collections::BTreeSet;
     use std::time::{Duration, Instant};
     use tempfile::tempdir;
+
+    #[test]
+    fn intake_stamps_missing_identity_and_preserves_existing_actor() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let owner_user_id = "michael.welsch@metric-space.ai";
+        let (capability_token, _) =
+            super::super::store::issue_business_os_capability_token_for_managed_user_with_email(
+                root.path(),
+                owner_user_id,
+                Some(owner_user_id),
+                "Michael Welsch",
+                "admin",
+                now_ms() as i64,
+            )?;
+        let accept = |command_id: &str, client_context: Value| {
+            accept_rxdb_business_command_with_origin(
+                root.path(),
+                serde_json::json!({
+                    "id": command_id,
+                    "command_id": command_id,
+                    "module": "research",
+                    "command_type": "business_os.chat.task",
+                    "payload": {
+                        "title": "Identity intake test",
+                        "instruction": "Verify the persisted command identity."
+                    },
+                    "client_context": client_context,
+                }),
+                CommandOrigin::ReplicatedPeer,
+            )
+        };
+        let load_context = |command_id: &str| -> anyhow::Result<Value> {
+            let conn = open_store(root.path())?;
+            let raw = conn.query_row(
+                "SELECT client_context_json FROM business_commands WHERE command_id = ?1",
+                params![command_id],
+                |row| row.get::<_, String>(0),
+            )?;
+            Ok(serde_json::from_str(&raw)?)
+        };
+
+        let missing_id = "cmd_missing_identity";
+        accept(
+            missing_id,
+            serde_json::json!({
+                "source": "business-os-chat",
+                "capability_token": capability_token,
+            }),
+        )?;
+        let stamped = load_context(missing_id)?;
+        assert_eq!(
+            stamped.get("owner_user_id").and_then(Value::as_str),
+            Some(owner_user_id)
+        );
+        assert_eq!(
+            stamped.pointer("/actor/id").and_then(Value::as_str),
+            Some(owner_user_id)
+        );
+        assert_eq!(
+            stamped
+                .pointer("/actor/display_name")
+                .and_then(Value::as_str),
+            Some(owner_user_id)
+        );
+
+        let existing_id = "cmd_existing_identity";
+        let existing_context = serde_json::json!({
+            "source": "business-os-chat",
+            "capability_token": capability_token,
+            "actor": { "id": owner_user_id, "display_name": "Existing User" }
+        });
+        accept(existing_id, existing_context.clone())?;
+        assert_eq!(load_context(existing_id)?, existing_context);
+        Ok(())
+    }
 
     fn rust_brace_depth_after(mut depth: usize, line: &str) -> usize {
         let mut quoted = false;

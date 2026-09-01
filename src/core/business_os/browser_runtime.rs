@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::OnceLock;
@@ -29,6 +29,12 @@ use crate::web_stack::spawn_persistent_browser;
 use crate::web_stack::PersistentBrowserHandle;
 use crate::web_stack::PersistentBrowserSpawn;
 
+const WEB_STACK_AUTH_SESSION_PREFIX: &str = "browser_session_web_stack_auth_";
+const DEFAULT_BROWSER_AUTH_SESSION_IDLE_MINUTES: u64 = 15;
+const CONTROLLER_LEASE_DURATION_MS: u64 = 120_000;
+const AUTOMATION_STOPPING: usize = 1usize << (usize::BITS - 1);
+const AUTOMATION_COUNT_MASK: usize = AUTOMATION_STOPPING - 1;
+
 /// One live browser process plus its viewport, guarded so only one request runs
 /// against the process at a time. The handle does blocking stdin/stdout IO, so
 /// every access happens inside `spawn_blocking`.
@@ -41,6 +47,8 @@ pub struct LiveBrowserSession {
     pub owner_user_id: String,
     pub root: PathBuf,
     last_input_seq: AtomicU64,
+    last_activity_ms: AtomicU64,
+    active_automation: AtomicUsize,
     clipboard: Mutex<Option<(String, Instant)>>,
 }
 
@@ -80,6 +88,7 @@ impl LiveBrowserSession {
 
     pub fn record_input_seq(&self, seq: u64) {
         self.last_input_seq.fetch_max(seq, Ordering::Relaxed);
+        self.note_activity();
     }
 
     pub fn last_input_seq(&self) -> u64 {
@@ -109,6 +118,82 @@ impl LiveBrowserSession {
             *clipboard = None;
         }
     }
+
+    fn note_activity(&self) {
+        self.last_activity_ms.fetch_max(
+            crate::business_os::store::now_ms() as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn idle_for_ms(&self, now_ms: u64) -> u64 {
+        now_ms.saturating_sub(self.last_activity_ms.load(Ordering::Relaxed))
+    }
+
+    fn has_active_automation(&self) -> bool {
+        self.active_automation.load(Ordering::Acquire) & AUTOMATION_COUNT_MASK > 0
+    }
+
+    fn try_mark_stopping(&self) -> bool {
+        self.active_automation
+            .compare_exchange(0, AUTOMATION_STOPPING, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn clear_stopping(&self) {
+        let _ = self.active_automation.compare_exchange(
+            AUTOMATION_STOPPING,
+            0,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+    }
+}
+
+struct BrowserAutomationGuard {
+    session: Arc<LiveBrowserSession>,
+    records_activity: bool,
+}
+
+impl BrowserAutomationGuard {
+    fn begin(session: Arc<LiveBrowserSession>, records_activity: bool) -> Result<Self> {
+        loop {
+            let state = session.active_automation.load(Ordering::Acquire);
+            anyhow::ensure!(
+                state & AUTOMATION_STOPPING == 0,
+                "browser session is stopping"
+            );
+            anyhow::ensure!(
+                state & AUTOMATION_COUNT_MASK < AUTOMATION_COUNT_MASK,
+                "browser session automation counter overflow"
+            );
+            if session
+                .active_automation
+                .compare_exchange_weak(state, state + 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
+        }
+        if records_activity {
+            session.note_activity();
+        }
+        Ok(Self {
+            session,
+            records_activity,
+        })
+    }
+}
+
+impl Drop for BrowserAutomationGuard {
+    fn drop(&mut self) {
+        if self.records_activity {
+            self.session.note_activity();
+        }
+        self.session
+            .active_automation
+            .fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// Process registry keyed by `session_id`.
@@ -124,6 +209,55 @@ static MANAGER: OnceLock<BrowserRuntimeManager> = OnceLock::new();
 /// maintenance loop.
 pub fn browser_runtime_manager() -> &'static BrowserRuntimeManager {
     MANAGER.get_or_init(BrowserRuntimeManager::new)
+}
+
+fn browser_auth_session_idle_minutes(root: &Path) -> u64 {
+    crate::inference::runtime_env::get_runtime_env_value(
+        root,
+        "CTOX_BROWSER_AUTH_SESSION_IDLE_MINUTES",
+    )
+    .and_then(|value| value.trim().parse::<u64>().ok())
+    .unwrap_or(DEFAULT_BROWSER_AUTH_SESSION_IDLE_MINUTES)
+    .clamp(2, 240)
+}
+
+fn browser_auth_session_should_stop(
+    idle_for_ms: u64,
+    idle_ttl: Duration,
+    has_active_controller_lease: bool,
+    has_active_automation: bool,
+) -> bool {
+    idle_for_ms >= idle_ttl.as_millis() as u64
+        && !has_active_controller_lease
+        && !has_active_automation
+}
+
+fn refresh_browser_auth_session_document_activity(
+    session: &LiveBrowserSession,
+    session_id: &str,
+    now_ms: u64,
+) -> Result<bool> {
+    let Some(document) = crate::business_os::store::load_rxdb_collection_record(
+        &session.root,
+        "browser_sessions",
+        session_id,
+    )?
+    else {
+        return Ok(false);
+    };
+    let lease_expires_at_ms = document
+        .get("controller_lease_expires_at_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let document_activity_ms = document
+        .pointer("/payload/last_command_created_at_ms")
+        .and_then(Value::as_u64)
+        .unwrap_or(0)
+        .max(lease_expires_at_ms.saturating_sub(CONTROLLER_LEASE_DURATION_MS));
+    session
+        .last_activity_ms
+        .fetch_max(document_activity_ms, Ordering::Relaxed);
+    Ok(lease_expires_at_ms > now_ms)
 }
 
 fn browser_profile_key(profile_owner: &str, session_id: &str, private_profile: bool) -> String {
@@ -174,45 +308,161 @@ impl BrowserRuntimeManager {
         }
     }
 
-    /// Remove runner handles whose process has already exited. A dead handle is
-    /// not a browser session and must not consume either runtime budget.
+    /// Remove runner handles whose process has exited and expire abandoned
+    /// web-stack authentication sessions. Neither kind may consume a runtime
+    /// budget slot after it is no longer usable.
     fn reap_exited_sessions(&self) -> Vec<String> {
-        let exited = {
-            let Ok(mut sessions) = self.sessions.lock() else {
-                return Vec::new();
+        let session_snapshot = self
+            .sessions
+            .lock()
+            .map(|sessions| {
+                sessions
+                    .iter()
+                    .map(|(session_id, session)| (session_id.clone(), Arc::clone(session)))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let now_ms = crate::business_os::store::now_ms() as u64;
+        let mut exited = Vec::new();
+        let mut idle = Vec::new();
+        for (session_id, session) in session_snapshot {
+            let running = match session.handle.lock() {
+                Ok(mut handle) => match handle.is_running() {
+                    Ok(running) => running,
+                    Err(err) => {
+                        eprintln!(
+                            "[business-os] browser session liveness check failed \
+                             session_id={session_id}: {err:#}"
+                        );
+                        false
+                    }
+                },
+                Err(_) => false,
             };
-            let exited = sessions
-                .iter()
-                .filter_map(|(session_id, session)| {
-                    let running = match session.handle.lock() {
-                        Ok(mut handle) => match handle.is_running() {
-                            Ok(running) => running,
-                            Err(err) => {
-                                eprintln!(
-                                    "[business-os] browser session liveness check failed \
-                                     session_id={session_id}: {err:#}"
-                                );
-                                false
-                            }
-                        },
-                        Err(_) => false,
-                    };
-                    (!running).then_some(session_id.clone())
-                })
-                .collect::<Vec<_>>();
-            for session_id in &exited {
-                sessions.remove(session_id);
+            if !running {
+                exited.push((session_id, session));
+                continue;
             }
-            exited
-        };
-        for session_id in &exited {
+            if !session_id.starts_with(WEB_STACK_AUTH_SESSION_PREFIX) {
+                continue;
+            }
+            let idle_minutes = browser_auth_session_idle_minutes(&session.root);
+            let idle_ttl = Duration::from_secs(idle_minutes.saturating_mul(60));
+            if session.idle_for_ms(now_ms) < idle_ttl.as_millis() as u64 {
+                continue;
+            }
+            let active_lease =
+                match refresh_browser_auth_session_document_activity(&session, &session_id, now_ms)
+                {
+                    Ok(active_lease) => active_lease,
+                    Err(err) => {
+                        eprintln!(
+                            "[business-os] browser auth session activity lookup failed \
+                             session_id={session_id}: {err:#}"
+                        );
+                        true
+                    }
+                };
+            let idle_for_ms = session.idle_for_ms(now_ms);
+            if browser_auth_session_should_stop(
+                idle_for_ms,
+                idle_ttl,
+                active_lease,
+                session.has_active_automation(),
+            ) {
+                idle.push((session_id, session, idle_for_ms / 60_000, idle_ttl));
+            }
+        }
+        let idle = idle
+            .into_iter()
+            .filter_map(|(session_id, session, _, idle_ttl)| {
+                let now_ms = crate::business_os::store::now_ms() as u64;
+                let active_lease = match refresh_browser_auth_session_document_activity(
+                    &session,
+                    &session_id,
+                    now_ms,
+                ) {
+                    Ok(active_lease) => active_lease,
+                    Err(err) => {
+                        eprintln!(
+                            "[business-os] browser auth session activity recheck failed \
+                             session_id={session_id}: {err:#}"
+                        );
+                        true
+                    }
+                };
+                let idle_for_ms = session.idle_for_ms(now_ms);
+                browser_auth_session_should_stop(
+                    idle_for_ms,
+                    idle_ttl,
+                    active_lease,
+                    session.has_active_automation(),
+                )
+                .then_some((session_id, session, idle_for_ms / 60_000, idle_ttl))
+            })
+            .collect::<Vec<_>>();
+        let mut reaped = Vec::new();
+        let mut expired = Vec::new();
+        if let Ok(mut sessions) = self.sessions.lock() {
+            for (session_id, session) in exited {
+                if sessions
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+                {
+                    sessions.remove(&session_id);
+                    reaped.push(session_id);
+                }
+            }
+            for (session_id, session, _, idle_ttl) in idle {
+                if !sessions
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session))
+                    || !session.try_mark_stopping()
+                {
+                    continue;
+                }
+                let now_ms = crate::business_os::store::now_ms() as u64;
+                let active_lease = match refresh_browser_auth_session_document_activity(
+                    &session,
+                    &session_id,
+                    now_ms,
+                ) {
+                    Ok(active_lease) => active_lease,
+                    Err(err) => {
+                        eprintln!(
+                            "[business-os] browser auth session final activity check failed \
+                             session_id={session_id}: {err:#}"
+                        );
+                        true
+                    }
+                };
+                let idle_for_ms = session.idle_for_ms(now_ms);
+                if browser_auth_session_should_stop(idle_for_ms, idle_ttl, active_lease, false) {
+                    sessions.remove(&session_id);
+                    expired.push((session_id, session, idle_for_ms / 60_000));
+                } else {
+                    session.clear_stopping();
+                }
+            }
+        }
+        for session_id in &reaped {
             self.record_crash(session_id);
             eprintln!(
                 "[business-os] reaped browser session without a live process \
                  session_id={session_id}"
             );
         }
-        exited
+        for (session_id, session, idle_for_minutes) in expired {
+            if let Ok(mut handle) = session.handle.lock() {
+                handle.shutdown();
+            }
+            self.clear_crash_history(&session_id);
+            eprintln!(
+                "[business-os] browser session stopped session_id={session_id} \
+                 gate=idle_ttl idle_minutes={idle_for_minutes}"
+            );
+        }
+        reaped
     }
 
     /// Return an existing process-backed session, if any.
@@ -403,6 +653,8 @@ impl BrowserRuntimeManager {
             owner_user_id: profile_owner.to_string(),
             root: session_root,
             last_input_seq: AtomicU64::new(0),
+            last_activity_ms: AtomicU64::new(crate::business_os::store::now_ms() as u64),
+            active_automation: AtomicUsize::new(0),
             clipboard: Mutex::new(None),
         });
         if let Ok(mut map) = self.sessions.lock() {
@@ -425,7 +677,9 @@ impl BrowserRuntimeManager {
     ) -> Result<Value> {
         let session = Arc::clone(session);
         let op = op.to_string();
+        let activity = BrowserAutomationGuard::begin(Arc::clone(&session), op != "screenshot")?;
         tokio::task::spawn_blocking(move || {
+            let _activity = activity;
             let mut handle = session
                 .handle
                 .lock()
@@ -448,7 +702,9 @@ impl BrowserRuntimeManager {
     ) -> Result<Value> {
         let session = Arc::clone(session);
         let op = op.to_string();
+        let activity = BrowserAutomationGuard::begin(Arc::clone(&session), true)?;
         tokio::task::spawn_blocking(move || {
+            let _activity = activity;
             let mut handle = session
                 .handle
                 .lock()
@@ -584,6 +840,37 @@ fn runner_command_line(pid: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn web_stack_auth_idle_ttl_requires_no_lease_or_automation() {
+        let ttl = Duration::from_secs(15 * 60);
+        let idle_for_ms = ttl.as_millis() as u64 + 1;
+
+        assert!(browser_auth_session_should_stop(
+            idle_for_ms,
+            ttl,
+            false,
+            false
+        ));
+        assert!(!browser_auth_session_should_stop(
+            idle_for_ms,
+            ttl,
+            true,
+            false
+        ));
+        assert!(!browser_auth_session_should_stop(
+            idle_for_ms,
+            ttl,
+            false,
+            true
+        ));
+        assert!(!browser_auth_session_should_stop(
+            ttl.as_millis() as u64 - 1,
+            ttl,
+            false,
+            false
+        ));
+    }
 
     #[test]
     fn web_stack_auth_sessions_use_source_scoped_profiles() {

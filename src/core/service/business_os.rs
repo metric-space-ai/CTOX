@@ -4604,7 +4604,13 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
                 .ok()
                 .flatten()
         })
-        .unwrap_or_else(|| source_module.to_string());
+        .unwrap_or_else(|| {
+            eprintln!(
+                "[business-os] auth assist owner unresolved source_module={} task={}",
+                source_module, requesting_task_id
+            );
+            source_module.to_string()
+        });
     let owner_user_id = resolved_owner_user_id.as_str();
     let source_slug = rxdb_id_slug(source_id);
     // Authentication state belongs to a user/source pair, not to one research
@@ -4838,13 +4844,62 @@ fn resolve_web_stack_auth_owner_user_id(
     args: &[String],
     requesting_task_id: &str,
 ) -> anyhow::Result<Option<String>> {
+    let env_owner = env::var("CTOX_OWNER_USER_ID").ok();
+    resolve_web_stack_auth_owner_user_id_with_env(
+        root,
+        args,
+        requesting_task_id,
+        env_owner.as_deref(),
+    )
+}
+
+fn resolve_web_stack_auth_owner_user_id_with_env(
+    root: &Path,
+    args: &[String],
+    requesting_task_id: &str,
+    env_owner_user_id: Option<&str>,
+) -> anyhow::Result<Option<String>> {
     if let Some(owner) = flag_value(args, "--owner-user-id")
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
         return Ok(Some(owner.to_string()));
     }
+    if let Some(owner) = env_owner_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(Some(owner.to_string()));
+    }
     web_stack_auth_owner_from_task(root, requesting_task_id)
+}
+
+fn web_stack_auth_owner_from_command_context(context: &serde_json::Value) -> Option<String> {
+    let parsed_client_context = match context.pointer("/command/client_context") {
+        Some(serde_json::Value::String(value)) => {
+            serde_json::from_str(value).unwrap_or(serde_json::Value::Null)
+        }
+        Some(client_context) => client_context.clone(),
+        None => serde_json::Value::Null,
+    };
+    ["/owner_user_id", "/actor/id", "/user_id"]
+        .into_iter()
+        .find_map(|pointer| {
+            parsed_client_context
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .or_else(|| {
+            context
+                .pointer("/command/payload/owner_user_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// Resolves the human owner behind a research task so browser auth sessions
@@ -4854,28 +4909,21 @@ fn web_stack_auth_owner_from_task(
     root: &Path,
     requesting_task_id: &str,
 ) -> anyhow::Result<Option<String>> {
-    if requesting_task_id.trim().is_empty() {
+    let requesting_task_id = requesting_task_id.trim();
+    if requesting_task_id.is_empty() {
         return Ok(None);
     }
-    let Some(context) =
-        channels::inspect_business_command_for_task(root, requesting_task_id.trim())?
-    else {
-        return Ok(None);
-    };
-    Ok([
-        "/command/client_context/actor/id",
-        "/command/client_context/actor/user_id",
-        "/command/payload/owner_user_id",
-    ]
-    .into_iter()
-    .find_map(|pointer| {
-        context
-            .pointer(pointer)
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_string)
-    }))
+    if let Some(context) = channels::inspect_business_command_for_task(root, requesting_task_id)? {
+        if let Some(owner) = web_stack_auth_owner_from_command_context(&context) {
+            return Ok(Some(owner));
+        }
+    }
+    if let Some(context) = channels::inspect_business_command(root, requesting_task_id)? {
+        if let Some(owner) = web_stack_auth_owner_from_command_context(&context) {
+            return Ok(Some(owner));
+        }
+    }
+    Ok(None)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6443,6 +6491,75 @@ mod tests {
     }
 
     #[test]
+    fn web_stack_auth_owner_resolution_prefers_flag_then_env_then_task() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let auth_assist = enqueue_web_stack_auth_assist_request(
+            root.path(),
+            "leadfeeder.com",
+            Some("https://app.leadfeeder.com/"),
+            Some("ctox-secret://credentials/LEADFEEDER_BROWSER_LOGIN"),
+            None,
+            None,
+            "owner-resolution-request",
+            "ctox_harness",
+            "ctox_web_auth_assist_request",
+            Some("task-owner"),
+            false,
+            true,
+        )?;
+        crate::business_os::store::deliver_business_command_outbox(root.path(), 16)?;
+        let task_id = auth_assist
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .context("auth-assist task id")?;
+        let command_id = auth_assist
+            .get("command_id")
+            .and_then(serde_json::Value::as_str)
+            .context("auth-assist command id")?;
+        let flag_args = vec!["--owner-user-id".to_string(), "flag-owner".to_string()];
+        assert_eq!(
+            resolve_web_stack_auth_owner_user_id_with_env(
+                root.path(),
+                &flag_args,
+                task_id,
+                Some("env-owner"),
+            )?
+            .as_deref(),
+            Some("flag-owner")
+        );
+        assert_eq!(
+            resolve_web_stack_auth_owner_user_id_with_env(
+                root.path(),
+                &[],
+                task_id,
+                Some("env-owner"),
+            )?
+            .as_deref(),
+            Some("env-owner")
+        );
+        assert_eq!(
+            resolve_web_stack_auth_owner_user_id_with_env(root.path(), &[], task_id, None)?
+                .as_deref(),
+            Some("task-owner")
+        );
+        assert_eq!(
+            resolve_web_stack_auth_owner_user_id_with_env(root.path(), &[], command_id, None)?
+                .as_deref(),
+            Some("task-owner")
+        );
+        assert_eq!(
+            resolve_web_stack_auth_owner_user_id_with_env(
+                root.path(),
+                &[],
+                "missing-task-or-command",
+                None,
+            )?,
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
     fn web_stack_auth_assist_reuses_active_task_across_request_ids() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
         let first = enqueue_web_stack_auth_assist_request(
@@ -6466,8 +6583,13 @@ mod tests {
             .context("first auth-assist task id")?;
         let owner_args = vec!["--task-id".to_string(), first_task_id.to_string()];
         assert_eq!(
-            resolve_web_stack_auth_owner_user_id(root.path(), &owner_args, first_task_id)?
-                .as_deref(),
+            resolve_web_stack_auth_owner_user_id_with_env(
+                root.path(),
+                &owner_args,
+                first_task_id,
+                None,
+            )?
+            .as_deref(),
             Some("user-a")
         );
         let second = enqueue_web_stack_auth_assist_request(

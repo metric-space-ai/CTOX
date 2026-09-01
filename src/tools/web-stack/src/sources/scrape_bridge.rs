@@ -131,13 +131,15 @@ pub fn run_via_runtime_target(
     allowed_fields: &[FieldKey],
     company: &str,
     country: Country,
+    owner_user_id: Option<&str>,
 ) -> ScrapeBridgeResult {
     let input = json!({
         "company": company,
         "country": country.as_iso(),
         "source_id": source_id,
     });
-    let output = Command::new(ctox_bin)
+    let mut command = Command::new(ctox_bin);
+    command
         .arg("scrape")
         .arg("execute")
         .arg("--target-key")
@@ -148,8 +150,14 @@ pub fn run_via_runtime_target(
         .arg("--input-json")
         .arg(input.to_string())
         .arg("--runtime-root")
-        .arg(root)
-        .output();
+        .arg(root);
+    if let Some(owner_user_id) = owner_user_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        command.arg("--owner-user-id").arg(owner_user_id);
+    }
+    let output = command.output();
     let output = match output {
         Ok(output) => output,
         Err(error) => {

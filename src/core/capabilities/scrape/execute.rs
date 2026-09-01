@@ -63,8 +63,11 @@ pub(crate) fn execute_scrape_with_outcome(
 ) -> Result<ScrapeExecutionOutcome> {
     let execution_started = Instant::now();
     let target_key = required_flag_value(args, "--target-key")
-        .context("usage: ctox scrape execute --target-key <key> [--trigger-kind <manual|scheduled|repair>] [--scheduled-for <iso>] [--timeout-seconds <n>] [--runtime-root <path>] [--allow-heal] [--input-json <text>] [--input-file <path>] [--thread-key <key>] [--queue-priority <urgent|high|normal|low>]")?;
+        .context("usage: ctox scrape execute --target-key <key> [--trigger-kind <manual|scheduled|repair>] [--scheduled-for <iso>] [--timeout-seconds <n>] [--runtime-root <path>] [--allow-heal] [--input-json <text>] [--input-file <path>] [--thread-key <key>] [--owner-user-id <id>] [--queue-priority <urgent|high|normal|low>]")?;
     let trigger_kind = find_flag_value(args, "--trigger-kind").unwrap_or("manual");
+    let owner_user_id = find_flag_value(args, "--owner-user-id")
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let timeout_seconds = find_flag_value(args, "--timeout-seconds")
         .map(|value| value.parse::<u64>())
         .transpose()
@@ -136,6 +139,7 @@ pub(crate) fn execute_scrape_with_outcome(
         &output_dir,
         timeout_seconds,
         input_json.as_deref(),
+        owner_user_id,
     )?;
     let payload = match parse_execution_payload(&execution.stdout_text) {
         Ok(value) => value,
@@ -246,6 +250,7 @@ pub(crate) fn execute_scrape_with_outcome(
                 root,
                 &run_id,
                 find_flag_value(args, "--thread-key"),
+                owner_user_id,
                 action,
             )
         })
@@ -431,6 +436,7 @@ pub(super) fn execute_registered_script(
     output_dir: &Path,
     timeout_seconds: u64,
     input_json: Option<&str>,
+    owner_user_id: Option<&str>,
 ) -> Result<CommandExecution> {
     let sources = target_sources(&target.view);
     let mut command_parts = target.script.entry_command.clone();
@@ -510,6 +516,9 @@ pub(super) fn execute_registered_script(
     }
     if let Some(text) = input_json {
         child.env("CTOX_SCRAPE_INPUT_JSON", text);
+    }
+    if let Some(owner_user_id) = owner_user_id {
+        child.env("CTOX_OWNER_USER_ID", owner_user_id);
     }
     child.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Own process group so a timeout kills the whole runner tree (node/bash plus

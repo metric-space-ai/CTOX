@@ -184,8 +184,13 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
         ))
         .spawn(move || {
             let _active_guard = active_guard;
-            let result =
-                panic::catch_unwind(AssertUnwindSafe(|| execute(&root, &worker_command.payload)));
+            let result = panic::catch_unwind(AssertUnwindSafe(|| {
+                execute(
+                    &root,
+                    &worker_command.payload,
+                    &worker_command.client_context,
+                )
+            }));
             let (persisted, lead_status, lead_error, lead_result) = match result {
                 Ok(Ok(outcome)) => {
                     let lead_result = outcome.clone();
@@ -833,7 +838,20 @@ fn safe_runtime_source_identifier(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
+fn execute(root: &Path, payload: &Value, client_context: &Value) -> anyhow::Result<Value> {
+    let parsed_client_context = match client_context {
+        Value::String(value) => serde_json::from_str(value).unwrap_or(Value::Null),
+        _ => client_context.clone(),
+    };
+    let owner_user_id = ["/owner_user_id", "/actor/id", "/user_id"]
+        .into_iter()
+        .find_map(|pointer| {
+            parsed_client_context
+                .pointer(pointer)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
     let request: PersonResearchCommandRequest = serde_json::from_value(payload.clone())
         .context("invalid web_stack.person_research payload")?;
     let company = request.company.trim();
@@ -930,6 +948,7 @@ fn execute(root: &Path, payload: &Value) -> anyhow::Result<Value> {
             &target_fields,
             company,
             country,
+            owner_user_id,
         );
         ctox_web_stack::person_research::merge_runtime_scrape_result(
             &mut result,
