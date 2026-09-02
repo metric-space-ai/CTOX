@@ -54,26 +54,38 @@ The command id stands in the assignment sentence. The payload carries:
 - **A step naming a source names a tool.** "Handelsregister", "Northdata", "Impressum", "LinkedIn/XING by name search" map to `ctox web search --source`, `ctox web read`, `ctox scrape execute --target-key`, or the login path in §4. `ctox web sources list --country <iso>` gives the registered source ids.
 - **The procedure can also demand behavior**, not just sources: two independent sources per field, no Google snippet as proof, mark conflicts instead of resolving them, no Sellify handover in this run. Those sentences are rules for you, not prose.
 
-## 2b. Reflect the app before you research (scraping store)
+## 2b. The app's agent areas (fixed contract — read these, nothing else)
 
-The app keeps more than the command payload: it deposits its procedure, its settings and its adapters in the **scraping area of the CTOX SQLite store**. Read that first — it is authoritative for every later turn, including a continuation after a login, where the original payload is out of reach.
+An app never explains itself to you through its source code, its UI or its collections. It deposits agent-facing information in exactly three defined places. Read those, and only those.
+
+**1. The assignment** — `ctox business-os commands inspect <command-id>`: everything that is specific to this run (§2).
+
+**2. The app policy target** — the standing procedure and settings, written by the app when the operator saves them:
 
 ```bash
-ctox scrape list-targets                                   # every target this instance knows
-ctox scrape show-target --target-key outbound-lead-generation-policy   # the app's procedure and settings
-ctox scrape show-target --target-key <source-target>       # per-source config: tier, country hints, access mode, heal mode
-ctox scrape show-api    --target-key <source-target>       # how to query what that target already collected
-ctox scrape show-latest --target-key <source-target> --limit 20
-ctox scrape query-records --target-key <source-target> --where field=value
-ctox web sources list --country <DE|AT|CH>                 # registered source modules, tier, credential requirement
-ctox web sources info --id <source-id>
+ctox scrape show-target --target-key outbound-lead-generation-policy
 ```
 
-- **`<app>-policy` target** (`target_kind = app-policy`, here `outbound-lead-generation-policy`): its `config` holds `research_instructions` (steps 0..x), `followup_instructions`, `fields`, `person_priorities`, `min_independent_sources` and `source_policy` (which sources the operator enabled, which are validation-only, which need a credential). When it exists, it is the same procedure the payload carries; when payload and target disagree, the **payload wins for this run** (it is the newer, per-assignment copy) and you say so in the chat.
-- **Per-source targets** carry the app's settings for that source: `tier`, `country_hints`, `access_mode`, `allowed_domains`, `challenge_detection`, `heal_mode`, `expected_min_records`. Respect them — a target with `access_mode: public_native_api` is queried through its API, not scraped by hand.
-- **Already collected records.** Before you scrape a source again, look at what it already holds (`show-latest`, `query-records`). A fresh record from an earlier lead is a legitimate source; a stale one is a hint where to look, not evidence.
-- **Missing adapter.** If a source in the procedure has no target, that is a finding: use browser or search for this lead, and say in the closing message that the source has no adapter. Register a target only when the source will recur (§4).
-- **Never write policy yourself.** `upsert-target`, `register-script` and `register-source-module` are for scraping adapters. The app's policy target is written by the app when the operator saves the procedure; you read it.
+Contract: `target_kind = app-policy`, `config.policy_contract = ctox.outbound.research_policy.v1`, and in `config`: `research_instructions` (steps 0..x), `followup_instructions`, `fields`, `person_priorities`, `min_independent_sources`, `source_policy` (enabled sources, validation-only sources, credential requirements), `policy_version`, `updated_at_ms`. Every app uses `<app-id>-policy`, so the same read works for another app's assignment.
+
+**3. The source targets** — one scrape target per source the app registered:
+
+```bash
+ctox scrape list-targets                       # which sources have an adapter at all
+ctox scrape show-target --target-key <source>  # tier, country_hints, access_mode, allowed_domains, challenge_detection, heal_mode
+ctox scrape show-api    --target-key <source>  # how to query what it already collected
+ctox scrape show-latest --target-key <source> --limit 20
+ctox web sources list --country <DE|AT|CH>     # registered source modules with tier and credential requirement
+```
+
+Rules for these three:
+
+- The assignment wins over the policy target when they differ (it is the newer, per-run copy); say so in the chat instead of silently choosing.
+- No policy target and no `research_instructions` in the assignment: work §5 as the fallback order and report that the procedure was missing. Never reconstruct one from the app's UI or code.
+- Respect a source target's settings: `access_mode: public_native_api` means query the API, not hand-scraping; `heal_mode` and `challenge_detection` decide what happens on drift or a block (§9).
+- Look at records a target already holds before scraping it again. A fresh record is a source; a stale one is a lead, not evidence.
+- A source named in the procedure without a target is a finding for the closing message, not a reason to stop.
+- You read these areas. Writing them is the app's job (policy) or an explicit adapter task (§4) — never a side effect of a research run.
 
 ## 3. The 32 fields
 
