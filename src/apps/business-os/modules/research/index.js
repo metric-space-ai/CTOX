@@ -12,7 +12,7 @@ import {
 // sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
 // ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
 // an index.css oder locales/ hochzaehlen.
-const BUILD = '20260902-research-sync-state-v95';
+const BUILD = '20260902-research-graph-stable-v96';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -1430,7 +1430,14 @@ async function loadDashboardData() {
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
   const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
-  const derivedMeasurementTable = tableForKey(base, 'derived_bearing_loads');
+  // Abgeleitete Kraefte/Momente: die Tabelle derived_propeller_load_points
+  // traegt Schub, Drehmoment und Leistung aus CT/CP (T = CT*rho*n^2*D^4,
+  // P = CP*rho*n^3*D^5, Q = P/(2*pi*n)). derived_bearing_loads ist seit der
+  // Quarantaene der Legacy-Ableitung (26.07.2026) leer; die Sicht zeigte
+  // deshalb 0 Zeilen, obwohl 3.925 verifizierte Ableitungen vorlagen
+  // (skf.ctox.dev, 02.09.2026).
+  const derivedMeasurementTable = tableForKey(base, 'derived_propeller_load_points')
+    || tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
   const graphEdgeTable = tableForKey(base, task.payload?.graph_contract?.edges_table_key || 'semantic_graph_edges') || firstTableMatching(base, /semantic.*graph.*edge|concept.*edge/i);
   const [candidateRows, sourceRows, curatedRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
@@ -2275,6 +2282,16 @@ function renderCenter() {
   }
   const projection = currentGraphProjection(task);
   const visibleStatus = visibleResearchStatus();
+  // Der Graph ueberlebt den Neuaufbau der Mittelspalte: jeder render() nach
+  // einem Realtime-Ereignis (Queue-Tick, Befehlsstatus, Notiz) schrieb den
+  // Mittelbereich per innerHTML neu und montierte die 3D-Szene von vorn -
+  // alle paar Sekunden ein neuer Aufbau, waehrend ein Lauf lief
+  // (skf.ctox.dev, 02.09.2026). Die bestehende Buehne wird ausgehaengt, in
+  // den neuen Rahmen zurueckgesetzt und nur bei geaenderter Projektion mit
+  // setData() aktualisiert.
+  const preserved = state.showDiagram && state.graphSurface && state.graphSurfaceTaskId === task.id
+    ? root.querySelector('[data-research-graph-host]')
+    : null;
   root.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band research-center-header">
       <div class="ctox-pane-title-row">
@@ -2331,9 +2348,38 @@ function renderCenter() {
       </section>
     </div>
   `;
-  if (state.showDiagram) scheduleResearchGraphMount(task, projection);
-  else disposeResearchGraph();
+  if (!state.showDiagram) {
+    disposeResearchGraph();
+  } else if (preserved) {
+    const placeholder = root.querySelector('[data-research-graph-host]');
+    if (placeholder) placeholder.replaceWith(preserved);
+    root.querySelector('[data-research-graph-loading]')?.remove();
+    const key = projection.fingerprint || graphProjectionKey(projection);
+    if (key !== state.graphSurfaceKey) {
+      state.graphSurfaceKey = key;
+      state.graphSurface.setData(projection);
+    }
+  } else {
+    scheduleResearchGraphMount(task, projection);
+  }
   restorePaneScroll(root, scrollState);
+}
+
+// Stabile Kennung einer Projektion fuer den In-Place-Vergleich: Knoten,
+// Kanten, Ebene und Detailstufe. Metriken oder Laufstatus aendern die Szene
+// nicht und loesen deshalb kein setData() aus.
+function graphProjectionKey(projection) {
+  const nodes = (projection.nodes || []).map((node) => `${node.id}:${node.size ?? ''}:${node.group ?? ''}`).join('|');
+  const links = (projection.links || []).map((link) => `${graphLinkNodeId(link.source)}>${graphLinkNodeId(link.target)}:${link.weight ?? ''}`).join('|');
+  return `${projection.layer || ''}#${projection.detailLevel || state.graph.detailLevel || ''}#${nodes.length}#${links.length}#${simpleHash(nodes)}#${simpleHash(links)}`;
+}
+
+function simpleHash(text) {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function renderSemanticGraph(task, projection) {
@@ -2562,6 +2608,7 @@ function refreshGraphProjectionInPlace() {
   const summary = center?.querySelector('[data-graph-summary]');
   if (summary) summary.innerHTML = graphSummary(projection.metrics);
   updateGraphInsights();
+  state.graphSurfaceKey = projection.fingerprint || graphProjectionKey(projection);
   state.graphSurface.setData(projection);
 }
 
@@ -2583,6 +2630,8 @@ async function scheduleResearchGraphMount(task, projection) {
     moduleUrl.search = new URL(import.meta.url).search;
     const graphModule = await import(moduleUrl.href);
     if (token !== state.graphMountToken || !host.isConnected || selectedTask()?.id !== task.id) return;
+    state.graphSurfaceTaskId = task.id;
+    state.graphSurfaceKey = projection.fingerprint || graphProjectionKey(projection);
     state.graphSurface = graphModule.createResearchGraph(host, {
       projection,
       dimensions: state.graph.dimensions,
@@ -2621,6 +2670,8 @@ function disposeResearchGraph() {
   state.graphMountToken += 1;
   state.graphSurface?.dispose?.();
   state.graphSurface = null;
+  state.graphSurfaceTaskId = '';
+  state.graphSurfaceKey = '';
 }
 
 function selectGraphNode(node) {
@@ -6407,6 +6458,7 @@ function setCollectionReadinessForTest(name, snapshot) {
 
 export const __researchTestHooks = {
   availableSubthemes,
+  graphProjectionKey,
   resolveRunStatus,
   countText,
   failureRetryDelay,
