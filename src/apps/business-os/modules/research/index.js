@@ -12,7 +12,7 @@ import {
 // sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
 // ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
 // an index.css oder locales/ hochzaehlen.
-const BUILD = '20260902-research-sync-state-v93';
+const BUILD = '20260902-research-sync-state-v94';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -5274,7 +5274,7 @@ function researchRunInfo(task) {
     : commandId
       ? state.queueTasks.find((item) => item.command_id === commandId)
       : null;
-  const status = queueTask?.status || command?.task_status || command?.status || run?.status || '';
+  const status = resolveRunStatus(queueTask, command, run);
   const statusKind = statusKindFor(status);
   return {
     run,
@@ -5292,6 +5292,20 @@ function researchRunInfo(task) {
     isActive: ['queued', 'running', 'accepted', 'blocked'].includes(statusKind),
     updatedLabel: relativeTime(queueTask?.updated_at_ms || command?.updated_at_ms || run?.updated_at_ms),
   };
+}
+
+// Die Queue-Projektion (ctox_queue_tasks) hinkt einem nativen Abbruch nach:
+// `ctox queue cancel` setzte den Befehl auf cancelled, die Projektion blieb
+// auf queued, und die Sicht hielt den Lauf fuer aktiv - "Research fortsetzen"
+// blieb gesperrt (skf.ctox.dev, 02.09.2026). Ein terminaler Befehlsstatus
+// ueberstimmt deshalb eine noch offene Projektion.
+function resolveRunStatus(queueTask, command, run) {
+  const queueStatus = queueTask?.status || '';
+  const commandStatus = command?.task_status || command?.status || '';
+  const terminalCommand = ['completed', 'failed', 'cancelled'].includes(statusKindFor(commandStatus));
+  const openQueue = ['queued', 'running', 'blocked'].includes(statusKindFor(queueStatus));
+  if (terminalCommand && openQueue) return commandStatus;
+  return queueStatus || commandStatus || run?.status || '';
 }
 
 function latestResearchCommandForTask(taskId) {
@@ -6381,6 +6395,7 @@ function setCollectionReadinessForTest(name, snapshot) {
 
 export const __researchTestHooks = {
   availableSubthemes,
+  resolveRunStatus,
   countText,
   failureRetryDelay,
   researchDataState,

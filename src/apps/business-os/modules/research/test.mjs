@@ -261,6 +261,14 @@ test('counts stay hidden until the first reload finished and retries back off af
   assert.equal(hooks.failureRetryDelay(9), 60000);
 });
 
+test('a terminal command status overrides a stale open queue projection', () => {
+  assert.equal(hooks.resolveRunStatus({ status: 'queued' }, { status: 'cancelled' }, { status: 'chat' }), 'cancelled');
+  assert.equal(hooks.resolveRunStatus({ status: 'pending' }, { status: 'failed' }, null), 'failed');
+  assert.equal(hooks.resolveRunStatus({ status: 'running' }, { status: 'accepted' }, null), 'running');
+  assert.equal(hooks.resolveRunStatus(null, { status: 'accepted' }, { status: 'chat' }), 'accepted');
+  assert.equal(hooks.resolveRunStatus(null, null, { status: 'chat' }), 'chat');
+});
+
 test('sub-theme chips only offer clusters that match a source in the current list', () => {
   const all = hooks.availableSubthemes([], 'all');
   assert.deepEqual(all.map((theme) => theme.id), ['all']);
