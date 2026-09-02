@@ -168,7 +168,7 @@ ctox business-os commands dispatch --json '{
 
 ### Validation rules the daemon enforces (get them right on the first attempt)
 
-- `field_status` covers **every requested field** with a terminal status; a missing or extra field is rejected.
+- `field_status` covers **every field of `payload.fields`** (normally all 32) with a terminal status; a missing or extra field is rejected. Reporting only the fields you worked on is not accepted — an untouched field is `no_match` (with its evidence) or keeps the status it had.
 - Every `field_status` entry is an object with `status`; `value` only for `verified`.
 - For a `verified` field the value in `result.fields.<field>.value` must be **identical** to `field_status.<field>.value` — same string, no reformatting, no added prefix.
 - Every populated `person_*` value, in `result.fields` and in `person_records`, needs the `person_key` of the person it belongs to. Keep the `person_key` from `known_person_records` for a Sellify person; invent a stable one only for a new person.

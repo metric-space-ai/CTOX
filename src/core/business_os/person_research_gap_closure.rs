@@ -418,7 +418,12 @@ pub(super) fn handle_research_writeback(
                     .context("gap task requested_fields must contain strings")
             })
             .collect::<anyhow::Result<Vec<_>>>()?,
-        None => request.field_status.keys().cloned().collect::<Vec<_>>(),
+        // Chat assignment: the field set is what the app asked for
+        // (`payload.fields` of the research command), not what the worker
+        // chose to report. Otherwise a worker could silently close a lead with
+        // a handful of fields (observed on thesen: 21 of 32).
+        None => research_command_requested_fields(root, &request.research_command_id)?
+            .unwrap_or_else(|| request.field_status.keys().cloned().collect::<Vec<_>>()),
     };
     anyhow::ensure!(
         !requested_fields.is_empty(),
@@ -534,6 +539,42 @@ fn load_gap_task_by_idempotency_key(
         .find(|task| {
             task.metadata.get("idempotency_key").and_then(Value::as_str) == Some(idempotency_key)
         }))
+}
+
+/// The canonical field set of a chat assignment: the app puts the requested
+/// field keys into `payload.fields` when it dispatches the research command.
+/// Returns `None` when the command carries no explicit field list, so the
+/// caller can fall back to what the worker reported.
+fn research_command_requested_fields(
+    root: &Path,
+    research_command_id: &str,
+) -> anyhow::Result<Option<Vec<String>>> {
+    let conn = store::open_store(root)?;
+    let payload_json: Option<String> = conn
+        .query_row(
+            "SELECT payload_json FROM business_commands WHERE command_id = ?1",
+            params![research_command_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(payload_json) = payload_json else {
+        return Ok(None);
+    };
+    let payload: Value = serde_json::from_str(&payload_json)?;
+    let fields = payload
+        .get("fields")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .filter(|fields| !fields.is_empty());
+    Ok(fields)
 }
 
 fn validate_original_research_command(
