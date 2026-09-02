@@ -1317,6 +1317,11 @@ const DEFAULT_AGENT_FAILURE_THRESHOLD: i64 = 2;
 const MAX_AGENT_FAILURE_THRESHOLD: i64 = 6;
 const REVIEW_FEEDBACK_SOURCE_LABEL: &str = "review-feedback";
 const OUTCOME_WITNESS_RECOVERY_SOURCE_LABEL: &str = "outcome-witness-recovery";
+const PERSON_RESEARCH_GAP_CLOSURE_MAX_RECOVERY_ROUNDS: usize = 3;
+const PERSON_RESEARCH_GAP_CLOSURE_METADATA_KEY: &str = "person_research_gap_closure";
+const PERSON_RESEARCH_GAP_CLOSURE_FIELD_STATUS_RELATIVE_PATH: &str =
+    "gap_closure/field_status.json";
+const PERSON_RESEARCH_GAP_CLOSURE_WRITEBACK_COMMAND: &str = "outbound.lead.research_writeback";
 const CHANNEL_ROUTER_SERIAL_LEASE_LIMIT: usize = 1;
 // router-4: defer the durable-queue idle lease only for the top inbound rank band
 // (founder/owner/admin/meeting-mention = source_label_dispatch_rank 4), so the
@@ -6531,7 +6536,7 @@ fn start_prompt_worker(
             } else {
                 CompletionReviewDisposition::None
             };
-            let review_disposition = match typed_result {
+            let mut review_disposition = match typed_result {
                 Ok(Some(task_id)) => {
                     if let Err(error) = record_typed_business_command_review(
                         &root,
@@ -6609,7 +6614,14 @@ fn start_prompt_worker(
                         app_validation_rework = false;
                         app_validation_terminal_failure = false;
                         let expected_artifact_refs = expected_outcome_artifacts_for_job(&job);
-                        let delivered_artifact_refs = match delivered_outcome_artifacts_for_job(
+                        let gap_closure_witness_feedback =
+                            match person_research_gap_closure_witness_feedback(&root, &job) {
+                                Ok(feedback) => feedback,
+                                Err(err) => Some(format!(
+                                    "Lückenschluss-Artefakt abgelehnt: der research_writeback-Nachweis konnte nicht gelesen werden: {err}"
+                                )),
+                            };
+                        let mut delivered_artifact_refs = match delivered_outcome_artifacts_for_job(
                             &root,
                             &job,
                             &expected_artifact_refs,
@@ -6623,6 +6635,23 @@ fn start_prompt_worker(
                                 Vec::new()
                             }
                         };
+                        if gap_closure_witness_feedback.is_some() {
+                            if let Some(path) = person_research_gap_closure_field_status_path(&job)
+                            {
+                                let path = path.to_string_lossy();
+                                delivered_artifact_refs.retain(|artifact| {
+                                    artifact.kind != ArtifactKind::WorkspaceFile
+                                        || artifact.primary_key.as_str() != path.as_ref()
+                                });
+                            } else {
+                                delivered_artifact_refs.retain(|artifact| {
+                                    artifact.kind != ArtifactKind::WorkspaceFile
+                                        || !artifact.primary_key.ends_with(
+                                            PERSON_RESEARCH_GAP_CLOSURE_FIELD_STATUS_RELATIVE_PATH,
+                                        )
+                                });
+                            }
+                        }
                         if !expected_artifact_refs.is_empty() {
                             push_event_locked(
                                 &mut shared,
@@ -6868,9 +6897,13 @@ fn start_prompt_worker(
                                     reviewed_terminal_proof_ids = proof_ids;
                                 }
                                 Err(err) => {
-                                    outcome_witness_error = Some(format!(
-                                        "Reviewed terminal proof rejected by core state machine: {err}"
-                                    ));
+                                    outcome_witness_error = Some(
+                                        gap_closure_witness_feedback.clone().unwrap_or_else(|| {
+                                            format!(
+                                                "Reviewed terminal proof rejected by core state machine: {err}"
+                                            )
+                                        }),
+                                    );
                                     should_handle_messages = false;
                                 }
                             }
@@ -7024,12 +7057,7 @@ fn start_prompt_worker(
                                 if job.ticket_self_work_id.is_none()
                                     && !job.leased_message_keys.is_empty()
                                     && job.outbound_email.is_none()
-                                    && should_queue_artifact_outcome_recovery(&job)
-                                    && outcome_witness_rejection_count(&root, &job)
-                                        .map(|count| {
-                                            count < review_checkpoint_requeue_block_threshold(&root)
-                                        })
-                                        .unwrap_or(true)
+                                    && outcome_witness_artifact_recovery_allowed(&root, &job)
                                 {
                                     let recovery =
                                         founder_send_error.as_ref().cloned().unwrap_or_else(|| {
@@ -7059,6 +7087,20 @@ fn start_prompt_worker(
                                         outbound_anchor: job.outbound_anchor.clone(),
                                     });
                                 }
+                            }
+                            if let Some(terminal_disposition) =
+                                person_research_gap_closure_terminal_disposition(&root, &job, err)
+                            {
+                                let CompletionReviewDisposition::TerminalQueueFailure { summary } =
+                                    &terminal_disposition
+                                else {
+                                    unreachable!(
+                                        "gap terminal disposition must be terminal failure"
+                                    )
+                                };
+                                founder_send_error = Some(summary.clone());
+                                outcome_recovery_prompt = None;
+                                review_disposition = terminal_disposition;
                             }
                         }
                         let completion_review_accepted = matches!(
@@ -8288,6 +8330,17 @@ fn start_prompt_worker(
                             }
                         }
                     }
+                }
+                if is_person_research_gap_closure_job(&job)
+                    && matches!(
+                        &review_disposition,
+                        CompletionReviewDisposition::TerminalQueueFailure { .. }
+                    )
+                {
+                    // Final suppression is deliberately adjacent to enqueue
+                    // selection so no later generic retry branch can recreate a
+                    // fourth gap-closure recovery task.
+                    outcome_recovery_prompt = None;
                 }
                 next_prompt = maybe_start_next_queued_prompt_after_recovery_locked(
                     &root,
@@ -10568,6 +10621,23 @@ fn cv_print_parse_dated_line(line: &str) -> Option<(String, String, String)> {
 fn chat_turn_session_options_for_queue_job(
     job: &QueuedPrompt,
 ) -> turn_loop::ChatTurnSessionOptions {
+    if is_person_research_gap_closure_job(job) {
+        return turn_loop::ChatTurnSessionOptions {
+            disable_mcp_servers: false,
+            enable_business_os_mcp: false,
+            business_os_mcp_command_session: None,
+            force_isolated_session: true,
+            base_instructions: None,
+            plain_prompt: false,
+            turn_timeout_secs_override: Some(3_600),
+            required_initial_tool: Some("update_plan".to_string()),
+            // `start_prompt_worker` passes this job's Phase-A workspace_root as
+            // the turn working directory and primary writable sandbox root.
+            additional_writable_roots: Vec::new(),
+            additional_readable_roots: Vec::new(),
+            worker_attempt: None,
+        };
+    }
     if is_systematic_research_job(job) {
         return turn_loop::ChatTurnSessionOptions {
             disable_mcp_servers: false,
@@ -12045,8 +12115,260 @@ fn xlsx_cell_text(cell: roxmltree::Node<'_, '_>, shared_strings: &[String]) -> S
     value.to_string()
 }
 
+fn person_research_gap_closure_metadata(job: &QueuedPrompt) -> Option<&Value> {
+    job.queue_task_metadata
+        .get(PERSON_RESEARCH_GAP_CLOSURE_METADATA_KEY)
+}
+
+fn is_person_research_gap_closure_job(job: &QueuedPrompt) -> bool {
+    person_research_gap_closure_metadata(job).is_some()
+}
+
+fn person_research_gap_closure_field_status_path(job: &QueuedPrompt) -> Option<PathBuf> {
+    let workspace = job
+        .workspace_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(Path::new(workspace).join(PERSON_RESEARCH_GAP_CLOSURE_FIELD_STATUS_RELATIVE_PATH))
+}
+
+fn person_research_gap_closure_requested_fields(job: &QueuedPrompt) -> Vec<String> {
+    person_research_gap_closure_metadata(job)
+        .map(|metadata| metadata_string_list(metadata, "requested_fields"))
+        .unwrap_or_default()
+}
+
+fn person_research_gap_closure_task_id(job: &QueuedPrompt) -> Option<&str> {
+    job.leased_message_keys
+        .first()
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn person_research_gap_closure_writeback_artifact_key(job: &QueuedPrompt) -> Option<String> {
+    let metadata = person_research_gap_closure_metadata(job)?;
+    let record_id = metadata_string(metadata, "record_id")?;
+    let task_id = person_research_gap_closure_task_id(job)?;
+    Some(format!(
+        "business-command:{PERSON_RESEARCH_GAP_CLOSURE_WRITEBACK_COMMAND}:{record_id}:{task_id}"
+    ))
+}
+
+fn person_research_gap_closure_open_fields(job: &QueuedPrompt) -> Vec<String> {
+    let Some(metadata) = person_research_gap_closure_metadata(job) else {
+        return Vec::new();
+    };
+    let open_fields = metadata_string_list(metadata, "open_fields");
+    if open_fields.is_empty() {
+        metadata_string_list(metadata, "requested_fields")
+    } else {
+        open_fields
+    }
+}
+
+fn person_research_gap_closure_terminal_failure_summary(
+    job: &QueuedPrompt,
+    feedback: &str,
+) -> String {
+    let open_fields = person_research_gap_closure_open_fields(job);
+    format!(
+        "Lückenschluss nach {} Runden unvollständig: {}. {}",
+        PERSON_RESEARCH_GAP_CLOSURE_MAX_RECOVERY_ROUNDS,
+        if open_fields.is_empty() {
+            "<unbekannt>".to_string()
+        } else {
+            open_fields.join(", ")
+        },
+        feedback.trim()
+    )
+}
+
+fn person_research_gap_closure_terminal_disposition(
+    root: &Path,
+    job: &QueuedPrompt,
+    feedback: &str,
+) -> Option<CompletionReviewDisposition> {
+    if !is_person_research_gap_closure_job(job)
+        || !outcome_witness_rejection_count(root, job)
+            .is_ok_and(|count| count >= PERSON_RESEARCH_GAP_CLOSURE_MAX_RECOVERY_ROUNDS)
+    {
+        return None;
+    }
+    Some(CompletionReviewDisposition::TerminalQueueFailure {
+        summary: person_research_gap_closure_terminal_failure_summary(job, feedback),
+    })
+}
+
+fn person_research_gap_closure_status_value<'a>(
+    field_status: &'a Value,
+    field: &str,
+) -> Option<&'a str> {
+    let statuses = field_status
+        .get("field_status")
+        .or_else(|| field_status.get("fields"))
+        .filter(|value| value.is_object())
+        .unwrap_or(field_status);
+    statuses.get(field).and_then(|value| {
+        value
+            .as_str()
+            .or_else(|| value.get("status").and_then(Value::as_str))
+    })
+}
+
+fn person_research_gap_closure_writeback_exists(
+    root: &Path,
+    record_id: &str,
+    task_id: &str,
+) -> Result<bool> {
+    let conn = crate::business_os::store::open_store(root)?;
+    let mut statement = conn.prepare(
+        "SELECT status, payload_json
+         FROM business_commands
+         WHERE command_type = ?1
+           AND status IN ('accepted', 'completed')
+         ORDER BY observed_at_ms DESC",
+    )?;
+    let rows = statement.query_map(
+        params![PERSON_RESEARCH_GAP_CLOSURE_WRITEBACK_COMMAND],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    for row in rows {
+        let (_status, payload_json) = row?;
+        let Ok(payload) = serde_json::from_str::<Value>(&payload_json) else {
+            continue;
+        };
+        if payload.get("record_id").and_then(Value::as_str) == Some(record_id)
+            && payload.get("gap_task_id").and_then(Value::as_str) == Some(task_id)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn person_research_gap_closure_witness_feedback(
+    root: &Path,
+    job: &QueuedPrompt,
+) -> Result<Option<String>> {
+    let Some(metadata) = person_research_gap_closure_metadata(job) else {
+        return Ok(None);
+    };
+    let requested_fields = person_research_gap_closure_requested_fields(job);
+    if requested_fields.is_empty() {
+        return Ok(Some(
+            "Lückenschluss-Artefakt abgelehnt: requested_fields ist leer oder fehlt.".to_string(),
+        ));
+    }
+    let Some(path) = person_research_gap_closure_field_status_path(job) else {
+        return Ok(Some(
+            "Lückenschluss-Artefakt abgelehnt: der Phase-A-Workspace fehlt; gap_closure/field_status.json kann nicht geprüft werden."
+                .to_string(),
+        ));
+    };
+    let field_status = match std::fs::read(&path) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                return Ok(Some(format!(
+                    "Lückenschluss-Artefakt abgelehnt: {} enthält kein gültiges JSON: {error}",
+                    path.display()
+                )))
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(Some(format!(
+                "Lückenschluss-Artefakt abgelehnt: {} fehlt; offene Felder: {}.",
+                path.display(),
+                requested_fields.join(", ")
+            )))
+        }
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()))
+        }
+    };
+    if !workspace_file_is_fresh_enough(&path, workspace_artifact_fresh_cutoff_for_job(root, job)) {
+        return Ok(Some(format!(
+            "Lückenschluss-Artefakt abgelehnt: {} ist nicht frisch für diese Recovery-Runde; offene Felder: {}.",
+            path.display(),
+            requested_fields.join(", ")
+        )));
+    }
+    let mut missing = Vec::new();
+    let mut invalid = Vec::new();
+    for field in &requested_fields {
+        match person_research_gap_closure_status_value(&field_status, field).map(str::trim) {
+            Some("verified" | "no_match" | "unsupported" | "action_required") => {}
+            Some(status) if !status.is_empty() => invalid.push(format!("{field} ({status})")),
+            _ => missing.push(field.clone()),
+        }
+    }
+    if !missing.is_empty() || !invalid.is_empty() {
+        let mut details = Vec::new();
+        if !missing.is_empty() {
+            details.push(format!("ohne terminalen Status: {}", missing.join(", ")));
+        }
+        if !invalid.is_empty() {
+            details.push(format!(
+                "unzulässiger Status (erlaubt: verified|no_match|unsupported|action_required): {}",
+                invalid.join(", ")
+            ));
+        }
+        return Ok(Some(format!(
+            "Lückenschluss-Artefakt abgelehnt: {}.",
+            details.join("; ")
+        )));
+    }
+    let record_id = metadata_string(metadata, "record_id").unwrap_or_default();
+    let Some(task_id) = person_research_gap_closure_task_id(job) else {
+        return Ok(Some(
+            "Lückenschluss-Artefakt abgelehnt: die Queue-Task-ID fehlt; research_writeback kann nicht zugeordnet werden."
+                .to_string(),
+        ));
+    };
+    if record_id.is_empty()
+        || !person_research_gap_closure_writeback_exists(root, &record_id, task_id)?
+    {
+        return Ok(Some(format!(
+            "Lückenschluss-Artefakt abgelehnt: kein research_writeback für Task {task_id} und Record {} angenommen oder abgeschlossen.",
+            if record_id.is_empty() {
+                "<fehlend>"
+            } else {
+                record_id.as_str()
+            }
+        )));
+    }
+    Ok(None)
+}
+
 fn expected_outcome_artifacts_for_job(job: &QueuedPrompt) -> Vec<ArtifactRef> {
     let mut refs = Vec::new();
+    if is_person_research_gap_closure_job(job) {
+        let path = person_research_gap_closure_field_status_path(job).unwrap_or_else(|| {
+            PathBuf::from("__ctox_missing_gap_closure_workspace__")
+                .join(PERSON_RESEARCH_GAP_CLOSURE_FIELD_STATUS_RELATIVE_PATH)
+        });
+        refs.push(ArtifactRef {
+            kind: ArtifactKind::WorkspaceFile,
+            primary_key: path.to_string_lossy().into_owned(),
+            expected_terminal_state: "fresh".to_string(),
+        });
+        refs.push(ArtifactRef {
+            kind: ArtifactKind::OutboundCommunication,
+            primary_key: person_research_gap_closure_writeback_artifact_key(job).unwrap_or_else(
+                || {
+                    format!(
+                        "business-command:{PERSON_RESEARCH_GAP_CLOSURE_WRITEBACK_COMMAND}:<missing>"
+                    )
+                },
+            ),
+            // A completed control command was accepted first; the lookup below
+            // admits both durable states while the core artifact vocabulary
+            // keeps the established terminal label `accepted`.
+            expected_terminal_state: "accepted".to_string(),
+        });
+    }
     if is_systematic_research_job(job) {
         if let Some(path) = systematic_research_validation_receipt_path(job) {
             refs.push(ArtifactRef {
@@ -12158,6 +12480,21 @@ fn delivered_outcome_artifacts_for_job(
             continue;
         }
         if expected.kind == ArtifactKind::OutboundCommunication {
+            if person_research_gap_closure_writeback_artifact_key(job).as_deref()
+                == Some(expected.primary_key.as_str())
+            {
+                let metadata = person_research_gap_closure_metadata(job)
+                    .expect("gap writeback artifact requires gap metadata");
+                let record_id = metadata_string(metadata, "record_id").unwrap_or_default();
+                let task_id = person_research_gap_closure_task_id(job).unwrap_or_default();
+                if !record_id.is_empty()
+                    && !task_id.is_empty()
+                    && person_research_gap_closure_writeback_exists(root, &record_id, task_id)?
+                {
+                    delivered.push(expected.clone());
+                }
+                continue;
+            }
             let Some((channel, thread_key)) = expected.primary_key.split_once(':') else {
                 continue;
             };
@@ -12498,6 +12835,7 @@ fn workspace_file_is_fresh_enough(path: &Path, cutoff: Option<SystemTime>) -> bo
 fn declared_workspace_file_artifacts_for_job(job: &QueuedPrompt) -> Vec<String> {
     if business_os_app_module_target_from_metadata(&job.queue_task_metadata).is_some()
         || is_systematic_research_job(job)
+        || is_person_research_gap_closure_job(job)
     {
         return Vec::new();
     }
@@ -13086,6 +13424,13 @@ fn outcome_witness_recovery_message(
     _approved_body: &str,
     err: &str,
 ) -> String {
+    if is_person_research_gap_closure_job(job) {
+        return format!(
+            "HARNESS FEEDBACK — PERSON RESEARCH GAP CLOSURE\nProblem: {}\n\nNEXT ACTION\n1. Setze denselben Lückenschluss im vorhandenen Phase-A-Workspace fort.\n2. Aktualisiere `gap_closure/field_status.json`, bis jedes requested_field exakt einen terminalen Status `verified|no_match|unsupported|action_required` hat.\n3. Persistiere jeden weiteren Versuch unter `gap_closure/attempts/<feld>/<n>.json`.\n4. Dispatch danach `outbound.lead.research_writeback` mit `payload.record_id` aus dem Vertrag und `payload.gap_task_id` gleich dieser Queue-Task-ID.\n5. Behandle die Aufgabe erst als abgeschlossen, wenn der Dispatch accepted oder completed ist.\n\nORIGINAL TASK\n{}",
+            clip_text(err, 1200),
+            clip_text(&job.prompt, 6000)
+        );
+    }
     let expected_file_artifacts = expected_outcome_artifacts_for_job(job)
         .into_iter()
         .filter(|artifact| artifact.kind == ArtifactKind::WorkspaceFile)
@@ -13185,9 +13530,17 @@ fn job_outcome_entity_id(job: &QueuedPrompt) -> String {
         .unwrap_or_else(|| format!("job:{}", channels::stable_digest(&job.source_label)))
 }
 
+fn outcome_witness_recovery_limit(root: &Path, job: &QueuedPrompt) -> usize {
+    if is_person_research_gap_closure_job(job) {
+        PERSON_RESEARCH_GAP_CLOSURE_MAX_RECOVERY_ROUNDS
+    } else {
+        review_checkpoint_requeue_block_threshold(root)
+    }
+}
+
 fn outcome_witness_retry_route_status(root: &Path, job: &QueuedPrompt) -> &'static str {
     match outcome_witness_rejection_count(root, job) {
-        Ok(count) if count >= review_checkpoint_requeue_block_threshold(root) => "failed",
+        Ok(count) if count >= outcome_witness_recovery_limit(root, job) => "failed",
         Ok(_) | Err(_) => "pending",
     }
 }
@@ -13197,10 +13550,13 @@ fn outcome_witness_retry_route_status_for_job(root: &Path, job: &QueuedPrompt) -
 }
 
 fn should_queue_artifact_outcome_recovery(job: &QueuedPrompt) -> bool {
-    if job.source_label == OUTCOME_WITNESS_RECOVERY_SOURCE_LABEL {
+    if business_os_app_module_target_from_metadata(&job.queue_task_metadata).is_some() {
         return false;
     }
-    if business_os_app_module_target_from_metadata(&job.queue_task_metadata).is_some() {
+    if is_person_research_gap_closure_job(job) {
+        return true;
+    }
+    if job.source_label == OUTCOME_WITNESS_RECOVERY_SOURCE_LABEL {
         return false;
     }
     if external_chat_channel_for_job(job).is_some() {
@@ -13220,8 +13576,15 @@ fn outcome_witness_outbound_recovery_requeue_allowed(root: &Path, job: &QueuedPr
         return false;
     }
     outcome_witness_rejection_count(root, job)
-        .map(|count| count < review_checkpoint_requeue_block_threshold(root))
+        .map(|count| count < outcome_witness_recovery_limit(root, job))
         .unwrap_or(true)
+}
+
+fn outcome_witness_artifact_recovery_allowed(root: &Path, job: &QueuedPrompt) -> bool {
+    should_queue_artifact_outcome_recovery(job)
+        && outcome_witness_rejection_count(root, job)
+            .map(|count| count < outcome_witness_recovery_limit(root, job))
+            .unwrap_or(true)
 }
 
 fn outcome_witness_rejection_count(root: &Path, job: &QueuedPrompt) -> Result<usize> {
@@ -22823,6 +23186,65 @@ mod tests {
         })
     }
 
+    fn person_research_gap_closure_test_job(workspace: &Path) -> QueuedPrompt {
+        QueuedPrompt {
+            queue_task_metadata: json!({
+                "person_research_gap_closure": {
+                    "lead_id": "lead-1",
+                    "record_id": "lead-1",
+                    "module": "outbound-lead-generation",
+                    "research_command_id": "research-1",
+                    "requested_fields": ["person_email", "person_phone"],
+                    "open_fields": ["person_email", "person_phone"]
+                }
+            }),
+            prompt: "Schließe die offenen Personenfelder und dispatch den Writeback.".to_string(),
+            goal: "Lückenschluss: Example GmbH".to_string(),
+            preview: "Lückenschluss".to_string(),
+            source_label: "queue".to_string(),
+            suggested_skill: Some("outbound-lead-generation-research".to_string()),
+            leased_message_keys: vec!["queue:person-gap-1".to_string()],
+            leased_ticket_event_keys: Vec::new(),
+            thread_key: Some("person-research-gap/lead-1".to_string()),
+            workspace_root: Some(workspace.to_string_lossy().into_owned()),
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        }
+    }
+
+    fn seed_person_research_gap_writeback(
+        root: &Path,
+        command_id: &str,
+        task_id: &str,
+        record_id: &str,
+        status: &str,
+    ) {
+        let conn = crate::business_os::store::open_store(root).expect("open Business OS store");
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, 'outbound-lead-generation', ?2, ?3, ?4, ?5, '{}', ?6)",
+            params![
+                command_id,
+                PERSON_RESEARCH_GAP_CLOSURE_WRITEBACK_COMMAND,
+                record_id,
+                status,
+                json!({
+                    "record_id": record_id,
+                    "gap_task_id": task_id,
+                    "field_status": {
+                        "person_email": {"status": "verified"},
+                        "person_phone": {"status": "no_match"}
+                    }
+                })
+                .to_string(),
+                chrono::Utc::now().timestamp_millis()
+            ],
+        )
+        .expect("seed research writeback");
+    }
+
     #[test]
     fn canonical_business_command_prompt_context_is_compact_and_non_redundant() {
         let repeated_instruction = "search bearings ".repeat(20_000);
@@ -30469,6 +30891,32 @@ Business OS command:
         ));
         assert!(prompt.contains("validation: ctox business-os app validate contracts --installed"));
         assert!(prompt.contains("tool_boundary: do not run ctox stop/start/upgrade"));
+    }
+
+    #[test]
+    fn person_research_gap_closure_queue_jobs_get_one_hour_turn_budget() {
+        let workspace = temp_root("person-research-gap-session-options");
+        let job = person_research_gap_closure_test_job(&workspace);
+
+        let options = chat_turn_session_options_for_queue_job(&job);
+
+        assert_eq!(options.turn_timeout_secs_override, Some(3_600));
+        assert_eq!(
+            options.required_initial_tool.as_deref(),
+            Some("update_plan")
+        );
+        assert!(options.force_isolated_session);
+        assert!(options.additional_writable_roots.is_empty());
+        assert!(options.additional_readable_roots.is_empty());
+
+        let mut ordinary = job;
+        ordinary.queue_task_metadata = Value::Null;
+        let ordinary_options = chat_turn_session_options_for_queue_job(&ordinary);
+        assert_eq!(ordinary_options.turn_timeout_secs_override, None);
+        assert_eq!(
+            ordinary_options.required_initial_tool.as_deref(),
+            Some("update_plan")
+        );
     }
 
     #[test]
@@ -42680,6 +43128,177 @@ Im Workspace muss synthesis/helper-run.json existieren."
         assert!(reply.contains("Ordner **CTOX** der Files-App"));
         assert!(reply.contains("**Spreadsheets**"));
         assert!(!reply.contains(root.path().to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn person_research_gap_witness_accepts_complete_status_and_writeback() {
+        for command_status in ["accepted", "completed"] {
+            let root = temp_root(&format!(
+                "person-research-gap-witness-complete-{command_status}"
+            ));
+            let workspace = root.join("phase-a");
+            let status_path =
+                workspace.join(PERSON_RESEARCH_GAP_CLOSURE_FIELD_STATUS_RELATIVE_PATH);
+            std::fs::create_dir_all(status_path.parent().expect("status parent"))
+                .expect("create gap closure directory");
+            std::fs::write(
+                &status_path,
+                json!({
+                    "person_email": {"status": "verified"},
+                    "person_phone": {"status": "no_match"}
+                })
+                .to_string(),
+            )
+            .expect("write field status");
+            let job = person_research_gap_closure_test_job(&workspace);
+            seed_person_research_gap_writeback(
+                &root,
+                &format!("writeback-{command_status}"),
+                "queue:person-gap-1",
+                "lead-1",
+                command_status,
+            );
+
+            assert_eq!(
+                person_research_gap_closure_witness_feedback(&root, &job)
+                    .expect("validate gap witness"),
+                None
+            );
+            let expected = expected_outcome_artifacts_for_job(&job);
+            assert!(expected.iter().any(|artifact| {
+                artifact.kind == ArtifactKind::WorkspaceFile
+                    && artifact.primary_key.as_str() == status_path.to_string_lossy().as_ref()
+                    && artifact.expected_terminal_state == "fresh"
+            }));
+            assert!(expected.iter().any(|artifact| {
+                artifact.kind == ArtifactKind::OutboundCommunication
+                    && artifact
+                        .primary_key
+                        .contains(PERSON_RESEARCH_GAP_CLOSURE_WRITEBACK_COMMAND)
+                    && artifact.primary_key.contains("queue:person-gap-1")
+                    && artifact.expected_terminal_state == "accepted"
+            }));
+            let delivered = delivered_outcome_artifacts_for_job(&root, &job, &expected)
+                .expect("inspect delivered gap artifacts");
+            let proof = enforce_job_outcome_witness(&root, &job, expected, delivered)
+                .expect("complete gap witness must pass")
+                .expect("gap witness proof");
+            assert!(proof.starts_with("ctp-"));
+        }
+    }
+
+    #[test]
+    fn person_research_gap_witness_rejects_missing_and_nonterminal_field_statuses() {
+        let root = temp_root("person-research-gap-witness-status-errors");
+        let workspace = root.join("phase-a");
+        let status_path = workspace.join(PERSON_RESEARCH_GAP_CLOSURE_FIELD_STATUS_RELATIVE_PATH);
+        let job = person_research_gap_closure_test_job(&workspace);
+
+        let missing_file = person_research_gap_closure_witness_feedback(&root, &job)
+            .expect("validate missing field status")
+            .expect("missing file feedback");
+        assert!(missing_file.contains("person_email, person_phone"));
+
+        std::fs::create_dir_all(status_path.parent().expect("status parent"))
+            .expect("create gap closure directory");
+        std::fs::write(
+            &status_path,
+            json!({"person_email": {"status": "verified"}}).to_string(),
+        )
+        .expect("write incomplete field status");
+        let missing_status = person_research_gap_closure_witness_feedback(&root, &job)
+            .expect("validate incomplete field status")
+            .expect("missing status feedback");
+        assert!(missing_status.contains("person_phone"));
+        assert!(missing_status.contains("ohne terminalen Status"));
+
+        std::fs::write(
+            &status_path,
+            json!({
+                "person_email": {"status": "verified"},
+                "person_phone": {"status": "pending"}
+            })
+            .to_string(),
+        )
+        .expect("write nonterminal field status");
+        let pending = person_research_gap_closure_witness_feedback(&root, &job)
+            .expect("validate pending field status")
+            .expect("pending status feedback");
+        assert!(pending.contains("person_phone (pending)"));
+        assert!(pending.contains("unzulässiger Status"));
+    }
+
+    #[test]
+    fn person_research_gap_witness_rejects_missing_writeback_for_task() {
+        let root = temp_root("person-research-gap-witness-writeback-missing");
+        let workspace = root.join("phase-a");
+        let status_path = workspace.join(PERSON_RESEARCH_GAP_CLOSURE_FIELD_STATUS_RELATIVE_PATH);
+        std::fs::create_dir_all(status_path.parent().expect("status parent"))
+            .expect("create gap closure directory");
+        std::fs::write(
+            &status_path,
+            json!({
+                "person_email": {"status": "verified"},
+                "person_phone": {"status": "unsupported"}
+            })
+            .to_string(),
+        )
+        .expect("write field status");
+        let job = person_research_gap_closure_test_job(&workspace);
+        seed_person_research_gap_writeback(
+            &root,
+            "writeback-for-other-task",
+            "queue:person-gap-other",
+            "lead-1",
+            "completed",
+        );
+
+        let feedback = person_research_gap_closure_witness_feedback(&root, &job)
+            .expect("validate missing task-bound writeback")
+            .expect("missing writeback feedback");
+
+        assert!(feedback.contains("kein research_writeback für Task queue:person-gap-1"));
+    }
+
+    #[test]
+    fn person_research_gap_witness_fails_terminally_after_third_rejection() {
+        let root = temp_root("person-research-gap-witness-recovery-limit");
+        let workspace = root.join("phase-a");
+        let job = person_research_gap_closure_test_job(&workspace);
+        let expected = expected_outcome_artifacts_for_job(&job);
+
+        for rejection in 1..=PERSON_RESEARCH_GAP_CLOSURE_MAX_RECOVERY_ROUNDS {
+            enforce_job_outcome_witness(&root, &job, expected.clone(), Vec::new())
+                .expect_err("missing gap witness must reject completion");
+            assert_eq!(
+                outcome_witness_rejection_count(&root, &job).unwrap(),
+                rejection
+            );
+            if rejection < PERSON_RESEARCH_GAP_CLOSURE_MAX_RECOVERY_ROUNDS {
+                assert_eq!(
+                    outcome_witness_retry_route_status_for_job(&root, &job),
+                    "pending"
+                );
+                assert!(outcome_witness_artifact_recovery_allowed(&root, &job));
+            }
+        }
+
+        assert_eq!(
+            outcome_witness_retry_route_status_for_job(&root, &job),
+            "failed"
+        );
+        assert!(!outcome_witness_artifact_recovery_allowed(&root, &job));
+        let disposition = person_research_gap_closure_terminal_disposition(
+            &root,
+            &job,
+            "kein research_writeback für Task queue:person-gap-1",
+        )
+        .expect("third rejection must become terminal queue failure");
+        let CompletionReviewDisposition::TerminalQueueFailure { summary } = disposition else {
+            panic!("third gap rejection did not become terminal queue failure");
+        };
+        assert!(summary
+            .starts_with("Lückenschluss nach 3 Runden unvollständig: person_email, person_phone"));
     }
 
     #[test]
