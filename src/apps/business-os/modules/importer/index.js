@@ -120,7 +120,8 @@ export function buildAppImportCommand({
     record_id: moduleId,
     dependencies,
     sync_collections: files.length ? ['desktop_files', 'desktop_file_chunks'] : [],
-    sync_flush_timeout_ms: 60_000,
+    sync_flush_timeout_ms: 15_000,
+    allow_dependency_delivery_lag: files.length > 0,
     payload: {
       title: `Import ${title}`,
       instruction: `Port the complete supplied application into a functional Shell-V2 Business OS app named ${title}. Preserve its user workflows rather than translating framework syntax.`,

@@ -88,7 +88,8 @@ test('GitHub import creates one durable harness command with the porting skill',
   assert.equal(command.command_id, 'app-import-omarchy-radio-atlas-42');
   assert.equal(command.command_type, 'ctox.business_os.app.create');
   assert.equal(command.payload.install_target, 'runtime-installed-module');
-  assert.equal(command.sync_flush_timeout_ms, 60_000);
+  assert.equal(command.sync_flush_timeout_ms, 15_000);
+  assert.equal(command.allow_dependency_delivery_lag, false);
   assert.deepEqual(command.payload.required_skills, ['business-os-app-module-development']);
   assert.deepEqual(command.payload.import_source, {
     kind: 'github',
@@ -111,6 +112,7 @@ test('folder imports declare exact RxDB dependencies', () => {
     },
   });
   assert.deepEqual(command.sync_collections, ['desktop_files', 'desktop_file_chunks']);
+  assert.equal(command.allow_dependency_delivery_lag, true);
   assert.deepEqual(command.dependencies, [{
     collection: 'desktop_files', record_id: 'file-1', generation_id: 'gen-1', content_hash: 'abc', required: true,
   }]);
