@@ -21410,8 +21410,13 @@ fn materialize_business_os_app_import_source(
         let manifest: Value = serde_json::from_slice(&fs::read(&marker_path)?)?;
         return Ok(Some(business_os_app_import_prompt_block(&manifest)?));
     }
+    let target_exists = runtime_app_starter_module_dir(root, &module_id).exists();
+    let command_has_durable_task = find_queue_task_for_command(root, command_id).is_some();
+    // App-authoring reserves the exact sandbox target before the first model
+    // turn. A retry of that same durable command must be allowed to restore a
+    // pruned source snapshot while preserving any partial module artifacts.
     anyhow::ensure!(
-        !runtime_app_starter_module_dir(root, &module_id).exists(),
+        !target_exists || command_has_durable_task,
         "Business OS app module `{module_id}` already exists; use an explicit modify command"
     );
 
