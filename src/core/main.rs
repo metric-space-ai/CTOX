@@ -177,6 +177,8 @@ INSTALL / UPGRADE
                                  reconcile durable CTOX queue state into Business OS projections
   ctox coding-agent status|providers|install|auth|workspace|session
                                  control desktop coding agents through a unified CLI
+  ctox workjet-transfer pack|apply
+                                 pack or apply network-free Git transfer artifacts
 
 ENGINE / GPU
   ctox doctor                    health check — update available? hints
@@ -716,6 +718,11 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
             service::business_os::handle_business_os_command(root, &args[1..])
         }
         Some("coding-agent") | Some("coding-agents") => coding_agents::handle_cli(root, &args[1..]),
+        Some("workjet-transfer") => {
+            let outcome = business_os::execute_workjet_transfer_git_cli(&args[1..])?;
+            println!("{}", serde_json::to_string_pretty(&outcome)?);
+            Ok(())
+        }
         Some("turn") => service::turn_ledger::handle_turn_command(root, &args[1..]),
         Some("harness-flow") => {
             service::harness_flow::handle_harness_flow_command(root, &args[1..])
