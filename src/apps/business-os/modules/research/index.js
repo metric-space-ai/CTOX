@@ -12,11 +12,14 @@ import {
 // sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
 // ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
 // an index.css oder locales/ hochzaehlen.
-const BUILD = '20260902-research-sync-state-v92';
+const BUILD = '20260902-research-sync-state-v93';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
-const COLLECTION_READ_TIMEOUT_MS = 10000;
+// 10 s reichten nicht, sobald Knowledge-Chunks (bis 256 KB je Dokument) den
+// selben WebRTC-Kanal fuellen: die Pflicht-Collections liefen dann in den
+// Timeout und die Sicht kippte in den Fehlerzustand (skf.ctox.dev, 02.09.2026).
+const COLLECTION_READ_TIMEOUT_MS = 30000;
 const POST_SYNC_REFRESH_LIMIT = 1;
 const KNOWLEDGE_TABLE_EMPTY_RETRY_DELAYS_MS = Object.freeze([250, 750, 1500]);
 const RESEARCH_COLLECTIONS = Object.freeze([
@@ -835,8 +838,14 @@ function scheduleFailureRetry(mountToken = state.mountToken) {
 // Knowledge-Collection ist nicht bereit) oder "ready". Zahlen werden nur im
 // Zustand "ready" gezeigt - eine "0" waehrend der Synchronisation las sich als
 // leere Knowledge Base.
+// Ein Lesefehler bei vorhandenen lokalen Daten ist eine verzoegerte
+// Aktualisierung, kein Datenverlust: die Sicht bleibt auf dem letzten Stand.
+function hasLocalResearchData() {
+  return state.tasks.length > 0 && state.knowledgeBases.length > 0;
+}
+
 function researchDataState() {
-  if (diagnosticFailures().length) return 'failed';
+  if (diagnosticFailures().length && !hasLocalResearchData()) return 'failed';
   // Nur der allererste Reload zaehlt: jeder spaetere Reload setzt
   // reloadFinishedAt zurueck, und die Sicht wuerde bei jeder Hintergrund-
   // Aktualisierung von Zahlen auf Auslassungszeichen springen.
@@ -5678,6 +5687,9 @@ function reloadStatusText() {
   const failures = diagnosticFailures();
   if (failures.length) {
     const seconds = Math.max(1, Math.round((state.diagnostics.failureRetryAt - Date.now()) / 1000));
+    if (hasLocalResearchData()) {
+      return state.t('researchRefreshDelayed', `Aktualisierung verzögert – neuer Versuch in ${seconds} s`, seconds);
+    }
     return state.diagnostics.failureRetryAt
       ? state.t('researchSyncRetry', `Synchronisation gestört – neuer Versuch in ${seconds} s`, seconds)
       : state.t('researchUnavailableTitle', 'Research ist gerade nicht verfügbar');

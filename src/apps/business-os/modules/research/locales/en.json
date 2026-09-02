@@ -170,5 +170,6 @@
   "taskSourcesUnavailable": "sources unavailable",
   "taskSourcesSyncing": "syncing sources …",
   "verifiedSources": "verified sources",
-  "noKnowledgeYet": "no knowledge base yet"
+  "noKnowledgeYet": "no knowledge base yet",
+  "researchRefreshDelayed": "Refresh delayed – retrying in {0} s"
 }

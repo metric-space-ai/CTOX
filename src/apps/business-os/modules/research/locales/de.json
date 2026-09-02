@@ -170,5 +170,6 @@
   "taskSourcesUnavailable": "Quellen nicht verfügbar",
   "taskSourcesSyncing": "Quellen werden synchronisiert …",
   "verifiedSources": "verifizierte Quellen",
-  "noKnowledgeYet": "noch keine Knowledge Base"
+  "noKnowledgeYet": "noch keine Knowledge Base",
+  "researchRefreshDelayed": "Aktualisierung verzögert – neuer Versuch in {0} s"
 }
