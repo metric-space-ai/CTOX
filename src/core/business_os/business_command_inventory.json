@@ -70,6 +70,8 @@
     "ctox.workjet.session.delete",
     "ctox.workjet.session.list",
     "ctox.workjet.session.transfer.abort",
+    "ctox.workjet.session.transfer.pack_complete",
+    "ctox.workjet.session.transfer.pause_ack",
     "ctox.workjet.session.transfer.start",
     "ctox.workjet.session.transfer.status",
     "ctox.workjet.working_copy.upsert",
