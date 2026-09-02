@@ -8,11 +8,18 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260728-research-knowledge-usability-v88';
+// Modul-eigener Stempel: er bustet index.css und die Locale-Dateien, die
+// sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
+// ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
+// an index.css oder locales/ hochzaehlen.
+const BUILD = '20260902-research-graph-stable-v96';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
-const COLLECTION_READ_TIMEOUT_MS = 10000;
+// 10 s reichten nicht, sobald Knowledge-Chunks (bis 256 KB je Dokument) den
+// selben WebRTC-Kanal fuellen: die Pflicht-Collections liefen dann in den
+// Timeout und die Sicht kippte in den Fehlerzustand (skf.ctox.dev, 02.09.2026).
+const COLLECTION_READ_TIMEOUT_MS = 30000;
 const POST_SYNC_REFRESH_LIMIT = 1;
 const KNOWLEDGE_TABLE_EMPTY_RETRY_DELAYS_MS = Object.freeze([250, 750, 1500]);
 const RESEARCH_COLLECTIONS = Object.freeze([
@@ -428,6 +435,9 @@ const state = {
     reloadFinishedAt: 0,
     reloadCount: 0,
     postSyncRefreshes: 0,
+    failureRetries: 0,
+    failureRetryAt: 0,
+    loadedOnce: false,
   },
   initialDataReady: false,
   readiness: {},
@@ -455,7 +465,7 @@ export async function mount(ctx) {
   state.initialDataReady = false;
 
   // Load dynamic translations
-  const messages = await loadModuleMessages(import.meta.url, ctx.locale, {});
+  const messages = await loadResearchMessages(ctx.locale);
   state.t = (key, fallback, ...args) => {
     let val = messages[key] ?? fallback ?? key;
     if (args.length) {
@@ -563,6 +573,34 @@ async function startResearchCollections(mountToken) {
           await waitForReplicationBridge(bridge, collection);
         }
       }
+      markCollectionDiagnostic(collection, 'sync', 'ok', state.t('syncReady', 'Sync bereit'));
+    } catch (error) {
+      markCollectionDiagnostic(collection, 'sync', 'failed', errorMessage(error));
+    }
+  }));
+}
+
+// Die Sync-Phase wurde nur beim Mount bewertet: lief die Erstreplikation einer
+// Pflicht-Collection laenger als 20 s (Daemon mit Recherche-Worker beschaeftigt),
+// blieb "data sync did not become ready in time" fuer die ganze Sitzung stehen,
+// obwohl die Daten laengst lokal lesbar waren (skf.ctox.dev, 02.09.2026).
+// Jeder Reload prueft gescheiterte Collections erneut: erst ueber den
+// Readiness-Schnappschuss der Shell, sonst ueber die Bridge selbst.
+async function reprobeFailedSyncCollections(mountToken = state.mountToken) {
+  const failed = RESEARCH_REQUIRED_COLLECTIONS.filter(
+    (collection) => state.diagnostics.collections[collection]?.sync?.kind === 'failed',
+  );
+  if (!failed.length) return;
+  await Promise.all(failed.map(async (collection) => {
+    if (collectionReadiness(collection)?.ready === true) {
+      markCollectionDiagnostic(collection, 'sync', 'ok', state.t('syncReady', 'Sync bereit'));
+      return;
+    }
+    if (typeof state.ctx?.sync?.startCollection !== 'function' || RESEARCH_DEMAND_ONLY_COLLECTIONS.has(collection)) return;
+    try {
+      const bridge = await state.ctx.sync.startCollection(collection);
+      if (mountToken && state.mountToken !== mountToken) return;
+      if (bridge) await waitForReplicationBridge(bridge, collection);
       markCollectionDiagnostic(collection, 'sync', 'ok', state.t('syncReady', 'Sync bereit'));
     } catch (error) {
       markCollectionDiagnostic(collection, 'sync', 'failed', errorMessage(error));
@@ -745,6 +783,8 @@ async function refreshAllNow({ seed = false, retryEmptyKnowledge = true, mountTo
   state.diagnostics.reloadFinishedAt = 0;
   state.diagnostics.reloadCount += 1;
   setStatus(state.t('loadingKnowledge', 'Knowledge wird geladen...'));
+  await reprobeFailedSyncCollections(mountToken);
+  if (mountToken && state.mountToken !== mountToken) return;
   await loadLocalState({ mountToken });
   if (mountToken && state.mountToken !== mountToken) return;
   const knowledgeBases = await loadKnowledgeBases({
@@ -760,10 +800,64 @@ async function refreshAllNow({ seed = false, retryEmptyKnowledge = true, mountTo
   }
   await loadDashboardData();
   if (mountToken && state.mountToken !== mountToken) return;
+  state.diagnostics.reloadFinishedAt = Date.now();
+  state.diagnostics.loadedOnce = true;
+  scheduleFailureRetry(mountToken);
   render();
   refreshOpenTaskDialogDomainOptions();
-  state.diagnostics.reloadFinishedAt = Date.now();
   setStatus(reloadStatusText());
+}
+
+// Ein Sync- oder Lesefehler (Timeout beim Demand-Fetch, Bridge nicht bereit)
+// blieb bisher als "Research ist gerade nicht verfuegbar" stehen, bis jemand
+// "Daten neu laden" drueckte - und die Sicht zeigte solange ueberall 0
+// (skf.ctox.dev, 02.09.2026). Ein gestoerter Reload plant jetzt selbst den
+// naechsten Versuch: 5 s, 10 s, 20 s, 40 s, dann jede Minute.
+const FAILURE_RETRY_BASE_MS = 5000;
+const FAILURE_RETRY_MAX_MS = 60000;
+
+function failureRetryDelay(attempt) {
+  return Math.min(FAILURE_RETRY_MAX_MS, FAILURE_RETRY_BASE_MS * (2 ** Math.max(0, attempt)));
+}
+
+function scheduleFailureRetry(mountToken = state.mountToken) {
+  if (!diagnosticFailures().length) {
+    state.diagnostics.failureRetries = 0;
+    state.diagnostics.failureRetryAt = 0;
+    return;
+  }
+  if (!mountToken || state.mountToken !== mountToken) return;
+  const delay = failureRetryDelay(state.diagnostics.failureRetries);
+  state.diagnostics.failureRetries += 1;
+  state.diagnostics.failureRetryAt = Date.now() + delay;
+  queueKnowledgeRefreshAfter(delay);
+}
+
+// Der Datenzustand des Moduls in einem Wort: "failed" (eine Pflicht-Collection
+// meldet einen Fehler), "syncing" (noch kein abgeschlossener Reload oder die
+// Knowledge-Collection ist nicht bereit) oder "ready". Zahlen werden nur im
+// Zustand "ready" gezeigt - eine "0" waehrend der Synchronisation las sich als
+// leere Knowledge Base.
+// Ein Lesefehler bei vorhandenen lokalen Daten ist eine verzoegerte
+// Aktualisierung, kein Datenverlust: die Sicht bleibt auf dem letzten Stand.
+function hasLocalResearchData() {
+  return state.tasks.length > 0 && state.knowledgeBases.length > 0;
+}
+
+function researchDataState() {
+  if (diagnosticFailures().length && !hasLocalResearchData()) return 'failed';
+  // Nur der allererste Reload zaehlt: jeder spaetere Reload setzt
+  // reloadFinishedAt zurueck, und die Sicht wuerde bei jeder Hintergrund-
+  // Aktualisierung von Zahlen auf Auslassungszeichen springen.
+  if (!state.diagnostics.loadedOnce) return 'syncing';
+  const readiness = collectionReadiness('knowledge_tables');
+  if (readiness && readiness.ready === false && !state.knowledgeBases.length) return 'syncing';
+  return 'ready';
+}
+
+function countText(value) {
+  if (researchDataState() !== 'ready') return '…';
+  return Number(value || 0).toLocaleString(state.lang === 'de' ? 'de-DE' : 'en-US');
 }
 
 async function loadLocalState({ mountToken = null } = {}) {
@@ -838,6 +932,18 @@ function wireReadiness() {
       const becameReady = wasReady === false && snapshot.ready === true;
       wasReady = snapshot.ready === true;
       state.readiness[name] = snapshot;
+      // Die Sync-Phase beim Mount wartet hoechstens 20 s auf die Bridge; laeuft
+      // parallel der Knowledge-Fetch (bis 80 MB je Domain), verpasst sie das
+      // "in sync" regelmaessig. Sobald die Shell die Collection bereit meldet,
+      // ist der Mount-Fehler erledigt - ohne auf den naechsten Reload zu warten.
+      if (snapshot.ready === true && state.diagnostics.collections[name]?.sync?.kind === 'failed') {
+        markCollectionDiagnostic(name, 'sync', 'ok', state.t('syncReady', 'Sync bereit'));
+        if (!diagnosticFailures().length) {
+          state.diagnostics.failureRetries = 0;
+          state.diagnostics.failureRetryAt = 0;
+          setStatus(reloadStatusText());
+        }
+      }
       if (becameReady) scheduleKnowledgeRefresh(250);
       render();
     });
@@ -912,15 +1018,42 @@ function queueKnowledgeRefreshAfter(delay) {
 }
 
 function isVisibleResearchTask(task) {
+  if (isDeletedResearchTask(task)) return false;
   if (/^outbound(?:_|$)/.test(String(task.knowledge_domain || ''))) return false;
   if (!task?.payload?.seeded_from_knowledge) return true;
   const base = state.knowledgeBases.find((item) => item.domain === task.knowledge_domain);
   return Boolean(base && isResearchKnowledgeBase(base));
 }
 
+// Ein geloeschter Task (Soft-Delete aus dem Modul oder RxDB-Tombstone) ist
+// kein Lineage-Kandidat: gruppiert nach knowledge_domain gewann sonst der
+// zuletzt aktualisierte, aber geloeschte Task ueber die lebenden Tasks seiner
+// Domain und stand mit fremdem Titel und fremdem Lauf als aktiv in der Liste
+// (Befund skf.ctox.dev, 02.09.2026).
+// Locale-Dateien mit dem Modul-Stempel laden: `loadModuleMessages` haengt
+// keinen Cache-Buster an, und der Shell-Proxy cacht `locales/*.json` am Edge.
+async function loadResearchMessages(locale) {
+  const lang = locale === 'en' ? 'en' : 'de';
+  try {
+    const url = new URL(`locales/${lang}.json`, new URL('./', import.meta.url));
+    url.searchParams.set('v', BUILD);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return await response.json();
+  } catch {
+    return loadModuleMessages(import.meta.url, locale, {});
+  }
+}
+
+function isDeletedResearchTask(task) {
+  if (!task || typeof task !== 'object') return true;
+  if (task._deleted === true || task.is_deleted === true) return true;
+  return String(task.status || '').trim().toLowerCase() === 'deleted';
+}
+
 function collapseResearchTaskLineages(tasks = []) {
   const byDomain = new Map();
-  for (const task of tasks) {
+  for (const task of tasks.filter((entry) => !isDeletedResearchTask(entry))) {
     const key = String(task.knowledge_domain || task.domain || task.id || '').trim();
     const bucket = byDomain.get(key) || [];
     bucket.push(task);
@@ -1297,7 +1430,14 @@ async function loadDashboardData() {
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
   const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
-  const derivedMeasurementTable = tableForKey(base, 'derived_bearing_loads');
+  // Abgeleitete Kraefte/Momente: die Tabelle derived_propeller_load_points
+  // traegt Schub, Drehmoment und Leistung aus CT/CP (T = CT*rho*n^2*D^4,
+  // P = CP*rho*n^3*D^5, Q = P/(2*pi*n)). derived_bearing_loads ist seit der
+  // Quarantaene der Legacy-Ableitung (26.07.2026) leer; die Sicht zeigte
+  // deshalb 0 Zeilen, obwohl 3.925 verifizierte Ableitungen vorlagen
+  // (skf.ctox.dev, 02.09.2026).
+  const derivedMeasurementTable = tableForKey(base, 'derived_propeller_load_points')
+    || tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
   const graphEdgeTable = tableForKey(base, task.payload?.graph_contract?.edges_table_key || 'semantic_graph_edges') || firstTableMatching(base, /semantic.*graph.*edge|concept.*edge/i);
   const [candidateRows, sourceRows, curatedRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
@@ -1997,7 +2137,7 @@ function renderLeft() {
       <section class="research-section">
         <div class="research-section-head">
           <strong>${escapeHtml(state.t('evidenceRanking', 'Evidence-Ranking'))}</strong>
-          <span>${rankedSources.length} ${escapeHtml(state.t('verified', 'verifiziert'))}</span>
+          <span>${countText(rankedSources.length)} ${escapeHtml(state.t('verified', 'verifiziert'))}</span>
         </div>
         <div class="research-ranking-list">
           ${rankedSources.map(renderRankingRow).join('') || `<div class="research-empty">${escapeHtml(state.t('noVerifiedSources', 'Keine verifizierten Quellen verfügbar. Discovery-Kandidaten bleiben ohne Evidence-Score.'))}</div>`}
@@ -2008,14 +2148,36 @@ function renderLeft() {
   restorePaneScroll(root, scrollState);
 }
 
+// Die Aufgabenliste nennt Quellen, nicht Rohzeilen: fuer die gewaehlte Aufgabe
+// die verifizierten Quellen des Evidence-Rankings, fuer die uebrigen die
+// Zeilen des Quellenkatalogs ihrer Domain. Waehrend der Synchronisation steht
+// dort keine Zahl.
+function taskSourceSummary(task) {
+  const dataState = researchDataState();
+  if (dataState !== 'ready') {
+    return dataState === 'failed'
+      ? state.t('taskSourcesUnavailable', 'Quellen nicht verfügbar')
+      : state.t('taskSourcesSyncing', 'Quellen werden synchronisiert …');
+  }
+  if (task.id === state.selectedTaskId) {
+    const verified = evidenceRankedSources().length;
+    return `${countText(verified)} ${state.t('verifiedSources', 'verifizierte Quellen')}`;
+  }
+  const base = knowledgeBaseForTask(task);
+  if (!base) return state.t('noKnowledgeYet', 'noch keine Knowledge Base');
+  const catalog = tableForKey(base, task.source_catalog_key || 'source_catalog')
+    || base.tables.find((table) => /source_catalog/.test(String(table.table_key || '')))
+    || null;
+  const sources = Number(catalog?.row_count || 0);
+  return `${countText(sources)} ${state.t('sourcesLabel', 'Quellen')}`;
+}
+
 function renderTaskButton(task) {
   const isActive = task.id === state.selectedTaskId;
-  const base = knowledgeBaseForTask(task);
-  const rows = base?.tables?.reduce((sum, table) => sum + Number(table.row_count || 0), 0) || 0;
   return `
     <button type="button" class="research-task-item${isActive ? ' is-active' : ''}" data-action="select-task" data-task-id="${escapeHtml(task.id)}">
       <strong>${escapeHtml(task.title)}</strong>
-      <span>${escapeHtml(task.knowledge_domain)} · ${rows.toLocaleString(state.lang === 'de' ? 'de-DE' : 'en-US')} ${escapeHtml(state.t('rows', 'rows'))}</span>
+      <span>${escapeHtml(task.knowledge_domain)} · ${escapeHtml(taskSourceSummary(task))}</span>
     </button>
   `;
 }
@@ -2120,6 +2282,16 @@ function renderCenter() {
   }
   const projection = currentGraphProjection(task);
   const visibleStatus = visibleResearchStatus();
+  // Der Graph ueberlebt den Neuaufbau der Mittelspalte: jeder render() nach
+  // einem Realtime-Ereignis (Queue-Tick, Befehlsstatus, Notiz) schrieb den
+  // Mittelbereich per innerHTML neu und montierte die 3D-Szene von vorn -
+  // alle paar Sekunden ein neuer Aufbau, waehrend ein Lauf lief
+  // (skf.ctox.dev, 02.09.2026). Die bestehende Buehne wird ausgehaengt, in
+  // den neuen Rahmen zurueckgesetzt und nur bei geaenderter Projektion mit
+  // setData() aktualisiert.
+  const preserved = state.showDiagram && state.graphSurface && state.graphSurfaceTaskId === task.id
+    ? root.querySelector('[data-research-graph-host]')
+    : null;
   root.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band research-center-header">
       <div class="ctox-pane-title-row">
@@ -2176,9 +2348,38 @@ function renderCenter() {
       </section>
     </div>
   `;
-  if (state.showDiagram) scheduleResearchGraphMount(task, projection);
-  else disposeResearchGraph();
+  if (!state.showDiagram) {
+    disposeResearchGraph();
+  } else if (preserved) {
+    const placeholder = root.querySelector('[data-research-graph-host]');
+    if (placeholder) placeholder.replaceWith(preserved);
+    root.querySelector('[data-research-graph-loading]')?.remove();
+    const key = projection.fingerprint || graphProjectionKey(projection);
+    if (key !== state.graphSurfaceKey) {
+      state.graphSurfaceKey = key;
+      state.graphSurface.setData(projection);
+    }
+  } else {
+    scheduleResearchGraphMount(task, projection);
+  }
   restorePaneScroll(root, scrollState);
+}
+
+// Stabile Kennung einer Projektion fuer den In-Place-Vergleich: Knoten,
+// Kanten, Ebene und Detailstufe. Metriken oder Laufstatus aendern die Szene
+// nicht und loesen deshalb kein setData() aus.
+function graphProjectionKey(projection) {
+  const nodes = (projection.nodes || []).map((node) => `${node.id}:${node.size ?? ''}:${node.group ?? ''}`).join('|');
+  const links = (projection.links || []).map((link) => `${graphLinkNodeId(link.source)}>${graphLinkNodeId(link.target)}:${link.weight ?? ''}`).join('|');
+  return `${projection.layer || ''}#${projection.detailLevel || state.graph.detailLevel || ''}#${nodes.length}#${links.length}#${simpleHash(nodes)}#${simpleHash(links)}`;
+}
+
+function simpleHash(text) {
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = ((hash << 5) - hash + text.charCodeAt(index)) | 0;
+  }
+  return (hash >>> 0).toString(36);
 }
 
 function renderSemanticGraph(task, projection) {
@@ -2407,6 +2608,7 @@ function refreshGraphProjectionInPlace() {
   const summary = center?.querySelector('[data-graph-summary]');
   if (summary) summary.innerHTML = graphSummary(projection.metrics);
   updateGraphInsights();
+  state.graphSurfaceKey = projection.fingerprint || graphProjectionKey(projection);
   state.graphSurface.setData(projection);
 }
 
@@ -2428,6 +2630,8 @@ async function scheduleResearchGraphMount(task, projection) {
     moduleUrl.search = new URL(import.meta.url).search;
     const graphModule = await import(moduleUrl.href);
     if (token !== state.graphMountToken || !host.isConnected || selectedTask()?.id !== task.id) return;
+    state.graphSurfaceTaskId = task.id;
+    state.graphSurfaceKey = projection.fingerprint || graphProjectionKey(projection);
     state.graphSurface = graphModule.createResearchGraph(host, {
       projection,
       dimensions: state.graph.dimensions,
@@ -2466,6 +2670,8 @@ function disposeResearchGraph() {
   state.graphMountToken += 1;
   state.graphSurface?.dispose?.();
   state.graphSurface = null;
+  state.graphSurfaceTaskId = '';
+  state.graphSurfaceKey = '';
 }
 
 function selectGraphNode(node) {
@@ -2817,7 +3023,7 @@ function renderNoTaskCenter() {
         <div class="research-empty-workbench-body">
           <label class="research-empty-search-row">
             <span>${escapeHtml(state.t('sourceSearch', 'Quellensuche'))}</span>
-            <input type="text" class="ctox-input" disabled placeholder="${escapeHtml(state.t('searchSourcesPlaceholder', 'Quelle suchen: NASA, UIUC, Tyto, PX4, Vibration ...'))}" />
+            <input type="text" class="ctox-input" disabled placeholder="${escapeHtml(state.t('searchSourcesPlaceholder', 'Quelle suchen: Titel, Autor, DOI, Kennung …'))}" />
           </label>
           <p>${escapeHtml(state.t('noTaskControlsHint', 'Suche, Filter, Portfolio Map und Tabellen werden aktiv, sobald mindestens eine lokale Knowledge Domain mit Quellen geladen ist.'))}</p>
         </div>
@@ -3237,7 +3443,7 @@ function renderActiveTable(task) {
    fuer belegfaehige Quellen — Discovery-URLs erscheinen nie. */
 function renderSourcesList(filteredList = state.sourceModels) {
   if (!filteredList.length) {
-    return `<div class="research-empty">${escapeHtml(state.t('noSources', 'Keine Quellen vorhanden.'))}</div>`;
+    return `<div class="research-empty">${escapeHtml(sourcesEmptyText())}</div>`;
   }
   return `
     <div class="research-source-list">
@@ -3284,9 +3490,29 @@ function sourcesViewToggleButton() {
           title="${escapeHtml(label)}">${iconSvg(showsCards ? 'list' : 'grid')}</button>`;
 }
 
+function sourcesEmptyText() {
+  return state.activeTab === 'candidates'
+    ? state.t('noCandidates', 'Keine Kandidaten vorhanden.')
+    : state.t('noSources', 'Keine Quellen vorhanden.');
+}
+
+// Ein Themen-Chip ohne Treffer ist ein toter Filter: er stammt aus der festen
+// Domain-Taxonomie, nicht aus den Daten, und fuehrte auf Instanzen mit anderem
+// Quellenbestand zu leeren Listen hinter jedem Chip. Angeboten werden nur
+// Cluster, die mindestens eine Quelle der aktuellen Liste treffen; der
+// aktive Chip bleibt sichtbar, damit er sich abwaehlen laesst.
+function availableSubthemes(sourceModels = [], activeTag = 'all') {
+  const clusters = domainTaxonomy(selectedTask()).clusters;
+  const hit = new Set(sourceModels.map((source) => getSearchCluster(source)));
+  return [
+    { id: 'all', label: state.t('subthemeAll', 'Alle') },
+    ...clusters.filter((cluster) => hit.has(cluster.id) || cluster.id === activeTag),
+  ];
+}
+
 function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candidates = false } = {}) {
   const activeTag = state.sourceActiveTag || 'all';
-  const subthemes = [{ id: 'all', label: state.t('subthemeAll', 'Alle') }, ...domainTaxonomy(selectedTask()).clusters];
+  const subthemes = availableSubthemes(sourceModels, activeTag);
 
   const filtered = filteredSources(sourceModels);
 
@@ -3299,7 +3525,7 @@ function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candid
                data-action="source-search"
                placeholder="${escapeHtml(candidates
                  ? state.t('searchCandidatesPlaceholder', 'Kandidat suchen: DOI, Titel, Publisher ...')
-                 : state.t('searchSourcesPlaceholder', 'Quelle suchen: NASA, UIUC, Tyto, PX4, Vibration ...'))}"
+                 : state.t('searchSourcesPlaceholder', 'Quelle suchen: Titel, Autor, DOI, Kennung …'))}"
                value="${escapeHtml(state.sourceSearchTerm || '')}"
                autocomplete="off" />
         <div class="research-sources-shards-filters">
@@ -3319,7 +3545,7 @@ function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candid
           <div class="research-sources-shards-grid">
             ${filtered.map(renderSourceCard).join('') || `
               <div class="research-empty" style="grid-column: 1 / -1; padding: 40px; text-align: center; color: var(--research-muted);">
-                ${escapeHtml(state.t('noSources', 'Keine Quellen vorhanden.'))}
+                ${escapeHtml(sourcesEmptyText())}
               </div>
             `}
           </div>
@@ -3755,10 +3981,10 @@ function renderRight() {
         </div>` : ''}
       </section>
       <section class="research-metric-grid">
-        <div><strong>${state.candidateModels.length}</strong><span>${escapeHtml(state.t('candidates', 'Candidates'))}</span></div>
-        <div><strong>${evidenceRankedSources().length}</strong><span>${escapeHtml(state.t('sources', 'Sources'))}</span></div>
-        <div><strong>${filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length}</strong><span>${escapeHtml(state.t('measurements', 'Measurements'))}</span></div>
-        <div><strong>${researchReportsForTask(task).length}</strong><span>${escapeHtml(state.t('reports', 'Fachberichte'))}</span></div>
+        <div><strong>${countText(state.candidateModels.length)}</strong><span>${escapeHtml(state.t('candidates', 'Candidates'))}</span></div>
+        <div><strong>${countText(evidenceRankedSources().length)}</strong><span>${escapeHtml(state.t('sources', 'Sources'))}</span></div>
+        <div><strong>${countText(filterMeasurementRowsForEvidence(state.measurementRows, state.sourceModels).length)}</strong><span>${escapeHtml(state.t('measurements', 'Measurements'))}</span></div>
+        <div><strong>${countText(researchReportsForTask(task).length)}</strong><span>${escapeHtml(state.t('reports', 'Fachberichte'))}</span></div>
       </section>
       ${renderRunPanel(runInfo)}
       <section class="research-context-block" data-selected-source-section>
@@ -3990,7 +4216,16 @@ function openTaskDialog(editTask = null) {
       </form>
     </section>
   `;
-  const close = () => overlay.remove();
+  const onKeydown = (event) => {
+    if (event.key !== 'Escape' || !overlay.isConnected) return;
+    event.preventDefault();
+    close();
+  };
+  const close = () => {
+    window.removeEventListener('keydown', onKeydown);
+    overlay.remove();
+  };
+  window.addEventListener('keydown', onKeydown);
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay || event.target.closest('[data-close]')) close();
   });
@@ -4040,7 +4275,13 @@ function closeTaskDialog() {
 }
 
 function knowledgeDomainOptionsMarkup(selectedDomain = '') {
-  return state.knowledgeBases.map((base) => `
+  // Beim Bearbeiten ist die Domain gesperrt und muss die Domain der Aufgabe
+  // zeigen — auch wenn dafuer (noch) keine Knowledge-Tabelle lokal liegt.
+  // Vorher zeigte das gesperrte Feld die erste verfuegbare Fremd-Domain.
+  const bases = selectedDomain && !state.knowledgeBases.some((base) => base.domain === selectedDomain)
+    ? [{ domain: selectedDomain, title: titleFromDomain(selectedDomain) }, ...state.knowledgeBases]
+    : state.knowledgeBases;
+  return bases.map((base) => `
     <option value="${escapeHtml(base.domain)}" ${base.domain === selectedDomain ? 'selected' : ''}>
       ${escapeHtml(`${base.title || titleFromDomain(base.domain)} · ${base.domain}`)}
     </option>
@@ -5096,7 +5337,7 @@ function researchRunInfo(task) {
     : commandId
       ? state.queueTasks.find((item) => item.command_id === commandId)
       : null;
-  const status = queueTask?.status || command?.task_status || command?.status || run?.status || '';
+  const status = resolveRunStatus(queueTask, command, run);
   const statusKind = statusKindFor(status);
   return {
     run,
@@ -5114,6 +5355,20 @@ function researchRunInfo(task) {
     isActive: ['queued', 'running', 'accepted', 'blocked'].includes(statusKind),
     updatedLabel: relativeTime(queueTask?.updated_at_ms || command?.updated_at_ms || run?.updated_at_ms),
   };
+}
+
+// Die Queue-Projektion (ctox_queue_tasks) hinkt einem nativen Abbruch nach:
+// `ctox queue cancel` setzte den Befehl auf cancelled, die Projektion blieb
+// auf queued, und die Sicht hielt den Lauf fuer aktiv - "Research fortsetzen"
+// blieb gesperrt (skf.ctox.dev, 02.09.2026). Ein terminaler Befehlsstatus
+// ueberstimmt deshalb eine noch offene Projektion.
+function resolveRunStatus(queueTask, command, run) {
+  const queueStatus = queueTask?.status || '';
+  const commandStatus = command?.task_status || command?.status || '';
+  const terminalCommand = ['completed', 'failed', 'cancelled'].includes(statusKindFor(commandStatus));
+  const openQueue = ['queued', 'running', 'blocked'].includes(statusKindFor(queueStatus));
+  if (terminalCommand && openQueue) return commandStatus;
+  return queueStatus || commandStatus || run?.status || '';
 }
 
 function latestResearchCommandForTask(taskId) {
@@ -5327,7 +5582,8 @@ function tabButton(id, label) {
   return `<button type="button" class="ctox-pane-tab${state.activeTab === id ? ' is-active' : ''}" role="tab" data-action="tab" data-tab="${id}" aria-selected="${state.activeTab === id}">${escapeHtml(label)}</button>`;
 }
 
-function countedTabButton(id, label, count) {
+function countedTabButton(id, label, rawCount) {
+  const count = countText(rawCount);
   const accessibleLabel = `${label} (${count})`;
   return `<button type="button" class="ctox-pane-tab research-counted-tab${state.activeTab === id ? ' is-active' : ''}" role="tab" data-action="tab" data-tab="${id}" aria-selected="${state.activeTab === id}" aria-label="${escapeHtml(accessibleLabel)}" title="${escapeHtml(accessibleLabel)}"><span class="research-tab-label">${escapeHtml(label)}</span><span class="research-tab-count">${escapeHtml(count)}</span></button>`;
 }
@@ -5506,7 +5762,15 @@ function diagnosticFailures() {
 
 function reloadStatusText() {
   const failures = diagnosticFailures();
-  if (failures.length) return state.t('researchUnavailableTitle', 'Research ist gerade nicht verfügbar');
+  if (failures.length) {
+    const seconds = Math.max(1, Math.round((state.diagnostics.failureRetryAt - Date.now()) / 1000));
+    if (hasLocalResearchData()) {
+      return state.t('researchRefreshDelayed', `Aktualisierung verzögert – neuer Versuch in ${seconds} s`, seconds);
+    }
+    return state.diagnostics.failureRetryAt
+      ? state.t('researchSyncRetry', `Synchronisation gestört – neuer Versuch in ${seconds} s`, seconds)
+      : state.t('researchUnavailableTitle', 'Research ist gerade nicht verfügbar');
+  }
   if (!state.diagnostics.reloadFinishedAt) return state.t('loadingKnowledge', 'Knowledge wird geladen...');
   const domainCount = state.knowledgeBases.length;
   const taskCount = state.tasks.length;
@@ -6193,8 +6457,16 @@ function setCollectionReadinessForTest(name, snapshot) {
 }
 
 export const __researchTestHooks = {
+  availableSubthemes,
+  graphProjectionKey,
+  resolveRunStatus,
+  countText,
+  failureRetryDelay,
+  researchDataState,
+  taskSourceSummary,
   buildSourceModels,
   collapseResearchTaskLineages,
+  isDeletedResearchTask,
   collectionDiagnosticRows,
   dataEmptyShowsSyncing,
   diagnosticRows,

@@ -209,6 +209,18 @@
   font-size: 12px;
 }
 
+/* Die Statuszeile der Mittelspalte ("Knowledge wird geladen…", "Research ist
+   gerade nicht verfuegbar") ist eine eigene Zeile unter dem Kopf. Ohne
+   Innenabstand stand sie einspaltig als loser Text zwischen Kopf und
+   Graph-Karte (Befund 02.09.2026, 375px und 719px). */
+.research-center > .research-status-line {
+  padding: 6px 18px 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .research-task-list,
 .research-ranking-list,
 .research-note-stack,

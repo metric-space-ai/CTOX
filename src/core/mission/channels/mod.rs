@@ -240,6 +240,19 @@ pub(crate) struct CommunicationIntakeSourceStamp {
     routing_count: usize,
     clock_updated_at: String,
     content_hash: String,
+    /// Earliest `retry_not_before` among durable queue routes still in
+    /// `pending`, RFC 3339, or empty. The idle router gates compare this
+    /// against the clock: a retry hold that expires changes nothing else in
+    /// the stamp, and without it a task held after a transient API failure
+    /// waited for the 3600 s safety poll instead of its 300 s backoff
+    /// (skf.ctox.dev, 2026-09-02).
+    earliest_pending_retry_not_before: String,
+}
+
+impl CommunicationIntakeSourceStamp {
+    pub(crate) fn earliest_pending_retry_not_before(&self) -> &str {
+        &self.earliest_pending_retry_not_before
+    }
 }
 
 const COMMUNICATION_INTAKE_SOURCE_STAMP_SQL: &str = r#"

@@ -143,7 +143,15 @@ function parseArgs(argv) {
 
 function withModuleHash(baseUrl, moduleId) {
   const url = new URL(baseUrl);
+  url.searchParams.set('rxdbSmoke', '1');
   url.hash = moduleId;
+  return url.href;
+}
+
+function withoutModuleHash(baseUrl) {
+  const url = new URL(baseUrl);
+  url.searchParams.set('rxdbSmoke', '1');
+  url.hash = '';
   return url.href;
 }
 
@@ -168,33 +176,97 @@ function printResult(result, json) {
 }
 
 async function waitForPrimaryCreateAction(page, moduleId, timeoutMs) {
-  const handle = await page.waitForFunction((id) => {
-    function isVisible(el) {
-      const box = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      return box.width > 0
-        && box.height > 0
-        && style.visibility !== 'hidden'
-        && style.display !== 'none'
-        && !el.disabled;
+  try {
+    const handle = await page.waitForFunction((id) => {
+      function isVisible(el) {
+        const box = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return box.width > 0
+          && box.height > 0
+          && style.visibility !== 'hidden'
+          && style.display !== 'none'
+          && !el.disabled;
+      }
+      function isPrimaryCreateAction(value) {
+        const action = String(value || '').trim().toLowerCase();
+        if (!action) return false;
+        if (/(^|[-_:])(follow-?up|review|save|submit|cancel|close|edit|archive|delete|remove)([-_:]|$)/.test(action)) return false;
+        return /^(add|new|create)([-_:]|$)/.test(action);
+      }
+      const root = document.querySelector(`[data-module-root="${id}"]`);
+      if (!root) return false;
+      const actions = Array.from(root.querySelectorAll('[data-action]'))
+        .map((el) => ({
+          action: el.getAttribute('data-action'),
+          visible: isVisible(el),
+        }))
+        .filter((item) => item.visible && isPrimaryCreateAction(item.action));
+      return actions[0]?.action || false;
+    }, moduleId, { timeout: Math.min(timeoutMs, 3000), polling: 250 });
+    return handle.jsonValue();
+  } catch (error) {
+    if (error?.name === 'TimeoutError' || /timeout/i.test(String(error?.message || error))) return null;
+    throw error;
+  }
+}
+
+async function openModule(page, moduleId, url, timeoutMs) {
+  const rootSelector = `[data-module-root="${moduleId}"]`;
+  await page.goto(withoutModuleHash(url), { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+  const deadline = Date.now() + timeoutMs;
+  let opened = false;
+  while (!opened && Date.now() <= deadline) {
+    try {
+      opened = await page.evaluate(async (id) => {
+        const app = window.CTOX_BUSINESS_OS_APP;
+        if (typeof app?.openModule === 'function'
+          && app.modules?.find?.((module) => module.id === id)) {
+          const target = new URL(location.href);
+          target.hash = id;
+          history.replaceState(history.state, '', target.href);
+          await app.openModule(id, { force: true });
+          return true;
+        }
+        const selector = [
+          `.desktop-icon[data-target="${CSS.escape(id)}"]`,
+          `.module-tab[data-target="${CSS.escape(id)}"]`,
+          `.start-menu-item[data-target="${CSS.escape(id)}"]`,
+        ].join(',');
+        const launcher = Array.from(document.querySelectorAll(selector)).find((element) => {
+          const box = element.getBoundingClientRect();
+          const style = window.getComputedStyle(element);
+          return box.width > 0 && box.height > 0
+            && style.visibility !== 'hidden' && style.display !== 'none';
+        });
+        if (!launcher) return false;
+        launcher.click();
+        return true;
+      }, moduleId);
+    } catch (error) {
+      if (!/execution context was destroyed|cannot find context/i.test(String(error?.message || error))) throw error;
     }
-    function isPrimaryCreateAction(value) {
-      const action = String(value || '').trim().toLowerCase();
-      if (!action) return false;
-      if (/(^|[-_:])(follow-?up|review|save|submit|cancel|close|edit|archive|delete|remove)([-_:]|$)/.test(action)) return false;
-      return /^(add|new|create)([-_:]|$)/.test(action);
-    }
-    const root = document.querySelector(`[data-module-root="${id}"]`);
-    if (!root) return false;
-    const actions = Array.from(root.querySelectorAll('[data-action]'))
-      .map((el) => ({
-        action: el.getAttribute('data-action'),
-        visible: isVisible(el),
-      }))
-      .filter((item) => item.visible && isPrimaryCreateAction(item.action));
-    return actions[0]?.action || false;
-  }, moduleId, { timeout: timeoutMs, polling: 500 });
-  return handle.jsonValue();
+    if (!opened) await page.waitForTimeout(250);
+  }
+  if (!opened) throw new Error(`Business OS shell did not expose module ${moduleId} before timeout`);
+  await page.waitForFunction((selector) => {
+    const root = document.querySelector(selector);
+    return root?.dataset.moduleReady === 'true';
+  }, rootSelector, { timeout: timeoutMs, polling: 100 });
+  const mount = await page.evaluate(({ id, selector }) => {
+    const root = document.querySelector(selector);
+    return {
+      failed: root?.dataset.moduleLoadFailed === 'true',
+      failure: globalThis.ctoxBusinessOsSmoke?.state?.qaModuleMountFailures?.[id]
+        || window.CTOX_BUSINESS_OS_APP?.qaModuleMountFailures?.[id]
+        || null,
+      recovery_text: root?.querySelector('.shell-app-recovery')?.textContent?.trim() || '',
+    };
+  }, { id: moduleId, selector: rootSelector });
+  if (mount.failed) {
+    throw new Error(`module mount failed: ${mount.failure?.message || mount.recovery_text || moduleId}`);
+  }
+  await page.waitForSelector(rootSelector, { state: 'visible', timeout: timeoutMs });
+  return rootSelector;
 }
 
 async function runSmoke(options) {
@@ -257,34 +329,7 @@ async function runSmoke(options) {
   });
 
   try {
-    const rootSelector = `[data-module-root="${options.moduleId}"]`;
-    await page.goto(result.url, { waitUntil: 'domcontentloaded', timeout: options.timeoutMs });
-    await page.evaluate(async (moduleId) => {
-      const app = window.CTOX_BUSINESS_OS_APP;
-      location.hash = moduleId;
-      if (typeof app?.openModule === 'function') {
-        await app.openModule(moduleId, { force: true });
-      }
-    }, options.moduleId);
-    await page.waitForFunction(({ moduleId, selector }) => {
-      const root = document.querySelector(selector);
-      if (root) {
-        const box = root.getBoundingClientRect();
-        const style = window.getComputedStyle(root);
-        if (box.width > 0 && box.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
-          return true;
-        }
-      }
-      const app = window.CTOX_BUSINESS_OS_APP;
-      return Boolean(app?.modules?.find?.((module) => module.id === moduleId));
-    }, { moduleId: options.moduleId, selector: rootSelector }, { timeout: options.timeoutMs });
-    await page.evaluate(async (moduleId) => {
-      const app = window.CTOX_BUSINESS_OS_APP;
-      if (typeof app?.openModule === 'function') {
-        await app.openModule(moduleId, { force: true });
-      }
-    }, options.moduleId);
-    await page.waitForSelector(rootSelector, { state: 'visible', timeout: options.timeoutMs });
+    const rootSelector = await openModule(page, options.moduleId, options.url, options.timeoutMs);
     result.evidence.mount = await page.evaluate((selector) => {
       const root = document.querySelector(selector);
       if (!root) return { visible: false };
