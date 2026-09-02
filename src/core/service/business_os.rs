@@ -4906,12 +4906,29 @@ fn web_stack_auth_owner_from_command_context(context: &serde_json::Value) -> Opt
         Some(client_context) => client_context.clone(),
         None => serde_json::Value::Null,
     };
-    parsed_client_context
-        .get("owner_user_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
+    // Verified-first: the intake stamps `client_context.owner_user_id` and
+    // `client_context.actor.id` from the authenticated session for replicated
+    // peers; server-enqueued commands (auth-assist requests) carry the same
+    // owner in `payload.owner_user_id`. Any of these identifies the human
+    // behind the task.
+    let from_client_context = ["/owner_user_id", "/actor/id", "/user_id"]
+        .into_iter()
+        .find_map(|pointer| {
+            parsed_client_context
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        });
+    from_client_context.or_else(|| {
+        context
+            .pointer("/command/payload/owner_user_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    })
 }
 
 /// Resolves the human owner behind a research task so browser auth sessions
