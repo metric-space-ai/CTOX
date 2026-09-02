@@ -377,6 +377,163 @@ export const collections = {
       ['project_id', 'computer_id', 'status']
     ],
     additionalProperties: false
+  },
+  workjet_computers: {
+    version: 0,
+    primaryKey: 'id',
+    type: 'object',
+    properties: {
+      id: { type: 'string', maxLength: 256 },
+      display_name: { type: 'string', maxLength: 256 },
+      hosting_mode: { type: 'string', enum: ['workstation', 'self_hosted'] },
+      status: { type: 'string', enum: ['assigned', 'unassigned'] },
+      capabilities: {
+        type: 'array',
+        maxItems: 32,
+        items: { type: 'string', maxLength: 80 }
+      },
+      self_hosted_colocation: { type: 'boolean' },
+      device_binding_id: { type: 'string', maxLength: 160 },
+      actor_epoch: { type: 'integer', minimum: 0 },
+      last_seen_at_ms: { type: 'integer', minimum: 0 },
+      replication_up: { type: 'boolean' },
+      owner_user_id: { type: 'string', maxLength: 256 },
+      created_at_ms: { type: 'integer', minimum: 0 },
+      updated_at_ms: { type: 'integer', minimum: 0 },
+      unassigned_at_ms: { type: 'integer', minimum: 0 },
+      is_deleted: { type: 'boolean' }
+    },
+    required: [
+      'id', 'display_name', 'hosting_mode', 'status', 'capabilities',
+      'self_hosted_colocation', 'device_binding_id', 'actor_epoch',
+      'last_seen_at_ms', 'replication_up', 'owner_user_id', 'created_at_ms',
+      'updated_at_ms', 'is_deleted'
+    ],
+    indexes: [
+      'owner_user_id',
+      'status',
+      'last_seen_at_ms',
+      'updated_at_ms',
+      ['owner_user_id', 'status', 'updated_at_ms']
+    ],
+    additionalProperties: false
+  },
+  workjet_sessions: {
+    version: 0,
+    primaryKey: 'id',
+    type: 'object',
+    properties: {
+      id: { type: 'string', maxLength: 160 },
+      project_id: { type: 'string', maxLength: 128 },
+      thread_id: { type: 'string', maxLength: 160 },
+      coding_session_id: { type: 'string', maxLength: 128 },
+      working_copy_id: { type: 'string', maxLength: 160 },
+      computer_id: { type: 'string', maxLength: 256 },
+      run_status: {
+        type: 'string',
+        enum: ['running', 'pausing', 'paused', 'transferring', 'resuming', 'transfer_failed']
+      },
+      fence_epoch: { type: 'integer', minimum: 0 },
+      active_transfer_id: { type: 'string', maxLength: 160 },
+      last_terminal_turn_id: { type: 'string', maxLength: 160 },
+      owner_user_id: { type: 'string', maxLength: 256 },
+      created_at_ms: { type: 'integer', minimum: 0 },
+      updated_at_ms: { type: 'integer', minimum: 0 },
+      is_deleted: { type: 'boolean' }
+    },
+    required: [
+      'id', 'project_id', 'working_copy_id', 'computer_id', 'run_status',
+      'fence_epoch', 'owner_user_id', 'created_at_ms', 'updated_at_ms',
+      'is_deleted'
+    ],
+    indexes: [
+      'owner_user_id',
+      'project_id',
+      'working_copy_id',
+      'computer_id',
+      'run_status',
+      'updated_at_ms',
+      ['owner_user_id', 'run_status', 'updated_at_ms']
+    ],
+    additionalProperties: false
+  },
+  workjet_session_transfers: {
+    version: 0,
+    primaryKey: 'id',
+    type: 'object',
+    properties: {
+      id: { type: 'string', maxLength: 160 },
+      session_id: { type: 'string', maxLength: 160 },
+      project_id: { type: 'string', maxLength: 128 },
+      source_working_copy_id: { type: 'string', maxLength: 160 },
+      source_computer_id: { type: 'string', maxLength: 256 },
+      target_computer_id: { type: 'string', maxLength: 256 },
+      target_path: { type: 'string', maxLength: 4096 },
+      target_working_copy_id: { type: 'string', maxLength: 160 },
+      state: {
+        type: 'string',
+        enum: [
+          'pause_requested', 'packing', 'packed', 'shipping', 'applying',
+          'applied', 'switching', 'resuming', 'completed', 'aborting',
+          'rolled_back', 'failed'
+        ]
+      },
+      fence_epoch: { type: 'integer', minimum: 1 },
+      mode: { type: 'string', enum: ['git', 'copy'] },
+      manifest_file_id: { type: 'string', maxLength: 160 },
+      artifact_file_ids: {
+        type: 'array',
+        maxItems: 64,
+        items: { type: 'string', maxLength: 160 }
+      },
+      artifact_generation_id: { type: 'string', maxLength: 160 },
+      manifest_sha256: { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' },
+      git: {
+        type: 'object',
+        properties: {
+          head: { type: 'string', minLength: 40, maxLength: 64, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' },
+          branch: { type: 'string', maxLength: 256 },
+          base_commit: { type: 'string', minLength: 40, maxLength: 64, pattern: '^(?:[0-9a-f]{40}|[0-9a-f]{64})$' },
+          bundle_file_id: { type: 'string', maxLength: 160 },
+          patch_file_id: { type: 'string', maxLength: 160 },
+          patch_sha256: { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' },
+          untracked_file_id: { type: 'string', maxLength: 160 },
+          untracked_sha256: { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' },
+          dirty: { type: 'boolean' }
+        },
+        required: [
+          'head', 'branch', 'base_commit', 'patch_file_id', 'patch_sha256',
+          'untracked_file_id', 'untracked_sha256', 'dirty'
+        ],
+        additionalProperties: false
+      },
+      tree_sha256: { type: 'string', minLength: 64, maxLength: 64, pattern: '^[0-9a-f]{64}$' },
+      error_code: { type: 'string', maxLength: 128 },
+      error_detail: { type: 'string', maxLength: 512 },
+      deadline_at_ms: { type: 'integer', minimum: 0 },
+      created_at_ms: { type: 'integer', minimum: 0 },
+      updated_at_ms: { type: 'integer', minimum: 0 },
+      completed_at_ms: { type: 'integer', minimum: 0 },
+      rolled_back_at_ms: { type: 'integer', minimum: 0 },
+      owner_user_id: { type: 'string', maxLength: 256 },
+      is_deleted: { type: 'boolean' }
+    },
+    required: [
+      'id', 'session_id', 'project_id', 'source_working_copy_id',
+      'source_computer_id', 'target_computer_id', 'target_path', 'state',
+      'fence_epoch', 'artifact_file_ids', 'deadline_at_ms', 'created_at_ms',
+      'updated_at_ms', 'owner_user_id', 'is_deleted'
+    ],
+    indexes: [
+      'owner_user_id',
+      'session_id',
+      'project_id',
+      'state',
+      'deadline_at_ms',
+      'updated_at_ms',
+      ['owner_user_id', 'state', 'updated_at_ms']
+    ],
+    additionalProperties: false
   }
 };
 

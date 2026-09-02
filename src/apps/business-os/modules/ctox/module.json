@@ -18,7 +18,10 @@
     "business_module_commits",
     "business_module_source_blob_chunks",
     "workjet_projects",
-    "workjet_working_copies"
+    "workjet_working_copies",
+    "workjet_computers",
+    "workjet_sessions",
+    "workjet_session_transfers"
   ],
   "layout": {
     "shell": "windowed",

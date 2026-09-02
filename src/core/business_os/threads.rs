@@ -244,7 +244,10 @@ const NATIVE_PROJECTION_COLLECTIONS: &[&str] = &[
     "channel_pairing_state",
     // Workjet project identity and local checkout bindings are native-authored
     // through exact business_commands; peers render their projections only.
+    "workjet_computers",
     "workjet_projects",
+    "workjet_sessions",
+    "workjet_session_transfers",
     "workjet_working_copies",
 ];
 
@@ -4873,6 +4876,29 @@ mod tests {
     }
 
     #[test]
+    fn workjet_session_peer_writes_are_rejected() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let (token, _) = store::issue_business_os_capability_token_for_managed_user(
+            temp.path(),
+            "workjet-session-peer-test",
+            "Workjet Session Peer Test",
+            "admin",
+            now_ms(),
+        )?;
+        for collection in [
+            "workjet_computers",
+            "workjet_sessions",
+            "workjet_session_transfers",
+        ] {
+            assert!(
+                !may_accept_peer_write(temp.path(), &token, collection),
+                "direct peer writes must be denied for {collection}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn peer_write_gate_allows_command_admission_but_blocks_native_owned_records(
     ) -> anyhow::Result<()> {
         let temp = tempdir()?;
@@ -5017,6 +5043,11 @@ mod tests {
             "business_module_catalog",
             "communication_accounts",
             "channel_pairing_state",
+            "workjet_computers",
+            "workjet_projects",
+            "workjet_sessions",
+            "workjet_session_transfers",
+            "workjet_working_copies",
         ] {
             assert!(
                 !may_accept_peer_write(temp.path(), &admin_token, collection),

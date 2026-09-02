@@ -152,6 +152,9 @@ export const CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   knowledge_items: '33db05bd0efe97e32343da493cd3cb552099383a4bfde182012e334034467300',
   knowledge_runbooks: '33db05bd0efe97e32343da493cd3cb552099383a4bfde182012e334034467300',
   knowledge_tables: '33db05bd0efe97e32343da493cd3cb552099383a4bfde182012e334034467300',
+  kundenpipeline_entscheidungen: '77d19e8ef20d5f8675368b7520ad6f5afd6fb3a7a76ed46b0d809bd80f847073',
+  kundenpipeline_projekte: '6fb52ae75feab318e044882b6c4b1359b856282dee41cde676f8d10b27806f24',
+  kundenpipeline_vorgaenge: '7236b69f9adf95937bafb27a49cd1b3eb4092a959648e0c761222775224874b2',
   matching_objects: '31ff9b1fce039239cf0684e1cf246b9e5d3a222abd8ca4b0c9f3c837dfeb55e1',
   matching_requirements: '7a57a57784d58c9898d135a519a8789380742cb5a0de055f19e8f6a279035b50',
   matching_results: 'a5260077a1b4e9d5881ff3b265daf8651b8c6be3158cb5eff0d4f78bed21137c',
@@ -215,7 +218,10 @@ export const CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   user_thread_messages: '3e9ac54c218496245fdeaa9e8cd6f2f649455448703bada2ac290a1de4fd7646',
   user_thread_states: '71e70b8a2e44bd2b851b24fde40a5b4cd42cd9e0b6158525055a9c04743de9eb',
   user_threads: '97a226600a64559f18c795e6a6c39b56e478d455bc5ce1485b714e1d13c2e5cb',
+  workjet_computers: 'ad5b7f32d8237ac93399904960c193e40de34e2f1b521306d8d1aeea590645b1',
   workjet_projects: '16bf130df1fb7883a21198744dd3f5c2c0ecd621e39355b6f0d875d59cbe9a0e',
+  workjet_session_transfers: '0bc267b792d828ae60c356a25301547ddaa97e47ac8809b0da204e2968b189fa',
+  workjet_sessions: '82ad8222bb8453b67e6b512f1e114ced576fcff972ef56b67a42a668ddf59088',
   workjet_working_copies: 'a2e418eafc2ee8900b9d1422dbcfb68dfd4b542226ec022b26c2484837cf0e08',
 });
 
