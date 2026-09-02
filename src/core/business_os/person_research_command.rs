@@ -1927,7 +1927,12 @@ mod tests {
             "company": "Example GmbH",
             "country": "DE",
             "mode": "new_record",
-            "fields": ["firma_domain"]
+            "fields": ["firma_domain"],
+            "writeback_contract": {
+                "collection": "outbound_lead_generation_leads",
+                "allowed_collections": ["outbound_lead_generation_leads"],
+                "record_ids": [record_id]
+            }
         });
         let conn = store::open_store(root)?;
         conn.execute(
@@ -1937,6 +1942,11 @@ mod tests {
             rusqlite::params![command_id, record_id, serde_json::to_string(&payload)?],
         )?;
         drop(conn);
+        for collection in ["business_commands", "outbound_lead_generation_leads"] {
+            crate::business_os::person_research_gap_closure::seed_rxdb_collection_table_for_tests(
+                root, collection,
+            )?;
+        }
         store::upsert_rxdb_collection_record(
             root,
             "business_commands",
