@@ -12,7 +12,7 @@ import {
 // sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
 // ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
 // an index.css oder locales/ hochzaehlen.
-const BUILD = '20260902-research-graph-stable-v96';
+const BUILD = '20260902-research-graph-stable-v97';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -3792,10 +3792,10 @@ function renderMeasurementsTable() {
   return `
     <div class="research-measurement-mode ctox-pane-tabs" role="tablist" aria-label="Messdatenart">
       <button type="button" class="ctox-pane-tab${mode === 'direct' ? ' is-active' : ''}" data-action="measurement-mode" data-measurement-mode="direct" role="tab" aria-selected="${mode === 'direct'}">
-        Direkte Messwerte <span>${directRows.length}</span>
+        Direkte Messwerte <span>${countText(directRows.length)}</span>
       </button>
       <button type="button" class="ctox-pane-tab${mode === 'derived' ? ' is-active' : ''}" data-action="measurement-mode" data-measurement-mode="derived" role="tab" aria-selected="${mode === 'derived'}">
-        Abgeleitete Kräfte &amp; Momente <span>${derivedRows.length}</span>
+        Abgeleitete Kräfte &amp; Momente <span>${countText(derivedRows.length)}</span>
       </button>
     </div>
     <p class="research-measurement-note">${mode === 'direct'
