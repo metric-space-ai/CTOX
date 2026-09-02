@@ -55,6 +55,7 @@ mod store_workjet_projects;
 mod store_workjet_sessions;
 mod support;
 mod threads;
+pub mod workjet_transfer_git;
 
 pub(crate) use app_runtime::inspect_module as inspect_app_runtime_module;
 pub use browser_control::browser_context_capture;
@@ -91,3 +92,4 @@ pub use server::BusinessOsServeOptions;
 pub(crate) use external_sql_sync::start_background_sync;
 pub(crate) use person_research_command::recover_once as recover_person_research_commands_once;
 pub use store_workjet_sessions::{run_workjet_session_transfer_recovery, RecoveryOutcome};
+pub(crate) use workjet_transfer_git::execute_cli as execute_workjet_transfer_git_cli;
