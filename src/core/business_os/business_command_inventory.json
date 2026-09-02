@@ -79,6 +79,7 @@
     "ctox.workjet.session.transfer.status",
     "ctox.workjet.working_copy.upsert",
     "knowledge.command",
+    "outbound.lead.research_writeback",
     "web_stack.person_research"
   ],
   "predicate_control_types": [

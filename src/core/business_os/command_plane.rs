@@ -266,7 +266,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 74] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 75] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -340,6 +340,7 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 74] = [
     "ctox.workjet.session.transfer.status",
     "ctox.workjet.working_copy.upsert",
     "knowledge.command",
+    "outbound.lead.research_writeback",
     "web_stack.person_research",
 ];
 
@@ -1222,6 +1223,34 @@ fn dispatch_business_command(
             .map(BusinessCommandDispatchOutcome::Returned),
         "web_stack.person_research" => super::person_research_command::start(root, command.clone())
             .map(BusinessCommandDispatchOutcome::Returned),
+        "outbound.lead.research_writeback" => {
+            match super::person_research_gap_closure::handle_research_writeback(root, command) {
+                Ok(result) => Ok(BusinessCommandDispatchOutcome::completed(
+                    result,
+                    command
+                        .payload
+                        .get("gap_task_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                )),
+                Err(error) => {
+                    let message = error.to_string();
+                    Ok(BusinessCommandDispatchOutcome::failed(
+                        command
+                            .payload
+                            .get("gap_task_id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        serde_json::json!({
+                            "ok": false,
+                            "error_code": "person_research_writeback_contract",
+                            "error": message,
+                        }),
+                        error,
+                    ))
+                }
+            }
+        }
         "knowledge.command" => {
             let args = command
                 .payload

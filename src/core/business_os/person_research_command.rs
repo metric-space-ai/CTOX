@@ -14,7 +14,7 @@ use super::store::{self, BusinessCommand};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ActiveResearchCommandKey {
     root: PathBuf,
-    command_id: String,
+    record_id: String,
 }
 
 static ACTIVE_RESEARCH_COMMANDS: OnceLock<Mutex<HashSet<ActiveResearchCommandKey>>> =
@@ -100,10 +100,6 @@ pub(super) fn start(root: &Path, command: BusinessCommand) -> anyhow::Result<Val
             return failed;
         }
     }
-    log_lead_projection_error(
-        command.id.as_deref().unwrap_or_default(),
-        project_outbound_lead_generation_lead_state(root, &command, "running", None, None),
-    );
     Ok(running)
 }
 
@@ -123,8 +119,21 @@ pub(crate) fn recover_once(root: &Path) -> anyhow::Result<usize> {
             &candidate.result,
             candidate.error_message.as_deref(),
         )?;
+        let mut recovered_result = candidate.result.clone();
         let (lead_status, lead_error) = if candidate.terminal_status == "completed" {
-            ("needs_review", None)
+            let gap_task = super::person_research_gap_closure::enqueue_gap_closure_if_needed(
+                root,
+                &candidate.command,
+                &mut recovered_result,
+            )?;
+            (
+                if gap_task.is_some() {
+                    "running"
+                } else {
+                    "completed"
+                },
+                None,
+            )
         } else {
             ("failed", candidate.error_message.as_deref())
         };
@@ -135,11 +144,12 @@ pub(crate) fn recover_once(root: &Path) -> anyhow::Result<usize> {
                 &candidate.command,
                 lead_status,
                 lead_error,
-                (candidate.terminal_status == "completed").then_some(&candidate.result),
+                (candidate.terminal_status == "completed").then_some(&recovered_result),
             ),
         );
         recovered += 1;
     }
+    recovered += recover_completed_phase_a_gap_closures(root)?;
     let commands = store::recoverable_person_research_commands(root)?;
     let mut started = recovered;
     for recoverable in commands {
@@ -172,15 +182,108 @@ pub(crate) fn recover_once(root: &Path) -> anyhow::Result<usize> {
     Ok(started)
 }
 
+fn recover_completed_phase_a_gap_closures(root: &Path) -> anyhow::Result<usize> {
+    let conn = store::open_store(root)?;
+    let mut statement = conn.prepare(
+        "SELECT command_id, module, record_id, payload_json, client_context_json
+         FROM business_commands
+         WHERE command_type = 'web_stack.person_research'
+           AND module = 'outbound-lead-generation'
+           AND status = 'completed'
+           AND record_id <> ''
+         ORDER BY observed_at_ms ASC",
+    )?;
+    let rows = statement.query_map([], |row| {
+        let command_id: String = row.get(0)?;
+        let payload_json: String = row.get(3)?;
+        let client_context_json: String = row.get(4)?;
+        Ok(BusinessCommand {
+            id: Some(command_id),
+            module: row.get(1)?,
+            command_type: "web_stack.person_research".to_string(),
+            record_id: Some(row.get(2)?),
+            payload: serde_json::from_str(&payload_json).unwrap_or(Value::Null),
+            client_context: serde_json::from_str(&client_context_json).unwrap_or(Value::Null),
+            origin: store::CommandOrigin::TrustedLocal,
+        })
+    })?;
+    let commands = rows.collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    drop(conn);
+
+    let mut recovered = 0;
+    for command in commands {
+        let command_id = command.id.as_deref().unwrap_or_default();
+        let record_id = command.record_id.as_deref().unwrap_or_default();
+        let Some(_guard) = ActiveResearchCommandGuard::claim(root, record_id) else {
+            continue;
+        };
+        let Some(lead) =
+            store::load_rxdb_collection_record(root, "outbound_lead_generation_leads", record_id)?
+        else {
+            continue;
+        };
+        if lead
+            .get("gap_task_id")
+            .and_then(Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+            || lead
+                .pointer("/payload/last_research_command_id")
+                .and_then(Value::as_str)
+                != Some(command_id)
+        {
+            continue;
+        }
+        let Some(command_projection) =
+            store::load_rxdb_collection_record(root, "business_commands", command_id)?
+        else {
+            continue;
+        };
+        let mut result = command_projection
+            .get("result")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if !result.is_object() {
+            continue;
+        }
+        let gap_task = super::person_research_gap_closure::enqueue_gap_closure_if_needed(
+            root,
+            &command,
+            &mut result,
+        )?;
+        if gap_task.is_none() {
+            continue;
+        }
+        project_outbound_lead_generation_lead_state(
+            root,
+            &command,
+            "running",
+            None,
+            Some(&result),
+        )?;
+        recovered += 1;
+    }
+    Ok(recovered)
+}
+
 fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool> {
     let command_id = command
         .id
         .as_deref()
         .context("person-research command id is required")?
         .to_string();
-    let Some(active_guard) = ActiveResearchCommandGuard::claim(&root, &command_id) else {
+    let guard_record_id = command
+        .record_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(command_id.as_str())
+        .to_string();
+    let Some(active_guard) = ActiveResearchCommandGuard::claim(&root, &guard_record_id) else {
         return Ok(false);
     };
+    super::person_research_gap_closure::cancel_open_gap_task_for_new_research(&root, &command)?;
+    project_outbound_lead_generation_lead_state(&root, &command, "running", None, None)?;
     let worker_command = command;
     let worker_command_id = command_id.clone();
     let spawn_result = std::thread::Builder::new()
@@ -193,26 +296,56 @@ fn spawn_worker(root: PathBuf, command: BusinessCommand) -> anyhow::Result<bool>
             let result = panic::catch_unwind(AssertUnwindSafe(|| {
                 execute(
                     &root,
+                    &worker_command_id,
                     &worker_command.payload,
                     &worker_command.client_context,
                 )
             }));
             let (persisted, lead_status, lead_error, lead_result) = match result {
-                Ok(Ok(outcome)) => {
-                    let lead_result = outcome.clone();
-                    (
-                        store::write_rxdb_control_command_outcome(
+                Ok(Ok(mut outcome)) => {
+                    let gap_task =
+                        super::person_research_gap_closure::enqueue_gap_closure_if_needed(
                             &root,
                             &worker_command,
-                            "completed",
-                            None,
-                            Some("completed"),
-                            outcome,
-                        ),
-                        "needs_review",
-                        None,
-                        Some(lead_result),
-                    )
+                            &mut outcome,
+                        );
+                    match gap_task {
+                        Ok(gap_task) => {
+                            let lead_status = if gap_task.is_some() {
+                                "running"
+                            } else {
+                                "completed"
+                            };
+                            let lead_result = outcome.clone();
+                            (
+                                store::write_rxdb_control_command_outcome(
+                                    &root,
+                                    &worker_command,
+                                    "completed",
+                                    gap_task.as_ref().map(|task| task.message_key.as_str()),
+                                    Some("completed"),
+                                    outcome,
+                                ),
+                                lead_status,
+                                None,
+                                Some(lead_result),
+                            )
+                        }
+                        Err(error) => {
+                            let message = error.to_string();
+                            (
+                                store::write_rxdb_failed_control_command_outcome(
+                                    &root,
+                                    &worker_command,
+                                    "person_research_gap_closure",
+                                    error,
+                                ),
+                                "failed",
+                                Some(message),
+                                None,
+                            )
+                        }
+                    }
                 }
                 Ok(Err(error)) => {
                     let message = error.to_string();
@@ -291,6 +424,30 @@ fn project_outbound_lead_generation_lead_state(
                 .unwrap_or_else(|| serde_json::json!({ "id": record_id }));
         let outcome_patch = outbound_lead_generation_research_outcome_patch(&existing, result, now);
         merge_json_object_values(&mut lead_document, &outcome_patch);
+        if let Some(gap_task_id) = result
+            .pointer("/gap_closure/task_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            lead_document["research_status"] = Value::String("running".to_string());
+            lead_document["research_phase"] = Value::String("gap_closure".to_string());
+            lead_document["gap_task_id"] = Value::String(gap_task_id.to_string());
+            lead_document["payload"]["gap_requested_fields"] = result
+                .pointer("/gap_closure/requested_fields")
+                .cloned()
+                .unwrap_or(Value::Null);
+            lead_document["payload"]["gap_open_fields"] = result
+                .pointer("/gap_closure/open_fields")
+                .cloned()
+                .unwrap_or(Value::Null);
+            lead_document["payload"]["gap_terminal_fields"] = result
+                .pointer("/gap_closure/terminal_fields")
+                .cloned()
+                .unwrap_or(Value::Null);
+        } else if research_status == "completed" {
+            lead_document["research_status"] = Value::String("completed".to_string());
+        }
     }
     store::upsert_rxdb_collection_record(
         root,
@@ -315,7 +472,10 @@ fn outbound_lead_generation_lead_state_document(
         "task_id": "",
         "payload": outbound_lead_generation_lead_state_patch(command_id, research_status, error, now),
     });
-    if research_status != "running" {
+    if research_status == "running" {
+        document["research_phase"] = Value::Null;
+        document["gap_task_id"] = Value::Null;
+    } else {
         document["research_error"] = error
             .filter(|value| !value.trim().is_empty())
             .map(|value| Value::String(value.to_string()))
@@ -325,7 +485,7 @@ fn outbound_lead_generation_lead_state_document(
     document
 }
 
-fn outbound_lead_generation_research_outcome_patch(
+pub(super) fn outbound_lead_generation_research_outcome_patch(
     existing: &Value,
     command_result: &Value,
     now: i64,
@@ -371,6 +531,13 @@ fn outbound_lead_generation_research_outcome_patch(
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    evidence.extend(
+        outcome
+            .get("evidence")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default(),
+    );
     let mut researched_field_keys = Vec::new();
 
     for (field_key, field) in outcome
@@ -415,6 +582,7 @@ fn outbound_lead_generation_research_outcome_patch(
                 "source_id": source_id,
                 "source_url": source_url,
                 "person_key": candidate.get("person_key").cloned().unwrap_or(Value::Null),
+                "quote": candidate.get("quote").or_else(|| candidate.get("note")).cloned().unwrap_or_else(|| candidate.get("value").cloned().unwrap_or(Value::Null)),
                 "tier": candidate.get("tier").cloned().unwrap_or(Value::Null),
                 "via": candidate.get("via").cloned().unwrap_or(Value::Null),
                 "label": if source_id.trim().is_empty() { source_url } else { source_id },
@@ -444,6 +612,7 @@ fn outbound_lead_generation_research_outcome_patch(
                 "source_id": source_id,
                 "source_url": source_url,
                 "person_key": candidate.get("person_key").cloned().unwrap_or_else(|| record.get("person_key").cloned().unwrap_or(Value::Null)),
+                "quote": candidate.get("quote").or_else(|| candidate.get("note")).cloned().unwrap_or_else(|| candidate.get("value").cloned().unwrap_or(Value::Null)),
                 "tier": candidate.get("tier").cloned().unwrap_or(Value::Null),
                 "via": candidate.get("via").cloned().unwrap_or(Value::Null),
                 "label": if source_id.trim().is_empty() { source_url } else { source_id },
@@ -876,7 +1045,7 @@ fn deduplicate_research_evidence(entries: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
-fn independent_research_evidence_count(evidence: &[Value], field_key: &str) -> usize {
+pub(super) fn independent_research_evidence_count(evidence: &[Value], field_key: &str) -> usize {
     evidence
         .iter()
         .filter(|entry| {
@@ -892,25 +1061,26 @@ fn independent_research_evidence_count(evidence: &[Value], field_key: &str) -> u
 }
 
 fn research_evidence_source_key(entry: &Value) -> Option<String> {
-    if let Some(source_id) = entry
+    let source_url = entry
+        .get("source_url")
+        .or_else(|| entry.get("url"))
+        .and_then(Value::as_str);
+    if let Some(host) = source_url
+        .and_then(|source_url| url::Url::parse(source_url).ok())
+        .and_then(|url| {
+            url.host_str()
+                .map(|host| host.trim_start_matches("www.").to_ascii_lowercase())
+        })
+        .filter(|host| !host.is_empty())
+    {
+        return Some(host);
+    }
+    entry
         .get("source_id")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-    {
-        return Some(source_id.to_ascii_lowercase());
-    }
-    let source_url = entry
-        .get("source_url")
-        .or_else(|| entry.get("url"))
-        .and_then(Value::as_str)?;
-    url::Url::parse(source_url)
-        .ok()
-        .and_then(|url| {
-            url.host_str()
-                .map(|host| host.trim_start_matches("www.").to_string())
-        })
-        .filter(|host| !host.is_empty())
+        .map(str::to_ascii_lowercase)
 }
 
 fn normalize_researched_contact(contact: Value) -> Option<Value> {
@@ -1065,7 +1235,7 @@ fn base36(mut value: u32) -> String {
     output.iter().rev().collect()
 }
 
-fn merge_json_object_values(target: &mut Value, patch: &Value) {
+pub(super) fn merge_json_object_values(target: &mut Value, patch: &Value) {
     let (Some(target), Some(patch)) = (target.as_object_mut(), patch.as_object()) else {
         *target = patch.clone();
         return;
@@ -1108,7 +1278,9 @@ fn outbound_lead_generation_lead_state_patch(
     lead_payload
 }
 
-fn outbound_lead_generation_writeback_record_id(command: &BusinessCommand) -> Option<&str> {
+pub(super) fn outbound_lead_generation_writeback_record_id(
+    command: &BusinessCommand,
+) -> Option<&str> {
     if command.module.trim() != "outbound-lead-generation" {
         return None;
     }
@@ -1153,22 +1325,22 @@ fn log_lead_projection_error(command_id: &str, result: anyhow::Result<()>) {
     }
 }
 
-fn now_ms() -> i64 {
+pub(super) fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64
 }
 
-struct ActiveResearchCommandGuard {
+pub(super) struct ActiveResearchCommandGuard {
     key: ActiveResearchCommandKey,
 }
 
 impl ActiveResearchCommandGuard {
-    fn claim(root: &Path, command_id: &str) -> Option<Self> {
+    pub(super) fn claim(root: &Path, record_id: &str) -> Option<Self> {
         let key = ActiveResearchCommandKey {
             root: std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()),
-            command_id: command_id.to_string(),
+            record_id: record_id.to_string(),
         };
         let mut active = active_commands();
         if active.insert(key.clone()) {
@@ -1192,7 +1364,7 @@ fn active_commands() -> std::sync::MutexGuard<'static, HashSet<ActiveResearchCom
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn parse_requested_fields(fields: &[String]) -> anyhow::Result<Vec<FieldKey>> {
+pub(super) fn parse_requested_fields(fields: &[String]) -> anyhow::Result<Vec<FieldKey>> {
     fields
         .iter()
         .map(|field| {
@@ -1210,7 +1382,12 @@ fn safe_runtime_source_identifier(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn execute(root: &Path, payload: &Value, client_context: &Value) -> anyhow::Result<Value> {
+fn execute(
+    root: &Path,
+    command_id: &str,
+    payload: &Value,
+    client_context: &Value,
+) -> anyhow::Result<Value> {
     let parsed_client_context = match client_context {
         Value::String(value) => serde_json::from_str(value).unwrap_or(Value::Null),
         _ => client_context.clone(),
@@ -1244,16 +1421,11 @@ fn execute(root: &Path, payload: &Value, client_context: &Value) -> anyhow::Resu
     // misspelled or not-yet-implemented field must fail visibly instead of
     // making a partial result look like a complete research run.
     let fields = parse_requested_fields(&request.fields)?;
-    let workspace =
-        root.join("runtime")
-            .join("research")
-            .join("person")
-            .join(safe_workspace_segment(
-                payload
-                    .get("command_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or(company),
-            ));
+    let workspace = root
+        .join("runtime")
+        .join("research")
+        .join("person")
+        .join(safe_workspace_segment(command_id));
     let auto_browser_capture = request.auto_browser_capture;
     let research_instructions_len = request.research_instructions.len();
     let known_person_records = request
@@ -1275,6 +1447,14 @@ fn execute(root: &Path, payload: &Value, client_context: &Value) -> anyhow::Resu
     };
     let mut result = ctox_web_stack::run_ctox_person_research_tool(root, &research_request)?;
     result["research_instructions_len"] = serde_json::json!(research_instructions_len);
+    result["workspace_root"] = Value::String(
+        research_request
+            .workspace
+            .as_ref()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+    );
     // Sellify is the contractual baseline of every lead research: the CRM
     // record is consulted first and its values must appear as visible
     // evidence candidates, not as invisible pre-knowledge. A lookup failure
@@ -1447,7 +1627,7 @@ fn execute(root: &Path, payload: &Value, client_context: &Value) -> anyhow::Resu
     Ok(result)
 }
 
-fn safe_workspace_segment(value: &str) -> String {
+pub(super) fn safe_workspace_segment(value: &str) -> String {
     let segment = value
         .chars()
         .map(|ch| {
@@ -1706,6 +1886,71 @@ mod tests {
         }));
 
         assert!(ActiveResearchCommandGuard::claim(root.path(), &command_id).is_some());
+    }
+
+    #[test]
+    fn recovery_enqueues_missing_gap_task_for_completed_phase_a_command() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let command_id = "completed-phase-a-without-gap";
+        let record_id = "lead-completed-phase-a";
+        let payload = serde_json::json!({
+            "company": "Example GmbH",
+            "country": "DE",
+            "mode": "new_record",
+            "fields": ["firma_domain"]
+        });
+        let conn = store::open_store(root)?;
+        conn.execute(
+            "INSERT INTO business_commands
+                (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+             VALUES (?1, 'outbound-lead-generation', 'web_stack.person_research', ?2, 'completed', ?3, '{}', 1)",
+            rusqlite::params![command_id, record_id, serde_json::to_string(&payload)?],
+        )?;
+        drop(conn);
+        store::upsert_rxdb_collection_record(
+            root,
+            "business_commands",
+            command_id,
+            1,
+            serde_json::json!({
+                "id": command_id,
+                "command_id": command_id,
+                "status": "completed",
+                "result": {
+                    "requested_fields": ["firma_domain"],
+                    "fields": {"firma_domain": {"value": null, "candidates": []}},
+                    "plan": []
+                }
+            }),
+        )?;
+        store::upsert_rxdb_collection_record(
+            root,
+            "outbound_lead_generation_leads",
+            record_id,
+            1,
+            serde_json::json!({
+                "id": record_id,
+                "research_status": "needs_review",
+                "payload": {"last_research_command_id": command_id}
+            }),
+        )?;
+
+        assert_eq!(recover_completed_phase_a_gap_closures(root)?, 1);
+        assert_eq!(recover_completed_phase_a_gap_closures(root)?, 0);
+        let lead =
+            store::load_rxdb_collection_record(root, "outbound_lead_generation_leads", record_id)?
+                .context("recovered lead missing")?;
+        assert_eq!(lead["research_status"], "running");
+        assert_eq!(lead["research_phase"], "gap_closure");
+        assert!(lead["gap_task_id"]
+            .as_str()
+            .is_some_and(|task_id| !task_id.trim().is_empty()));
+        assert_eq!(
+            crate::mission::channels::list_queue_tasks(root, &[], 10)?.len(),
+            1
+        );
+        Ok(())
     }
 
     #[test]

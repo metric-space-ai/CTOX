@@ -24,6 +24,7 @@ mod module_lifecycle;
 mod module_manifest_loader;
 pub mod office_engine;
 mod person_research_command;
+mod person_research_gap_closure;
 pub mod policy;
 mod rxdb_peer;
 mod rxdb_peer_browser;
