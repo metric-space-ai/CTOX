@@ -194,6 +194,146 @@ pub(super) fn workjet_session_transfer_next_state(state: &str, verb: &str) -> Op
         .map(|transition| transition.to)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryOutcome {
+    pub transfer_id: String,
+    pub old_state: String,
+    pub new_state: String,
+    pub error_code: String,
+}
+
+pub fn run_workjet_session_transfer_recovery(root: &Path, now_ms: i64) -> Vec<RecoveryOutcome> {
+    run_workjet_session_transfer_recovery_inner(root, now_ms).unwrap_or_default()
+}
+
+fn run_workjet_session_transfer_recovery_inner(
+    root: &Path,
+    now_ms: i64,
+) -> anyhow::Result<Vec<RecoveryOutcome>> {
+    let mut conn = open_store(root)?;
+    let transfers = {
+        let mut statement = conn.prepare(
+            "SELECT payload_json FROM business_records
+             WHERE collection=?1 AND deleted=0",
+        )?;
+        let rows = statement.query_map([TRANSFERS_COLLECTION], |row| row.get::<_, String>(0))?;
+        let mut transfers = Vec::new();
+        for row in rows {
+            transfers.push(serde_json::from_str::<Value>(&row?)?);
+        }
+        transfers
+    };
+    let mut outcomes = Vec::new();
+    for mut transfer in transfers {
+        let Some(transfer_id) = transfer
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(old_state) = transfer
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if is_terminal_transfer_state(Some(&old_state)) {
+            continue;
+        }
+        let Some(deadline_at_ms) = transfer.get("deadline_at_ms").and_then(Value::as_i64) else {
+            continue;
+        };
+        if deadline_at_ms >= now_ms {
+            continue;
+        }
+        let Some(session_id) = transfer
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(mut session) = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
+        else {
+            continue;
+        };
+        let precommit = matches!(
+            old_state.as_str(),
+            "pause_requested" | "packing" | "packed" | "shipping" | "applying" | "applied"
+        );
+        let (new_state, error_code, audit_event) = if precommit {
+            let error_code = if old_state == "pause_requested" {
+                "pause_timeout"
+            } else {
+                "transfer_expired"
+            };
+            transfer["recovery_aborting_at_ms"] = Value::from(now_ms);
+            transfer["state"] = Value::String("rolled_back".to_owned());
+            transfer["error_code"] = Value::String(error_code.to_owned());
+            transfer["target_partial_cleanup_required"] = Value::Bool(true);
+            transfer["rolled_back_at_ms"] = Value::from(now_ms);
+            session["run_status"] = Value::String("running".to_owned());
+            session
+                .as_object_mut()
+                .context("session must be an object")?
+                .remove("active_transfer_id");
+            (
+                "rolled_back",
+                error_code,
+                "workjet.session.transfer.aborted",
+            )
+        } else if matches!(old_state.as_str(), "switching" | "resuming") {
+            transfer["state"] = Value::String("failed".to_owned());
+            transfer["error_code"] = Value::String("resume_timeout".to_owned());
+            session["run_status"] = Value::String("transfer_failed".to_owned());
+            (
+                "failed",
+                "resume_timeout",
+                "workjet.session.transfer.manual_intervention",
+            )
+        } else {
+            continue;
+        };
+        transfer["updated_at_ms"] = Value::from(now_ms);
+        session["updated_at_ms"] = Value::from(now_ms);
+        let tx = conn.transaction()?;
+        upsert_business_record(&tx, TRANSFERS_COLLECTION, &transfer_id, now_ms, transfer)?;
+        upsert_business_record(&tx, SESSIONS_COLLECTION, &session_id, now_ms, session)?;
+        insert_business_event(
+            &tx,
+            TRANSFERS_COLLECTION,
+            &transfer_id,
+            audit_event,
+            serde_json::json!({
+                "event_type": audit_event,
+                "transfer_id": transfer_id,
+                "session_id": session_id,
+                "old_state": old_state,
+                "state": new_state,
+                "reason": "deadline_expired",
+                "error_code": error_code,
+                "observed_at_ms": now_ms,
+            }),
+            now_ms,
+        )?;
+        tx.commit()?;
+        let session = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
+            .context("failed to reload recovered Workjet session")?;
+        let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+            .context("failed to reload recovered Workjet transfer")?;
+        project_transfer_records(root, &session, &transfer)?;
+        outcomes.push(RecoveryOutcome {
+            transfer_id,
+            old_state,
+            new_state: new_state.to_owned(),
+            error_code: error_code.to_owned(),
+        });
+    }
+    Ok(outcomes)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionCreatePayload {
@@ -3099,6 +3239,18 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    fn transfer_fixture_records(
+        root: &Path,
+        owner: &str,
+        suffix: &str,
+        target_online: bool,
+    ) -> anyhow::Result<Value> {
+        let created = create_session(root, owner, suffix)?;
+        seed_online_computer(root, owner, &format!("computer-{suffix}"), true)?;
+        seed_online_computer(root, owner, &format!("target-{suffix}"), target_online)?;
+        Ok(created)
+    }
+
     fn transfer_fixture(
         root: &Path,
         owner: &str,
@@ -3107,10 +3259,7 @@ pub(crate) mod tests {
     ) -> anyhow::Result<Value> {
         create_workjet_rxdb_projection_tables(root)?;
         create_workjet_session_rxdb_projection_tables(root)?;
-        let created = create_session(root, owner, suffix)?;
-        seed_online_computer(root, owner, &format!("computer-{suffix}"), true)?;
-        seed_online_computer(root, owner, &format!("target-{suffix}"), target_online)?;
-        Ok(created)
+        transfer_fixture_records(root, owner, suffix, target_online)
     }
 
     fn start_transfer(
@@ -3242,13 +3391,13 @@ pub(crate) mod tests {
         )
     }
 
-    fn packed_transfer(
+    fn packed_transfer_records(
         root: &Path,
         owner: &str,
         suffix: &str,
         mode: &str,
     ) -> anyhow::Result<Value> {
-        let created = transfer_fixture(root, owner, suffix, true)?;
+        let created = transfer_fixture_records(root, owner, suffix, true)?;
         let session_id = created["session"]["id"].as_str().context("session id")?;
         let started = start_transfer(root, owner, session_id, suffix, "start")?;
         let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
@@ -3283,6 +3432,17 @@ pub(crate) mod tests {
         )
     }
 
+    fn packed_transfer(
+        root: &Path,
+        owner: &str,
+        suffix: &str,
+        mode: &str,
+    ) -> anyhow::Result<Value> {
+        create_workjet_rxdb_projection_tables(root)?;
+        create_workjet_session_rxdb_projection_tables(root)?;
+        packed_transfer_records(root, owner, suffix, mode)
+    }
+
     fn apply_command(
         transfer_id: &str,
         suffix: &str,
@@ -3315,8 +3475,8 @@ pub(crate) mod tests {
         )
     }
 
-    fn applied_transfer(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
-        let packed = packed_transfer(root, owner, suffix, "git")?;
+    fn applied_transfer_records(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        let packed = packed_transfer_records(root, owner, suffix, "git")?;
         let transfer_id = packed["transfer_id"].as_str().context("transfer id")?;
         handle_workjet_session_transfer_apply_complete_command(
             root,
@@ -3324,6 +3484,12 @@ pub(crate) mod tests {
             owner,
             false,
         )
+    }
+
+    fn applied_transfer(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        create_workjet_rxdb_projection_tables(root)?;
+        create_workjet_session_rxdb_projection_tables(root)?;
+        applied_transfer_records(root, owner, suffix)
     }
 
     fn confirm_command(
@@ -3346,8 +3512,8 @@ pub(crate) mod tests {
         )
     }
 
-    fn switched_transfer(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
-        let applied = applied_transfer(root, owner, suffix)?;
+    fn switched_transfer_records(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        let applied = applied_transfer_records(root, owner, suffix)?;
         let transfer_id = applied["transfer_id"].as_str().context("transfer id")?;
         let path = format!("opaque://target-{suffix}/project-{suffix}");
         let working_copy_id = deterministic_working_copy_id(
@@ -3361,6 +3527,12 @@ pub(crate) mod tests {
             owner,
             false,
         )
+    }
+
+    fn switched_transfer(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        create_workjet_rxdb_projection_tables(root)?;
+        create_workjet_session_rxdb_projection_tables(root)?;
+        switched_transfer_records(root, owner, suffix)
     }
 
     fn resume_ack_command(
@@ -4324,6 +4496,101 @@ pub(crate) mod tests {
             )?;
             assert_eq!(audit_count, 1, "abort replay must not duplicate audit");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_recovery_handles_expired_sides_and_is_idempotent(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let now = super::super::store::now_ms() as i64;
+
+        let pre_created = transfer_fixture(root.path(), "owner-1", "recovery-pre", true)?;
+        let pre_session_id = pre_created["session"]["id"]
+            .as_str()
+            .context("pre session id")?;
+        let pre = start_transfer(
+            root.path(),
+            "owner-1",
+            pre_session_id,
+            "recovery-pre",
+            "start",
+        )?;
+        let pre_transfer_id = pre["transfer_id"].as_str().context("pre transfer id")?;
+
+        let post = switched_transfer_records(root.path(), "owner-1", "recovery-post")?;
+        let post_transfer_id = post["transfer_id"].as_str().context("post transfer id")?;
+        let post_session_id = post["session"]["id"].as_str().context("post session id")?;
+
+        let fresh_created =
+            transfer_fixture_records(root.path(), "owner-1", "recovery-fresh", true)?;
+        let fresh_session_id = fresh_created["session"]["id"]
+            .as_str()
+            .context("fresh session id")?;
+        let fresh = start_transfer(
+            root.path(),
+            "owner-1",
+            fresh_session_id,
+            "recovery-fresh",
+            "start",
+        )?;
+        let fresh_transfer_id = fresh["transfer_id"].as_str().context("fresh transfer id")?;
+
+        let conn = open_store(root.path())?;
+        for (transfer_id, deadline) in [
+            (pre_transfer_id, now - 1),
+            (post_transfer_id, now - 1),
+            (fresh_transfer_id, now + 60_000),
+        ] {
+            let mut transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, transfer_id)?
+                .context("transfer")?;
+            transfer["deadline_at_ms"] = Value::from(deadline);
+            upsert_business_record(&conn, TRANSFERS_COLLECTION, transfer_id, now, transfer)?;
+        }
+        drop(conn);
+
+        let mut outcomes = run_workjet_session_transfer_recovery(root.path(), now);
+        outcomes.sort_by(|left, right| left.transfer_id.cmp(&right.transfer_id));
+        assert_eq!(outcomes.len(), 2);
+        let pre_outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.transfer_id == pre_transfer_id)
+            .context("pre outcome")?;
+        assert_eq!(pre_outcome.old_state, "pause_requested");
+        assert_eq!(pre_outcome.new_state, "rolled_back");
+        assert_eq!(pre_outcome.error_code, "pause_timeout");
+        let post_outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.transfer_id == post_transfer_id)
+            .context("post outcome")?;
+        assert_eq!(post_outcome.old_state, "resuming");
+        assert_eq!(post_outcome.new_state, "failed");
+        assert_eq!(post_outcome.error_code, "resume_timeout");
+
+        let conn = open_store(root.path())?;
+        let pre_transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, pre_transfer_id)?
+            .context("pre transfer")?;
+        let pre_session = outbound_load_record(&conn, SESSIONS_COLLECTION, pre_session_id)?
+            .context("pre session")?;
+        assert_eq!(pre_transfer["state"], "rolled_back");
+        assert_eq!(pre_transfer["target_partial_cleanup_required"], true);
+        assert_eq!(pre_session["run_status"], "running");
+        assert!(pre_session.get("active_transfer_id").is_none());
+
+        let post_transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, post_transfer_id)?
+            .context("post transfer")?;
+        let post_session = outbound_load_record(&conn, SESSIONS_COLLECTION, post_session_id)?
+            .context("post session")?;
+        assert_eq!(post_transfer["state"], "failed");
+        assert_eq!(post_transfer["error_code"], "resume_timeout");
+        assert_eq!(post_session["run_status"], "transfer_failed");
+        assert_eq!(post_session["computer_id"], "target-recovery-post");
+
+        let fresh_transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, fresh_transfer_id)?
+            .context("fresh transfer")?;
+        assert_eq!(fresh_transfer["state"], "pause_requested");
+        drop(conn);
+        assert!(run_workjet_session_transfer_recovery(root.path(), now).is_empty());
         Ok(())
     }
 
