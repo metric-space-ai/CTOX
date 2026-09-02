@@ -21359,6 +21359,7 @@ fn extract_pdf_literal_text(bytes: &[u8]) -> String {
 
 const BUSINESS_OS_APP_IMPORT_MAX_FILES: usize = 400;
 const BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES: u64 = 512 * 1024;
+const BUSINESS_OS_APP_IMPORT_MAX_DESKTOP_FILE_BYTES: u64 = 8 * 1024 * 1024;
 const BUSINESS_OS_APP_IMPORT_MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
 const BUSINESS_OS_APP_IMPORT_MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -21709,9 +21710,9 @@ fn materialize_desktop_folder_app_import_source(
             Some(&generation_id),
         )?;
         anyhow::ensure!(
-            materialized.size_bytes <= BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES,
+            materialized.size_bytes <= BUSINESS_OS_APP_IMPORT_MAX_DESKTOP_FILE_BYTES,
             "app import file `{relative_path}` exceeds {} bytes",
-            BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES
+            BUSINESS_OS_APP_IMPORT_MAX_DESKTOP_FILE_BYTES
         );
         total_bytes = total_bytes.saturating_add(materialized.size_bytes);
         anyhow::ensure!(

@@ -6,7 +6,8 @@ import {
 } from '../../shared/file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 const MAX_FILES = 400;
-const MAX_FILE_BYTES = 512 * 1024;
+const MAX_LOCAL_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_LOCAL_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'blocked']);
 const RECOVERABLE_DISPATCH_PATTERNS = [
@@ -148,6 +149,7 @@ export function buildAppImportCommand({
 
 async function readDirectoryFiles(dirHandle) {
   const files = [];
+  let snapshotBytes = 0;
   async function walk(handle, prefix) {
     for await (const [name, entry] of handle.entries()) {
       const relativePath = prefix ? `${prefix}/${name}` : name;
@@ -164,13 +166,38 @@ async function readDirectoryFiles(dirHandle) {
         throw new Error(`invalid_path:${relativePath}`);
       }
       const file = await entry.getFile();
-      if (file.size > MAX_FILE_BYTES) {
+      if (file.size > MAX_LOCAL_FILE_BYTES) {
         throw Object.assign(new Error('file_too_large'), { path: relativePath, size: file.size });
       }
+      snapshotBytes += file.size;
+      if (snapshotBytes > MAX_LOCAL_SNAPSHOT_BYTES) throw new Error('snapshot_too_large');
       files.push({ relativePath, file, bytes: new Uint8Array(await file.arrayBuffer()) });
     }
   }
   await walk(dirHandle, '');
+  if (!files.length) throw new Error('no_importable_files');
+  return files;
+}
+
+async function readSelectedFiles(fileList) {
+  const files = [];
+  let snapshotBytes = 0;
+  for (const file of Array.from(fileList || [])) {
+    const relativePath = String(file?.webkitRelativePath || file?.name || '').replaceAll('\\', '/');
+    if (!relativePath || shouldSkipPath(relativePath) || !isImportableFile(relativePath)) continue;
+    if (files.length >= MAX_FILES) {
+      throw Object.assign(new Error('too_many_files'), { count: files.length + 1 });
+    }
+    if (relativePath.length > 240 || relativePath.split('/').some((part) => !part || part === '..')) {
+      throw new Error(`invalid_path:${relativePath}`);
+    }
+    if (file.size > MAX_LOCAL_FILE_BYTES) {
+      throw Object.assign(new Error('file_too_large'), { path: relativePath, size: file.size });
+    }
+    snapshotBytes += file.size;
+    if (snapshotBytes > MAX_LOCAL_SNAPSHOT_BYTES) throw new Error('snapshot_too_large');
+    files.push({ relativePath, file, bytes: new Uint8Array(await file.arrayBuffer()) });
+  }
   if (!files.length) throw new Error('no_importable_files');
   return files;
 }
@@ -190,11 +217,10 @@ async function writeChunkDocuments(collection, rows) {
   return undefined;
 }
 
-async function stageDesktopFolderSnapshot(ctx, dirHandle, onProgress = () => {}) {
+async function stageDesktopSnapshot(ctx, { folderName, sourceFiles }, onProgress = () => {}) {
   const desktopFiles = ctx?.db?.collection?.('desktop_files');
   const desktopChunks = ctx?.db?.collection?.('desktop_file_chunks');
   if (!desktopFiles || !desktopChunks) throw new Error('desktop_file_sync_unavailable');
-  const sourceFiles = await readDirectoryFiles(dirHandle);
   const now = Date.now();
   const snapshotId = `app-import-${crypto.randomUUID()}`;
   const folderId = `fs_${snapshotId}`;
@@ -203,7 +229,7 @@ async function stageDesktopFolderSnapshot(ctx, dirHandle, onProgress = () => {})
     id: folderId,
     parent_id: 'fs_root',
     path: folderPath,
-    name: dirHandle.name || snapshotId,
+    name: folderName || snapshotId,
     kind: 'folder',
     mime_type: 'inode/directory',
     extension: '',
@@ -274,9 +300,25 @@ async function stageDesktopFolderSnapshot(ctx, dirHandle, onProgress = () => {})
   return {
     kind: 'desktop-folder',
     snapshot_id: snapshotId,
-    folder_name: dirHandle.name || 'Imported app',
+    folder_name: folderName || 'Imported app',
     files: manifest,
   };
+}
+
+async function stageDesktopFolderSnapshot(ctx, dirHandle, onProgress = () => {}) {
+  return stageDesktopSnapshot(ctx, {
+    folderName: dirHandle.name,
+    sourceFiles: await readDirectoryFiles(dirHandle),
+  }, onProgress);
+}
+
+async function stageDesktopFileSnapshot(ctx, fileList, onProgress = () => {}) {
+  const sourceFiles = await readSelectedFiles(fileList);
+  const firstName = sourceFiles[0].relativePath.split('/').pop() || 'Imported app';
+  return stageDesktopSnapshot(ctx, {
+    folderName: firstName.replace(/\.[^.]+$/, '') || firstName,
+    sourceFiles,
+  }, onProgress);
 }
 
 function commandStatus(command) {
@@ -328,6 +370,7 @@ export async function mount(ctx) {
     sourceSection: q('[data-imp-source-section]'), progressSection: q('[data-imp-progress-section]'),
     doneSection: q('[data-imp-done-section]'), githubForm: q('[data-imp-github-form]'),
     githubUrl: q('[data-imp-github-url]'), githubBtn: q('[data-imp-github-btn]'),
+    pickFiles: q('[data-imp-pick-files]'), pickFilesInput: q('[data-imp-pick-files-input]'),
     pickFolder: q('[data-imp-pick-folder]'), sourceHint: q('[data-imp-source-hint]'),
     commandId: q('[data-imp-command-id]'), moduleId: q('[data-imp-module-id]'),
     progressTitle: q('[data-imp-progress-title]'), progressNote: q('[data-imp-progress-note]'),
@@ -459,6 +502,27 @@ export async function mount(ctx) {
       setStage('source');
     } finally {
       refs.githubBtn.disabled = false;
+    }
+  });
+
+  refs.pickFiles.addEventListener('click', () => refs.pickFilesInput.click());
+  refs.pickFilesInput.addEventListener('change', async () => {
+    const selectedFiles = refs.pickFilesInput.files;
+    if (!selectedFiles?.length) return;
+    refs.pickFiles.disabled = true;
+    try {
+      notify(t('snapshotting', 'Securing the source snapshot…'));
+      const importSource = await stageDesktopFileSnapshot(ctx, selectedFiles, (current, total, path) => {
+        refs.sourceHint.textContent = `${current}/${total} · ${path}`;
+      });
+      const moduleId = moduleIdFromSource(selectedFiles[0].name.replace(/\.[^.]+$/, ''));
+      notify('');
+      await dispatchImport(moduleId, titleFromModuleId(moduleId), importSource);
+    } catch (error) {
+      notify(t('fileFailed', 'The file import could not be started: {error}', { error: error?.message || error }), true);
+    } finally {
+      refs.pickFiles.disabled = false;
+      refs.pickFilesInput.value = '';
     }
   });
 

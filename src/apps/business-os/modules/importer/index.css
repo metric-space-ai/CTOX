@@ -429,6 +429,11 @@
   transition: border-color 160ms ease, background-color 160ms ease, transform 160ms ease;
 }
 
+.imp-local-sources {
+  display: grid;
+  gap: 10px;
+}
+
 .imp-folder:hover {
   border-color: color-mix(in srgb, var(--imp-accent) 35%, var(--border));
   background: var(--imp-accent-soft);
