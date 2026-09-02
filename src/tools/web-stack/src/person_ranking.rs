@@ -57,7 +57,79 @@ pub fn role_category(role: &str) -> usize {
 pub fn contains_role_keyword(value: &str) -> bool {
     let normalized = value.trim().to_lowercase();
     role_category(value) != 99
-        || normalized_contains_any(&normalized, &["leiter", "leiterin", "leitung", "head of"])
+        || normalized_contains_any(&normalized, GENERIC_ROLE_SUBSTRINGS)
+        || normalized_words_contain_any(&normalized, GENERIC_ROLE_WORDS)
+}
+
+/// Generic role vocabulary that does not map to a priority category but still
+/// marks a value as a job function rather than a place or a person name
+/// (review finding N4: "Account Manager", "Verkauf", "HR" were rejected).
+const GENERIC_ROLE_SUBSTRINGS: &[&str] = &[
+    "leiter",
+    "leiterin",
+    "leitung",
+    "head of",
+    "manager",
+    "director",
+    "direktor",
+    "vorstand",
+    "assistenz",
+    "assistant",
+    "sales",
+    "verkauf",
+    "vertrieb",
+    "marketing",
+    "personal",
+    "human resources",
+    "informatik",
+    "consultant",
+    "berater",
+    "referent",
+    "sachbearbeit",
+    "kaufmann",
+    "kauffrau",
+    "kaufmänn",
+    "controller",
+    "buchhalt",
+    "ingenieur",
+    "engineer",
+    "specialist",
+    "spezialist",
+    "expert",
+    "koordinator",
+    "coordinator",
+    "projekt",
+    "product",
+    "produkt",
+    "partner",
+    "gesellschafter",
+    "owner",
+    "founder",
+    "gründer",
+    "chef",
+    "officer",
+    "analyst",
+    "architekt",
+    "architect",
+    "qualität",
+    "quality",
+    "service",
+    "support",
+    "recruit",
+    "key account",
+];
+
+/// Short tokens that only count as whole words (substring matching would hit
+/// "leiter" for "it" or "uhr" for "hr").
+const GENERIC_ROLE_WORDS: &[&str] = &[
+    "hr", "it", "ceo", "cfo", "coo", "cto", "cio", "cmo", "cso", "vp", "pm",
+];
+
+fn normalized_words_contain_any(value: &str, words: &[&str]) -> bool {
+    value
+        .split(|ch: char| !ch.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .any(|word| words.contains(&word))
 }
 
 pub fn priority_rank(role: &str, priorities: &[String]) -> usize {
@@ -241,6 +313,13 @@ mod tests {
             ("Head of Supply Chain", true),
             ("Leiterin Einkauf", true),
             ("Dr.", false),
+            ("Account Manager", true),
+            ("Verkauf", true),
+            ("HR", true),
+            ("IT", true),
+            ("Sales", true),
+            ("Werkleiter Leipzig", true),
+            ("Berlin", false),
         ] {
             assert_eq!(
                 role_is_valid(value, "Tim Nils Berner", &[]),
