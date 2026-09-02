@@ -240,6 +240,19 @@ struct TransferStartPayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TransferPauseAckPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
+    transfer_id: String,
+    computer_id: String,
+    fence_epoch: i64,
+    last_terminal_turn_id: String,
+    git_repository: bool,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TransferAbortPayload {
     #[serde(default, rename = "inbound_channel")]
     _inbound_channel: Option<String>,
@@ -286,6 +299,14 @@ pub(super) fn handle_workjet_session_store_command(
             authorized_owner_user_id,
             can_manage_all_records,
         ),
+        "ctox.workjet.session.transfer.pause_ack" => {
+            handle_workjet_session_transfer_pause_ack_command(
+                root,
+                command,
+                authorized_owner_user_id,
+                can_manage_all_records,
+            )
+        }
         "ctox.workjet.session.transfer.abort" => handle_workjet_session_transfer_abort_command(
             root,
             command,
@@ -402,6 +423,16 @@ pub(super) fn workjet_session_record_policy_scope(
                 record.get("owner_user_id").and_then(Value::as_str) == Some(owner_user_id.as_str())
             });
             (SESSIONS_COLLECTION, session_id, owned, false)
+        }
+        "ctox.workjet.session.transfer.pause_ack" => {
+            let payload: TransferPauseAckPayload = serde_json::from_value(command.payload.clone())
+                .context("invalid ctox.workjet.session.transfer.pause_ack payload")?;
+            let transfer_id = bounded_required(&payload.transfer_id, "transfer_id", 160)?;
+            let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?;
+            let owned = transfer.as_ref().is_none_or(|record| {
+                record.get("owner_user_id").and_then(Value::as_str) == Some(owner_user_id.as_str())
+            });
+            (TRANSFERS_COLLECTION, transfer_id, owned, false)
         }
         "ctox.workjet.session.transfer.abort" => {
             let payload: TransferAbortPayload = serde_json::from_value(command.payload.clone())
@@ -930,6 +961,190 @@ fn handle_workjet_session_transfer_start_command(
     transfer_success_response(&session, &transfer)
 }
 
+fn handle_workjet_session_transfer_pause_ack_command(
+    root: &Path,
+    command: &BusinessCommand,
+    authorized_owner_user_id: &str,
+    can_manage_all_records: bool,
+) -> anyhow::Result<Value> {
+    let payload: TransferPauseAckPayload = match serde_json::from_value(command.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Ok(transfer_error(
+                "idempotency_conflict",
+                false,
+                command.payload.get("transfer_id").and_then(Value::as_str),
+                None,
+                &format!("invalid transfer pause_ack payload: {error}"),
+            ));
+        }
+    };
+    let actor_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
+    let transfer_id = bounded_required(&payload.transfer_id, "transfer_id", 160)?;
+    let computer_id = bounded_required(&payload.computer_id, "computer_id", 256)?;
+    let last_terminal_turn_id =
+        bounded_required(&payload.last_terminal_turn_id, "last_terminal_turn_id", 160)?;
+    let idempotency_key = bounded_required(&payload.idempotency_key, "idempotency_key", 160)?;
+    if payload.fence_epoch < 0 {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            None,
+            "pause_ack fence_epoch must be nonnegative",
+        ));
+    }
+    let normalized_payload = serde_json::json!({
+        "transfer_id": transfer_id,
+        "computer_id": computer_id,
+        "fence_epoch": payload.fence_epoch,
+        "last_terminal_turn_id": last_terminal_turn_id,
+        "git_repository": payload.git_repository,
+        "idempotency_key": idempotency_key,
+    });
+    let payload_sha256 = normalized_payload_sha256(&normalized_payload)?;
+
+    let mut conn = open_store(root)?;
+    let Some(mut transfer) = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+    else {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            None,
+            "Workjet transfer not found",
+        ));
+    };
+    let state = transfer
+        .get("state")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no state")?
+        .to_owned();
+    if !can_manage_all_records
+        && transfer.get("owner_user_id").and_then(Value::as_str) != Some(actor_user_id.as_str())
+    {
+        return Ok(transfer_error(
+            "session_not_owned",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet transfer belongs to a different owner",
+        ));
+    }
+    let session_id = bounded_required(
+        transfer
+            .get("session_id")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no session_id")?,
+        "session_id",
+        160,
+    )?;
+    let Some(mut session) = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)? else {
+        return Ok(transfer_error(
+            "session_not_found",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet session not found",
+        ));
+    };
+
+    if let Some(previous_payload_sha256) = previous_transfer_step_payload_sha256(
+        &conn,
+        &transfer_id,
+        "workjet.session.transfer.fenced",
+        &idempotency_key,
+    )? {
+        if previous_payload_sha256 != payload_sha256 {
+            return Ok(transfer_error(
+                "idempotency_conflict",
+                false,
+                Some(&transfer_id),
+                Some(&state),
+                "pause_ack idempotency key was reused with different payload",
+            ));
+        }
+        return transfer_success_response(&session, &transfer);
+    }
+    if state != "pause_requested" {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "pause_ack is only valid in pause_requested",
+        ));
+    }
+    let source_computer_id = transfer
+        .get("source_computer_id")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no source_computer_id")?;
+    if computer_id != source_computer_id {
+        return Ok(transfer_error(
+            "computer_actor_mismatch",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "pause_ack computer is not the transfer source",
+        ));
+    }
+    if transfer.get("fence_epoch").and_then(Value::as_i64) != Some(payload.fence_epoch) {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "pause_ack fence_epoch does not match the transfer",
+        ));
+    }
+    let next_state = workjet_session_transfer_next_state(&state, "pause_ack")
+        .context("pause_ack transition missing from transfer state table")?;
+    let now = super::store::now_ms() as i64;
+    let packing_timeout_ms = if payload.git_repository {
+        5 * 60_000
+    } else {
+        30 * 60_000
+    };
+    transfer["state"] = Value::String(next_state.to_owned());
+    transfer["source_git_repository"] = Value::Bool(payload.git_repository);
+    transfer["last_terminal_turn_id"] = Value::String(last_terminal_turn_id.clone());
+    transfer["pause_acked_at_ms"] = Value::from(now);
+    transfer["deadline_at_ms"] = Value::from(now.saturating_add(packing_timeout_ms));
+    transfer["updated_at_ms"] = Value::from(now);
+    session["run_status"] = Value::String("paused".to_owned());
+    session["last_terminal_turn_id"] = Value::String(last_terminal_turn_id.clone());
+    session["updated_at_ms"] = Value::from(now);
+
+    let tx = conn.transaction()?;
+    upsert_business_record(&tx, TRANSFERS_COLLECTION, &transfer_id, now, transfer)?;
+    upsert_business_record(&tx, SESSIONS_COLLECTION, &session_id, now, session)?;
+    insert_business_event(
+        &tx,
+        TRANSFERS_COLLECTION,
+        &transfer_id,
+        "workjet.session.transfer.fenced",
+        serde_json::json!({
+            "event_type": "workjet.session.transfer.fenced",
+            "transfer_id": transfer_id,
+            "session_id": session_id,
+            "fence_epoch": payload.fence_epoch,
+            "last_turn": last_terminal_turn_id,
+            "idempotency_key": idempotency_key,
+            "payload_sha256": payload_sha256,
+            "observed_at_ms": now,
+        }),
+        now,
+    )?;
+    tx.commit()?;
+
+    let session = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
+        .context("failed to reload pause-acked Workjet session")?;
+    let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+        .context("failed to reload pause-acked Workjet transfer")?;
+    project_transfer_records(root, &session, &transfer)?;
+    transfer_success_response(&session, &transfer)
+}
+
 fn handle_workjet_session_transfer_abort_command(
     root: &Path,
     command: &BusinessCommand,
@@ -1163,6 +1378,42 @@ fn redacted_transfer_reason(reason: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     normalized.chars().take(512).collect()
+}
+
+fn normalized_payload_sha256(payload: &Value) -> anyhow::Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(payload)?)
+    ))
+}
+
+fn previous_transfer_step_payload_sha256(
+    conn: &Connection,
+    transfer_id: &str,
+    event_type: &str,
+    idempotency_key: &str,
+) -> anyhow::Result<Option<String>> {
+    let mut statement = conn.prepare(
+        "SELECT payload_json FROM business_events
+         WHERE collection=?1 AND record_id=?2 AND command_type=?3
+         ORDER BY observed_at_ms ASC",
+    )?;
+    let rows = statement.query_map([TRANSFERS_COLLECTION, transfer_id, event_type], |row| {
+        row.get::<_, String>(0)
+    })?;
+    for row in rows {
+        let payload: Value = serde_json::from_str(&row?)?;
+        if payload.get("idempotency_key").and_then(Value::as_str) == Some(idempotency_key) {
+            return Ok(Some(
+                payload
+                    .get("payload_sha256")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+            ));
+        }
+    }
+    Ok(None)
 }
 
 fn previous_abort_reason_sha256(
@@ -1590,6 +1841,33 @@ pub(crate) mod tests {
         )
     }
 
+    fn pause_ack_transfer(
+        root: &Path,
+        owner: &str,
+        transfer_id: &str,
+        computer_id: &str,
+        fence_epoch: i64,
+        key: &str,
+    ) -> anyhow::Result<Value> {
+        handle_workjet_session_transfer_pause_ack_command(
+            root,
+            &command(
+                "ctox.workjet.session.transfer.pause_ack",
+                None,
+                json!({
+                    "transfer_id": transfer_id,
+                    "computer_id": computer_id,
+                    "fence_epoch": fence_epoch,
+                    "last_terminal_turn_id": "turn-terminal-1",
+                    "git_repository": true,
+                    "idempotency_key": key,
+                }),
+            ),
+            owner,
+            false,
+        )
+    }
+
     #[test]
     fn workjet_session_transfer_state_table_matches_rfc() {
         let states = WORKJET_SESSION_TRANSFER_STATES
@@ -1720,6 +1998,134 @@ pub(crate) mod tests {
             )?["error_code"],
             "session_not_owned"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_pause_ack_moves_to_packing_and_pauses_session() -> anyhow::Result<()>
+    {
+        let root = tempdir()?;
+        let created = transfer_fixture(root.path(), "owner-1", "pause-ack", true)?;
+        let session_id = created["session"]["id"].as_str().context("session id")?;
+        let started = start_transfer(root.path(), "owner-1", session_id, "pause-ack", "start")?;
+        let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
+        let result = pause_ack_transfer(
+            root.path(),
+            "owner-1",
+            transfer_id,
+            "computer-pause-ack",
+            1,
+            "ack-once",
+        )?;
+        assert_eq!(result["state"], "packing");
+        assert_eq!(result["session"]["run_status"], "paused");
+        assert_eq!(
+            result["session"]["last_terminal_turn_id"],
+            "turn-terminal-1"
+        );
+        assert_eq!(result["transfer"]["source_git_repository"], true);
+        assert!(result["transfer"]["pause_acked_at_ms"].as_i64().is_some());
+        assert!(
+            result["transfer"]["deadline_at_ms"]
+                .as_i64()
+                .unwrap_or_default()
+                > result["transfer"]["pause_acked_at_ms"]
+                    .as_i64()
+                    .unwrap_or_default()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_pause_ack_rejects_wrong_computer() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let created = transfer_fixture(root.path(), "owner-1", "ack-computer", true)?;
+        let session_id = created["session"]["id"].as_str().context("session id")?;
+        let started = start_transfer(root.path(), "owner-1", session_id, "ack-computer", "start")?;
+        let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
+        let result = pause_ack_transfer(root.path(), "owner-1", transfer_id, "other", 1, "ack")?;
+        assert_eq!(result["error_code"], "computer_actor_mismatch");
+        assert_eq!(result["state"], "pause_requested");
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_pause_ack_rejects_epoch_mismatch() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let created = transfer_fixture(root.path(), "owner-1", "ack-epoch", true)?;
+        let session_id = created["session"]["id"].as_str().context("session id")?;
+        let started = start_transfer(root.path(), "owner-1", session_id, "ack-epoch", "start")?;
+        let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
+        let result = pause_ack_transfer(
+            root.path(),
+            "owner-1",
+            transfer_id,
+            "computer-ack-epoch",
+            0,
+            "ack",
+        )?;
+        assert_eq!(result["error_code"], "session_fenced");
+        assert_eq!(result["state"], "pause_requested");
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_pause_ack_rejects_illegal_state() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let created = transfer_fixture(root.path(), "owner-1", "ack-state", true)?;
+        let session_id = created["session"]["id"].as_str().context("session id")?;
+        let started = start_transfer(root.path(), "owner-1", session_id, "ack-state", "start")?;
+        let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
+        let conn = open_store(root.path())?;
+        let now = super::super::store::now_ms() as i64;
+        let mut transfer =
+            outbound_load_record(&conn, TRANSFERS_COLLECTION, transfer_id)?.context("transfer")?;
+        transfer["state"] = Value::String("packing".to_owned());
+        upsert_business_record(&conn, TRANSFERS_COLLECTION, transfer_id, now, transfer)?;
+        let result = pause_ack_transfer(
+            root.path(),
+            "owner-1",
+            transfer_id,
+            "computer-ack-state",
+            1,
+            "ack",
+        )?;
+        assert_eq!(result["error_code"], "transfer_illegal_state");
+        assert_eq!(result["state"], "packing");
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_pause_ack_replays_without_second_effect() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let created = transfer_fixture(root.path(), "owner-1", "ack-replay", true)?;
+        let session_id = created["session"]["id"].as_str().context("session id")?;
+        let started = start_transfer(root.path(), "owner-1", session_id, "ack-replay", "start")?;
+        let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
+        let first = pause_ack_transfer(
+            root.path(),
+            "owner-1",
+            transfer_id,
+            "computer-ack-replay",
+            1,
+            "ack-once",
+        )?;
+        let second = pause_ack_transfer(
+            root.path(),
+            "owner-1",
+            transfer_id,
+            "computer-ack-replay",
+            1,
+            "ack-once",
+        )?;
+        assert_eq!(first, second);
+        let audit_count: i64 = open_store(root.path())?.query_row(
+            "SELECT COUNT(*) FROM business_events
+             WHERE record_id=?1 AND command_type='workjet.session.transfer.fenced'",
+            [transfer_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(audit_count, 1, "pause_ack replay must not duplicate audit");
         Ok(())
     }
 
