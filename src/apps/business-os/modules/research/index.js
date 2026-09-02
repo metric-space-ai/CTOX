@@ -12,7 +12,7 @@ import {
 // sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
 // ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
 // an index.css oder locales/ hochzaehlen.
-const BUILD = '20260902-research-sync-state-v90';
+const BUILD = '20260902-research-sync-state-v91';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -576,6 +576,34 @@ async function startResearchCollections(mountToken) {
   }));
 }
 
+// Die Sync-Phase wurde nur beim Mount bewertet: lief die Erstreplikation einer
+// Pflicht-Collection laenger als 20 s (Daemon mit Recherche-Worker beschaeftigt),
+// blieb "data sync did not become ready in time" fuer die ganze Sitzung stehen,
+// obwohl die Daten laengst lokal lesbar waren (skf.ctox.dev, 02.09.2026).
+// Jeder Reload prueft gescheiterte Collections erneut: erst ueber den
+// Readiness-Schnappschuss der Shell, sonst ueber die Bridge selbst.
+async function reprobeFailedSyncCollections(mountToken = state.mountToken) {
+  const failed = RESEARCH_REQUIRED_COLLECTIONS.filter(
+    (collection) => state.diagnostics.collections[collection]?.sync?.kind === 'failed',
+  );
+  if (!failed.length) return;
+  await Promise.all(failed.map(async (collection) => {
+    if (collectionReadiness(collection)?.ready === true) {
+      markCollectionDiagnostic(collection, 'sync', 'ok', state.t('syncReady', 'Sync bereit'));
+      return;
+    }
+    if (typeof state.ctx?.sync?.startCollection !== 'function' || RESEARCH_DEMAND_ONLY_COLLECTIONS.has(collection)) return;
+    try {
+      const bridge = await state.ctx.sync.startCollection(collection);
+      if (mountToken && state.mountToken !== mountToken) return;
+      if (bridge) await waitForReplicationBridge(bridge, collection);
+      markCollectionDiagnostic(collection, 'sync', 'ok', state.t('syncReady', 'Sync bereit'));
+    } catch (error) {
+      markCollectionDiagnostic(collection, 'sync', 'failed', errorMessage(error));
+    }
+  }));
+}
+
 async function waitForReplicationBridge(bridge, collection, timeoutMs = 20000) {
   const bridgeState = bridge?.state;
   const wait = typeof bridgeState?.awaitInSync === 'function'
@@ -751,6 +779,8 @@ async function refreshAllNow({ seed = false, retryEmptyKnowledge = true, mountTo
   state.diagnostics.reloadFinishedAt = 0;
   state.diagnostics.reloadCount += 1;
   setStatus(state.t('loadingKnowledge', 'Knowledge wird geladen...'));
+  await reprobeFailedSyncCollections(mountToken);
+  if (mountToken && state.mountToken !== mountToken) return;
   await loadLocalState({ mountToken });
   if (mountToken && state.mountToken !== mountToken) return;
   const knowledgeBases = await loadKnowledgeBases({
