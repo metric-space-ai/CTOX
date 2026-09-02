@@ -14948,6 +14948,9 @@ fn should_skip_idle_channel_router_preflight(root: &Path) -> bool {
             || previous.env_overlay != env_overlay
             || now.duration_since(previous.last_idle_pass)
                 >= Duration::from_secs(CHANNEL_ROUTER_IDLE_SAFETY_SECS)
+            // Same rule as the durable-queue empty probe: an expired retry hold
+            // is a due time the counters of the source stamp cannot express.
+            || durable_stamp_retry_due(&source_stamp.communication)
         {
             return false;
         }
@@ -16014,6 +16017,12 @@ fn should_skip_idle_durable_queue_empty_probe(root: &Path) -> bool {
         if previous.root != root_path || previous.queue_stamp != queue_stamp {
             return false;
         }
+        // A retry hold that has expired is due work even though the intake
+        // stamp did not move: the empty probe that armed this gate ran while
+        // `retry_not_before` was still in the future.
+        if durable_stamp_retry_due(&queue_stamp) {
+            return false;
+        }
         let timer_backoff = idle_durable_queue_empty_backoff(previous.consecutive_empty_probes);
         let unchanged_source_backoff =
             Duration::from_secs(IDLE_DURABLE_QUEUE_EMPTY_IDLE_SAFETY_SECS);
@@ -16057,6 +16066,21 @@ fn clear_idle_durable_queue_empty_gate(root: &Path) {
     {
         *gate = None;
     }
+}
+
+/// True when the durable queue holds a `pending` route whose `retry_not_before`
+/// has passed. The stamp carries the earliest hold; only the clock decides.
+fn durable_stamp_retry_due(stamp: &DurableCommunicationSourceStamp) -> bool {
+    let DurableCommunicationSourceStamp::Source(intake) = stamp else {
+        return false;
+    };
+    let raw = intake.earliest_pending_retry_not_before().trim();
+    if raw.is_empty() {
+        return false;
+    }
+    DateTime::parse_from_rfc3339(raw)
+        .map(|due_at| due_at.with_timezone(&Utc) <= Utc::now())
+        .unwrap_or(false)
 }
 
 fn idle_durable_queue_empty_backoff(consecutive_empty_probes: u32) -> Duration {
@@ -38299,6 +38323,54 @@ Use shell tools to create or update these files."
         );
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn idle_durable_queue_empty_gate_reopens_when_retry_hold_expires() {
+        let root = temp_root("durable-empty-retry-hold");
+        let pending = ["pending".to_string()];
+        channels::list_queue_tasks(&root, &pending, 1).expect("initialize queue schema");
+        clear_idle_durable_queue_empty_gate(&root);
+        let task = channels::create_queue_task(
+            &root,
+            channels::QueueTaskCreateRequest {
+                title: "Held after API failure".to_string(),
+                prompt: "Retry the interrupted step.".to_string(),
+                thread_key: "queue/retry-hold".to_string(),
+                workspace_root: None,
+                priority: "normal".to_string(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )
+        .expect("create held queue task");
+        let db_path = crate::paths::core_db(&root);
+        let conn = Connection::open(&db_path).expect("open core db for retry hold");
+        let set_hold = |not_before: &str| {
+            conn.execute(
+                "UPDATE communication_routing_state SET route_status='pending', retry_not_before=?2, hold_reason='technical:worker-runtime-api-failure' WHERE message_key=?1",
+                rusqlite::params![task.message_key, not_before],
+            )
+            .expect("set retry hold");
+        };
+
+        // Hold still in the future: an empty probe arms the gate and stays armed.
+        set_hold("2999-01-01T00:00:00+00:00");
+        mark_idle_durable_queue_empty_probe(&root);
+        assert!(
+            should_skip_idle_durable_queue_empty_probe(&root),
+            "a retry hold in the future keeps the empty probe backoff"
+        );
+
+        // Hold expired without any other queue change: the gate must reopen.
+        set_hold("2000-01-01T00:00:00+00:00");
+        assert!(
+            !should_skip_idle_durable_queue_empty_probe(&root),
+            "an expired retry hold is due work and must reopen durable queue leasing"
+        );
+        clear_idle_durable_queue_empty_gate(&root);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

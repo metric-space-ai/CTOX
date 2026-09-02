@@ -912,6 +912,25 @@ pub(crate) fn communication_intake_source_stamp(
             .optional()?
             .unwrap_or_else(|| (0, 0, 0, 0, 0, String::new()));
 
+        let earliest_pending_retry_not_before = if routing_table_exists {
+            conn.query_row(
+                r#"
+                SELECT MIN(retry_not_before)
+                FROM communication_routing_state
+                WHERE lower(route_status) = 'pending'
+                  AND retry_not_before IS NOT NULL
+                  AND TRIM(retry_not_before) <> ''
+                "#,
+                [],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten()
+            .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
         Ok(CommunicationIntakeSourceStamp {
             database_exists: true,
             accounts_table_exists,
@@ -930,6 +949,7 @@ pub(crate) fn communication_intake_source_stamp(
             content_hash: format!(
                 "communication-projection-clock:{projection_version}:{clock_updated_at}"
             ),
+            earliest_pending_retry_not_before,
         })
     })
 }
@@ -953,6 +973,7 @@ pub(super) fn empty_communication_intake_source_stamp(
         routing_count: 0,
         clock_updated_at: String::new(),
         content_hash: String::new(),
+        earliest_pending_retry_not_before: String::new(),
     }
 }
 
