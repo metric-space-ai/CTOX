@@ -35,10 +35,24 @@ The command id stands in the assignment sentence. The payload carries:
 | `fields` | the requested field keys (default: all 32) |
 | `lead_snapshot` | the lead's current `data.*` values and `contacts[]` — what is already known |
 | `known_person_records` | Sellify persons (name, function, e-mail) — keep, complete, never re-guess |
-| `research_instructions` | the owner's "Rechercheablauf" — overrides the source order in §5, never the evidence or writeback rules |
+| `research_instructions` | **the app's maintained research procedure, steps 0..x — binding, see §2a** |
+| `research_instructions_variant` | `followup` (the Nachrecherche procedure is maintained separately) or `default` |
+| `research_instructions_default` | the "Neue Recherche" procedure, when the followup variant is in use |
 | `person_priorities` | contact categories in the required order |
 | `include_private` | login sources the owner allows (`linkedin.com`, `xing.com`, `dnbhoovers.com`, `leadfeeder.com`, `rocketreach.com`) |
 | `writeback_contract` | `record_ids`, `min_independent_sources` (2) |
+
+## 2a. The app's research procedure is the assignment (steps 0..x)
+
+`payload.research_instructions` carries the procedure the operator maintains **inside the app** (Kampagnen-Einstellungen → „Prompt: Neue Recherche" / „Prompt: Nachrecherche"). It is numbered, usually 0..7, and it is the actual order of work for this campaign. Read it first, follow it step by step, and let it decide what comes before what — which register first, which portal for the address, when Sellify counts, when a source needs a login.
+
+- **This is why the assignment is one sentence.** The procedure can be long; it belongs in the command payload, not in the chat message. Never ask the operator to paste it, never repeat it back into the chat, and never treat its absence from the prompt as its absence from the assignment.
+- **Load it, never assume it.** It lives only in the command payload; there is no copy in this skill and none in the prompt sentence. If `commands inspect` gives you no `research_instructions`, say so in the chat and work §5 as the fallback order — do not invent a procedure.
+- **`research_instructions_variant`** tells you which one you got: `followup` means the operator maintains a separate Nachrecherche procedure and you must work that one; `default` means the same procedure applies to both. `research_instructions_default` is the other one, for reference only.
+- **Precedence.** The app procedure outranks the source order in §5 and the field order in §3. It never outranks §6 (evidence) or §7 (writeback): a step that says "übernimm den Wert" still needs two independent sources, and results still leave through the command bus.
+- **Cover every step.** Work the steps in their order, and only skip one with a reason you can state (source down, field not requested, country not applicable). In your closing chat message, say which steps you completed and which you could not, with the reason.
+- **A step naming a source names a tool.** "Handelsregister", "Northdata", "Impressum", "LinkedIn/XING by name search" map to `ctox web search --source`, `ctox web read`, `ctox scrape execute --target-key`, or the login path in §4. `ctox web sources list --country <iso>` gives the registered source ids.
+- **The procedure can also demand behavior**, not just sources: two independent sources per field, no Google snippet as proof, mark conflicts instead of resolving them, no Sellify handover in this run. Those sentences are rules for you, not prose.
 
 ## 3. The 32 fields
 
