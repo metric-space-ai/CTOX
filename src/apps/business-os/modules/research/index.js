@@ -12,7 +12,7 @@ import {
 // sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
 // ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
 // an index.css oder locales/ hochzaehlen.
-const BUILD = '20260902-research-sync-state-v94';
+const BUILD = '20260902-research-sync-state-v95';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -932,6 +932,18 @@ function wireReadiness() {
       const becameReady = wasReady === false && snapshot.ready === true;
       wasReady = snapshot.ready === true;
       state.readiness[name] = snapshot;
+      // Die Sync-Phase beim Mount wartet hoechstens 20 s auf die Bridge; laeuft
+      // parallel der Knowledge-Fetch (bis 80 MB je Domain), verpasst sie das
+      // "in sync" regelmaessig. Sobald die Shell die Collection bereit meldet,
+      // ist der Mount-Fehler erledigt - ohne auf den naechsten Reload zu warten.
+      if (snapshot.ready === true && state.diagnostics.collections[name]?.sync?.kind === 'failed') {
+        markCollectionDiagnostic(name, 'sync', 'ok', state.t('syncReady', 'Sync bereit'));
+        if (!diagnosticFailures().length) {
+          state.diagnostics.failureRetries = 0;
+          state.diagnostics.failureRetryAt = 0;
+          setStatus(reloadStatusText());
+        }
+      }
       if (becameReady) scheduleKnowledgeRefresh(250);
       render();
     });
