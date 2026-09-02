@@ -1899,7 +1899,7 @@ pub(crate) fn run_business_os_web_stack_auth_assist_request(
     let credential_ref = optional_web_stack_credential_ref(flag_value(args, "--credential-ref"))?;
     let login_hint = optional_web_stack_login_hint(flag_value(args, "--login-hint"));
     let requesting_task_id = flag_value(args, "--task-id").unwrap_or_default();
-    let owner_user_id = resolve_web_stack_auth_owner_user_id(root, args, requesting_task_id)?;
+    let owner_user_id = resolve_web_stack_auth_owner_user_id(root, args, requesting_task_id, true)?;
     enqueue_web_stack_auth_assist_request(
         root,
         source_id,
@@ -1991,7 +1991,7 @@ fn run_business_os_web_stack_auth_assist_login_with_continuation(
     let local_secret_ref = parse_local_ctox_secret_ref(&credential_ref)?;
     let explicit_login_hint = optional_web_stack_login_hint(flag_value(args, "--login-hint"));
     let requesting_task_id = flag_value(args, "--task-id").unwrap_or_default();
-    let owner_user_id = resolve_web_stack_auth_owner_user_id(root, args, requesting_task_id)?;
+    let owner_user_id = resolve_web_stack_auth_owner_user_id(root, args, requesting_task_id, true)?;
     let timeout_ms = flag_value(args, "--timeout-ms")
         .map(|value| {
             value
@@ -4597,22 +4597,27 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
     // user's Browser app, so the unlock view had nothing to render and the
     // login the research was waiting for could never happen. Callers that do
     // not know the owner fall back to the requesting task's actor here.
-    let resolved_owner_user_id = owner_user_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            web_stack_auth_owner_from_task(root, requesting_task_id)
-                .ok()
-                .flatten()
-        })
-        .unwrap_or_else(|| {
+    let resolved_owner_user_id = resolve_web_stack_auth_owner_user_id_with_env(
+        root,
+        &[],
+        requesting_task_id,
+        owner_user_id,
+        accept_as_trusted_local,
+    )?;
+    let resolved_owner_user_id = match resolved_owner_user_id {
+        Some(owner_user_id) => owner_user_id,
+        None if accept_as_trusted_local => {
             eprintln!(
                 "[business-os] auth assist owner unresolved source_module={} task={}",
                 source_module, requesting_task_id
             );
             source_module.to_string()
-        });
+        }
+        None => anyhow::bail!(
+            "web-stack auth assist requires a verified owner for task `{}`",
+            requesting_task_id
+        ),
+    };
     let owner_user_id = resolved_owner_user_id.as_str();
     let source_slug = rxdb_id_slug(source_id);
     // Authentication state belongs to a user/source pair, not to one research
@@ -4713,6 +4718,7 @@ pub(crate) fn enqueue_web_stack_auth_assist_request(
         "client_context": {
             "source_module": source_module,
             "command_path": command_path,
+            "owner_user_id": owner_user_id,
             "actor": {
                 "id": owner_user_id,
                 "display_name": owner_user_id,
@@ -4845,6 +4851,7 @@ fn resolve_web_stack_auth_owner_user_id(
     root: &Path,
     args: &[String],
     requesting_task_id: &str,
+    accept_as_trusted_local: bool,
 ) -> anyhow::Result<Option<String>> {
     let env_owner = env::var("CTOX_OWNER_USER_ID").ok();
     resolve_web_stack_auth_owner_user_id_with_env(
@@ -4852,6 +4859,7 @@ fn resolve_web_stack_auth_owner_user_id(
         args,
         requesting_task_id,
         env_owner.as_deref(),
+        accept_as_trusted_local,
     )
 }
 
@@ -4860,20 +4868,34 @@ fn resolve_web_stack_auth_owner_user_id_with_env(
     args: &[String],
     requesting_task_id: &str,
     env_owner_user_id: Option<&str>,
+    accept_as_trusted_local: bool,
 ) -> anyhow::Result<Option<String>> {
-    if let Some(owner) = flag_value(args, "--owner-user-id")
+    let claimed_owner = flag_value(args, "--owner-user-id")
+        .or(env_owner_user_id)
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(Some(owner.to_string()));
+        .filter(|value| !value.is_empty());
+    let verified_owner = web_stack_auth_owner_from_task(root, requesting_task_id)?;
+    if accept_as_trusted_local {
+        return Ok(claimed_owner.map(str::to_string).or(verified_owner));
     }
-    if let Some(owner) = env_owner_user_id
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        return Ok(Some(owner.to_string()));
+    match (claimed_owner, verified_owner) {
+        (Some(claimed), Some(verified)) if claimed != verified => {
+            eprintln!(
+                "[business-os] web-stack auth owner override task={} claimed_id={} verified_id={}",
+                requesting_task_id, claimed, verified
+            );
+            Ok(Some(verified))
+        }
+        (Some(_), Some(verified)) | (None, Some(verified)) => Ok(Some(verified)),
+        (Some(claimed), None) => {
+            eprintln!(
+                "[business-os] web-stack auth owner rejected without verified task owner task={} claimed_id={}",
+                requesting_task_id, claimed
+            );
+            Ok(None)
+        }
+        (None, None) => Ok(None),
     }
-    web_stack_auth_owner_from_task(root, requesting_task_id)
 }
 
 fn web_stack_auth_owner_from_command_context(context: &serde_json::Value) -> Option<String> {
@@ -4884,24 +4906,12 @@ fn web_stack_auth_owner_from_command_context(context: &serde_json::Value) -> Opt
         Some(client_context) => client_context.clone(),
         None => serde_json::Value::Null,
     };
-    ["/owner_user_id", "/actor/id", "/user_id"]
-        .into_iter()
-        .find_map(|pointer| {
-            parsed_client_context
-                .pointer(pointer)
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .or_else(|| {
-            context
-                .pointer("/command/payload/owner_user_id")
-                .and_then(serde_json::Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
+    parsed_client_context
+        .get("owner_user_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Resolves the human owner behind a research task so browser auth sessions
@@ -6525,6 +6535,7 @@ mod tests {
                 &flag_args,
                 task_id,
                 Some("env-owner"),
+                true,
             )?
             .as_deref(),
             Some("flag-owner")
@@ -6535,18 +6546,36 @@ mod tests {
                 &[],
                 task_id,
                 Some("env-owner"),
+                true,
             )?
             .as_deref(),
             Some("env-owner")
         );
         assert_eq!(
-            resolve_web_stack_auth_owner_user_id_with_env(root.path(), &[], task_id, None)?
+            resolve_web_stack_auth_owner_user_id_with_env(
+                root.path(),
+                &flag_args,
+                task_id,
+                Some("env-owner"),
+                false,
+            )?
+            .as_deref(),
+            Some("task-owner")
+        );
+        assert_eq!(
+            resolve_web_stack_auth_owner_user_id_with_env(root.path(), &[], task_id, None, true)?
                 .as_deref(),
             Some("task-owner")
         );
         assert_eq!(
-            resolve_web_stack_auth_owner_user_id_with_env(root.path(), &[], command_id, None)?
-                .as_deref(),
+            resolve_web_stack_auth_owner_user_id_with_env(
+                root.path(),
+                &[],
+                command_id,
+                None,
+                true,
+            )?
+            .as_deref(),
             Some("task-owner")
         );
         assert_eq!(
@@ -6555,6 +6584,7 @@ mod tests {
                 &[],
                 "missing-task-or-command",
                 None,
+                true,
             )?,
             None
         );
@@ -6590,6 +6620,7 @@ mod tests {
                 &owner_args,
                 first_task_id,
                 None,
+                true,
             )?
             .as_deref(),
             Some("user-a")

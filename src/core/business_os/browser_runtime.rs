@@ -232,6 +232,10 @@ fn browser_auth_session_should_stop(
         && !has_active_automation
 }
 
+fn clamp_document_activity_ms(document_activity_ms: u64, now_ms: u64) -> u64 {
+    document_activity_ms.min(now_ms.saturating_add(60_000))
+}
+
 fn refresh_browser_auth_session_document_activity(
     session: &LiveBrowserSession,
     session_id: &str,
@@ -254,6 +258,7 @@ fn refresh_browser_auth_session_document_activity(
         .and_then(Value::as_u64)
         .unwrap_or(0)
         .max(lease_expires_at_ms.saturating_sub(CONTROLLER_LEASE_DURATION_MS));
+    let document_activity_ms = clamp_document_activity_ms(document_activity_ms, now_ms);
     session
         .last_activity_ms
         .fetch_max(document_activity_ms, Ordering::Relaxed);
@@ -866,6 +871,23 @@ mod tests {
         ));
         assert!(!browser_auth_session_should_stop(
             ttl.as_millis() as u64 - 1,
+            ttl,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn future_document_activity_cannot_prevent_idle_expiry() {
+        let now_ms = 1_000_000;
+        let one_year_ms = 365 * 24 * 60 * 60 * 1_000;
+        let clamped = clamp_document_activity_ms(now_ms + one_year_ms, now_ms);
+        assert_eq!(clamped, now_ms + 60_000);
+
+        let ttl = Duration::from_secs(15 * 60);
+        let later_ms = clamped + ttl.as_millis() as u64;
+        assert!(browser_auth_session_should_stop(
+            later_ms.saturating_sub(clamped),
             ttl,
             false,
             false

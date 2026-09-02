@@ -455,9 +455,6 @@ fn stamp_verified_session_identity(
     command: &mut BusinessCommand,
     session: &BusinessOsSession,
 ) {
-    if client_context_has_user_identity(&command.client_context) {
-        return;
-    }
     let Some(owner_user_id) = session_user_id(session)
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -484,20 +481,85 @@ fn stamp_verified_session_identity(
     if !client_context.is_object() {
         client_context = serde_json::json!({});
     }
+    let had_client_identity = client_context_has_user_identity(&client_context);
+    let claimed_actor_id = client_context
+        .pointer("/actor/id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let claimed_owner_user_id = client_context
+        .get("owner_user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let claimed_user_id = client_context
+        .get("user_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let identity_was_overridden = [
+        claimed_actor_id.as_deref(),
+        claimed_owner_user_id.as_deref(),
+        claimed_user_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|claimed| claimed != owner_user_id);
+    let first_claimed_id = [
+        claimed_actor_id.as_deref(),
+        claimed_owner_user_id.as_deref(),
+        claimed_user_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|claimed| *claimed != owner_user_id)
+    .unwrap_or("<missing>")
+    .to_string();
+
     let object = client_context
         .as_object_mut()
         .expect("client context was normalized to an object");
+    object.remove("claimed_actor");
     object.insert(
         "owner_user_id".to_string(),
         Value::String(owner_user_id.to_string()),
     );
-    object.insert(
-        "actor".to_string(),
-        serde_json::json!({
-            "id": owner_user_id,
-            "display_name": display_name,
-        }),
-    );
+    if object.contains_key("user_id") {
+        object.insert(
+            "user_id".to_string(),
+            Value::String(owner_user_id.to_string()),
+        );
+    }
+    if claimed_actor_id.as_deref() == Some(owner_user_id) {
+        // Preserve matching actor metadata exactly as supplied.
+    } else {
+        object.insert(
+            "actor".to_string(),
+            serde_json::json!({
+                "id": owner_user_id,
+                "display_name": display_name,
+            }),
+        );
+    }
+    if identity_was_overridden && had_client_identity {
+        object.insert(
+            "claimed_actor".to_string(),
+            serde_json::json!({
+                "actor": { "id": claimed_actor_id },
+                "owner_user_id": claimed_owner_user_id,
+                "user_id": claimed_user_id,
+            }),
+        );
+        eprintln!(
+            "[business-os] intake overrode client-claimed actor command_id={} claimed_id={} verified_id={}",
+            command.id.as_deref().unwrap_or("<missing>"),
+            first_claimed_id,
+            owner_user_id
+        );
+    }
     command.client_context = client_context;
 }
 
@@ -542,9 +604,7 @@ pub fn accept_rxdb_business_command_with_origin(
             .cloned()
             .unwrap_or(Value::Null),
     };
-    if matches!(command.origin, CommandOrigin::ReplicatedPeer)
-        && !client_context_has_user_identity(&command.client_context)
-    {
+    if matches!(command.origin, CommandOrigin::ReplicatedPeer) {
         let session = rxdb_authenticated_session(root, &command)?;
         stamp_verified_session_identity(root, &mut command, &session);
     }
@@ -1831,7 +1891,8 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn intake_stamps_missing_identity_and_preserves_existing_actor() -> anyhow::Result<()> {
+    fn intake_stamps_verified_identity_and_preserves_claimed_actor_evidence() -> anyhow::Result<()>
+    {
         let root = tempdir()?;
         let owner_user_id = "michael.welsch@metric-space.ai";
         let (capability_token, _) =
@@ -1894,14 +1955,68 @@ mod tests {
             Some(owner_user_id)
         );
 
-        let existing_id = "cmd_existing_identity";
-        let existing_context = serde_json::json!({
-            "source": "business-os-chat",
-            "capability_token": capability_token,
-            "actor": { "id": owner_user_id, "display_name": "Existing User" }
-        });
-        accept(existing_id, existing_context.clone())?;
-        assert_eq!(load_context(existing_id)?, existing_context);
+        let foreign_id = "cmd_foreign_identity";
+        accept(
+            foreign_id,
+            serde_json::json!({
+                "source": "business-os-chat",
+                "capability_token": capability_token,
+                "actor": { "id": "attacker", "display_name": "Claimed User" },
+                "owner_user_id": "foreign-owner",
+                "user_id": "foreign-user"
+            }),
+        )?;
+        let overridden = load_context(foreign_id)?;
+        assert_eq!(
+            overridden.pointer("/actor/id").and_then(Value::as_str),
+            Some(owner_user_id)
+        );
+        assert_eq!(
+            overridden.get("owner_user_id").and_then(Value::as_str),
+            Some(owner_user_id)
+        );
+        assert_eq!(
+            overridden.get("user_id").and_then(Value::as_str),
+            Some(owner_user_id)
+        );
+        assert_eq!(
+            overridden
+                .pointer("/claimed_actor/actor/id")
+                .and_then(Value::as_str),
+            Some("attacker")
+        );
+        assert_eq!(
+            overridden
+                .pointer("/claimed_actor/owner_user_id")
+                .and_then(Value::as_str),
+            Some("foreign-owner")
+        );
+        assert_eq!(
+            overridden
+                .pointer("/claimed_actor/user_id")
+                .and_then(Value::as_str),
+            Some("foreign-user")
+        );
+
+        let matching_id = "cmd_matching_identity";
+        accept(
+            matching_id,
+            serde_json::json!({
+                "source": "business-os-chat",
+                "capability_token": capability_token,
+                "actor": { "id": owner_user_id, "display_name": "Existing User" },
+                "owner_user_id": owner_user_id,
+                "user_id": owner_user_id
+            }),
+        )?;
+        let matching = load_context(matching_id)?;
+        assert_eq!(
+            matching
+                .pointer("/actor/display_name")
+                .and_then(Value::as_str),
+            Some("Existing User")
+        );
+        assert!(matching.get("claimed_actor").is_none());
         Ok(())
     }
 

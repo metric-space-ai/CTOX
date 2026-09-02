@@ -346,6 +346,7 @@ fn outbound_lead_generation_research_outcome_patch(
         .unwrap_or_default();
     let lead_locations = lead_location_values(existing);
     set_known_person_contacts(
+        existing.get("id").and_then(Value::as_str).unwrap_or("lead"),
         &mut contacts,
         outcome
             .get("known_person_records")
@@ -573,12 +574,13 @@ fn merge_researched_person_records_with_context(
 }
 
 fn set_known_person_contacts(
+    lead_id: &str,
     contacts: &mut Vec<Value>,
     known_person_records: Vec<Value>,
     locations: &[String],
 ) {
     for known in known_person_records {
-        let Some(mut contact) = known_person_contact(known, locations) else {
+        let Some(mut contact) = known_person_contact(lead_id, known, locations) else {
             continue;
         };
         let existing_index = contacts
@@ -593,13 +595,19 @@ fn set_known_person_contacts(
     }
 }
 
-fn known_person_contact(known: Value, locations: &[String]) -> Option<Value> {
+fn known_person_contact(lead_id: &str, known: Value, locations: &[String]) -> Option<Value> {
     let first_name = contact_string(&known, &["vorname", "person_vorname", "first_name"]);
     let last_name = contact_string(&known, &["nachname", "person_nachname", "last_name"]);
     let function = contact_string(&known, &["funktion", "person_funktion", "role"]);
     let email = contact_string(&known, &["email", "person_email"]);
     let phone = contact_string(&known, &["telefon", "person_telefon", "phone"]);
     let sellify_contact_id = contact_string(&known, &["sellify_contact_id"]);
+    let sellify_contact_id = sellify_contact_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        .then_some(sellify_contact_id)
+        .filter(|value| !value.is_empty() && value.len() <= 64)
+        .unwrap_or_default();
     let known_source_url = contact_string(&known, &["source"]);
     let known_source_url = url::Url::parse(&known_source_url)
         .ok()
@@ -611,7 +619,7 @@ fn known_person_contact(known: Value, locations: &[String]) -> Option<Value> {
         return None;
     }
     let id_suffix = if sellify_contact_id.is_empty() {
-        javascript_fingerprint(&name)
+        javascript_fingerprint(&format!("{lead_id}|{name}|{email}|{phone}"))
     } else {
         sellify_contact_id.clone()
     };
@@ -718,7 +726,18 @@ fn contacts_match(left: &Value, right: &Value) -> bool {
     }
     let left_name = normalized_contact_name(left);
     let right_name = normalized_contact_name(right);
-    !left_name.is_empty() && left_name == right_name
+    if left_name.is_empty() || left_name != right_name {
+        return false;
+    }
+    let left_phone = normalized_phone(&contact_string(
+        left,
+        &["person_telefon", "telefon", "phone"],
+    ));
+    let right_phone = normalized_phone(&contact_string(
+        right,
+        &["person_telefon", "telefon", "phone"],
+    ));
+    !left_phone.is_empty() && left_phone == right_phone
 }
 
 fn profiles_match(left: &Value, right: &Value) -> bool {
@@ -741,6 +760,13 @@ fn profiles_match(left: &Value, right: &Value) -> bool {
 
 fn normalized_email(value: &str) -> String {
     value.trim().to_lowercase()
+}
+
+fn normalized_phone(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect()
 }
 
 fn normalized_profile(value: &str) -> String {
@@ -2007,6 +2033,7 @@ mod tests {
                     "vorname": "Eric",
                     "nachname": "Hahn",
                     "funktion": "Geschäftsführer",
+                    "email": "eric.hahn@example.com",
                     "sellify_contact_id": "eric-1",
                     "source": "sellify"
                 },
@@ -2022,6 +2049,7 @@ mod tests {
                 "person_vorname": "Eric",
                 "person_nachname": "Hahn",
                 "person_funktion": "CEO",
+                "person_email": "eric.hahn@example.com",
                 "person_xing": "https://www.xing.com/profile/Eric_Hahn",
                 "source_id": "xing.com",
                 "source_url": "https://www.xing.com/profile/Eric_Hahn"
@@ -2050,6 +2078,56 @@ mod tests {
                 .any(|contact| contact["name"] == "Heinz-Tristan Gund"
                     && contact["crm_known"] == true)
         );
+    }
+
+    #[test]
+    fn contacts_match_requires_more_than_a_shared_name() {
+        let first = serde_json::json!({
+            "person_vorname": "Michael",
+            "person_nachname": "Schmidt",
+            "person_xing": "https://www.xing.com/profile/Michael_Schmidt_One",
+            "person_email": "one@example.com"
+        });
+        let namesake = serde_json::json!({
+            "person_vorname": "Michael",
+            "person_nachname": "Schmidt",
+            "person_xing": "https://www.xing.com/profile/Michael_Schmidt_Two",
+            "person_email": "two@example.com"
+        });
+        let same_email = serde_json::json!({
+            "person_vorname": "Michael",
+            "person_nachname": "Schmidt",
+            "person_email": "ONE@example.com"
+        });
+
+        assert!(!contacts_match(&first, &namesake));
+        assert!(contacts_match(&first, &same_email));
+    }
+
+    #[test]
+    fn known_person_fallback_ids_include_lead_identity_and_validate_sellify_ids() {
+        let known = serde_json::json!({
+            "vorname": "Thomas",
+            "nachname": "Müller",
+            "email": "thomas@example.com",
+            "telefon": "+49 30 1234"
+        });
+        let first = known_person_contact("lead-one", known.clone(), &[]).unwrap();
+        let second = known_person_contact("lead-two", known.clone(), &[]).unwrap();
+        assert_ne!(first["id"], second["id"]);
+
+        let invalid = known_person_contact(
+            "lead-one",
+            serde_json::json!({
+                "vorname": "Thomas",
+                "nachname": "Müller",
+                "sellify_contact_id": "../../escape"
+            }),
+            &[],
+        )
+        .unwrap();
+        assert_ne!(invalid["id"], "contact_sellify_../../escape");
+        assert_eq!(invalid["sellify_contact_id"], "");
     }
 
     #[test]

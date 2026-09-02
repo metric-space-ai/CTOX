@@ -8,12 +8,6 @@ use chrono::DateTime;
 use chrono::Utc;
 use cv_print_recovery::*;
 #[cfg(unix)]
-use libc::RLIMIT_NOFILE;
-#[cfg(unix)]
-use libc::SIG_IGN;
-#[cfg(unix)]
-use libc::SIGPIPE;
-#[cfg(unix)]
 use libc::geteuid;
 #[cfg(unix)]
 use libc::getrlimit;
@@ -25,18 +19,24 @@ use libc::setpgid;
 use libc::setrlimit;
 #[cfg(unix)]
 use libc::signal;
+#[cfg(unix)]
+use libc::RLIMIT_NOFILE;
+#[cfg(unix)]
+use libc::SIGPIPE;
+#[cfg(unix)]
+use libc::SIG_IGN;
 use runtime_support::*;
+use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OpenFlags;
 use rusqlite::OptionalExtension;
-use rusqlite::params;
 use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
-use std::collections::hash_map::DefaultHasher;
 use std::env;
 use std::fs::OpenOptions;
 use std::hash::Hash;
@@ -83,8 +83,8 @@ use crate::channels;
 use crate::communication::adapters as communication_adapters;
 use crate::context_health;
 use crate::core_state::guard::{
-    CoreSpawnRequest, enforce_core_transition, ensure_core_transition_guard_schema,
-    evaluate_core_spawn,
+    enforce_core_transition, ensure_core_transition_guard_schema, evaluate_core_spawn,
+    CoreSpawnRequest,
 };
 use crate::core_state::{
     ArtifactKind, ArtifactRef, CoreEntityType, CoreEvent, CoreEvidenceRefs, CoreState,
@@ -1553,8 +1553,19 @@ pub fn run_foreground(root: &Path) -> Result<()> {
         for stream in listener.incoming() {
             match stream {
                 Ok(stream) => {
-                    if let Err(err) = handle_service_ipc_stream(stream, root, state.clone()) {
-                        eprintln!("ctox service request error: {err}");
+                    let root = root.to_path_buf();
+                    let state = state.clone();
+                    let connection_id = SERVICE_IPC_THREAD_SEQUENCE
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if let Err(err) = std::thread::Builder::new()
+                        .name(format!("ctox-ipc-{connection_id}"))
+                        .spawn(move || {
+                            if let Err(err) = handle_service_ipc_stream(stream, &root, state) {
+                                eprintln!("ctox service request error: {err}");
+                            }
+                        })
+                    {
+                        eprintln!("ctox service IPC thread spawn error: {err}");
                     }
                 }
                 Err(err) => {
@@ -2108,7 +2119,8 @@ fn release_stale_service_communication_leases_on_boot(
                     conversation_id: None,
                     severity: "info",
                     reason: "crash_recovery_stale_lease_reclaim",
-                    action_taken: "released stale service communication leases left by a prior crash at boot",
+                    action_taken:
+                        "released stale service communication leases left by a prior crash at boot",
                     details: serde_json::json!({ "released_count": count }),
                     idempotence_key: None,
                 },
@@ -2249,28 +2261,26 @@ fn is_non_work_tui_probe(prompt: &str) -> bool {
 }
 
 fn start_work_hours_dispatcher(root: PathBuf, state: Arc<Mutex<SharedState>>) {
-    thread::spawn(move || {
-        loop {
-            let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_work_hours_dispatch_tick(&root, &state)
-            }));
-            match tick {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => push_event(
-                    &state,
-                    format!(
-                        "Working-hours dispatcher failed to lease durable queue task: {}",
-                        clip_text(&err.to_string(), 180)
-                    ),
+    thread::spawn(move || loop {
+        let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_work_hours_dispatch_tick(&root, &state)
+        }));
+        match tick {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => push_event(
+                &state,
+                format!(
+                    "Working-hours dispatcher failed to lease durable queue task: {}",
+                    clip_text(&err.to_string(), 180)
                 ),
-                Err(_) => push_event(
-                    &state,
-                    "Working-hours dispatcher panicked during idle queue dispatch; continuing"
-                        .to_string(),
-                ),
-            }
-            thread::sleep(Duration::from_secs(IDLE_QUEUE_DISPATCH_POLL_SECS));
+            ),
+            Err(_) => push_event(
+                &state,
+                "Working-hours dispatcher panicked during idle queue dispatch; continuing"
+                    .to_string(),
+            ),
         }
+        thread::sleep(Duration::from_secs(IDLE_QUEUE_DISPATCH_POLL_SECS));
     });
 }
 
@@ -2300,28 +2310,25 @@ fn run_work_hours_dispatch_tick(root: &Path, state: &Arc<Mutex<SharedState>>) ->
 }
 
 fn start_appsec_pipeline_worker_loop(root: PathBuf, state: Arc<Mutex<SharedState>>) {
-    thread::spawn(move || {
-        loop {
-            let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                run_appsec_pipeline_worker_tick(&root, &state)
-            }));
-            match tick {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => push_event(
-                    &state,
-                    format!(
-                        "AppSec pipeline worker skipped: {}",
-                        clip_text(&err.to_string(), 180)
-                    ),
+    thread::spawn(move || loop {
+        let tick = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_appsec_pipeline_worker_tick(&root, &state)
+        }));
+        match tick {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => push_event(
+                &state,
+                format!(
+                    "AppSec pipeline worker skipped: {}",
+                    clip_text(&err.to_string(), 180)
                 ),
-                Err(_) => push_event(
-                    &state,
-                    "AppSec pipeline worker panicked during queue execution; continuing"
-                        .to_string(),
-                ),
-            }
-            thread::sleep(Duration::from_secs(APPSEC_PIPELINE_WORKER_POLL_SECS));
+            ),
+            Err(_) => push_event(
+                &state,
+                "AppSec pipeline worker panicked during queue execution; continuing".to_string(),
+            ),
         }
+        thread::sleep(Duration::from_secs(APPSEC_PIPELINE_WORKER_POLL_SECS));
     });
 }
 
@@ -2874,6 +2881,13 @@ pub fn submit_chat_prompt(root: &Path, prompt: &str) -> Result<()> {
 }
 
 const SANDBOXED_CLI_STDIN_ARG: &str = "--__ctox-sandboxed-stdin";
+const SANDBOXED_CLI_STDIN_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const SERVICE_IPC_REQUEST_MAX_BYTES: u64 = 32 * 1024 * 1024;
+#[cfg(unix)]
+static SERVICE_IPC_THREAD_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+const SANDBOXED_CLI_SCRAPE_RUNTIME_ROOT: &str = "runtime/scraping";
+const SANDBOXED_CLI_MAX_TIMEOUT_SECONDS: u64 = 600;
 
 pub(crate) fn sandboxed_cli_command_allowed(argv: &[String]) -> bool {
     match (
@@ -2891,6 +2905,142 @@ fn sandboxed_cli_flag_value<'a>(argv: &'a [String], flag: &str) -> Option<&'a st
     argv.get(index + 1).map(String::as_str)
 }
 
+fn sandboxed_cli_argv_prefix(argv: &[String]) -> &[String] {
+    &argv[..argv.len().min(2)]
+}
+
+fn sandboxed_cli_arg_is_flag(arg: &str, flag: &str) -> bool {
+    arg == flag
+        || arg
+            .strip_prefix(flag)
+            .is_some_and(|suffix| suffix.starts_with('='))
+}
+
+fn sanitize_sandboxed_cli_argv(root: &Path, argv: &[String]) -> Result<Vec<String>> {
+    for flag in ["--runtime-root", "--db"] {
+        if argv.iter().any(|arg| sandboxed_cli_arg_is_flag(arg, flag)) {
+            anyhow::bail!("sandboxed cli: flag {flag} is not allowed over the relay");
+        }
+    }
+
+    let mut sanitized = argv.to_vec();
+    for index in 0..sanitized.len() {
+        if sanitized[index] != "--timeout-seconds" {
+            continue;
+        }
+        if let Some(timeout) = sanitized
+            .get(index + 1)
+            .and_then(|value| value.parse::<u64>().ok())
+        {
+            sanitized[index + 1] = timeout.min(SANDBOXED_CLI_MAX_TIMEOUT_SECONDS).to_string();
+        }
+    }
+    if !argv.iter().any(|arg| {
+        ["--script-file", "--module-file", "--input-file"]
+            .into_iter()
+            .any(|flag| sandboxed_cli_arg_is_flag(arg, flag))
+    }) {
+        return Ok(sanitized);
+    }
+
+    // Scrape repair tasks are created with `repair_workspace` equal to the
+    // registered target workspace (`resolve_workspace_dir(root,
+    // target.view.workspace_dir)`). `ensure_target_workspace` stores each one
+    // at DEFAULT_RUNTIME_ROOT/targets/<target_key>. Bind file arguments to the
+    // requested target so one repair task cannot read a sibling workspace.
+    let target_key = sandboxed_cli_flag_value(&sanitized, "--target-key")
+        .context("sandboxed cli: file arguments require --target-key")?;
+    let mut target_key_components = Path::new(target_key).components();
+    anyhow::ensure!(
+        matches!(
+            target_key_components.next(),
+            Some(std::path::Component::Normal(_))
+        ) && target_key_components.next().is_none(),
+        "sandboxed cli: target key must name one scrape workspace"
+    );
+    let targets_prefix = root.join(SANDBOXED_CLI_SCRAPE_RUNTIME_ROOT).join("targets");
+    let canonical_targets_prefix = std::fs::canonicalize(&targets_prefix).with_context(|| {
+        format!(
+            "sandboxed cli: scrape workspace prefix is unavailable: {}",
+            targets_prefix.display()
+        )
+    })?;
+    let target_workspace = targets_prefix.join(target_key);
+    let target_workspace_metadata =
+        std::fs::symlink_metadata(&target_workspace).with_context(|| {
+            format!(
+                "sandboxed cli: target workspace is unavailable below {}",
+                canonical_targets_prefix.display()
+            )
+        })?;
+    anyhow::ensure!(
+        !target_workspace_metadata.file_type().is_symlink(),
+        "sandboxed cli: target workspace must not be a symlink"
+    );
+    let canonical_allowed_prefix = std::fs::canonicalize(&target_workspace).with_context(|| {
+        format!(
+            "sandboxed cli: target workspace is unavailable below {}",
+            canonical_targets_prefix.display()
+        )
+    })?;
+    anyhow::ensure!(
+        canonical_allowed_prefix.starts_with(&canonical_targets_prefix),
+        "sandboxed cli: target workspace is outside scrape workspace prefix {}",
+        canonical_targets_prefix.display()
+    );
+    let mut index = 0;
+    while index < sanitized.len() {
+        let arg = sanitized[index].clone();
+        let mut path_value = None;
+        let mut value_index = None;
+        for flag in ["--script-file", "--module-file", "--input-file"] {
+            if arg == flag {
+                let next = index + 1;
+                let value = sanitized
+                    .get(next)
+                    .with_context(|| format!("sandboxed cli: flag {flag} requires a path value"))?;
+                path_value = Some(value.clone());
+                value_index = Some(next);
+                break;
+            }
+            if let Some(value) = arg.strip_prefix(&format!("{flag}=")) {
+                path_value = Some(value.to_string());
+                value_index = Some(index);
+                break;
+            }
+        }
+        let Some(path_value) = path_value else {
+            index += 1;
+            continue;
+        };
+        let candidate = PathBuf::from(&path_value);
+        let candidate = if candidate.is_absolute() {
+            candidate
+        } else {
+            target_workspace.join(candidate)
+        };
+        let canonical_candidate = std::fs::canonicalize(&candidate).with_context(|| {
+            format!(
+                "sandboxed cli: path must exist below allowed workspace prefix {}",
+                canonical_allowed_prefix.display()
+            )
+        })?;
+        anyhow::ensure!(
+            canonical_candidate.starts_with(&canonical_allowed_prefix),
+            "sandboxed cli: path is outside allowed workspace prefix {}",
+            canonical_allowed_prefix.display()
+        );
+        if value_index == Some(index) {
+            let flag = arg.split_once('=').map(|(flag, _)| flag).unwrap_or(&arg);
+            sanitized[index] = format!("{flag}={}", canonical_candidate.display());
+        } else if let Some(value_index) = value_index {
+            sanitized[value_index] = canonical_candidate.to_string_lossy().into_owned();
+        }
+        index += 1;
+    }
+    Ok(sanitized)
+}
+
 fn sandboxed_cli_request_argv(argv: &[String]) -> Result<Vec<String>> {
     let mut request_argv = argv.to_vec();
     if argv.first().map(String::as_str) == Some("continuity-update")
@@ -2899,10 +3049,17 @@ fn sandboxed_cli_request_argv(argv: &[String]) -> Result<Vec<String>> {
             Some("full" | "diff")
         )
     {
-        let mut stdin = String::new();
+        let mut stdin = Vec::new();
         std::io::stdin()
-            .read_to_string(&mut stdin)
+            .take(SANDBOXED_CLI_STDIN_MAX_BYTES.saturating_add(1))
+            .read_to_end(&mut stdin)
             .context("failed to read continuity-update stdin for daemon relay")?;
+        anyhow::ensure!(
+            stdin.len() as u64 <= SANDBOXED_CLI_STDIN_MAX_BYTES,
+            "sandboxed cli: relayed stdin exceeds 16 MiB"
+        );
+        let stdin = String::from_utf8(stdin)
+            .context("continuity-update stdin for daemon relay must be UTF-8")?;
         request_argv.push(SANDBOXED_CLI_STDIN_ARG.to_string());
         request_argv.push(stdin);
     }
@@ -2946,7 +3103,10 @@ fn run_sandboxed_cli_direct(root: &Path, argv: &[String]) -> Result<()> {
         [command, rest @ ..] if command == "continuity-update" => {
             crate::handle_continuity_update(rest)
         }
-        _ => anyhow::bail!("sandboxed cli command is not allowlisted: {argv:?}"),
+        _ => anyhow::bail!(
+            "sandboxed cli command is not allowlisted: {:?}",
+            sandboxed_cli_argv_prefix(argv)
+        ),
     }
 }
 
@@ -2957,7 +3117,8 @@ fn run_sandboxed_cli_direct(root: &Path, argv: &[String]) -> Result<()> {
 pub fn run_sandboxed_cli(root: &Path, argv: &[String]) -> Result<()> {
     anyhow::ensure!(
         sandboxed_cli_command_allowed(argv),
-        "sandboxed cli command is not allowlisted: {argv:?}"
+        "sandboxed cli command is not allowlisted: {:?}",
+        sandboxed_cli_argv_prefix(argv)
     );
 
     #[cfg(unix)]
@@ -3467,16 +3628,26 @@ fn handle_service_ipc_stream(
             .try_clone()
             .context("failed to clone service socket")?,
     );
-    let mut request_line = String::new();
+    let mut request_line = Vec::new();
     let read = reader
-        .read_line(&mut request_line)
+        .by_ref()
+        .take(SERVICE_IPC_REQUEST_MAX_BYTES.saturating_add(1))
+        .read_until(b'\n', &mut request_line)
         .context("failed to read service socket request")?;
     if read == 0 {
         return Ok(());
     }
-    let request: ServiceIpcRequest = serde_json::from_str(request_line.trim())
-        .context("failed to parse service socket request")?;
-    let response = handle_service_ipc_request(request, root, state)?;
+    let response = if read as u64 > SERVICE_IPC_REQUEST_MAX_BYTES {
+        ServiceIpcResponse::Error {
+            message: "service IPC request exceeds 32 MiB".to_string(),
+        }
+    } else {
+        let request_line =
+            std::str::from_utf8(&request_line).context("service socket request must be UTF-8")?;
+        let request: ServiceIpcRequest = serde_json::from_str(request_line.trim())
+            .context("failed to parse service socket request")?;
+        handle_service_ipc_request(request, root, state)?
+    };
     let mut writer = BufWriter::new(stream);
     let payload =
         serde_json::to_vec(&response).context("failed to encode service socket response")?;
@@ -3704,9 +3875,20 @@ fn handle_service_ipc_request(
         ServiceIpcRequest::SandboxedCli { argv } => {
             if !sandboxed_cli_command_allowed(&argv) {
                 return Ok(ServiceIpcResponse::Error {
-                    message: format!("sandboxed cli command is not allowlisted: {argv:?}"),
+                    message: format!(
+                        "sandboxed cli command is not allowlisted: {:?}",
+                        sandboxed_cli_argv_prefix(&argv)
+                    ),
                 });
             }
+            let argv = match sanitize_sandboxed_cli_argv(root, &argv) {
+                Ok(argv) => argv,
+                Err(error) => {
+                    return Ok(ServiceIpcResponse::Error {
+                        message: error.to_string(),
+                    });
+                }
+            };
             Ok(ServiceIpcResponse::Json {
                 status: 200,
                 payload: dispatch_sandboxed_cli_capturing(root, &argv),
@@ -3764,7 +3946,8 @@ fn dispatch_sandboxed_cli_capturing(root: &Path, argv: &[String]) -> Value {
                 .unwrap_or_else(sandboxed_cli_error_payload)
         }
         _ => sandboxed_cli_error_payload(anyhow::anyhow!(
-            "sandboxed cli command is not allowlisted: {argv:?}"
+            "sandboxed cli command is not allowlisted: {:?}",
+            sandboxed_cli_argv_prefix(argv)
         )),
     }
 }
@@ -4407,8 +4590,9 @@ fn service_ipc_timeout(request: &ServiceIpcRequest) -> Duration {
             {
                 let timeout_seconds = sandboxed_cli_flag_value(argv, "--timeout-seconds")
                     .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(120);
-                Duration::from_secs(timeout_seconds.saturating_add(90).max(180))
+                    .unwrap_or(120)
+                    .min(SANDBOXED_CLI_MAX_TIMEOUT_SECONDS);
+                Duration::from_secs(timeout_seconds.saturating_add(90))
             } else {
                 Duration::from_secs(60)
             }
@@ -4851,23 +5035,21 @@ impl PromptWorkerActivity {
         let heartbeat_stop = lease_heartbeat_stop.clone();
         let lease_heartbeat = (!heartbeat_keys.is_empty() || !heartbeat_ticket_keys.is_empty())
             .then(|| {
-                thread::spawn(move || {
-                    loop {
-                        if heartbeat_stop.load(std::sync::atomic::Ordering::Acquire) {
-                            break;
-                        }
-                        let _ = channels::renew_message_leases(
-                            &heartbeat_root,
-                            CHANNEL_ROUTER_LEASE_OWNER,
-                            &heartbeat_keys,
-                        );
-                        let _ = tickets::renew_ticket_event_leases(
-                            &heartbeat_root,
-                            CHANNEL_ROUTER_LEASE_OWNER,
-                            &heartbeat_ticket_keys,
-                        );
-                        thread::park_timeout(Duration::from_secs(60));
+                thread::spawn(move || loop {
+                    if heartbeat_stop.load(std::sync::atomic::Ordering::Acquire) {
+                        break;
                     }
+                    let _ = channels::renew_message_leases(
+                        &heartbeat_root,
+                        CHANNEL_ROUTER_LEASE_OWNER,
+                        &heartbeat_keys,
+                    );
+                    let _ = tickets::renew_ticket_event_leases(
+                        &heartbeat_root,
+                        CHANNEL_ROUTER_LEASE_OWNER,
+                        &heartbeat_ticket_keys,
+                    );
+                    thread::park_timeout(Duration::from_secs(60));
                 })
             });
         // lease-3 (F-002): persist the durable worker identity on the lease
@@ -9277,7 +9459,8 @@ fn attach_typed_business_command_context(
         harness_flow::RecordHarnessFlowEventRequest {
             event_kind: "business_command_context_loaded",
             title: "Canonical Business OS command loaded",
-            body_text: "The worker resolved canonical command intent and lifecycle state at lease time.",
+            body_text:
+                "The worker resolved canonical command intent and lifecycle state at lease time.",
             message_key: task_id.as_deref(),
             work_id: job.ticket_self_work_id.as_deref(),
             ticket_key: None,
@@ -10000,7 +10183,11 @@ fn cv_print_first_date_token(value: &str) -> String {
 fn cv_print_birth_date(text: &str) -> String {
     let value = cv_print_value_after_label(text, &["Geburtstag", "Geburtsdatum", "geboren"], 32);
     let date = cv_print_first_date_token(&value);
-    if date.is_empty() { value } else { date }
+    if date.is_empty() {
+        value
+    } else {
+        date
+    }
 }
 
 fn cv_print_nationality(text: &str) -> String {
@@ -14114,22 +14301,20 @@ fn start_channel_router(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>
 }
 
 fn start_business_os_app_recovery_loop(root: std::path::PathBuf, state: Arc<Mutex<SharedState>>) {
-    thread::spawn(move || {
-        loop {
-            recover_person_research_commands_for_service(
-                &root,
-                &state,
-                "dedicated Business OS recovery loop",
+    thread::spawn(move || loop {
+        recover_person_research_commands_for_service(
+            &root,
+            &state,
+            "dedicated Business OS recovery loop",
+        );
+        if !should_skip_idle_business_os_app_recovery(&root) {
+            maybe_spawn_business_os_app_recovery(
+                root.clone(),
+                state.clone(),
+                "dedicated app recovery loop",
             );
-            if !should_skip_idle_business_os_app_recovery(&root) {
-                maybe_spawn_business_os_app_recovery(
-                    root.clone(),
-                    state.clone(),
-                    "dedicated app recovery loop",
-                );
-            }
-            thread::sleep(Duration::from_secs(BUSINESS_OS_APP_RECOVERY_POLL_SECS));
         }
+        thread::sleep(Duration::from_secs(BUSINESS_OS_APP_RECOVERY_POLL_SECS));
     });
 }
 
@@ -15095,7 +15280,8 @@ fn route_external_messages(root: &Path, state: &Arc<Mutex<SharedState>>) -> Resu
                 conversation_id: None,
                 severity: "info",
                 reason: "queue_pressure_active",
-                action_taken: "skipped downstream channel-router stages while queue pressure is active",
+                action_taken:
+                    "skipped downstream channel-router stages while queue pressure is active",
                 details: serde_json::json!({}),
                 idempotence_key: Some("queue-pressure-router-skip"),
             },
@@ -15602,7 +15788,8 @@ fn handle_channel_router_guard_block(
             conversation_id: None,
             severity: "warning",
             reason: &reason,
-            action_taken: "kept channel router alive and skipped this guarded background routing stage",
+            action_taken:
+                "kept channel router alive and skipped this guarded background routing stage",
             details: serde_json::json!({
                 "stage": stage,
             }),
@@ -16060,7 +16247,8 @@ fn reconcile_ticket_runtime_state(root: &Path, state: &Arc<Mutex<SharedState>>) 
                 mechanism_id: "ticket_reconciliation",
                 conversation_id: None,
                 severity: "info",
-                reason: "blocked ticket events became preparable after knowledge/control state changed",
+                reason:
+                    "blocked ticket events became preparable after knowledge/control state changed",
                 action_taken: "released blocked ticket events back to pending",
                 details: serde_json::json!({
                     "released_event_keys": released_blocked.clone(),
@@ -16354,8 +16542,10 @@ fn enqueue_prompt(
                             mechanism_id: "runtime_blocker_backoff",
                             conversation_id: Some(turn_loop::CHAT_CONVERSATION_ID),
                             severity: "warning",
-                            reason: "hard runtime blocker cooldown is deferring new prompt dispatch",
-                            action_taken: "kept the new prompt queued until the runtime cooldown expires",
+                            reason:
+                                "hard runtime blocker cooldown is deferring new prompt dispatch",
+                            action_taken:
+                                "kept the new prompt queued until the runtime cooldown expires",
                             details: serde_json::json!({
                                 "remaining_secs": remaining_secs,
                                 "pending": pending,
@@ -21391,7 +21581,8 @@ fn record_ticket_sync_failure_event(
             conversation_id: None,
             severity: "warning",
             reason: error,
-            action_taken: "recorded ticket sync failure and skipped dispatch from this source for this cycle",
+            action_taken:
+                "recorded ticket sync failure and skipped dispatch from this source for this cycle",
             details: serde_json::json!({
                 "system": system,
             }),
@@ -21802,7 +21993,8 @@ fn maybe_enqueue_timeout_continuation(
             conversation_id: Some(turn_loop::CHAT_CONVERSATION_ID),
             severity: "error",
             reason: "the agent turn hit the runtime time budget",
-            action_taken: "suppressed timeout continuation spawn; original queue scope must retry or defer",
+            action_taken:
+                "suppressed timeout continuation spawn; original queue scope must retry or defer",
             details: serde_json::json!({
                 "source_label": job.source_label,
                 "thread_key": job.thread_key.clone(),
@@ -22731,6 +22923,118 @@ mod tests {
     }
 
     #[test]
+    fn sandboxed_cli_relay_rejects_unsafe_paths_and_daemon_override_flags() {
+        let root = temp_root("sandboxed-cli-paths");
+        let workspace = root
+            .join(SANDBOXED_CLI_SCRAPE_RUNTIME_ROOT)
+            .join("targets")
+            .join("fixture");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let allowed_input = workspace.join("input.json");
+        std::fs::write(&allowed_input, "{}").unwrap();
+        let sibling_workspace = root
+            .join(SANDBOXED_CLI_SCRAPE_RUNTIME_ROOT)
+            .join("targets")
+            .join("sibling");
+        std::fs::create_dir_all(&sibling_workspace).unwrap();
+        let sibling_input = sibling_workspace.join("input.json");
+        std::fs::write(&sibling_input, "{}").unwrap();
+        let args = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        for argv in [
+            args(&[
+                "scrape",
+                "execute",
+                "--target-key",
+                "fixture",
+                "--input-file",
+                "/etc/hosts",
+            ]),
+            args(&[
+                "scrape",
+                "register-script",
+                "--target-key",
+                "fixture",
+                "--script-file",
+                "/tmp/x.js",
+            ]),
+            args(&[
+                "scrape",
+                "execute",
+                "--target-key",
+                "fixture",
+                "--input-file",
+                sibling_input.to_str().unwrap(),
+            ]),
+            args(&[
+                "scrape",
+                "execute",
+                "--runtime-root",
+                "/tmp/attacker-runtime",
+            ]),
+            args(&["scrape", "execute", "--db", "/tmp/attacker.sqlite3"]),
+        ] {
+            assert!(
+                sanitize_sandboxed_cli_argv(&root, &argv).is_err(),
+                "unsafe relay argv was accepted: {:?}",
+                sandboxed_cli_argv_prefix(&argv)
+            );
+        }
+
+        #[cfg(unix)]
+        {
+            let escaped_symlink = workspace.join("escaped-input.json");
+            std::os::unix::fs::symlink("/etc/hosts", &escaped_symlink).unwrap();
+            let argv = args(&[
+                "scrape",
+                "execute",
+                "--target-key",
+                "fixture",
+                "--input-file",
+                escaped_symlink.to_str().unwrap(),
+            ]);
+            assert!(sanitize_sandboxed_cli_argv(&root, &argv).is_err());
+        }
+
+        let accepted = sanitize_sandboxed_cli_argv(
+            &root,
+            &args(&[
+                "scrape",
+                "execute",
+                "--target-key",
+                "fixture",
+                "--input-file",
+                "input.json",
+            ]),
+        )
+        .unwrap();
+        let canonical_allowed_input = std::fs::canonicalize(allowed_input).unwrap();
+        assert_eq!(
+            sandboxed_cli_flag_value(&accepted, "--input-file"),
+            canonical_allowed_input.to_str()
+        );
+    }
+
+    #[test]
+    fn sandboxed_cli_relay_clamps_execute_timeout_argument() {
+        let root = temp_root("sandboxed-cli-timeout-clamp");
+        let argv = ["scrape", "execute", "--timeout-seconds", "86400"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        let sanitized = sanitize_sandboxed_cli_argv(&root, &argv).unwrap();
+        assert_eq!(
+            sandboxed_cli_flag_value(&sanitized, "--timeout-seconds"),
+            Some("600")
+        );
+    }
+
+    #[test]
     fn sandboxed_cli_request_serde_round_trip() {
         let request = ServiceIpcRequest::SandboxedCli {
             argv: vec![
@@ -22769,7 +23073,16 @@ mod tests {
         );
         assert_eq!(
             service_ipc_timeout(&request(&["scrape", "execute", "--timeout-seconds", "30"])),
-            Duration::from_secs(180)
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            service_ipc_timeout(&request(&[
+                "scrape",
+                "execute",
+                "--timeout-seconds",
+                "86400"
+            ])),
+            Duration::from_secs(690)
         );
         assert_eq!(
             service_ipc_timeout(&request(&["scrape", "register-script"])),
@@ -22945,11 +23258,9 @@ mod tests {
         let expected = expected_outcome_artifacts_for_job(&job);
         assert_eq!(expected.len(), 1);
         assert_eq!(expected[0].kind, ArtifactKind::WorkspaceFile);
-        assert!(
-            expected[0]
-                .primary_key
-                .ends_with(".ctox/systematic-research-validation.json")
-        );
+        assert!(expected[0]
+            .primary_key
+            .ends_with(".ctox/systematic-research-validation.json"));
         let receipt = PathBuf::from(&expected[0].primary_key);
         std::fs::create_dir_all(receipt.parent().unwrap()).unwrap();
         std::fs::write(
@@ -23021,11 +23332,9 @@ mod tests {
 
         std::fs::write(&approved, b"changed research seed").unwrap();
         let error = materialize_systematic_research_seed_inputs(&root, &job).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("existing staged input does not match")
-        );
+        assert!(error
+            .to_string()
+            .contains("existing staged input does not match"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -23043,11 +23352,9 @@ mod tests {
             systematic_research_binding(&recovery).unwrap(),
             ("run-1", "command-1")
         );
-        assert!(
-            recovery
-                .prompt
-                .contains("Immutable systematic research binding:")
-        );
+        assert!(recovery
+            .prompt
+            .contains("Immutable systematic research binding:"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -23060,11 +23367,9 @@ mod tests {
 
         let error = preserve_systematic_research_binding(&original, &mut recovery).unwrap_err();
 
-        assert!(
-            error
-                .to_string()
-                .contains("attempted to change its immutable run binding")
-        );
+        assert!(error
+            .to_string()
+            .contains("attempted to change its immutable run binding"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -23079,11 +23384,9 @@ mod tests {
             validate_systematic_research_workspace(&root, &job, "attempt-1", current_epoch_secs())
                 .unwrap_err();
         assert!(error.to_string().contains("no evidence manifest found"));
-        assert!(
-            !workspace
-                .join(".ctox/systematic-research-validation.json")
-                .exists()
-        );
+        assert!(!workspace
+            .join(".ctox/systematic-research-validation.json")
+            .exists());
     }
 
     #[test]
@@ -23279,11 +23582,9 @@ mod tests {
             SystematicResearchDepth::Exhaustive,
         )
         .unwrap_err();
-        assert!(
-            foreign_binding
-                .to_string()
-                .contains("observed discovery calls: none")
-        );
+        assert!(foreign_binding
+            .to_string()
+            .contains("observed discovery calls: none"));
 
         write_rollout(
             "ctox_deep_research",
@@ -23304,11 +23605,9 @@ mod tests {
             SystematicResearchDepth::Exhaustive,
         )
         .unwrap_err();
-        assert!(
-            foreign_workspace
-                .to_string()
-                .contains("observed discovery calls: none")
-        );
+        assert!(foreign_workspace
+            .to_string()
+            .contains("observed discovery calls: none"));
 
         // Standard discovery remains agentic and accepts a persisted standard
         // sweep.
@@ -23331,11 +23630,9 @@ mod tests {
             SystematicResearchDepth::Exhaustive,
         )
         .unwrap_err();
-        assert!(
-            shallow_for_exhaustive
-                .to_string()
-                .contains("shallower than requested exhaustive")
-        );
+        assert!(shallow_for_exhaustive
+            .to_string()
+            .contains("shallower than requested exhaustive"));
 
         let standard_depth = validate_systematic_research_discovery_receipt_from_conn(
             &conn,
@@ -23430,11 +23727,9 @@ mod tests {
             SystematicResearchDepth::Exhaustive,
         )
         .unwrap_err();
-        assert!(
-            missing_persisted_artifact
-                .to_string()
-                .contains("(not persisted)")
-        );
+        assert!(missing_persisted_artifact
+            .to_string()
+            .contains("(not persisted)"));
 
         // Deep research is one optional discovery round, never the required
         // first or only tool: agentic search or scholarly discovery without
@@ -23626,11 +23921,9 @@ mod tests {
             started_at,
         )
         .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("were not emitted by typed ctox_web_read calls")
-        );
+        assert!(error
+            .to_string()
+            .contains("were not emitted by typed ctox_web_read calls"));
     }
 
     #[test]
@@ -24040,11 +24333,9 @@ mod tests {
             started_at,
         )
         .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("were not emitted by typed ctox_web_read calls")
-        );
+        assert!(error
+            .to_string()
+            .contains("were not emitted by typed ctox_web_read calls"));
 
         let _ = std::fs::remove_dir_all(&workspace);
         let _ = std::fs::remove_dir_all(&codex_home);
@@ -24140,22 +24431,18 @@ mod tests {
         );
         let error = validate_systematic_research_web_receipts(&root, &manifest, attempt_started_at)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("not bound to a matching admitted")
-        );
+        assert!(error
+            .to_string()
+            .contains("not bound to a matching admitted"));
 
         manifest["evidence"][0]["extracted_text"]["sha256"] = Value::String(page_text_sha256);
         manifest["evidence"][0]["retrieval_receipt"]["final_url"] =
             Value::String("https://example.edu/rewritten".to_string());
         let error = validate_systematic_research_web_receipts(&root, &manifest, attempt_started_at)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("canonical_url does not equal the immutable retrieval final_url")
-        );
+        assert!(error
+            .to_string()
+            .contains("canonical_url does not equal the immutable retrieval final_url"));
 
         manifest["evidence"][0]["retrieval_receipt"]["final_url"] =
             Value::String("https://example.edu/paper".to_string());
@@ -24165,11 +24452,9 @@ mod tests {
         manifest["evidence"][0]["relevance_score"] = Value::from(99);
         let error = validate_systematic_research_web_receipts(&root, &manifest, attempt_started_at)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("not bound to a matching admitted")
-        );
+        assert!(error
+            .to_string()
+            .contains("not bound to a matching admitted"));
 
         manifest["evidence"][0]["relevance_score"] = Value::from(9);
         manifest["evidence"][0]["extracted_text"]["sha256"] = Value::String(
@@ -24177,11 +24462,9 @@ mod tests {
         );
         let error = validate_systematic_research_web_receipts(&root, &manifest, attempt_started_at)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("not bound to a matching admitted")
-        );
+        assert!(error
+            .to_string()
+            .contains("not bound to a matching admitted"));
     }
 
     #[test]
@@ -24257,11 +24540,9 @@ mod tests {
         std::fs::write(&artifact, b"tampered").unwrap();
         let error = validate_systematic_research_web_receipts(&root, &manifest, attempt_started_at)
             .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("not bound to a matching admitted")
-        );
+        assert!(error
+            .to_string()
+            .contains("not bound to a matching admitted"));
     }
 
     #[test]
@@ -26141,21 +26422,17 @@ Business OS command:
             "Typisierungsingenieurin für Fahrerassistenzsysteme"
         );
         assert_eq!(value["candidate"]["email"], "julia.schikore@t-online.de");
-        assert!(
-            value["candidate"]["additional"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["key"] == "cv.experience")
-        );
-        assert!(
-            value["candidate"]["additional"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["key"] == "cv.skills"
-                    && entry["value"].get("Weitere Fähigkeiten").is_some())
-        );
+        assert!(value["candidate"]["additional"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["key"] == "cv.experience"));
+        assert!(value["candidate"]["additional"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["key"] == "cv.skills"
+                && entry["value"].get("Weitere Fähigkeiten").is_some()));
     }
 
     #[test]
@@ -26286,13 +26563,11 @@ Business OS command:
         assert_eq!(value["candidate"]["email"], "m.aboarais@gmail.com");
         assert_eq!(by_key("cv.experience").as_array().unwrap().len(), 3);
         assert_eq!(by_key("cv.education").as_array().unwrap().len(), 2);
-        assert!(
-            by_key("cv.skills")["Fachkenntnisse"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|skill| skill == "ISO 26262")
-        );
+        assert!(by_key("cv.skills")["Fachkenntnisse"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|skill| skill == "ISO 26262"));
     }
 
     fn review_outcome_for_no_send_test(summary: &str) -> review::ReviewOutcome {
@@ -26343,17 +26618,12 @@ Business OS command:
 
         let evidence = review_external_work_backing_evidence_summaries(&root, &job);
         assert!(evidence.iter().any(|line| line.contains("queue_open=1")));
-        assert!(
-            evidence
-                .iter()
-                .any(|line| line
-                    .contains("new_task, update_existing, merge_duplicate, extend_scope"))
-        );
-        assert!(
-            evidence
-                .iter()
-                .any(|line| line.contains(&format!("message_key={}", queue_task.message_key)))
-        );
+        assert!(evidence
+            .iter()
+            .any(|line| line.contains("new_task, update_existing, merge_duplicate, extend_scope")));
+        assert!(evidence
+            .iter()
+            .any(|line| line.contains(&format!("message_key={}", queue_task.message_key))));
         assert!(evidence.iter().any(|line| {
             line.contains("Merge duplicate scraper request into existing Intersolar task")
         }));
@@ -26406,11 +26676,9 @@ Business OS command:
         });
         let missing_target = communication_pipeline_resolution_guard_outcome(&request, &outcome)
             .expect("pipeline mutation without target must be rejected");
-        assert!(
-            missing_target
-                .summary
-                .contains("names no durable target item")
-        );
+        assert!(missing_target
+            .summary
+            .contains("names no durable target item"));
 
         outcome.pipeline_resolution = Some(review::PipelineResolution {
             action: review::PipelineResolutionAction::BlockedNeedsClarification,
@@ -26418,10 +26686,8 @@ Business OS command:
             rationale: "Asked for the missing account id before changing queued work.".to_string(),
         });
         let approval_summary = communication_review_approval_summary(&outcome);
-        assert!(
-            approval_summary
-                .contains("PIPELINE_RESOLUTION: action=blocked_needs_clarification | target=none")
-        );
+        assert!(approval_summary
+            .contains("PIPELINE_RESOLUTION: action=blocked_needs_clarification | target=none"));
     }
 
     #[test]
@@ -26662,11 +26928,9 @@ Business OS command:
         );
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.mechanism_id == "queue_pressure_guard")
-        );
+        assert!(events
+            .iter()
+            .any(|event| event.mechanism_id == "queue_pressure_guard"));
     }
 
     #[test]
@@ -26704,11 +26968,9 @@ Business OS command:
             let shared = lock_shared_state(&state);
             shared.recent_events.iter().cloned().collect::<Vec<_>>()
         };
-        assert!(
-            recent_events
-                .iter()
-                .any(|event| event.contains("State invariants repaired at boot"))
-        );
+        assert!(recent_events
+            .iter()
+            .any(|event| event.contains("State invariants repaired at boot")));
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
         assert!(events.iter().any(|event| {
@@ -26774,11 +27036,9 @@ Business OS command:
             let shared = lock_shared_state(&state);
             shared.recent_events.iter().cloned().collect::<Vec<_>>()
         };
-        assert!(
-            recent_events
-                .iter()
-                .any(|event| event.contains("State invariants repaired at boot"))
-        );
+        assert!(recent_events
+            .iter()
+            .any(|event| event.contains("State invariants repaired at boot")));
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
         assert!(events.iter().any(|event| {
@@ -27088,12 +27348,10 @@ Business OS command:
             turn_loop::CHAT_CONVERSATION_ID,
         )
         .expect("failed to evaluate initial invariants");
-        assert!(
-            before
-                .violations
-                .iter()
-                .any(|issue| { issue.code == "closed_mission_with_open_runtime_work" })
-        );
+        assert!(before
+            .violations
+            .iter()
+            .any(|issue| { issue.code == "closed_mission_with_open_runtime_work" }));
 
         let state = Arc::new(Mutex::new(SharedState::default()));
         let repaired =
@@ -27119,12 +27377,10 @@ Business OS command:
             .expect("failed to reload continuity");
         assert_ne!(continuity.focus.head_commit_id, "contbase_1_focus");
         assert!(continuity.focus.content.contains("- Mission state: active"));
-        assert!(
-            continuity
-                .focus
-                .content
-                .contains("- Continuation mode: continuous")
-        );
+        assert!(continuity
+            .focus
+            .content
+            .contains("- Continuation mode: continuous"));
 
         // The mission is reopened because durable work is open. The action no
         // longer mentions canonicalizing the focus: the structured write path
@@ -27266,12 +27522,10 @@ Business OS command:
 
         ensure_queue_guard_locked(&root, &mut shared);
 
-        assert!(
-            shared
-                .pending_prompts
-                .iter()
-                .all(|item| item.source_label != QUEUE_GUARD_SOURCE_LABEL)
-        );
+        assert!(shared
+            .pending_prompts
+            .iter()
+            .all(|item| item.source_label != QUEUE_GUARD_SOURCE_LABEL));
     }
 
     #[test]
@@ -27303,12 +27557,10 @@ Business OS command:
             shared.pending_prompts.front().unwrap().leased_message_keys,
             vec!["queue:system::next".to_string()]
         );
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("outcome-witness recovery"))
-        );
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|event| event.contains("outcome-witness recovery")));
     }
 
     #[test]
@@ -27419,21 +27671,17 @@ Business OS command:
 
         let shared = state.lock().expect("state poisoned");
         assert!(shared.pending_prompts.is_empty());
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|item| item.contains("Blocked ticket event"))
-        );
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|item| item.contains("Blocked ticket event")));
         drop(shared);
 
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.mechanism_id == "ticket_control_gate")
-        );
+        assert!(events
+            .iter()
+            .any(|event| event.mechanism_id == "ticket_control_gate"));
     }
 
     #[test]
@@ -27503,10 +27751,8 @@ Business OS command:
         ));
         assert!(prompt.contains("ticket source-skill-review-note --case-id case-1"));
         assert!(prompt.contains("Oeffentliche Ticketantwort:"));
-        assert!(
-            prompt
-                .contains("ticket writeback-comment --case-id case-1 --body \\\"<reply text>\\\"")
-        );
+        assert!(prompt
+            .contains("ticket writeback-comment --case-id case-1 --body \\\"<reply text>\\\""));
         assert!(prompt.contains("--internal"));
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -27623,12 +27869,10 @@ Business OS command:
             .expect("queued prompt missing");
         assert_eq!(prompt.source_label, "ticket:local");
         assert_eq!(prompt.suggested_skill.as_deref(), Some("system-onboarding"));
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("skill system-onboarding"))
-        );
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|event| event.contains("skill system-onboarding")));
     }
 
     #[test]
@@ -27688,12 +27932,10 @@ Business OS command:
             .expect("queued prompt missing");
         assert_eq!(prompt.source_label, "ticket:local");
         assert_eq!(prompt.suggested_skill.as_deref(), Some("system-onboarding"));
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("skill system-onboarding"))
-        );
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|event| event.contains("skill system-onboarding")));
     }
 
     #[test]
@@ -27742,12 +27984,10 @@ Business OS command:
             .expect("self-work missing after routing");
         assert_eq!(routed.state, "published");
         let shared = state.lock().expect("state poisoned");
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("Queued internal work"))
-        );
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|event| event.contains("Queued internal work")));
     }
 
     #[test]
@@ -27828,12 +28068,10 @@ Business OS command:
             prompt.suggested_skill.as_deref(),
             Some("roller-ticket-desk-operator-v4")
         );
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("skill roller-ticket-desk-operator-v4"))
-        );
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|event| event.contains("skill roller-ticket-desk-operator-v4")));
     }
 
     #[test]
@@ -27993,16 +28231,12 @@ Business OS command:
 
         let shared = lock_shared_state(&state);
         assert_eq!(shared.pending_prompts.len(), 1);
-        assert!(
-            !shared.pending_prompts[0]
-                .prompt
-                .contains("sk-proj-service-secret-1234567890")
-        );
-        assert!(
-            shared.pending_prompts[0]
-                .prompt
-                .contains("[secret-ref:credentials/OPENAI_API_KEY")
-        );
+        assert!(!shared.pending_prompts[0]
+            .prompt
+            .contains("sk-proj-service-secret-1234567890"));
+        assert!(shared.pending_prompts[0]
+            .prompt
+            .contains("[secret-ref:credentials/OPENAI_API_KEY"));
         assert_eq!(
             shared.pending_prompts[0].suggested_skill.as_deref(),
             Some("secret-hygiene")
@@ -28026,11 +28260,9 @@ Business OS command:
 
         assert_eq!(prepared.suggested_skill.as_deref(), Some("secret-hygiene"));
         assert!(prepared.auto_ingested_secrets >= 1);
-        assert!(
-            prepared
-                .prompt
-                .contains("[secret-ref:credentials/OPENAI_API_KEY")
-        );
+        assert!(prepared
+            .prompt
+            .contains("[secret-ref:credentials/OPENAI_API_KEY"));
     }
 
     #[test]
@@ -28364,12 +28596,10 @@ Business OS command:
         assert_eq!(status.pending_count, 0);
         assert!(status.pending_previews.is_empty());
         assert_eq!(status.blocked_count, 1);
-        assert!(
-            status
-                .blocked_previews
-                .iter()
-                .any(|preview| preview.contains("queue blocked  HY3 smoke artifact missing"))
-        );
+        assert!(status
+            .blocked_previews
+            .iter()
+            .any(|preview| preview.contains("queue blocked  HY3 smoke artifact missing")));
     }
 
     #[test]
@@ -28520,12 +28750,10 @@ Business OS command:
         assert_eq!(status.pid, Some(4242));
         assert_eq!(status.pending_count, 1);
         assert!(status.business_os.is_some());
-        assert!(
-            status
-                .recent_events
-                .iter()
-                .any(|event| event.contains("system-onboarding"))
-        );
+        assert!(status
+            .recent_events
+            .iter()
+            .any(|event| event.contains("system-onboarding")));
     }
 
     #[cfg(unix)]
@@ -28863,10 +29091,8 @@ Business OS command:
             "Implement the requested slice.",
             Some("/tmp/ctox-workspace-contract"),
         );
-        assert!(
-            prompt
-                .starts_with("Work only inside this workspace:\n/tmp/ctox-workspace-contract\n\n")
-        );
+        assert!(prompt
+            .starts_with("Work only inside this workspace:\n/tmp/ctox-workspace-contract\n\n"));
         assert!(prompt.contains("Implement the requested slice."));
 
         let timeout_prompt = render_timeout_continue_prompt(
@@ -28874,10 +29100,8 @@ Business OS command:
             "execution timed out after 180s",
             Some("/tmp/ctox-workspace-contract"),
         );
-        assert!(
-            timeout_prompt
-                .contains("Work only inside this workspace:\n/tmp/ctox-workspace-contract")
-        );
+        assert!(timeout_prompt
+            .contains("Work only inside this workspace:\n/tmp/ctox-workspace-contract"));
         assert!(timeout_prompt.contains("CURRENT TASK\nShip the next implementation slice."));
     }
 
@@ -28998,11 +29222,9 @@ Business OS command:
             "CTO_MEETING_AUTO_JOIN_ENABLED".to_string(),
             "false".to_string(),
         );
-        assert!(
-            meeting_auto_join_policy_block(&settings, &message)
-                .expect("disabled block")
-                .contains("auto-join disabled")
-        );
+        assert!(meeting_auto_join_policy_block(&settings, &message)
+            .expect("disabled block")
+            .contains("auto-join disabled"));
 
         settings.insert(
             "CTO_MEETING_AUTO_JOIN_ENABLED".to_string(),
@@ -29012,11 +29234,9 @@ Business OS command:
             "CTO_MEETING_ALLOWED_INVITE_SENDERS".to_string(),
             "scheduler@example.com,@trusted.example".to_string(),
         );
-        assert!(
-            meeting_auto_join_policy_block(&settings, &message)
-                .expect("sender block")
-                .contains("not in")
-        );
+        assert!(meeting_auto_join_policy_block(&settings, &message)
+            .expect("sender block")
+            .contains("not in"));
 
         let allowed_exact = routed_email_message("scheduler@example.com");
         assert_eq!(
@@ -29078,12 +29298,10 @@ Business OS command:
 
         let shared = state.lock().expect("state poisoned");
         assert!(shared.pending_prompts.is_empty());
-        assert!(
-            shared
-                .recent_events
-                .iter()
-                .any(|event| event.contains("Ignored non-work TUI route"))
-        );
+        assert!(shared
+            .recent_events
+            .iter()
+            .any(|event| event.contains("Ignored non-work TUI route")));
         drop(shared);
         assert_eq!(route_status_for(&root, "tui-probe-1"), "handled");
         let _ = std::fs::remove_dir_all(&root);
@@ -29516,12 +29734,10 @@ Business OS command:
             pending.front().map(|item| item.source_label.as_str()),
             Some("tui")
         );
-        assert!(
-            pending
-                .front()
-                .and_then(|item| item.outbound_email.as_ref())
-                .is_some()
-        );
+        assert!(pending
+            .front()
+            .and_then(|item| item.outbound_email.as_ref())
+            .is_some());
         assert_eq!(
             pending.back().map(|item| item.source_label.as_str()),
             Some("email:founder")
@@ -29800,11 +30016,9 @@ Business OS command:
         assert!(self_work.is_empty());
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.mechanism_id == "turn_timeout_continuation")
-        );
+        assert!(events
+            .iter()
+            .any(|event| event.mechanism_id == "turn_timeout_continuation"));
     }
 
     #[test]
@@ -29873,12 +30087,10 @@ Business OS command:
         assert_eq!(terminal.agent_outcome, lcm::AgentOutcome::TurnTimeout);
         assert!(terminal.reply_message_id.is_some());
 
-        assert!(
-            created
-                .as_deref()
-                .unwrap_or_default()
-                .starts_with("Recover interrupted Run artifact controller")
-        );
+        assert!(created
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("Recover interrupted Run artifact controller"));
         let pending = channels::list_queue_tasks(&root, &["pending".to_string()], 10)
             .expect("failed to list pending queue tasks");
         assert_eq!(pending.len(), 1);
@@ -29900,11 +30112,9 @@ Business OS command:
             job.workspace_root.as_deref()
         );
         assert_eq!(pending[0].parent_message_key, None);
-        assert!(
-            pending[0]
-                .prompt
-                .contains("DURABLE FILES THAT MUST STAY UPDATED")
-        );
+        assert!(pending[0]
+            .prompt
+            .contains("DURABLE FILES THAT MUST STAY UPDATED"));
         assert!(pending[0].prompt.contains(controller.to_str().unwrap()));
         assert!(pending[0].prompt.contains(logbook.to_str().unwrap()));
         let self_work = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
@@ -30096,22 +30306,18 @@ Business OS command:
         let shared = state.lock().expect("state poisoned");
         assert!(!shared.busy);
         assert!(shared.active_source_label.is_none());
-        assert!(
-            !shared
-                .leased_message_keys_inflight
-                .contains(&task.message_key)
-        );
+        assert!(!shared
+            .leased_message_keys_inflight
+            .contains(&task.message_key));
         assert!(shared.recent_events.iter().any(|event| {
             event.contains("Suppressed fatal harness continuation before model execution")
         }));
         drop(shared);
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.mechanism_id == "fatal_harness_loop_guard")
-        );
+        assert!(events
+            .iter()
+            .any(|event| event.mechanism_id == "fatal_harness_loop_guard"));
     }
 
     #[test]
@@ -30252,9 +30458,7 @@ Business OS command:
         assert!(prompt.contains("Business OS app resource context:"));
         assert!(prompt.contains("- module_id: contracts"));
         assert!(prompt.contains("- install_target: runtime-installed-module"));
-        assert!(
-            prompt.contains("- app_directory: runtime/business-os/installed-modules/contracts")
-        );
+        assert!(prompt.contains("- app_directory: runtime/business-os/installed-modules/contracts"));
         assert!(prompt.contains("- skill: business-os-app-module-development"));
         assert!(prompt.contains("resource.module_contract:"));
         assert!(prompt.contains("resource.dos_and_donts:"));
@@ -30440,12 +30644,10 @@ Business OS command:
         assert!(options.enable_business_os_mcp);
         assert!(!options.disable_mcp_servers);
         assert!(options.force_isolated_session);
-        assert!(
-            options
-                .business_os_mcp_command_session
-                .as_deref()
-                .is_some_and(|token| !token.is_empty())
-        );
+        assert!(options
+            .business_os_mcp_command_session
+            .as_deref()
+            .is_some_and(|token| !token.is_empty()));
         assert!(!queue_job_reuses_persistent_session(&options));
         let _ = std::fs::remove_dir_all(root);
         Ok(())
@@ -30576,12 +30778,10 @@ Business OS command:
         let unresolved = completion_review_writeback_action_guard_outcome(&root, &job)?
             .context("non-terminal child coverage must fail")?;
         assert!(unresolved.summary.contains("1 are still non-terminal"));
-        assert!(
-            unresolved
-                .evidence
-                .iter()
-                .any(|line| line.contains("lead_2 (running/none)"))
-        );
+        assert!(unresolved
+            .evidence
+            .iter()
+            .any(|line| line.contains("lead_2 (running/none)")));
 
         conn.execute(
             "UPDATE business_command_aggregates SET execution_phase='terminal', terminal_status='failed', updated_at_ms=?1 WHERE command_id='cmd_child_running'",
@@ -30860,16 +31060,12 @@ Business OS command:
         let reloaded = channels::load_queue_task(&root, &task.message_key)
             .expect("load failed")
             .expect("missing queue task");
-        assert!(
-            reloaded
-                .prompt
-                .contains(BUSINESS_OS_APP_VALIDATION_FAILURE_MARKER)
-        );
-        assert!(
-            reloaded
-                .prompt
-                .contains("module.json install_scope must be installed")
-        );
+        assert!(reloaded
+            .prompt
+            .contains(BUSINESS_OS_APP_VALIDATION_FAILURE_MARKER));
+        assert!(reloaded
+            .prompt
+            .contains("module.json install_scope must be installed"));
         assert!(reloaded.prompt.contains("Original app request summary"));
         assert_eq!(route_status_for(&root, &task.message_key), "review_rework");
         let conn =
@@ -30973,11 +31169,9 @@ Business OS command:
             .expect("load failed")
             .expect("missing queue task");
         assert_eq!(route_status_for(&root, &task.message_key), "review_rework");
-        assert!(
-            reloaded
-                .prompt
-                .contains(BUSINESS_OS_APP_VALIDATION_FAILURE_MARKER)
-        );
+        assert!(reloaded
+            .prompt
+            .contains(BUSINESS_OS_APP_VALIDATION_FAILURE_MARKER));
         assert!(reloaded.prompt.contains("layout.right is not allowed"));
         assert!(reloaded.prompt.contains("Original app request summary"));
         let conn =
@@ -31540,11 +31734,9 @@ Business OS command:
         let reloaded = channels::load_queue_task(&root, &task.message_key)
             .expect("load failed")
             .expect("missing queue task");
-        assert!(
-            reloaded
-                .prompt
-                .contains("Business OS app artifact validation failed.")
-        );
+        assert!(reloaded
+            .prompt
+            .contains("Business OS app artifact validation failed."));
         assert!(reloaded.prompt.contains("missing index.js and tests"));
         let shared = lock_shared_state(&state);
         assert!(
@@ -31701,11 +31893,9 @@ Business OS command:
 
         assert_eq!(updated, 1);
         assert_eq!(route_status_for(&state_root, &task.message_key), "handled");
-        assert!(
-            !state_root
-                .join("runtime/business-os/installed-modules/subscriptions")
-                .exists()
-        );
+        assert!(!state_root
+            .join("runtime/business-os/installed-modules/subscriptions")
+            .exists());
     }
 
     #[test]
@@ -31957,11 +32147,9 @@ Business OS command:
             .expect("load queue task")
             .expect("queue task exists");
         assert_eq!(reloaded.route_status, "review_rework");
-        assert!(
-            reloaded
-                .prompt
-                .contains("Business OS app artifact validation failed.")
-        );
+        assert!(reloaded
+            .prompt
+            .contains("Business OS app artifact validation failed."));
         assert!(reloaded.prompt.contains("missing index.html"));
     }
 
@@ -33353,11 +33541,9 @@ Business OS command:
             route_status_for(&root, &pending_task.message_key),
             "pending"
         );
-        assert!(
-            leased
-                .prompt
-                .contains(BUSINESS_OS_APP_VALIDATION_FAILURE_MARKER)
-        );
+        assert!(leased
+            .prompt
+            .contains(BUSINESS_OS_APP_VALIDATION_FAILURE_MARKER));
     }
 
     #[test]
@@ -33585,11 +33771,9 @@ Business OS command:
             Some(queued.preview.as_str())
         );
         assert_eq!(shared.active_source_label.as_deref(), Some("queue"));
-        assert!(
-            shared
-                .leased_message_keys_inflight
-                .contains(&next_task.message_key)
-        );
+        assert!(shared
+            .leased_message_keys_inflight
+            .contains(&next_task.message_key));
         assert!(shared.recent_events.iter().any(|event| {
             event.contains("Started durable queue task after worker completion")
                 && !event.contains("released durable queue lease")
@@ -33767,16 +33951,12 @@ Business OS command:
         );
         assert_eq!(route_status_for(&root, &stale_task.message_key), "leased");
         assert_eq!(route_status_for(&root, &fresh_task.message_key), "pending");
-        assert!(
-            leased
-                .prompt
-                .contains("Business OS app artifact validation failed.")
-        );
-        assert!(
-            leased
-                .prompt
-                .contains("module tests failed: expected count is inconsistent")
-        );
+        assert!(leased
+            .prompt
+            .contains("Business OS app artifact validation failed."));
+        assert!(leased
+            .prompt
+            .contains("module tests failed: expected count is inconsistent"));
     }
 
     #[test]
@@ -34309,7 +34489,7 @@ Business OS command:
             reasons: vec!["Runtime mission contract still open".to_string()],
             failed_gates: vec!["Closure readiness".to_string()],
             semantic_findings: vec![
-                "Do the remaining rework instead of closing the queue item.".to_string(),
+                "Do the remaining rework instead of closing the queue item.".to_string()
             ],
             categorized_findings: Vec::new(),
             open_items: vec!["Persist the missing closure evidence.".to_string()],
@@ -34854,13 +35034,11 @@ Business OS command:
             disposition,
             CompletionReviewDisposition::Hold { .. }
         ));
-        assert!(
-            state
-                .lock()
-                .expect("service state poisoned")
-                .pending_prompts
-                .is_empty()
-        );
+        assert!(state
+            .lock()
+            .expect("service state poisoned")
+            .pending_prompts
+            .is_empty());
     }
 
     #[test]
@@ -35079,17 +35257,13 @@ Business OS command:
             .expect("load queue task")
             .expect("queue task exists");
         assert!(reloaded.prompt.starts_with(original_prompt));
-        assert!(
-            reloaded
-                .prompt
-                .contains("- command_id: cmd-review-preserve")
-        );
+        assert!(reloaded
+            .prompt
+            .contains("- command_id: cmd-review-preserve"));
         assert!(reloaded.prompt.contains("Fix the validation result."));
-        assert!(
-            !reloaded
-                .prompt
-                .contains("Fix the missing durable evidence.")
-        );
+        assert!(!reloaded
+            .prompt
+            .contains("Fix the missing durable evidence."));
     }
 
     #[test]
@@ -35322,11 +35496,9 @@ Business OS command:
             .expect("missing self-work");
         assert_eq!(reloaded.state, "published");
         assert_eq!(queued.thread_key, "queue/mission-1");
-        assert!(
-            queued
-                .title
-                .contains("Continue mission Deliver the Kunstmen homepage reset")
-        );
+        assert!(queued
+            .title
+            .contains("Continue mission Deliver the Kunstmen homepage reset"));
 
         let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
             .expect("failed to list self-work");
@@ -35592,11 +35764,9 @@ Business OS command:
 
         let blocked_tasks = channels::list_queue_tasks(&root, &["blocked".to_string()], 10)
             .expect("failed to list blocked queue tasks");
-        assert!(
-            !blocked_tasks
-                .iter()
-                .any(|task| task.ticket_self_work_id.as_deref() == Some(item.work_id.as_str()))
-        );
+        assert!(!blocked_tasks
+            .iter()
+            .any(|task| task.ticket_self_work_id.as_deref() == Some(item.work_id.as_str())));
     }
 
     #[test]
@@ -35662,11 +35832,9 @@ Business OS command:
 
         let blocked_tasks = channels::list_queue_tasks(&root, &["blocked".to_string()], 10)
             .expect("failed to list blocked queue tasks");
-        assert!(
-            !blocked_tasks
-                .iter()
-                .any(|task| task.ticket_self_work_id.as_deref() == Some(item.work_id.as_str()))
-        );
+        assert!(!blocked_tasks
+            .iter()
+            .any(|task| task.ticket_self_work_id.as_deref() == Some(item.work_id.as_str())));
     }
 
     #[test]
@@ -36213,16 +36381,12 @@ Business OS command:
             items[0].suggested_skill.as_deref(),
             Some("follow-up-orchestrator")
         );
-        assert!(
-            items[0]
-                .body_text
-                .contains("Use `ctox strategy show --conversation-id")
-        );
-        assert!(
-            items[0]
-                .body_text
-                .contains("--thread-key kunstmen-supervisor")
-        );
+        assert!(items[0]
+            .body_text
+            .contains("Use `ctox strategy show --conversation-id"));
+        assert!(items[0]
+            .body_text
+            .contains("--thread-key kunstmen-supervisor"));
     }
 
     #[test]
@@ -36392,11 +36556,9 @@ Keep the work bounded to project preparation."
         let tasks =
             channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
                 .expect("failed to list queue tasks");
-        assert!(
-            tasks
-                .iter()
-                .any(|task| task.title == "prep-priority-plan: choose first work items")
-        );
+        assert!(tasks
+            .iter()
+            .any(|task| task.title == "prep-priority-plan: choose first work items"));
 
         let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
             .expect("failed to list self-work");
@@ -36971,13 +37133,11 @@ Use shell tools to create or update these files."
 
         assert_eq!(updated, 1);
         assert_eq!(saved.prompt, original_prompt);
-        assert!(
-            saved
-                .status_note
-                .as_deref()
-                .unwrap_or_default()
-                .contains("kept original task prompt")
-        );
+        assert!(saved
+            .status_note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("kept original task prompt"));
     }
 
     #[test]
@@ -37038,10 +37198,8 @@ Use shell tools to create or update these files."
         );
         assert!(runtime_error_is_transient_api_failure(error));
         assert_eq!(failed_worker_route_status(false, false, true), "pending");
-        assert!(
-            turn_loop::summarize_runtime_error(error)
-                .contains("managed local backend did not become ready")
-        );
+        assert!(turn_loop::summarize_runtime_error(error)
+            .contains("managed local backend did not become ready"));
     }
 
     #[test]
@@ -37224,16 +37382,12 @@ Use shell tools to create or update these files."
             .expect("load queue task")
             .expect("queue task exists");
         assert!(reloaded.prompt.contains("HARNESS FEEDBACK"));
-        assert!(
-            reloaded
-                .prompt
-                .contains("without producing the required final assistant message")
-        );
-        assert!(
-            reloaded
-                .prompt
-                .contains("Create and verify the smoke artifact.")
-        );
+        assert!(reloaded
+            .prompt
+            .contains("without producing the required final assistant message"));
+        assert!(reloaded
+            .prompt
+            .contains("Create and verify the smoke artifact."));
         assert_eq!(reloaded.workspace_root.as_deref(), Some("/tmp/qwen-smoke"));
         assert_eq!(route_status_for(&root, &task.message_key), "leased");
     }
@@ -37450,11 +37604,9 @@ Use shell tools to create or update these files."
         .expect("release retryable command");
 
         assert_eq!(route_status_for(&root, &task_id), "pending");
-        assert!(
-            channels::queue_task_deferred_until(&root, &task_id)
-                .expect("read durable retry")
-                .is_some()
-        );
+        assert!(channels::queue_task_deferred_until(&root, &task_id)
+            .expect("read durable retry")
+            .is_some());
         let retry_context = channels::inspect_business_command_for_task(&root, &task_id)
             .expect("inspect retry command")
             .expect("linked command");
@@ -37923,19 +38075,15 @@ Use shell tools to create or update these files."
             .expect("collect preserve telemetry");
         assert_eq!(events.len(), 1, "identical preserve hits must dedupe");
         assert!(events[0].0.contains("stale application queue lease"));
-        assert!(
-            events[0]
-                .1
-                .contains("specialized Business OS application recovery")
-        );
+        assert!(events[0]
+            .1
+            .contains("specialized Business OS application recovery"));
         let details: Value = serde_json::from_str(&events[0].2).expect("parse telemetry details");
         assert_eq!(details["message_key"], task.message_key);
         assert_eq!(details["context_key"], task.message_key);
-        assert!(
-            events[0]
-                .3
-                .starts_with("repair:preserve_stale_service_communication_lease")
-        );
+        assert!(events[0]
+            .3
+            .starts_with("repair:preserve_stale_service_communication_lease"));
     }
 
     #[test]
@@ -39545,11 +39693,9 @@ Use shell tools to create or update these files."
         );
         let shared = lock_shared_state(&state);
         assert!(shared.pending_prompts.is_empty());
-        assert!(
-            !shared
-                .leased_message_keys_inflight
-                .contains(&task.message_key)
-        );
+        assert!(!shared
+            .leased_message_keys_inflight
+            .contains(&task.message_key));
         assert!(shared.recent_events.iter().any(|event| {
             event.contains("released durable queue lease") && event.contains("active agent loop")
         }));
@@ -39607,16 +39753,14 @@ Use shell tools to create or update these files."
                 'later reviewed founder reply in same thread',
                 '2026-04-27T15:39:18Z', '2026-04-27T15:39:18Z', '{}'
             )"#,
-            rusqlite::params![
-                serde_json::json!({
-                    "thread_key": thread_key,
-                    "to": ["michael.welsch@metric-space.ai"],
-                    "cc": [],
-                    "subject": "Re: Aw: Re: Visuelle Homepage",
-                    "attachments": [],
-                })
-                .to_string()
-            ],
+            rusqlite::params![serde_json::json!({
+                "thread_key": thread_key,
+                "to": ["michael.welsch@metric-space.ai"],
+                "cc": [],
+                "subject": "Re: Aw: Re: Visuelle Homepage",
+                "attachments": [],
+            })
+            .to_string()],
         )
         .expect("failed to seed later reviewed send");
 
@@ -39643,30 +39787,26 @@ Use shell tools to create or update these files."
             "previous_route_status": "failed",
             "repair_outcome": "restored_stalled_founder_communication",
         });
-        assert!(
-            record_repair_telemetry(
-                &root,
-                "repair_stalled_founder_communications",
-                "a founder communication remained failed without a reviewed sent reply",
-                "restored the inbound and its durable founder rework into the routing loop",
-                inbound_key,
-                Some(inbound_key),
-                restored_details.clone(),
-            )
-            .expect("persist second founder repair outcome")
-        );
-        assert!(
-            !record_repair_telemetry(
-                &root,
-                "repair_stalled_founder_communications",
-                "a founder communication remained failed without a reviewed sent reply",
-                "restored the inbound and its durable founder rework into the routing loop",
-                inbound_key,
-                Some(inbound_key),
-                restored_details,
-            )
-            .expect("dedupe identical second founder repair outcome")
-        );
+        assert!(record_repair_telemetry(
+            &root,
+            "repair_stalled_founder_communications",
+            "a founder communication remained failed without a reviewed sent reply",
+            "restored the inbound and its durable founder rework into the routing loop",
+            inbound_key,
+            Some(inbound_key),
+            restored_details.clone(),
+        )
+        .expect("persist second founder repair outcome"));
+        assert!(!record_repair_telemetry(
+            &root,
+            "repair_stalled_founder_communications",
+            "a founder communication remained failed without a reviewed sent reply",
+            "restored the inbound and its durable founder rework into the routing loop",
+            inbound_key,
+            Some(inbound_key),
+            restored_details,
+        )
+        .expect("dedupe identical second founder repair outcome"));
         let (reason, action, details_json): (String, String, String) = conn
             .query_row(
                 "SELECT reason, action_taken, details_json
@@ -39917,16 +40057,14 @@ Use shell tools to create or update these files."
                 'later reviewed founder reply copied Michael on a different founder thread',
                 '2026-04-27T23:21:23Z', '2026-04-27T23:21:23Z', '{"ok":true}'
             )"#,
-            rusqlite::params![
-                serde_json::json!({
-                    "thread_key": "<current-thread@example.com>",
-                    "to": ["o.schaefers@gmx.net"],
-                    "cc": ["michael.welsch@metric-space.ai"],
-                    "subject": "Re: Aw: Re: Visuelle Homepage",
-                    "attachments": [],
-                })
-                .to_string()
-            ],
+            rusqlite::params![serde_json::json!({
+                "thread_key": "<current-thread@example.com>",
+                "to": ["o.schaefers@gmx.net"],
+                "cc": ["michael.welsch@metric-space.ai"],
+                "subject": "Re: Aw: Re: Visuelle Homepage",
+                "attachments": [],
+            })
+            .to_string()],
         )
         .expect("failed to seed later reviewed send");
 
@@ -40218,11 +40356,10 @@ Was jetzt zu tun ist:\n\
 
         let note = maybe_continue_platform_expertise_pipeline_after_success(&root, &job)
             .expect("platform pass continuation should succeed");
-        assert!(
-            note.as_deref()
-                .unwrap_or_default()
-                .contains("messaging-wording")
-        );
+        assert!(note
+            .as_deref()
+            .unwrap_or_default()
+            .contains("messaging-wording"));
 
         let items = tickets::list_ticket_self_work_items(&root, Some("local"), None, 10)
             .expect("failed to list self-work");
@@ -40370,21 +40507,17 @@ Was jetzt zu tun ist:\n\
         let shared = state.lock().expect("service state poisoned");
         assert!(!shared.busy);
         assert_eq!(shared.pending_prompts.len(), 1);
-        assert!(
-            shared
-                .recent_events
-                .back()
-                .map(|event| event.contains("runtime blocker cooldown"))
-                .unwrap_or(false)
-        );
+        assert!(shared
+            .recent_events
+            .back()
+            .map(|event| event.contains("runtime blocker cooldown"))
+            .unwrap_or(false));
         drop(shared);
         let events = governance::list_recent_events(&root, turn_loop::CHAT_CONVERSATION_ID, 8)
             .expect("failed to list governance events");
-        assert!(
-            events
-                .iter()
-                .any(|event| event.mechanism_id == "runtime_blocker_backoff")
-        );
+        assert!(events
+            .iter()
+            .any(|event| event.mechanism_id == "runtime_blocker_backoff"));
     }
 
     #[test]
@@ -40756,11 +40889,9 @@ Was jetzt zu tun ist:\n\
 
         let alerts = runtime_lifecycle_alerts(&root, None, false).unwrap();
 
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.contains("stale service pid file"))
-        );
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.contains("stale service pid file")));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -40772,11 +40903,9 @@ Was jetzt zu tun ist:\n\
 
         let alerts = runtime_lifecycle_alerts(&root, None, false).unwrap();
 
-        assert!(
-            alerts
-                .iter()
-                .any(|alert| alert.contains("backend residue stale pid file"))
-        );
+        assert!(alerts
+            .iter()
+            .any(|alert| alert.contains("backend residue stale pid file")));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -41365,10 +41494,9 @@ Was jetzt zu tun ist:\n\
         assert!(paths.contains(&"/tmp/ctox-tb2-run/controller.json"));
         assert!(paths.contains(&"/tmp/ctox-tb2-run/results.jsonl"));
         assert!(paths.contains(&"/tmp/ctox-tb2-run/blogpost-notes.md"));
-        assert!(
-            refs.iter()
-                .all(|artifact| artifact.expected_terminal_state == "present")
-        );
+        assert!(refs
+            .iter()
+            .all(|artifact| artifact.expected_terminal_state == "present"));
     }
 
     #[test]
@@ -41953,18 +42081,16 @@ The controller must update stale files itself."
             delivered.is_empty(),
             "review-feedback must not accept files older than latest outcome rejection"
         );
-        assert!(
-            workspace_file_artifact_diagnostic_for_expected(
-                &root,
-                &job,
-                &ArtifactRef {
-                    kind: ArtifactKind::WorkspaceFile,
-                    primary_key: controller_text,
-                    expected_terminal_state: "fresh".to_string(),
-                },
-            )
-            .contains("stale")
-        );
+        assert!(workspace_file_artifact_diagnostic_for_expected(
+            &root,
+            &job,
+            &ArtifactRef {
+                kind: ArtifactKind::WorkspaceFile,
+                primary_key: controller_text,
+                expected_terminal_state: "fresh".to_string(),
+            },
+        )
+        .contains("stale"));
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -43168,11 +43294,9 @@ Those are not durable artifact requirements."
             classify_findings(&outcome.categorized_findings),
             ReviewRoutingClass::RewriteOnly
         );
-        assert!(
-            outcome
-                .summary
-                .contains("internal status or completion report")
-        );
+        assert!(outcome
+            .summary
+            .contains("internal status or completion report"));
     }
 
     #[test]
@@ -43973,11 +44097,9 @@ Those are not durable artifact requirements."
         let tasks =
             channels::list_queue_tasks(&root, &["pending".to_string(), "leased".to_string()], 10)
                 .expect("failed to list queue tasks");
-        assert!(
-            tasks
-                .iter()
-                .all(|task| !task.title.starts_with("Founder communication rework:"))
-        );
+        assert!(tasks
+            .iter()
+            .all(|task| !task.title.starts_with("Founder communication rework:")));
         let _ = std::fs::remove_dir_all(root);
     }
 
