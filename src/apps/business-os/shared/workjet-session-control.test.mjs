@@ -193,12 +193,14 @@ test('Workjet session create/list is idempotent and transfer outcomes pass throu
     idempotencyKey: 'transfer-key-1',
   });
   assert.deepEqual(transferOutcome, {
-    ok: false,
-    transfer_id: 'workjet-transfer-1',
-    state: null,
-    error_code: 'session_not_running',
-    retryable: false,
-    message: 'Workjet session is not running',
+    action: 'session.transfer.start',
+    outcome: {
+      ok: false,
+      retryable: false,
+      transferId: 'workjet-transfer-1',
+      errorCode: 'session_not_running',
+      message: 'Workjet session is not running',
+    },
   });
   assert.ok(dispatched.every(({ options }) => options.until === 'terminal'));
 

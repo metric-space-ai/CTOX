@@ -13015,7 +13015,10 @@ async function workjetSessionControl(request = {}) {
         idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
       },
     );
-    return readTerminalCommandOutcome(commandId);
+    return {
+      action: 'session.transfer.start',
+      outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
+    };
   }
 
   if (action === 'session.transfer.status') {
@@ -13033,7 +13036,10 @@ async function workjetSessionControl(request = {}) {
       transferId || sessionId,
       payload,
     );
-    return readTerminalCommandOutcome(commandId);
+    return {
+      action: 'session.transfer.status',
+      outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
+    };
   }
 
   if (action === 'session.transfer.abort') {
@@ -13052,7 +13058,10 @@ async function workjetSessionControl(request = {}) {
         idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
       },
     );
-    return readTerminalCommandOutcome(commandId);
+    return {
+      action: 'session.transfer.abort',
+      outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
+    };
   }
 
   throw new Error(`Unsupported Workjet session control action: ${action}`);
@@ -13143,6 +13152,42 @@ async function waitForProjectedWorkjetSession(
   error.code = 'workjet_session_projection_timeout';
   if (lastError) error.cause = lastError;
   throw error;
+}
+
+const WORKJET_TRANSFER_OUTCOME_MAX_TRANSFER_BYTES = 64 * 1024;
+
+// Transfer outcomes cross the Desktop/Mobile bridge as a typed contract:
+// camelCase keys, bounded strings, and the raw transfer record only as an
+// opaque, size-capped object. The native result keys stay snake_case.
+function normalizeWorkjetTransferOutcome(outcome) {
+  const text = (value, field, maxLength) => (
+    typeof value === 'string' && value.length > 0
+      ? boundedWorkjetSessionText(value, field, maxLength)
+      : null
+  );
+  let transfer = null;
+  if (outcome.transfer && typeof outcome.transfer === 'object' && !Array.isArray(outcome.transfer)) {
+    const encoded = JSON.stringify(outcome.transfer);
+    if (encoded.length <= WORKJET_TRANSFER_OUTCOME_MAX_TRANSFER_BYTES) transfer = Object.freeze({ ...outcome.transfer });
+  }
+  let session = null;
+  if (outcome.session && typeof outcome.session === 'object') {
+    try { session = boundedWorkjetSessionResult(outcome.session); } catch { session = null; }
+  }
+  const normalized = { ok: outcome.ok === true, retryable: outcome.retryable === true };
+  const transferId = text(outcome.transfer_id, 'outcome.transferId', 160);
+  const state = text(outcome.state, 'outcome.state', 64);
+  const errorCode = text(outcome.error_code, 'outcome.errorCode', 128);
+  const message = text(outcome.message ?? outcome.error, 'outcome.message', 512);
+  // Optional keys are omitted, never null: the Desktop contract decodes with
+  // excess-property errors and optional (not nullable) fields.
+  if (transferId !== null) normalized.transferId = transferId;
+  if (state !== null) normalized.state = state;
+  if (errorCode !== null) normalized.errorCode = errorCode;
+  if (message !== null) normalized.message = message;
+  if (session !== null) normalized.session = session;
+  if (transfer !== null) normalized.transfer = transfer;
+  return Object.freeze(normalized);
 }
 
 async function readTerminalCommandOutcome(commandId) {
