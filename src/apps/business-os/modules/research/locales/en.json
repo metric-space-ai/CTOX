@@ -98,7 +98,7 @@
   "decisionNoteGapBody": "This source requires further extraction before serving as a reliable dashboard metric.",
   "decisionNoteScope": "Scope control",
   "decisionNoteScopeBody": "Dashboard scores remain only as reliable as the linked knowledge tables and their provenance.",
-  "sourcesLabel": "Sources",
+  "sourcesLabel": "sources",
   "measurementsLabel": "Measurements",
   "tablesLabel": "Tables",
   "scoreLabel": "Score",
@@ -165,5 +165,11 @@
   "reports": "Reports",
   "noCandidates": "No candidates yet.",
   "evidenceRanking": "Evidence ranking",
-  "searchCandidatesPlaceholder": "Search candidates: DOI, title, publisher …"
+  "searchCandidatesPlaceholder": "Search candidates: DOI, title, publisher …",
+  "researchSyncRetry": "Sync interrupted – retrying in {0} s",
+  "taskSourcesUnavailable": "sources unavailable",
+  "taskSourcesSyncing": "syncing sources …",
+  "verifiedSources": "verified sources",
+  "noKnowledgeYet": "no knowledge base yet",
+  "researchRefreshDelayed": "Refresh delayed – retrying in {0} s"
 }
