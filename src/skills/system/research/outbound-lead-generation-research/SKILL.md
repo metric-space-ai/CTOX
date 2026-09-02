@@ -78,12 +78,20 @@ ctox web unlock <list-probes|list-vectors|baseline|history|add-vector|set-vector
 
 ```bash
 ctox business-os web-stack auth-assist-request --source-id <id> [--target-url <url>] [--credential-ref <ctox-secret://scope/name>] [--login-hint <hint>] [--task-id <id>]
-ctox business-os web-stack auth-assist-status ...
+ctox business-os web-stack auth-assist-status --session-id <id>
+ctox business-os web-stack context-capture --session-id <id> [--source-id <id>] [--task-id <id>] [--no-handoff]
+ctox business-os web-stack context-extract --session-id <id> [--source-id <id>] [--capture-script <id>] [--task-id <id>]
 ctox business-os web-stack source-capture --source-id <dnbhoovers.com|leadfeeder.com|rocketreach.com|xing.com> --company <name> [--country <DE|AT|CH>] [--session-id <id>] [--credential-ref <ctox-secret://scope/name>] [--timeout-ms <n>]
 ctox business-os web-stack authenticated-automation --source-id <id> --target-url <url> --credential-ref <ctox-secret://scope/name> [--login-hint <hint>] [--task-id <id>] [--timeout-ms <n>]
 ```
 
-`auth-assist-request` opens the streamed browser for the human owner (`--task-id` = your command id, so the session belongs to the person who asked). `source-capture` extracts from a login source with the owner's session. Never type credentials yourself; never guess what a login source would have said.
+Unblocking with continuation, in this order:
+
+1. `auth-assist-request --source-id <id> --task-id <your command id>` — opens the owner's streamed browser on that source and returns the browser `session_id`; the human signs in or solves the challenge in the stream.
+2. `auth-assist-status --session-id <id>` — poll until the session reports authenticated; do not proceed on a pending session.
+3. Continue **in the same session**: `ctox web browser-automation --session-id <id> --script-file <path>` for your own navigation and extraction, `source-capture --source-id <id> --session-id <id> --company <name>` for the built-in extractors of dnbhoovers.com, leadfeeder.com, rocketreach.com and xing.com, `context-capture --session-id <id>` / `context-extract --session-id <id>` for a page the human positioned for you.
+
+Never type credentials yourself; never guess what a login source would have said. If the human does not complete the login within the turn, the field ends `action_required` with the `session_id` and your command id as reference.
 
 ### Scraping pipeline (scripts and records live in SQLite)
 
