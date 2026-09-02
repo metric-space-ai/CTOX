@@ -266,7 +266,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 66] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 69] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -330,6 +330,9 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 66] = [
     "ctox.workjet.session.create",
     "ctox.workjet.session.delete",
     "ctox.workjet.session.list",
+    "ctox.workjet.session.transfer.abort",
+    "ctox.workjet.session.transfer.start",
+    "ctox.workjet.session.transfer.status",
     "ctox.workjet.working_copy.upsert",
     "knowledge.command",
     "web_stack.person_research",
@@ -898,6 +901,7 @@ impl CommandAuthorizationStage {
 enum CentralCommandPolicyRequirement {
     Fixed(CommandPolicyRequirement),
     ThreadExternalApproval,
+    WorkjetSessionDataRead,
     WorkjetSessionDataWrite,
 }
 
@@ -959,9 +963,14 @@ impl CentralCommandPolicyRequirement {
             ))
         } else if matches!(
             command_type,
-            "ctox.workjet.session.create" | "ctox.workjet.session.delete"
+            "ctox.workjet.session.create"
+                | "ctox.workjet.session.delete"
+                | "ctox.workjet.session.transfer.start"
+                | "ctox.workjet.session.transfer.abort"
         ) {
             return Some(Self::WorkjetSessionDataWrite);
+        } else if command_type == "ctox.workjet.session.transfer.status" {
+            return Some(Self::WorkjetSessionDataRead);
         } else if is_appsec_business_command(command_type) {
             let permission = if appsec_business_command_requires_data_write(command_type) {
                 BusinessOsPermission::DataWrite
@@ -1019,6 +1028,21 @@ impl CentralCommandPolicyRequirement {
     ) -> anyhow::Result<CommandPolicyRequirement> {
         match self {
             Self::Fixed(requirement) => Ok(requirement),
+            Self::WorkjetSessionDataRead => {
+                let owner_user_id = session_user_id(session)
+                    .context("authorized Workjet session command is missing a user identity")?;
+                let owner_email = rxdb_verified_identity_email(root, command, owner_user_id);
+                let scope = super::store_workjet_sessions::workjet_session_record_policy_scope(
+                    root,
+                    command,
+                    owner_user_id,
+                    owner_email.as_deref(),
+                )?;
+                Ok(CommandPolicyRequirement::scoped(
+                    BusinessOsPermission::DataRead,
+                    scope,
+                ))
+            }
             Self::WorkjetSessionDataWrite => {
                 let owner_user_id = session_user_id(session)
                     .context("authorized Workjet session command is missing a user identity")?;
@@ -1265,7 +1289,10 @@ fn dispatch_business_command(
         }
         "ctox.workjet.session.create"
         | "ctox.workjet.session.list"
-        | "ctox.workjet.session.delete" => {
+        | "ctox.workjet.session.delete"
+        | "ctox.workjet.session.transfer.start"
+        | "ctox.workjet.session.transfer.abort"
+        | "ctox.workjet.session.transfer.status" => {
             let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
             let owner_user_id = session_user_id(session)
                 .context("authorized Workjet session command is missing a user identity")?;
