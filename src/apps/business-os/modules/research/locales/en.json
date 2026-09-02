@@ -111,7 +111,7 @@
   "verticalLabel": "Vertical",
   "showAsList": "Show as list",
   "showAsCards": "Show as cards",
-  "searchSourcesPlaceholder": "Search sources: NASA, UIUC, Tyto, PX4, Vibration ...",
+  "searchSourcesPlaceholder": "Search sources: title, author, DOI, id …",
   "sourceSearch": "Source search",
   "noTaskControlsHint": "Search, filters, semantic graph, and tables become active once a knowledge base with sources is available.",
   "subthemeAll": "All",
@@ -159,5 +159,11 @@
   "actionFailed": "Action failed",
   "targetedResearchQueued": "Targeted research was handed off to CTOX.",
   "graphDocumentQueued": "Word document was handed off to CTOX.",
-  "researchChatOpened": "Research task prepared in chat – send it there to start."
+  "researchChatOpened": "Research task prepared in chat – send it there to start.",
+  "candidates": "Candidates",
+  "knowledge": "Knowledge",
+  "reports": "Reports",
+  "noCandidates": "No candidates yet.",
+  "evidenceRanking": "Evidence ranking",
+  "searchCandidatesPlaceholder": "Search candidates: DOI, title, publisher …"
 }

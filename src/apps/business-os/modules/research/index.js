@@ -8,7 +8,11 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260728-research-knowledge-usability-v88';
+// Modul-eigener Stempel: er bustet index.css und die Locale-Dateien, die
+// sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
+// ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
+// an index.css oder locales/ hochzaehlen.
+const BUILD = '20260902-research-lineage-v89';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -455,7 +459,7 @@ export async function mount(ctx) {
   state.initialDataReady = false;
 
   // Load dynamic translations
-  const messages = await loadModuleMessages(import.meta.url, ctx.locale, {});
+  const messages = await loadResearchMessages(ctx.locale);
   state.t = (key, fallback, ...args) => {
     let val = messages[key] ?? fallback ?? key;
     if (args.length) {
@@ -912,15 +916,42 @@ function queueKnowledgeRefreshAfter(delay) {
 }
 
 function isVisibleResearchTask(task) {
+  if (isDeletedResearchTask(task)) return false;
   if (/^outbound(?:_|$)/.test(String(task.knowledge_domain || ''))) return false;
   if (!task?.payload?.seeded_from_knowledge) return true;
   const base = state.knowledgeBases.find((item) => item.domain === task.knowledge_domain);
   return Boolean(base && isResearchKnowledgeBase(base));
 }
 
+// Ein geloeschter Task (Soft-Delete aus dem Modul oder RxDB-Tombstone) ist
+// kein Lineage-Kandidat: gruppiert nach knowledge_domain gewann sonst der
+// zuletzt aktualisierte, aber geloeschte Task ueber die lebenden Tasks seiner
+// Domain und stand mit fremdem Titel und fremdem Lauf als aktiv in der Liste
+// (Befund skf.ctox.dev, 02.09.2026).
+// Locale-Dateien mit dem Modul-Stempel laden: `loadModuleMessages` haengt
+// keinen Cache-Buster an, und der Shell-Proxy cacht `locales/*.json` am Edge.
+async function loadResearchMessages(locale) {
+  const lang = locale === 'en' ? 'en' : 'de';
+  try {
+    const url = new URL(`locales/${lang}.json`, new URL('./', import.meta.url));
+    url.searchParams.set('v', BUILD);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return await response.json();
+  } catch {
+    return loadModuleMessages(import.meta.url, locale, {});
+  }
+}
+
+function isDeletedResearchTask(task) {
+  if (!task || typeof task !== 'object') return true;
+  if (task._deleted === true || task.is_deleted === true) return true;
+  return String(task.status || '').trim().toLowerCase() === 'deleted';
+}
+
 function collapseResearchTaskLineages(tasks = []) {
   const byDomain = new Map();
-  for (const task of tasks) {
+  for (const task of tasks.filter((entry) => !isDeletedResearchTask(entry))) {
     const key = String(task.knowledge_domain || task.domain || task.id || '').trim();
     const bucket = byDomain.get(key) || [];
     bucket.push(task);
@@ -2817,7 +2848,7 @@ function renderNoTaskCenter() {
         <div class="research-empty-workbench-body">
           <label class="research-empty-search-row">
             <span>${escapeHtml(state.t('sourceSearch', 'Quellensuche'))}</span>
-            <input type="text" class="ctox-input" disabled placeholder="${escapeHtml(state.t('searchSourcesPlaceholder', 'Quelle suchen: NASA, UIUC, Tyto, PX4, Vibration ...'))}" />
+            <input type="text" class="ctox-input" disabled placeholder="${escapeHtml(state.t('searchSourcesPlaceholder', 'Quelle suchen: Titel, Autor, DOI, Kennung …'))}" />
           </label>
           <p>${escapeHtml(state.t('noTaskControlsHint', 'Suche, Filter, Portfolio Map und Tabellen werden aktiv, sobald mindestens eine lokale Knowledge Domain mit Quellen geladen ist.'))}</p>
         </div>
@@ -3237,7 +3268,7 @@ function renderActiveTable(task) {
    fuer belegfaehige Quellen — Discovery-URLs erscheinen nie. */
 function renderSourcesList(filteredList = state.sourceModels) {
   if (!filteredList.length) {
-    return `<div class="research-empty">${escapeHtml(state.t('noSources', 'Keine Quellen vorhanden.'))}</div>`;
+    return `<div class="research-empty">${escapeHtml(sourcesEmptyText())}</div>`;
   }
   return `
     <div class="research-source-list">
@@ -3284,9 +3315,29 @@ function sourcesViewToggleButton() {
           title="${escapeHtml(label)}">${iconSvg(showsCards ? 'list' : 'grid')}</button>`;
 }
 
+function sourcesEmptyText() {
+  return state.activeTab === 'candidates'
+    ? state.t('noCandidates', 'Keine Kandidaten vorhanden.')
+    : state.t('noSources', 'Keine Quellen vorhanden.');
+}
+
+// Ein Themen-Chip ohne Treffer ist ein toter Filter: er stammt aus der festen
+// Domain-Taxonomie, nicht aus den Daten, und fuehrte auf Instanzen mit anderem
+// Quellenbestand zu leeren Listen hinter jedem Chip. Angeboten werden nur
+// Cluster, die mindestens eine Quelle der aktuellen Liste treffen; der
+// aktive Chip bleibt sichtbar, damit er sich abwaehlen laesst.
+function availableSubthemes(sourceModels = [], activeTag = 'all') {
+  const clusters = domainTaxonomy(selectedTask()).clusters;
+  const hit = new Set(sourceModels.map((source) => getSearchCluster(source)));
+  return [
+    { id: 'all', label: state.t('subthemeAll', 'Alle') },
+    ...clusters.filter((cluster) => hit.has(cluster.id) || cluster.id === activeTag),
+  ];
+}
+
 function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candidates = false } = {}) {
   const activeTag = state.sourceActiveTag || 'all';
-  const subthemes = [{ id: 'all', label: state.t('subthemeAll', 'Alle') }, ...domainTaxonomy(selectedTask()).clusters];
+  const subthemes = availableSubthemes(sourceModels, activeTag);
 
   const filtered = filteredSources(sourceModels);
 
@@ -3299,7 +3350,7 @@ function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candid
                data-action="source-search"
                placeholder="${escapeHtml(candidates
                  ? state.t('searchCandidatesPlaceholder', 'Kandidat suchen: DOI, Titel, Publisher ...')
-                 : state.t('searchSourcesPlaceholder', 'Quelle suchen: NASA, UIUC, Tyto, PX4, Vibration ...'))}"
+                 : state.t('searchSourcesPlaceholder', 'Quelle suchen: Titel, Autor, DOI, Kennung …'))}"
                value="${escapeHtml(state.sourceSearchTerm || '')}"
                autocomplete="off" />
         <div class="research-sources-shards-filters">
@@ -3319,7 +3370,7 @@ function renderSourcesWorkbench(sourceModels = evidenceRankedSources(), { candid
           <div class="research-sources-shards-grid">
             ${filtered.map(renderSourceCard).join('') || `
               <div class="research-empty" style="grid-column: 1 / -1; padding: 40px; text-align: center; color: var(--research-muted);">
-                ${escapeHtml(state.t('noSources', 'Keine Quellen vorhanden.'))}
+                ${escapeHtml(sourcesEmptyText())}
               </div>
             `}
           </div>
@@ -3990,7 +4041,16 @@ function openTaskDialog(editTask = null) {
       </form>
     </section>
   `;
-  const close = () => overlay.remove();
+  const onKeydown = (event) => {
+    if (event.key !== 'Escape' || !overlay.isConnected) return;
+    event.preventDefault();
+    close();
+  };
+  const close = () => {
+    window.removeEventListener('keydown', onKeydown);
+    overlay.remove();
+  };
+  window.addEventListener('keydown', onKeydown);
   overlay.addEventListener('click', (event) => {
     if (event.target === overlay || event.target.closest('[data-close]')) close();
   });
@@ -4040,7 +4100,13 @@ function closeTaskDialog() {
 }
 
 function knowledgeDomainOptionsMarkup(selectedDomain = '') {
-  return state.knowledgeBases.map((base) => `
+  // Beim Bearbeiten ist die Domain gesperrt und muss die Domain der Aufgabe
+  // zeigen — auch wenn dafuer (noch) keine Knowledge-Tabelle lokal liegt.
+  // Vorher zeigte das gesperrte Feld die erste verfuegbare Fremd-Domain.
+  const bases = selectedDomain && !state.knowledgeBases.some((base) => base.domain === selectedDomain)
+    ? [{ domain: selectedDomain, title: titleFromDomain(selectedDomain) }, ...state.knowledgeBases]
+    : state.knowledgeBases;
+  return bases.map((base) => `
     <option value="${escapeHtml(base.domain)}" ${base.domain === selectedDomain ? 'selected' : ''}>
       ${escapeHtml(`${base.title || titleFromDomain(base.domain)} · ${base.domain}`)}
     </option>
@@ -6193,8 +6259,10 @@ function setCollectionReadinessForTest(name, snapshot) {
 }
 
 export const __researchTestHooks = {
+  availableSubthemes,
   buildSourceModels,
   collapseResearchTaskLineages,
+  isDeletedResearchTask,
   collectionDiagnosticRows,
   dataEmptyShowsSyncing,
   diagnosticRows,

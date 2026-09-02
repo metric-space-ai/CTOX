@@ -224,6 +224,44 @@ test('research task history collapses into one visible domain lineage', () => {
   assert.deepEqual(tasks[0].lineage_task_ids, ['task-current', 'task-old']);
 });
 
+test('deleted tasks never lead or join a domain lineage', () => {
+  assert.equal(hooks.isDeletedResearchTask({ id: 'a', status: 'deleted' }), true);
+  assert.equal(hooks.isDeletedResearchTask({ id: 'a', status: 'ready', is_deleted: true }), true);
+  assert.equal(hooks.isDeletedResearchTask({ id: 'a', status: 'ready', _deleted: true }), true);
+  assert.equal(hooks.isDeletedResearchTask({ id: 'a', status: 'ready' }), false);
+
+  // skf.ctox.dev, 02.09.2026: der geloeschte, aber zuletzt aktualisierte Task
+  // gewann die Lineage und stand mit fremdem Titel als aktiv in der Liste.
+  const tasks = hooks.collapseResearchTaskLineages([
+    { id: 'task-live', title: 'Drone Bearing Design Verified', knowledge_domain: 'drone_bearing_design', status: 'ready', updated_at_ms: 10 },
+    { id: 'task-deleted', title: 'Integrated Rolling Bearing', knowledge_domain: 'drone_bearing_design', status: 'deleted', is_deleted: true, updated_at_ms: 20 },
+    { id: 'task-gone', knowledge_domain: 'only_deleted', status: 'deleted', updated_at_ms: 30 },
+  ]);
+
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].id, 'task-live');
+  assert.deepEqual(tasks[0].lineage_task_ids, ['task-live']);
+});
+
+test('sub-theme chips only offer clusters that match a source in the current list', () => {
+  const all = hooks.availableSubthemes([], 'all');
+  assert.deepEqual(all.map((theme) => theme.id), ['all']);
+
+  const sources = [
+    { id: 'src-1', title: 'Propeller thrust and rotor load measurements', sourceClass: 'dataset', row: {} },
+    { id: 'src-2', title: 'Wind tunnel aerodynamic study', sourceClass: 'article', row: {} },
+  ];
+  const offered = hooks.availableSubthemes(sources, 'all').map((theme) => theme.id);
+  assert.equal(offered[0], 'all');
+  assert.ok(offered.length >= 2, 'a matching cluster is offered');
+  assert.ok(offered.length < 6, 'clusters without a matching source are not offered');
+
+  // Der aktive Chip bleibt auch ohne Treffer sichtbar, damit er sich
+  // abwaehlen laesst.
+  const sticky = hooks.availableSubthemes([], offered[1]).map((theme) => theme.id);
+  assert.deepEqual(sticky, ['all', offered[1]]);
+});
+
 test('create task preserves selected local knowledge domain ids', () => {
   const knowledgeBases = [{ domain: 'drone_bearing_design', title: 'Drone Bearing Design' }];
 
