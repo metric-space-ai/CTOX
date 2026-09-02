@@ -7576,6 +7576,135 @@ pub(super) fn write_rxdb_policy_denied_command_outcome(
     Ok(outcome)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CodingTurnSessionAdmission {
+    session_id: String,
+    fence_epoch: u64,
+    turn_id: Option<String>,
+}
+
+fn optional_bounded_coding_turn_field(
+    payload: &Value,
+    field: &str,
+    max_chars: usize,
+) -> anyhow::Result<Option<String>> {
+    let Some(raw) = payload.get(field) else {
+        return Ok(None);
+    };
+    let value = raw
+        .as_str()
+        .with_context(|| format!("{field} must be a string"))?
+        .trim();
+    anyhow::ensure!(!value.is_empty(), "{field} must not be empty");
+    anyhow::ensure!(
+        value.chars().count() <= max_chars,
+        "{field} exceeds {max_chars} characters"
+    );
+    Ok(Some(value.to_owned()))
+}
+
+fn admit_coding_turn_session(
+    root: &Path,
+    session: &BusinessOsSession,
+    payload: &Value,
+) -> anyhow::Result<Result<Option<CodingTurnSessionAdmission>, Value>> {
+    let workjet_session_id =
+        optional_bounded_coding_turn_field(payload, "workjet_session_id", 160)?;
+    let turn_id = optional_bounded_coding_turn_field(payload, "turn_id", 160)?;
+    let Some(session_id) = workjet_session_id else {
+        return Ok(Ok(None));
+    };
+    let payload_epoch = match payload.get("fence_epoch") {
+        None => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .context("fence_epoch must be a nonnegative 64-bit integer")?,
+        ),
+    };
+    let conn = open_store(root)?;
+    let Some(record) = outbound_load_record(
+        &conn,
+        super::store_workjet_sessions::SESSIONS_COLLECTION,
+        &session_id,
+    )?
+    else {
+        return Ok(Err(coding_turn_failure_result(
+            "session_not_found",
+            &session_id,
+            "Workjet session was not found",
+        )));
+    };
+    let actor_id = session_user_id(session).unwrap_or_default();
+    if record.get("owner_user_id").and_then(Value::as_str) != Some(actor_id) {
+        return Ok(Err(coding_turn_failure_result(
+            "session_not_owned",
+            &session_id,
+            "Workjet session belongs to a different owner",
+        )));
+    }
+    let current_epoch = record
+        .get("fence_epoch")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let transfer_active = record
+        .get("active_transfer_id")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty());
+    if payload_epoch.is_none() && (transfer_active || current_epoch > 0) {
+        return Ok(Err(coding_turn_failure_result(
+            "session_fenced",
+            &session_id,
+            "Workjet session requires its current fence epoch",
+        )));
+    }
+    if payload_epoch.is_some_and(|epoch| epoch != current_epoch) {
+        return Ok(Err(coding_turn_failure_result(
+            "session_fenced",
+            &session_id,
+            "Workjet session fence epoch does not match",
+        )));
+    }
+    if matches!(
+        record.get("run_status").and_then(Value::as_str),
+        Some("pausing" | "paused" | "transferring" | "resuming" | "transfer_failed")
+    ) {
+        return Ok(Err(coding_turn_failure_result(
+            "session_fenced",
+            &session_id,
+            "Workjet session is not accepting coding turns",
+        )));
+    }
+    Ok(Ok(Some(CodingTurnSessionAdmission {
+        session_id,
+        fence_epoch: current_epoch,
+        turn_id,
+    })))
+}
+
+fn coding_turn_failure_result(error_code: &str, session_id: &str, message: &str) -> Value {
+    serde_json::json!({
+        "ok": false,
+        "error_code": error_code,
+        "retryable": false,
+        "session_id": session_id,
+        "error": message.chars().take(512).collect::<String>(),
+    })
+}
+
+fn write_rxdb_coding_turn_failure_outcome(
+    root: &Path,
+    command: &BusinessCommand,
+    result: Value,
+) -> anyhow::Result<Value> {
+    let mut outcome =
+        write_rxdb_control_command_outcome(root, command, "failed", None, Some("failed"), result)?;
+    if let Some(object) = outcome.as_object_mut() {
+        object.insert("ok".to_string(), Value::Bool(false));
+    }
+    Ok(outcome)
+}
+
 pub(super) fn write_rxdb_failed_control_command_outcome(
     root: &Path,
     command: &BusinessCommand,
@@ -12521,7 +12650,16 @@ pub(super) fn handle_workspace_control_command(
                         module_id,
                     ))
                 },
-                |_session| {
+                |session| {
+                    let _admission =
+                        match admit_coding_turn_session(root, session, &command.payload)? {
+                            Ok(admission) => admission,
+                            Err(result) => {
+                                return write_rxdb_coding_turn_failure_outcome(
+                                    root, &command, result,
+                                )
+                            }
+                        };
                     let module_id = source_sanitize_slug(
                         command
                             .payload
@@ -23476,6 +23614,215 @@ fn room_secret_id(value: &str) -> String {
 pub(super) mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    fn seed_coding_turn_workjet_session(
+        root: &Path,
+        session_id: &str,
+        owner: &str,
+        fence_epoch: u64,
+        run_status: &str,
+        active_transfer_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let conn = open_store(root)?;
+        let now = now_ms() as i64;
+        let mut session = serde_json::json!({
+            "id": session_id,
+            "owner_user_id": owner,
+            "fence_epoch": fence_epoch,
+            "run_status": run_status,
+            "updated_at_ms": now,
+            "is_deleted": false,
+        });
+        if let Some(transfer_id) = active_transfer_id {
+            session["active_transfer_id"] = Value::String(transfer_id.to_owned());
+        }
+        upsert_business_record(
+            &conn,
+            super::super::store_workjet_sessions::SESSIONS_COLLECTION,
+            session_id,
+            now,
+            session,
+        )?;
+        Ok(())
+    }
+
+    fn coding_turn_admission_error_code(
+        root: &Path,
+        actor: &str,
+        payload: Value,
+    ) -> anyhow::Result<Option<String>> {
+        let admission = admit_coding_turn_session(root, &test_session(actor, "admin"), &payload)?;
+        Ok(admission.err().and_then(|result| {
+            result
+                .get("error_code")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        }))
+    }
+
+    #[test]
+    fn workjet_session_fence_admission_rejects_stale_and_missing_epochs_before_sidecar(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        seed_coding_turn_workjet_session(
+            root.path(),
+            "session-stale",
+            "owner",
+            2,
+            "running",
+            None,
+        )?;
+        assert_eq!(
+            coding_turn_admission_error_code(
+                root.path(),
+                "owner",
+                serde_json::json!({
+                    "workjet_session_id": "session-stale",
+                    "fence_epoch": 1,
+                    "turn_id": "turn-stale"
+                }),
+            )?
+            .as_deref(),
+            Some("session_fenced")
+        );
+
+        seed_coding_turn_workjet_session(
+            root.path(),
+            "session-transfer",
+            "owner",
+            0,
+            "running",
+            Some("transfer-1"),
+        )?;
+        assert_eq!(
+            coding_turn_admission_error_code(
+                root.path(),
+                "owner",
+                serde_json::json!({"workjet_session_id": "session-transfer"}),
+            )?
+            .as_deref(),
+            Some("session_fenced")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_fence_admission_rejects_pausing_foreign_and_missing_sessions(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        seed_coding_turn_workjet_session(
+            root.path(),
+            "session-pausing",
+            "owner",
+            4,
+            "pausing",
+            Some("transfer-2"),
+        )?;
+        assert_eq!(
+            coding_turn_admission_error_code(
+                root.path(),
+                "owner",
+                serde_json::json!({
+                    "workjet_session_id": "session-pausing",
+                    "fence_epoch": 4
+                }),
+            )?
+            .as_deref(),
+            Some("session_fenced")
+        );
+        assert_eq!(
+            coding_turn_admission_error_code(
+                root.path(),
+                "other-owner",
+                serde_json::json!({
+                    "workjet_session_id": "session-pausing",
+                    "fence_epoch": 4
+                }),
+            )?
+            .as_deref(),
+            Some("session_not_owned")
+        );
+        assert_eq!(
+            coding_turn_admission_error_code(
+                root.path(),
+                "owner",
+                serde_json::json!({"workjet_session_id": "session-missing", "fence_epoch": 0}),
+            )?
+            .as_deref(),
+            Some("session_not_found")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_fence_admission_error_is_persisted_as_command_result() -> anyhow::Result<()>
+    {
+        let root = tempdir()?;
+        seed_business_user(root.path(), "owner", "admin")?;
+        seed_coding_turn_workjet_session(
+            root.path(),
+            "session-command",
+            "owner",
+            8,
+            "running",
+            None,
+        )?;
+        let outcome = accept_rxdb_business_command(
+            root.path(),
+            serde_json::json!({
+                "id": "coding-turn-stale-command",
+                "module": "widget",
+                "type": "ctox.coding.turn",
+                "payload": {
+                    "module_id": "widget",
+                    "prompt": "must not start a sidecar",
+                    "faux": true,
+                    "workjet_session_id": "session-command",
+                    "fence_epoch": 7,
+                    "turn_id": "turn-command"
+                },
+                "client_context": {
+                    "actor": { "id": "owner", "display_name": "Owner" }
+                }
+            }),
+        )?;
+        assert_eq!(
+            outcome.get("status").and_then(Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/error_code")
+                .and_then(Value::as_str),
+            Some("session_fenced")
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/retryable")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/session_id")
+                .and_then(Value::as_str),
+            Some("session-command")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_fence_admission_preserves_legacy_turns_without_session_id(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let admission = admit_coding_turn_session(
+            root.path(),
+            &test_session("owner", "admin"),
+            &serde_json::json!({"module_id": "widget", "prompt": "legacy"}),
+        )?;
+        assert_eq!(admission.expect("legacy turn must be admitted"), None);
+        Ok(())
+    }
 
     #[cfg(unix)]
     #[test]
