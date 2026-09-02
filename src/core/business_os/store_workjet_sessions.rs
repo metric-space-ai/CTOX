@@ -24,6 +24,176 @@ pub(super) const TRANSFERS_COLLECTION: &str = "workjet_session_transfers";
 const PROJECTS_COLLECTION: &str = "workjet_projects";
 const WORKING_COPIES_COLLECTION: &str = "workjet_working_copies";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct WorkjetSessionTransferTransition {
+    pub(super) from: &'static str,
+    pub(super) verb: &'static str,
+    pub(super) to: &'static str,
+}
+
+/// The complete RFC §12 transfer state machine. Keeping verbs on every edge
+/// makes illegal state changes rejectable without spreading lifecycle rules
+/// across individual handlers.
+pub(super) const WORKJET_SESSION_TRANSFER_STATES: [&str; 12] = [
+    "pause_requested",
+    "packing",
+    "packed",
+    "shipping",
+    "applying",
+    "applied",
+    "switching",
+    "resuming",
+    "completed",
+    "aborting",
+    "rolled_back",
+    "failed",
+];
+
+pub(super) const WORKJET_SESSION_TRANSFER_TRANSITIONS: [WorkjetSessionTransferTransition; 27] = [
+    WorkjetSessionTransferTransition {
+        from: "pause_requested",
+        verb: "pause_ack",
+        to: "packing",
+    },
+    WorkjetSessionTransferTransition {
+        from: "pause_requested",
+        verb: "abort",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "pause_requested",
+        verb: "timeout",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "packing",
+        verb: "pack_complete",
+        to: "packed",
+    },
+    WorkjetSessionTransferTransition {
+        from: "packing",
+        verb: "abort",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "packing",
+        verb: "timeout",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "packed",
+        verb: "shipping_start",
+        to: "shipping",
+    },
+    WorkjetSessionTransferTransition {
+        from: "packed",
+        verb: "abort",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "packed",
+        verb: "timeout",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "shipping",
+        verb: "apply_start",
+        to: "applying",
+    },
+    WorkjetSessionTransferTransition {
+        from: "shipping",
+        verb: "abort",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "shipping",
+        verb: "timeout",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "applying",
+        verb: "apply_complete",
+        to: "applied",
+    },
+    WorkjetSessionTransferTransition {
+        from: "applying",
+        verb: "abort",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "applying",
+        verb: "timeout",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "applied",
+        verb: "confirm_working_copy",
+        to: "switching",
+    },
+    WorkjetSessionTransferTransition {
+        from: "applied",
+        verb: "abort",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "applied",
+        verb: "timeout",
+        to: "aborting",
+    },
+    WorkjetSessionTransferTransition {
+        from: "switching",
+        verb: "commit_complete",
+        to: "resuming",
+    },
+    WorkjetSessionTransferTransition {
+        from: "switching",
+        verb: "abort",
+        to: "failed",
+    },
+    WorkjetSessionTransferTransition {
+        from: "switching",
+        verb: "timeout",
+        to: "failed",
+    },
+    WorkjetSessionTransferTransition {
+        from: "switching",
+        verb: "commit_failed",
+        to: "failed",
+    },
+    WorkjetSessionTransferTransition {
+        from: "resuming",
+        verb: "resume_ack",
+        to: "completed",
+    },
+    WorkjetSessionTransferTransition {
+        from: "resuming",
+        verb: "abort",
+        to: "failed",
+    },
+    WorkjetSessionTransferTransition {
+        from: "resuming",
+        verb: "timeout",
+        to: "failed",
+    },
+    WorkjetSessionTransferTransition {
+        from: "aborting",
+        verb: "compensation_complete",
+        to: "rolled_back",
+    },
+    WorkjetSessionTransferTransition {
+        from: "aborting",
+        verb: "compensation_failed",
+        to: "failed",
+    },
+];
+
+pub(super) fn workjet_session_transfer_next_state(state: &str, verb: &str) -> Option<&'static str> {
+    WORKJET_SESSION_TRANSFER_TRANSITIONS
+        .iter()
+        .find(|transition| transition.from == state && transition.verb == verb)
+        .map(|transition| transition.to)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionCreatePayload {
@@ -631,6 +801,39 @@ pub(crate) mod tests {
             ),
             owner,
         )
+    }
+
+    #[test]
+    fn workjet_session_transfer_state_table_matches_rfc() {
+        let states = WORKJET_SESSION_TRANSFER_STATES
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(states.len(), WORKJET_SESSION_TRANSFER_STATES.len());
+        for transition in WORKJET_SESSION_TRANSFER_TRANSITIONS {
+            assert!(states.contains(transition.from));
+            assert!(states.contains(transition.to));
+            assert_eq!(
+                workjet_session_transfer_next_state(transition.from, transition.verb),
+                Some(transition.to)
+            );
+        }
+
+        for (state, verb) in [
+            ("pause_requested", "pack_complete"),
+            ("packing", "pause_ack"),
+            ("packed", "apply_complete"),
+            ("shipping", "confirm_working_copy"),
+            ("applying", "resume_ack"),
+            ("applied", "pack_complete"),
+            ("switching", "pause_ack"),
+            ("resuming", "confirm_working_copy"),
+            ("aborting", "resume_ack"),
+            ("completed", "abort"),
+            ("rolled_back", "abort"),
+            ("failed", "abort"),
+        ] {
+            assert_eq!(workjet_session_transfer_next_state(state, verb), None);
+        }
     }
 
     #[test]
