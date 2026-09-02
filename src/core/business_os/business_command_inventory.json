@@ -69,6 +69,9 @@
     "ctox.workjet.session.create",
     "ctox.workjet.session.delete",
     "ctox.workjet.session.list",
+    "ctox.workjet.session.transfer.abort",
+    "ctox.workjet.session.transfer.start",
+    "ctox.workjet.session.transfer.status",
     "ctox.workjet.working_copy.upsert",
     "knowledge.command",
     "web_stack.person_research"
