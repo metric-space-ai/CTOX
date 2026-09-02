@@ -16,6 +16,10 @@ use super::person_research_command::{
 use super::store::{self, BusinessCommand};
 use crate::mission::channels;
 
+/// Skill the harness worker loads for the gap-closure turn: it carries the
+/// Outbound research procedure (field set, Sellify precedence, adapters as
+/// tools, typed writeback) so the task prompt only names the lead and the gaps.
+const GAP_CLOSURE_SKILL: &str = "outbound-lead-generation-research";
 const LEAD_COLLECTION: &str = "outbound_lead_generation_leads";
 const GAP_METADATA_KEY: &str = "person_research_gap_closure";
 const TERMINAL_FIELD_STATUSES: &[&str] =
@@ -27,6 +31,10 @@ struct ResearchWritebackRequest {
     record_id: String,
     module: String,
     research_command_id: String,
+    /// Set only when the daemon handed the research over as a queue task
+    /// ("Lückenschluss: …"). Empty for a chat assignment researched directly
+    /// by the harness worker.
+    #[serde(default)]
     gap_task_id: String,
     field_status: BTreeMap<String, FieldStatus>,
     result: ResearchWritebackResult,
@@ -296,7 +304,7 @@ pub(super) fn enqueue_gap_closure_if_needed(
                 thread_key: format!("person-research-gap/{record_id}"),
                 workspace_root: Some(workspace.to_string_lossy().into_owned()),
                 priority: "high".to_string(),
-                suggested_skill: None,
+                suggested_skill: Some(GAP_CLOSURE_SKILL.to_string()),
                 parent_message_key: None,
                 extra_metadata: Some(serde_json::json!({
                     "idempotency_key": idempotency_key,
@@ -372,53 +380,77 @@ pub(super) fn handle_research_writeback(
     validate_original_research_command(root, &request)?;
     let mut lead = store::load_rxdb_collection_record(root, LEAD_COLLECTION, &request.record_id)?
         .context("research writeback lead record does not exist")?;
+    let gap_task = if request.gap_task_id.trim().is_empty() {
+        // Chat assignment: the harness worker researched the lead directly
+        // (skill `outbound-lead-generation-research`). No queue task, no
+        // phase precondition; the field set is what the worker reports, and
+        // every reported field must be a canonical research field.
+        None
+    } else {
+        anyhow::ensure!(
+            lead.get("research_phase").and_then(Value::as_str) == Some("gap_closure"),
+            "lead is not in research_phase gap_closure"
+        );
+        anyhow::ensure!(
+            lead.get("gap_task_id").and_then(Value::as_str) == Some(request.gap_task_id.as_str()),
+            "research writeback gap_task_id does not match lead"
+        );
+        let task = channels::load_queue_task(root, &request.gap_task_id)?
+            .context("research writeback gap task does not exist")?;
+        let contract = task
+            .metadata
+            .get(GAP_METADATA_KEY)
+            .cloned()
+            .context("gap task is missing person_research_gap_closure metadata")?;
+        validate_task_correlation(&contract, &request)?;
+        Some((task, contract))
+    };
+    let requested_fields = match &gap_task {
+        Some((_, contract)) => contract
+            .get("requested_fields")
+            .and_then(Value::as_array)
+            .context("gap task requested_fields array is missing")?
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .map(str::to_string)
+                    .context("gap task requested_fields must contain strings")
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?,
+        None => request.field_status.keys().cloned().collect::<Vec<_>>(),
+    };
     anyhow::ensure!(
-        lead.get("research_phase").and_then(Value::as_str) == Some("gap_closure"),
-        "lead is not in research_phase gap_closure"
+        !requested_fields.is_empty(),
+        "research writeback field_status must not be empty"
     );
-    anyhow::ensure!(
-        lead.get("gap_task_id").and_then(Value::as_str) == Some(request.gap_task_id.as_str()),
-        "research writeback gap_task_id does not match lead"
-    );
-    let task = channels::load_queue_task(root, &request.gap_task_id)?
-        .context("research writeback gap task does not exist")?;
-    let contract = task
-        .metadata
-        .get(GAP_METADATA_KEY)
-        .context("gap task is missing person_research_gap_closure metadata")?;
-    validate_task_correlation(contract, &request)?;
-    let requested_fields = contract
-        .get("requested_fields")
-        .and_then(Value::as_array)
-        .context("gap task requested_fields array is missing")?
-        .iter()
-        .map(|value| {
-            value
-                .as_str()
-                .map(str::to_string)
-                .context("gap task requested_fields must contain strings")
-        })
-        .collect::<anyhow::Result<Vec<_>>>()?;
     validate_field_status_keys(&requested_fields, &request.field_status)?;
     validate_result_shape(&request.result, &requested_fields)?;
     validate_result_field_status_consistency(&request.result, &request.field_status)?;
-    let workspace = task_workspace(root, &task, contract)?;
-    for (field, status) in &request.field_status {
-        validate_terminal_field(field, status, &workspace, contract)?;
+    if let Some((task, contract)) = &gap_task {
+        let workspace = task_workspace(root, task, contract)?;
+        for (field, status) in &request.field_status {
+            validate_terminal_field(field, status, &workspace, contract)?;
+        }
     }
-
+    let known_person_records = gap_task
+        .as_ref()
+        .and_then(|(_, contract)| contract.get("known_person_records").cloned())
+        .unwrap_or_else(|| Value::Array(Vec::new()));
     let mut projection_result = serde_json::json!({
         "fields": request.result.fields,
         "person_records": request.result.person_records,
         "evidence": request.result.evidence,
-        "known_person_records": contract.get("known_person_records").cloned().unwrap_or_else(|| Value::Array(Vec::new())),
+        "known_person_records": known_person_records,
     });
     add_field_status_evidence(&mut projection_result, &request.field_status)?;
     let now = super::person_research_command::now_ms();
     let patch = outbound_lead_generation_research_outcome_patch(&lead, &projection_result, now);
     merge_json_object_values(&mut lead, &patch);
     lead["field_status"] = serde_json::to_value(&request.field_status)?;
-    lead["gap_task_id"] = Value::String(request.gap_task_id.clone());
+    if gap_task.is_some() {
+        lead["gap_task_id"] = Value::String(request.gap_task_id.clone());
+    }
     lead["research_phase"] = Value::Null;
     let needs_review = request
         .field_status
@@ -529,8 +561,11 @@ fn validate_original_research_command(
         )
     })?;
     anyhow::ensure!(
-        command_type == "web_stack.person_research",
-        "research_command_id must reference web_stack.person_research"
+        matches!(
+            command_type.as_str(),
+            "web_stack.person_research" | "business_os.chat.task"
+        ),
+        "research_command_id must reference web_stack.person_research or the chat assignment (business_os.chat.task)"
     );
     anyhow::ensure!(
         module == request.module && record_id == request.record_id,
