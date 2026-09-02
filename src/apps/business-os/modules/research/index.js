@@ -8,7 +8,11 @@ import {
   sliceResearchGraphProjection,
 } from './research-graph-data.mjs';
 
-const BUILD = '20260728-research-knowledge-usability-v88';
+// Modul-eigener Stempel: er bustet index.css und die Locale-Dateien, die
+// sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
+// ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
+// an index.css oder locales/ hochzaehlen.
+const BUILD = '20260902-research-lineage-v89';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -455,7 +459,7 @@ export async function mount(ctx) {
   state.initialDataReady = false;
 
   // Load dynamic translations
-  const messages = await loadModuleMessages(import.meta.url, ctx.locale, {});
+  const messages = await loadResearchMessages(ctx.locale);
   state.t = (key, fallback, ...args) => {
     let val = messages[key] ?? fallback ?? key;
     if (args.length) {
@@ -924,6 +928,21 @@ function isVisibleResearchTask(task) {
 // zuletzt aktualisierte, aber geloeschte Task ueber die lebenden Tasks seiner
 // Domain und stand mit fremdem Titel und fremdem Lauf als aktiv in der Liste
 // (Befund skf.ctox.dev, 02.09.2026).
+// Locale-Dateien mit dem Modul-Stempel laden: `loadModuleMessages` haengt
+// keinen Cache-Buster an, und der Shell-Proxy cacht `locales/*.json` am Edge.
+async function loadResearchMessages(locale) {
+  const lang = locale === 'en' ? 'en' : 'de';
+  try {
+    const url = new URL(`locales/${lang}.json`, new URL('./', import.meta.url));
+    url.searchParams.set('v', BUILD);
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+    return await response.json();
+  } catch {
+    return loadModuleMessages(import.meta.url, locale, {});
+  }
+}
+
 function isDeletedResearchTask(task) {
   if (!task || typeof task !== 'object') return true;
   if (task._deleted === true || task.is_deleted === true) return true;
