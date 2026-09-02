@@ -946,6 +946,25 @@ fn resume_auth_assist_requesting_task(
                 "source_id": source_id,
                 "browser_session_id": session_id,
                 "secret_value_in_payload": false,
+                // Carry the originating Business OS command forward: owner
+                // resolution for further auth sessions and the app writeback
+                // both follow `business_os_command_id`. Without it the
+                // continuation would run without the human's identity.
+                "business_os_command_id": task
+                    .metadata
+                    .get("business_os_command_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "business_os_module": task
+                    .metadata
+                    .get("business_os_module")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
+                "business_os_record_id": task
+                    .metadata
+                    .get("business_os_record_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default(),
             })),
         },
     ) {

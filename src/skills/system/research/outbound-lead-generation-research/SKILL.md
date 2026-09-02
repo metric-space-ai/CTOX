@@ -179,7 +179,42 @@ ctox business-os commands dispatch --json '{
 - `research_command_id` is your own command id; `gap_task_id` stays empty for a chat assignment (it is only set when the daemon handed you a queue task "Lückenschluss: …" — then copy it from that task).
 - Done means the dispatch answered `ok: true` with status `accepted` or `completed`. Report the counts (verified / no_match / action_required / unsupported) and the persons found in one short chat message.
 
-## 8. Stop conditions
+## 8. Unblocking across turns (login, captcha, MFA)
+
+The human is not always at the keyboard, and your turn is bounded. The system therefore has two paths — use both correctly:
+
+**Same turn (preferred, fastest).** You raised `auth-assist-request`; the owner's browser opens streamed. Poll `auth-assist-status --session-id <id>` a few times while you work other fields. If it reports authenticated, continue in that session (`browser-automation --session-id`, `source-capture --session-id`) and finish the field normally.
+
+**Later (the human confirms after your turn ended).** When the owner presses "Anmeldung bestätigt" in the Browser app, the daemon does three things by itself: it cancels the pending auth-assist task, it reopens your research task if it was blocked or failed, and — if your task had already finished — it creates a follow-up task **"Fortsetzen: Nachrecherche: &lt;Firma&gt;"** in the same thread, with the same workspace, the same skill and the original assignment plus a note naming the source and the browser session. So:
+
+- Finish your turn even when a login is still open. Write the affected fields as `action_required` with the `source_id` and the browser `session_id`, and write back. Do not idle-wait for the human, and never leave the task without a writeback.
+- When you receive a "Fortsetzen" assignment: read the same command with `commands inspect` (the id is in the original sentence, and `business_os_command_id` is in the task metadata), read the lead's current `field_status`, and work **only** the fields that are `action_required` or still open. Re-verify nothing that is already `verified` unless the new session contradicts it.
+- The continuation carries the browser `session_id` in its prompt and metadata. Use exactly that session; do not open a second one.
+- Then write back again with the **complete** 32-field `field_status` (the fields you did not touch keep their previous status and value). The daemon replaces the lead's field status, so a partial map would silently drop earlier results.
+
+## 9. Edge cases (each one has already happened)
+
+| Situation | What you do |
+| --- | --- |
+| Search engine answers "rate limit" or "low relevance" | Switch engine (`--source html.duckduckgo.com`, `--source bing`) or pin the domain (`--domain handelsregister.de`). A tired engine never justifies `no_match`. |
+| Source blocks you (captcha, Cloudflare, 403) | It proves nothing — not the value and not its absence. Try `browser-capture`, then a different source. Only if the source is the only one that can hold the field: `auth-assist-request` and `action_required`. |
+| Login source without an owner session | `auth-assist-request --source-id <id> --task-id <your command id>`, keep working other fields, finish the turn with `action_required`. Never enter credentials, never guess the content behind the login. |
+| Scrape target exists but the run classifies `portal_drift` | The repair is queued automatically by `--allow-heal`. Record it, use another source, do not retry the same target in this run. |
+| Scrape target classifies `temporary_unreachable` / `blocked` | Fall back to another source; do not queue a repair. |
+| No adapter for a recurring source | Write the extraction script, `register-script`, `execute --allow-heal`. For a one-off page use `web read` or `browser-capture` instead — do not build a target for a single lead. |
+| Two sources contradict each other | Leave the value empty, keep both in `candidates` with their sources, status `action_required`, reason `conflict`. Never average, never pick the prettier one. |
+| Sellify already holds a value | It is the starting value and counts as one source. Confirm it with one independent source (then `verified`), or contradict it with two (then take the new value and say so in `reason`). |
+| A Sellify person is outdated (left the company) | Keep the `person_key`, set the function to the documented state (for example "Geschäftsführung (ausgeschieden)"), and add the current holder as a new person. Never delete a Sellify person. |
+| Two persons look like one (same name, different profile) | Distinct `person_key` each; only merge with a document that shows they are the same person. |
+| A profile URL as `person_key` | Do not do it. `person_key` is a stable key (Sellify id or a key you keep for this lead), not a URL — profile URLs change and produce duplicates. |
+| Company is a subsidiary / renamed / merged | Research the entity the lead names. Put former names into `firma_fruehere_namen`, note the parent in `firma_geschaeftstaetigkeit`, and never silently replace the lead with the parent company. |
+| Register shows the company as inactive | `firma_aktivitaetsstatus` verified with the register entry; keep researching the remaining fields, the lead is still a record. |
+| Country is AT or CH | Use the country's register first (Firmenbuch/JustizOnline, Zefix/SHAB/Moneyhouse). A DE-only field on a foreign lead is `unsupported`, not `no_match`. |
+| The writeback is rejected | Read the error, fix exactly that (see §7 rules), dispatch again with a new command id. Three rejected attempts in a row: write back what is valid, mark the rest `action_required` with the error as reason, and report it. |
+| Your turn budget runs out | `field_status.json` is your checkpoint; the follow-up turn continues from it. Better a complete writeback with honest `no_match` than a half one. |
+| You found nothing at all for a field | `no_match` — but only with the documented search and two reads. `no_match` without evidence is a false statement, not a result. |
+
+## 10. Stop conditions
 
 - One turn is bounded; keep `field_status.json` current so a follow-up continues instead of restarting.
 - Never fabricate a value, a person, an e-mail address or a source. An empty verified field is better than a plausible one.
