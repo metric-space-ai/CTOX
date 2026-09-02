@@ -305,17 +305,14 @@ pub(super) fn enqueue_gap_closure_if_needed(
             },
         )?
     };
-    // The gap task inherits the research command's human owner: the link lets
-    // `inspect_business_command_for_task` resolve auth-session ownership for
-    // `--task-id <gap task>`, and `business_os_command_id` lets the harness
-    // lease issue a bound command session for the worker.
-    let owner_linked = channels::link_business_command_task(root, command_id, &task.message_key)?;
-    if !owner_linked {
-        eprintln!(
-            "[person-research] gap task {} could not be bound to command {}: owner resolution for auth sessions will fall back to the task context",
-            task.message_key, command_id
-        );
-    }
+    // The gap task inherits the research command's human owner through the
+    // `business_os_command_id` metadatum: owner resolution for
+    // `--task-id <gap task>` and the harness command session follow it to the
+    // command's verified actor. It is deliberately NOT a
+    // `business_command_task_links` row — that link marks a task as the
+    // command's own execution, and for an already-completed research command
+    // the queue would settle the gap task to `handled` on lease as an
+    // "orphaned lease of a terminal command" without running it.
     channels::set_queue_task_metadata_value(
         root,
         &task.message_key,
@@ -345,7 +342,7 @@ pub(super) fn enqueue_gap_closure_if_needed(
     )?;
     phase_a_result["gap_closure"] = serde_json::json!({
         "required": true,
-        "owner_linked": owner_linked,
+        "owner_command_id": command_id,
         "task_id": task.message_key.clone(),
         "workspace_root": task.workspace_root.clone(),
         "requested_fields": task.metadata.pointer(&format!("/{GAP_METADATA_KEY}/requested_fields")).cloned().unwrap_or(Value::Null),

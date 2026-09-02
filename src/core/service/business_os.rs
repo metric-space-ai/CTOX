@@ -4915,10 +4915,12 @@ fn resolve_web_stack_auth_owner_user_id_with_env(
         .transpose()?
         .flatten();
     let task_owner = web_stack_auth_owner_from_task_link(root, requesting_task_id)?;
+    let task_metadata_owner = web_stack_auth_owner_from_task_metadata(root, requesting_task_id)?;
     let command_owner = web_stack_auth_owner_from_command_authorization(root, requesting_task_id)?;
     let chat_owner = web_stack_auth_owner_from_chat(root, requesting_task_id)?;
     let verified_owner = command_session_owner
         .or(task_owner)
+        .or(task_metadata_owner)
         .or(command_owner)
         .or(chat_owner);
 
@@ -5077,6 +5079,35 @@ fn web_stack_auth_owner_from_task_link(
             .as_ref()
             .and_then(web_stack_auth_owner_from_command_context),
     )
+}
+
+/// Queue tasks spawned by a Business OS command (person-research gap closure)
+/// carry `business_os_command_id` in their metadata instead of a
+/// `business_command_task_links` row, because the spawning command is already
+/// terminal. The human owner is the command's verified actor.
+fn web_stack_auth_owner_from_task_metadata(
+    root: &Path,
+    requesting_task_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let requesting_task_id = requesting_task_id.trim();
+    if requesting_task_id.is_empty() {
+        return Ok(None);
+    }
+    let Some(task) = channels::load_queue_task(root, requesting_task_id)? else {
+        return Ok(None);
+    };
+    let Some(command_id) = task
+        .metadata
+        .get("business_os_command_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(channels::inspect_business_command(root, command_id)?
+        .as_ref()
+        .and_then(web_stack_auth_owner_from_command_context))
 }
 
 fn web_stack_auth_owner_from_command_authorization(
