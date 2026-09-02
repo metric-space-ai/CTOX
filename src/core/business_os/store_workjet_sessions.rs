@@ -194,6 +194,146 @@ pub(super) fn workjet_session_transfer_next_state(state: &str, verb: &str) -> Op
         .map(|transition| transition.to)
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecoveryOutcome {
+    pub transfer_id: String,
+    pub old_state: String,
+    pub new_state: String,
+    pub error_code: String,
+}
+
+pub fn run_workjet_session_transfer_recovery(root: &Path, now_ms: i64) -> Vec<RecoveryOutcome> {
+    run_workjet_session_transfer_recovery_inner(root, now_ms).unwrap_or_default()
+}
+
+fn run_workjet_session_transfer_recovery_inner(
+    root: &Path,
+    now_ms: i64,
+) -> anyhow::Result<Vec<RecoveryOutcome>> {
+    let mut conn = open_store(root)?;
+    let transfers = {
+        let mut statement = conn.prepare(
+            "SELECT payload_json FROM business_records
+             WHERE collection=?1 AND deleted=0",
+        )?;
+        let rows = statement.query_map([TRANSFERS_COLLECTION], |row| row.get::<_, String>(0))?;
+        let mut transfers = Vec::new();
+        for row in rows {
+            transfers.push(serde_json::from_str::<Value>(&row?)?);
+        }
+        transfers
+    };
+    let mut outcomes = Vec::new();
+    for mut transfer in transfers {
+        let Some(transfer_id) = transfer
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(old_state) = transfer
+            .get("state")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        if is_terminal_transfer_state(Some(&old_state)) {
+            continue;
+        }
+        let Some(deadline_at_ms) = transfer.get("deadline_at_ms").and_then(Value::as_i64) else {
+            continue;
+        };
+        if deadline_at_ms >= now_ms {
+            continue;
+        }
+        let Some(session_id) = transfer
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(mut session) = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
+        else {
+            continue;
+        };
+        let precommit = matches!(
+            old_state.as_str(),
+            "pause_requested" | "packing" | "packed" | "shipping" | "applying" | "applied"
+        );
+        let (new_state, error_code, audit_event) = if precommit {
+            let error_code = if old_state == "pause_requested" {
+                "pause_timeout"
+            } else {
+                "transfer_expired"
+            };
+            transfer["recovery_aborting_at_ms"] = Value::from(now_ms);
+            transfer["state"] = Value::String("rolled_back".to_owned());
+            transfer["error_code"] = Value::String(error_code.to_owned());
+            transfer["target_partial_cleanup_required"] = Value::Bool(true);
+            transfer["rolled_back_at_ms"] = Value::from(now_ms);
+            session["run_status"] = Value::String("running".to_owned());
+            session
+                .as_object_mut()
+                .context("session must be an object")?
+                .remove("active_transfer_id");
+            (
+                "rolled_back",
+                error_code,
+                "workjet.session.transfer.aborted",
+            )
+        } else if matches!(old_state.as_str(), "switching" | "resuming") {
+            transfer["state"] = Value::String("failed".to_owned());
+            transfer["error_code"] = Value::String("resume_timeout".to_owned());
+            session["run_status"] = Value::String("transfer_failed".to_owned());
+            (
+                "failed",
+                "resume_timeout",
+                "workjet.session.transfer.manual_intervention",
+            )
+        } else {
+            continue;
+        };
+        transfer["updated_at_ms"] = Value::from(now_ms);
+        session["updated_at_ms"] = Value::from(now_ms);
+        let tx = conn.transaction()?;
+        upsert_business_record(&tx, TRANSFERS_COLLECTION, &transfer_id, now_ms, transfer)?;
+        upsert_business_record(&tx, SESSIONS_COLLECTION, &session_id, now_ms, session)?;
+        insert_business_event(
+            &tx,
+            TRANSFERS_COLLECTION,
+            &transfer_id,
+            audit_event,
+            serde_json::json!({
+                "event_type": audit_event,
+                "transfer_id": transfer_id,
+                "session_id": session_id,
+                "old_state": old_state,
+                "state": new_state,
+                "reason": "deadline_expired",
+                "error_code": error_code,
+                "observed_at_ms": now_ms,
+            }),
+            now_ms,
+        )?;
+        tx.commit()?;
+        let session = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
+            .context("failed to reload recovered Workjet session")?;
+        let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+            .context("failed to reload recovered Workjet transfer")?;
+        project_transfer_records(root, &session, &transfer)?;
+        outcomes.push(RecoveryOutcome {
+            transfer_id,
+            old_state,
+            new_state: new_state.to_owned(),
+            error_code: error_code.to_owned(),
+        });
+    }
+    Ok(outcomes)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SessionCreatePayload {
@@ -287,6 +427,47 @@ struct TransferPackCompletePayload {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct TransferApplyCompletePayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
+    transfer_id: String,
+    computer_id: String,
+    fence_epoch: i64,
+    #[serde(default)]
+    observed_head: Option<String>,
+    observed_manifest_sha256: String,
+    #[serde(default)]
+    observed_tree_sha256: Option<String>,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransferConfirmWorkingCopyPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
+    transfer_id: String,
+    computer_id: String,
+    fence_epoch: i64,
+    working_copy_id: String,
+    path: String,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TransferResumeAckPayload {
+    #[serde(default, rename = "inbound_channel")]
+    _inbound_channel: Option<String>,
+    transfer_id: String,
+    computer_id: String,
+    fence_epoch: i64,
+    worker_instance_id: String,
+    idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TransferAbortPayload {
     #[serde(default, rename = "inbound_channel")]
     _inbound_channel: Option<String>,
@@ -343,6 +524,30 @@ pub(super) fn handle_workjet_session_store_command(
         }
         "ctox.workjet.session.transfer.pack_complete" => {
             handle_workjet_session_transfer_pack_complete_command(
+                root,
+                command,
+                authorized_owner_user_id,
+                can_manage_all_records,
+            )
+        }
+        "ctox.workjet.session.transfer.apply_complete" => {
+            handle_workjet_session_transfer_apply_complete_command(
+                root,
+                command,
+                authorized_owner_user_id,
+                can_manage_all_records,
+            )
+        }
+        "ctox.workjet.session.transfer.confirm_working_copy" => {
+            handle_workjet_session_transfer_confirm_working_copy_command(
+                root,
+                command,
+                authorized_owner_user_id,
+                can_manage_all_records,
+            )
+        }
+        "ctox.workjet.session.transfer.resume_ack" => {
+            handle_workjet_session_transfer_resume_ack_command(
                 root,
                 command,
                 authorized_owner_user_id,
@@ -1537,6 +1742,824 @@ fn handle_workjet_session_transfer_pack_complete_command(
     transfer_success_response(&session, &transfer)
 }
 
+fn handle_workjet_session_transfer_apply_complete_command(
+    root: &Path,
+    command: &BusinessCommand,
+    authorized_owner_user_id: &str,
+    can_manage_all_records: bool,
+) -> anyhow::Result<Value> {
+    let payload: TransferApplyCompletePayload =
+        match serde_json::from_value(command.payload.clone()) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return Ok(transfer_error(
+                    "idempotency_conflict",
+                    false,
+                    command.payload.get("transfer_id").and_then(Value::as_str),
+                    None,
+                    &format!("invalid transfer apply_complete payload: {error}"),
+                ));
+            }
+        };
+    let actor_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
+    let transfer_id = bounded_required(&payload.transfer_id, "transfer_id", 160)?;
+    let computer_id = bounded_required(&payload.computer_id, "computer_id", 256)?;
+    let observed_head = payload
+        .observed_head
+        .as_deref()
+        .map(|value| exact_lower_hex(value, "observed_head", 40))
+        .transpose()?;
+    let observed_manifest_sha256 = exact_lower_hex(
+        &payload.observed_manifest_sha256,
+        "observed_manifest_sha256",
+        64,
+    )?;
+    let observed_tree_sha256 = payload
+        .observed_tree_sha256
+        .as_deref()
+        .map(|value| exact_lower_hex(value, "observed_tree_sha256", 64))
+        .transpose()?;
+    let idempotency_key = bounded_required(&payload.idempotency_key, "idempotency_key", 160)?;
+    if payload.fence_epoch < 0 {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            None,
+            "apply_complete fence_epoch must be nonnegative",
+        ));
+    }
+    let normalized_payload = serde_json::json!({
+        "transfer_id": transfer_id,
+        "computer_id": computer_id,
+        "fence_epoch": payload.fence_epoch,
+        "observed_head": observed_head,
+        "observed_manifest_sha256": observed_manifest_sha256,
+        "observed_tree_sha256": observed_tree_sha256,
+        "idempotency_key": idempotency_key,
+    });
+    let payload_sha256 = normalized_payload_sha256(&normalized_payload)?;
+    let mismatch_sha256 = normalized_payload_sha256(&serde_json::json!({
+        "computer_id": computer_id,
+        "fence_epoch": payload.fence_epoch,
+        "observed_head": observed_head,
+        "observed_manifest_sha256": observed_manifest_sha256,
+        "observed_tree_sha256": observed_tree_sha256,
+    }))?;
+
+    let mut conn = open_store(root)?;
+    let Some(mut transfer) = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+    else {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            None,
+            "Workjet transfer not found",
+        ));
+    };
+    let state = transfer
+        .get("state")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no state")?
+        .to_owned();
+    if !can_manage_all_records
+        && transfer.get("owner_user_id").and_then(Value::as_str) != Some(actor_user_id.as_str())
+    {
+        return Ok(transfer_error(
+            "session_not_owned",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet transfer belongs to a different owner",
+        ));
+    }
+    let session_id = bounded_required(
+        transfer
+            .get("session_id")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no session_id")?,
+        "session_id",
+        160,
+    )?;
+    let Some(session) = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)? else {
+        return Ok(transfer_error(
+            "session_not_found",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet session not found",
+        ));
+    };
+
+    for event_type in [
+        "workjet.session.transfer.applied",
+        "workjet.session.transfer.apply_mismatch",
+    ] {
+        if let Some(previous_payload_sha256) = previous_transfer_step_payload_sha256(
+            &conn,
+            &transfer_id,
+            event_type,
+            &idempotency_key,
+        )? {
+            if previous_payload_sha256 != payload_sha256 {
+                return Ok(transfer_error(
+                    "idempotency_conflict",
+                    false,
+                    Some(&transfer_id),
+                    Some(&state),
+                    "apply_complete idempotency key was reused with different payload",
+                ));
+            }
+            return if event_type == "workjet.session.transfer.applied" {
+                transfer_success_response(&session, &transfer)
+            } else {
+                Ok(transfer_error(
+                    "apply_hash_mismatch",
+                    true,
+                    Some(&transfer_id),
+                    Some(&state),
+                    "target apply proof does not match the packed manifest",
+                ))
+            };
+        }
+    }
+    if !matches!(state.as_str(), "shipping" | "applying") {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "apply_complete is only valid in shipping or applying",
+        ));
+    }
+    let target_computer_id = transfer
+        .get("target_computer_id")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no target_computer_id")?;
+    if computer_id != target_computer_id {
+        return Ok(transfer_error(
+            "computer_actor_mismatch",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "apply_complete computer is not the transfer target",
+        ));
+    }
+    if transfer.get("fence_epoch").and_then(Value::as_i64) != Some(payload.fence_epoch) {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "apply_complete fence_epoch does not match the transfer",
+        ));
+    }
+
+    let mode = transfer
+        .get("mode")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no mode")?
+        .to_owned();
+    let manifest_matches = transfer.get("manifest_sha256").and_then(Value::as_str)
+        == Some(observed_manifest_sha256.as_str());
+    let content_matches = match mode.as_str() {
+        "git" => {
+            transfer
+                .get("git")
+                .and_then(|git| git.get("head"))
+                .and_then(Value::as_str)
+                == observed_head.as_deref()
+        }
+        "copy" => {
+            transfer.get("tree_sha256").and_then(Value::as_str) == observed_tree_sha256.as_deref()
+        }
+        _ => false,
+    };
+    let now = super::store::now_ms() as i64;
+    if !manifest_matches || !content_matches {
+        if state == "shipping" {
+            let applying_state = workjet_session_transfer_next_state(&state, "apply_start")
+                .context("apply_start transition missing from transfer state table")?;
+            transfer["state"] = Value::String(applying_state.to_owned());
+        }
+        let same_mismatch = transfer
+            .get("apply_mismatch_sha256")
+            .and_then(Value::as_str)
+            == Some(mismatch_sha256.as_str());
+        let mismatch_count = if same_mismatch {
+            transfer
+                .get("apply_mismatch_count")
+                .and_then(Value::as_i64)
+                .unwrap_or(0)
+                .saturating_add(1)
+        } else {
+            1
+        };
+        transfer["apply_mismatch_sha256"] = Value::String(mismatch_sha256);
+        transfer["apply_mismatch_count"] = Value::from(mismatch_count);
+        transfer["deadline_at_ms"] = Value::from(now.saturating_add(if mode == "git" {
+            15 * 60_000
+        } else {
+            60 * 60_000
+        }));
+        if mismatch_count >= 3 {
+            transfer["state"] = Value::String("failed".to_owned());
+            transfer["error_code"] = Value::String("apply_hash_mismatch".to_owned());
+        }
+        transfer["updated_at_ms"] = Value::from(now);
+        let tx = conn.transaction()?;
+        upsert_business_record(&tx, TRANSFERS_COLLECTION, &transfer_id, now, transfer)?;
+        insert_business_event(
+            &tx,
+            TRANSFERS_COLLECTION,
+            &transfer_id,
+            "workjet.session.transfer.apply_mismatch",
+            serde_json::json!({
+                "event_type": "workjet.session.transfer.apply_mismatch",
+                "transfer_id": transfer_id,
+                "session_id": session_id,
+                "idempotency_key": idempotency_key,
+                "payload_sha256": payload_sha256,
+                "apply_mismatch_count": mismatch_count,
+                "observed_at_ms": now,
+            }),
+            now,
+        )?;
+        tx.commit()?;
+        let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+            .context("failed to reload mismatched Workjet transfer")?;
+        project_transfer_records(root, &session, &transfer)?;
+        return Ok(transfer_error(
+            "apply_hash_mismatch",
+            true,
+            Some(&transfer_id),
+            transfer.get("state").and_then(Value::as_str),
+            "target apply proof does not match the packed manifest",
+        ));
+    }
+
+    let applying_state = if state == "shipping" {
+        workjet_session_transfer_next_state(&state, "apply_start")
+            .context("apply_start transition missing from transfer state table")?
+    } else {
+        state.as_str()
+    };
+    let applied_state = workjet_session_transfer_next_state(applying_state, "apply_complete")
+        .context("apply_complete transition missing from transfer state table")?;
+    transfer["state"] = Value::String(applied_state.to_owned());
+    transfer["applied_at_ms"] = Value::from(now);
+    transfer["observed_manifest_sha256"] = Value::String(observed_manifest_sha256.clone());
+    if let Some(observed_head) = observed_head.clone() {
+        transfer["observed_head"] = Value::String(observed_head);
+    }
+    if let Some(observed_tree_sha256) = observed_tree_sha256.clone() {
+        transfer["observed_tree_sha256"] = Value::String(observed_tree_sha256);
+    }
+    transfer["deadline_at_ms"] = Value::from(now.saturating_add(60_000));
+    transfer["updated_at_ms"] = Value::from(now);
+
+    let tx = conn.transaction()?;
+    upsert_business_record(&tx, TRANSFERS_COLLECTION, &transfer_id, now, transfer)?;
+    insert_business_event(
+        &tx,
+        TRANSFERS_COLLECTION,
+        &transfer_id,
+        "workjet.session.transfer.applied",
+        serde_json::json!({
+            "event_type": "workjet.session.transfer.applied",
+            "transfer_id": transfer_id,
+            "session_id": session_id,
+            "observed_head": observed_head,
+            "observed_manifest_sha256": observed_manifest_sha256,
+            "observed_tree_sha256": observed_tree_sha256,
+            "idempotency_key": idempotency_key,
+            "payload_sha256": payload_sha256,
+            "observed_at_ms": now,
+        }),
+        now,
+    )?;
+    tx.commit()?;
+
+    let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+        .context("failed to reload applied Workjet transfer")?;
+    project_transfer_records(root, &session, &transfer)?;
+    transfer_success_response(&session, &transfer)
+}
+
+fn handle_workjet_session_transfer_confirm_working_copy_command(
+    root: &Path,
+    command: &BusinessCommand,
+    authorized_owner_user_id: &str,
+    can_manage_all_records: bool,
+) -> anyhow::Result<Value> {
+    let payload: TransferConfirmWorkingCopyPayload =
+        match serde_json::from_value(command.payload.clone()) {
+            Ok(payload) => payload,
+            Err(error) => {
+                return Ok(transfer_error(
+                    "idempotency_conflict",
+                    false,
+                    command.payload.get("transfer_id").and_then(Value::as_str),
+                    None,
+                    &format!("invalid transfer confirm_working_copy payload: {error}"),
+                ));
+            }
+        };
+    let actor_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
+    let transfer_id = bounded_required(&payload.transfer_id, "transfer_id", 160)?;
+    let computer_id = bounded_required(&payload.computer_id, "computer_id", 256)?;
+    let working_copy_id = bounded_required(&payload.working_copy_id, "working_copy_id", 160)?;
+    let path = bounded_required(&payload.path, "path", 4096)?;
+    let idempotency_key = bounded_required(&payload.idempotency_key, "idempotency_key", 160)?;
+    if payload.fence_epoch < 0 {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            None,
+            "confirm_working_copy fence_epoch must be nonnegative",
+        ));
+    }
+    let normalized_payload = serde_json::json!({
+        "transfer_id": transfer_id,
+        "computer_id": computer_id,
+        "fence_epoch": payload.fence_epoch,
+        "working_copy_id": working_copy_id,
+        "path": path,
+        "idempotency_key": idempotency_key,
+    });
+    let payload_sha256 = normalized_payload_sha256(&normalized_payload)?;
+
+    let mut conn = open_store(root)?;
+    let Some(mut transfer) = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+    else {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            None,
+            "Workjet transfer not found",
+        ));
+    };
+    let state = transfer
+        .get("state")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no state")?
+        .to_owned();
+    if !can_manage_all_records
+        && transfer.get("owner_user_id").and_then(Value::as_str) != Some(actor_user_id.as_str())
+    {
+        return Ok(transfer_error(
+            "session_not_owned",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet transfer belongs to a different owner",
+        ));
+    }
+    let session_id = bounded_required(
+        transfer
+            .get("session_id")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no session_id")?,
+        "session_id",
+        160,
+    )?;
+    let Some(mut session) = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)? else {
+        return Ok(transfer_error(
+            "session_not_found",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet session not found",
+        ));
+    };
+    if let Some(previous_payload_sha256) = previous_transfer_step_payload_sha256(
+        &conn,
+        &transfer_id,
+        "workjet.session.transfer.switched",
+        &idempotency_key,
+    )? {
+        if previous_payload_sha256 != payload_sha256 {
+            return Ok(transfer_error(
+                "idempotency_conflict",
+                false,
+                Some(&transfer_id),
+                Some(&state),
+                "confirm_working_copy idempotency key was reused with different payload",
+            ));
+        }
+        return transfer_success_response(&session, &transfer);
+    }
+    if state != "applied" {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "confirm_working_copy is only valid in applied",
+        ));
+    }
+    let target_computer_id = bounded_required(
+        transfer
+            .get("target_computer_id")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no target_computer_id")?,
+        "target_computer_id",
+        256,
+    )?;
+    if computer_id != target_computer_id {
+        return Ok(transfer_error(
+            "computer_actor_mismatch",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "confirm_working_copy computer is not the transfer target",
+        ));
+    }
+    if transfer.get("fence_epoch").and_then(Value::as_i64) != Some(payload.fence_epoch) {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "confirm_working_copy fence_epoch does not match the transfer",
+        ));
+    }
+    let project_id = bounded_required(
+        transfer
+            .get("project_id")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no project_id")?,
+        "project_id",
+        128,
+    )?;
+    let target_path = bounded_required(
+        transfer
+            .get("target_path")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no target_path")?,
+        "target_path",
+        4096,
+    )?;
+    let expected_working_copy_id =
+        deterministic_working_copy_id(&project_id, &target_computer_id, &target_path);
+    if path != target_path || working_copy_id != expected_working_copy_id {
+        return Ok(transfer_error(
+            "working_copy_id_mismatch",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "working_copy_id or path does not match the deterministic transfer target",
+        ));
+    }
+    let source_working_copy_id = bounded_required(
+        transfer
+            .get("source_working_copy_id")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no source_working_copy_id")?,
+        "source_working_copy_id",
+        160,
+    )?;
+    let Some(mut source_working_copy) =
+        outbound_load_record(&conn, WORKING_COPIES_COLLECTION, &source_working_copy_id)?
+    else {
+        return Ok(transfer_error(
+            "source_working_copy_missing",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "source working copy is missing",
+        ));
+    };
+    let session_owner = bounded_required(
+        session
+            .get("owner_user_id")
+            .and_then(Value::as_str)
+            .context("Workjet session has no owner_user_id")?,
+        "owner_user_id",
+        256,
+    )?;
+    let existing_target = outbound_load_record(&conn, WORKING_COPIES_COLLECTION, &working_copy_id)?;
+    if let Some(existing_target) = existing_target.as_ref() {
+        let target_matches = existing_target.get("owner_user_id").and_then(Value::as_str)
+            == Some(session_owner.as_str())
+            && existing_target.get("project_id").and_then(Value::as_str)
+                == Some(project_id.as_str())
+            && existing_target.get("computer_id").and_then(Value::as_str)
+                == Some(target_computer_id.as_str())
+            && existing_target.get("path").and_then(Value::as_str) == Some(target_path.as_str());
+        if !target_matches {
+            return Ok(transfer_error(
+                "working_copy_id_mismatch",
+                false,
+                Some(&transfer_id),
+                Some(&state),
+                "existing target working copy does not match the transfer target",
+            ));
+        }
+    }
+
+    let now = super::store::now_ms() as i64;
+    let old_epoch = session
+        .get("fence_epoch")
+        .and_then(Value::as_i64)
+        .context("Workjet session has no fence_epoch")?;
+    let new_epoch = old_epoch
+        .checked_add(1)
+        .context("Workjet session fence_epoch overflow")?;
+    let created_at_ms = existing_target
+        .as_ref()
+        .and_then(|record| record.get("created_at_ms"))
+        .and_then(Value::as_i64)
+        .unwrap_or(now);
+    let mut target_working_copy = serde_json::json!({
+        "id": working_copy_id,
+        "project_id": project_id,
+        "computer_id": target_computer_id,
+        "path": target_path,
+        "status": "active",
+        "verified_at_ms": now,
+        "owner_user_id": session_owner,
+        "created_at_ms": created_at_ms,
+        "updated_at_ms": now,
+        "is_deleted": false,
+    });
+    if let Some(label) = existing_target
+        .as_ref()
+        .and_then(|record| record.get("label"))
+        .cloned()
+    {
+        target_working_copy["label"] = label;
+    }
+    source_working_copy["status"] = Value::String("detached".to_owned());
+    source_working_copy["updated_at_ms"] = Value::from(now);
+    session["working_copy_id"] = Value::String(working_copy_id.clone());
+    session["computer_id"] = Value::String(target_computer_id.clone());
+    session["run_status"] = Value::String("resuming".to_owned());
+    session["fence_epoch"] = Value::from(new_epoch);
+    session["updated_at_ms"] = Value::from(now);
+    let switching_state = workjet_session_transfer_next_state(&state, "confirm_working_copy")
+        .context("confirm_working_copy transition missing from transfer state table")?;
+    let resuming_state = workjet_session_transfer_next_state(switching_state, "commit_complete")
+        .context("commit_complete transition missing from transfer state table")?;
+    transfer["state"] = Value::String(resuming_state.to_owned());
+    transfer["fence_epoch"] = Value::from(new_epoch);
+    transfer["target_working_copy_id"] = Value::String(working_copy_id.clone());
+    transfer["switched_at_ms"] = Value::from(now);
+    transfer["deadline_at_ms"] = Value::from(now.saturating_add(120_000));
+    transfer["updated_at_ms"] = Value::from(now);
+
+    let tx = conn.transaction()?;
+    upsert_business_record(
+        &tx,
+        WORKING_COPIES_COLLECTION,
+        &working_copy_id,
+        now,
+        target_working_copy,
+    )?;
+    upsert_business_record(
+        &tx,
+        WORKING_COPIES_COLLECTION,
+        &source_working_copy_id,
+        now,
+        source_working_copy,
+    )?;
+    upsert_business_record(&tx, SESSIONS_COLLECTION, &session_id, now, session)?;
+    upsert_business_record(&tx, TRANSFERS_COLLECTION, &transfer_id, now, transfer)?;
+    insert_business_event(
+        &tx,
+        TRANSFERS_COLLECTION,
+        &transfer_id,
+        "workjet.session.transfer.switched",
+        serde_json::json!({
+            "event_type": "workjet.session.transfer.switched",
+            "transfer_id": transfer_id,
+            "session_id": session_id,
+            "old_working_copy_id": source_working_copy_id,
+            "new_working_copy_id": working_copy_id,
+            "new_fence_epoch": new_epoch,
+            "idempotency_key": idempotency_key,
+            "payload_sha256": payload_sha256,
+            "observed_at_ms": now,
+        }),
+        now,
+    )?;
+    tx.commit()?;
+
+    let session = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
+        .context("failed to reload switched Workjet session")?;
+    let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+        .context("failed to reload switched Workjet transfer")?;
+    let source_working_copy =
+        outbound_load_record(&conn, WORKING_COPIES_COLLECTION, &source_working_copy_id)?
+            .context("failed to reload detached source working copy")?;
+    let target_working_copy =
+        outbound_load_record(&conn, WORKING_COPIES_COLLECTION, &working_copy_id)?
+            .context("failed to reload active target working copy")?;
+    project_transfer_records(root, &session, &transfer)?;
+    for working_copy in [&source_working_copy, &target_working_copy] {
+        let id = working_copy
+            .get("id")
+            .and_then(Value::as_str)
+            .context("working-copy projection has no id")?;
+        upsert_rxdb_collection_record(
+            root,
+            WORKING_COPIES_COLLECTION,
+            id,
+            working_copy
+                .get("updated_at_ms")
+                .and_then(Value::as_i64)
+                .unwrap_or(now),
+            working_copy.clone(),
+        )?;
+    }
+    transfer_success_response(&session, &transfer)
+}
+
+fn handle_workjet_session_transfer_resume_ack_command(
+    root: &Path,
+    command: &BusinessCommand,
+    authorized_owner_user_id: &str,
+    can_manage_all_records: bool,
+) -> anyhow::Result<Value> {
+    let payload: TransferResumeAckPayload = match serde_json::from_value(command.payload.clone()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Ok(transfer_error(
+                "idempotency_conflict",
+                false,
+                command.payload.get("transfer_id").and_then(Value::as_str),
+                None,
+                &format!("invalid transfer resume_ack payload: {error}"),
+            ));
+        }
+    };
+    let actor_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
+    let transfer_id = bounded_required(&payload.transfer_id, "transfer_id", 160)?;
+    let computer_id = bounded_required(&payload.computer_id, "computer_id", 256)?;
+    let worker_instance_id =
+        bounded_required(&payload.worker_instance_id, "worker_instance_id", 256)?;
+    let idempotency_key = bounded_required(&payload.idempotency_key, "idempotency_key", 160)?;
+    if payload.fence_epoch < 0 {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            None,
+            "resume_ack fence_epoch must be nonnegative",
+        ));
+    }
+    let normalized_payload = serde_json::json!({
+        "transfer_id": transfer_id,
+        "computer_id": computer_id,
+        "fence_epoch": payload.fence_epoch,
+        "worker_instance_id": worker_instance_id,
+        "idempotency_key": idempotency_key,
+    });
+    let payload_sha256 = normalized_payload_sha256(&normalized_payload)?;
+
+    let mut conn = open_store(root)?;
+    let Some(mut transfer) = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+    else {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            None,
+            "Workjet transfer not found",
+        ));
+    };
+    let state = transfer
+        .get("state")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no state")?
+        .to_owned();
+    if !can_manage_all_records
+        && transfer.get("owner_user_id").and_then(Value::as_str) != Some(actor_user_id.as_str())
+    {
+        return Ok(transfer_error(
+            "session_not_owned",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet transfer belongs to a different owner",
+        ));
+    }
+    let session_id = bounded_required(
+        transfer
+            .get("session_id")
+            .and_then(Value::as_str)
+            .context("Workjet transfer has no session_id")?,
+        "session_id",
+        160,
+    )?;
+    let Some(mut session) = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)? else {
+        return Ok(transfer_error(
+            "session_not_found",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "Workjet session not found",
+        ));
+    };
+    if let Some(previous_payload_sha256) = previous_transfer_step_payload_sha256(
+        &conn,
+        &transfer_id,
+        "workjet.session.transfer.completed",
+        &idempotency_key,
+    )? {
+        if previous_payload_sha256 != payload_sha256 {
+            return Ok(transfer_error(
+                "idempotency_conflict",
+                false,
+                Some(&transfer_id),
+                Some(&state),
+                "resume_ack idempotency key was reused with different payload",
+            ));
+        }
+        return transfer_success_response(&session, &transfer);
+    }
+    if state != "resuming" {
+        return Ok(transfer_error(
+            "transfer_illegal_state",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "resume_ack is only valid in resuming",
+        ));
+    }
+    let target_computer_id = transfer
+        .get("target_computer_id")
+        .and_then(Value::as_str)
+        .context("Workjet transfer has no target_computer_id")?
+        .to_owned();
+    if computer_id != target_computer_id {
+        return Ok(transfer_error(
+            "computer_actor_mismatch",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "resume_ack computer is not the transfer target",
+        ));
+    }
+    if transfer.get("fence_epoch").and_then(Value::as_i64) != Some(payload.fence_epoch)
+        || session.get("fence_epoch").and_then(Value::as_i64) != Some(payload.fence_epoch)
+    {
+        return Ok(transfer_error(
+            "session_fenced",
+            false,
+            Some(&transfer_id),
+            Some(&state),
+            "resume_ack fence_epoch does not match the switched session",
+        ));
+    }
+
+    let completed_state = workjet_session_transfer_next_state(&state, "resume_ack")
+        .context("resume_ack transition missing from transfer state table")?;
+    let now = super::store::now_ms() as i64;
+    session["run_status"] = Value::String("running".to_owned());
+    session
+        .as_object_mut()
+        .context("session must be an object")?
+        .remove("active_transfer_id");
+    session["updated_at_ms"] = Value::from(now);
+    transfer["state"] = Value::String(completed_state.to_owned());
+    transfer["completed_at_ms"] = Value::from(now);
+    transfer["worker_instance_id"] = Value::String(worker_instance_id.clone());
+    transfer["updated_at_ms"] = Value::from(now);
+
+    let tx = conn.transaction()?;
+    upsert_business_record(&tx, SESSIONS_COLLECTION, &session_id, now, session)?;
+    upsert_business_record(&tx, TRANSFERS_COLLECTION, &transfer_id, now, transfer)?;
+    insert_business_event(
+        &tx,
+        TRANSFERS_COLLECTION,
+        &transfer_id,
+        "workjet.session.transfer.completed",
+        serde_json::json!({
+            "event_type": "workjet.session.transfer.completed",
+            "transfer_id": transfer_id,
+            "session_id": session_id,
+            "target_computer_id": target_computer_id,
+            "worker_instance_id": worker_instance_id,
+            "idempotency_key": idempotency_key,
+            "payload_sha256": payload_sha256,
+            "observed_at_ms": now,
+        }),
+        now,
+    )?;
+    tx.commit()?;
+
+    let session = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
+        .context("failed to reload resumed Workjet session")?;
+    let transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, &transfer_id)?
+        .context("failed to reload completed Workjet transfer")?;
+    project_transfer_records(root, &session, &transfer)?;
+    transfer_success_response(&session, &transfer)
+}
+
 fn handle_workjet_session_transfer_abort_command(
     root: &Path,
     command: &BusinessCommand,
@@ -1835,6 +2858,15 @@ fn previous_abort_reason_sha256(
         }
     }
     Ok(None)
+}
+
+fn deterministic_working_copy_id(project_id: &str, computer_id: &str, path: &str) -> String {
+    let mut hasher = Sha256::new();
+    for part in [project_id, computer_id, path] {
+        hasher.update((part.len() as u64).to_be_bytes());
+        hasher.update(part.as_bytes());
+    }
+    format!("workjet_wc_{:x}", hasher.finalize())
 }
 
 fn deterministic_transfer_id(session_id: &str, idempotency_key: &str) -> String {
@@ -2207,6 +3239,18 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    fn transfer_fixture_records(
+        root: &Path,
+        owner: &str,
+        suffix: &str,
+        target_online: bool,
+    ) -> anyhow::Result<Value> {
+        let created = create_session(root, owner, suffix)?;
+        seed_online_computer(root, owner, &format!("computer-{suffix}"), true)?;
+        seed_online_computer(root, owner, &format!("target-{suffix}"), target_online)?;
+        Ok(created)
+    }
+
     fn transfer_fixture(
         root: &Path,
         owner: &str,
@@ -2215,10 +3259,7 @@ pub(crate) mod tests {
     ) -> anyhow::Result<Value> {
         create_workjet_rxdb_projection_tables(root)?;
         create_workjet_session_rxdb_projection_tables(root)?;
-        let created = create_session(root, owner, suffix)?;
-        seed_online_computer(root, owner, &format!("computer-{suffix}"), true)?;
-        seed_online_computer(root, owner, &format!("target-{suffix}"), target_online)?;
-        Ok(created)
+        transfer_fixture_records(root, owner, suffix, target_online)
     }
 
     fn start_transfer(
@@ -2350,6 +3391,169 @@ pub(crate) mod tests {
         )
     }
 
+    fn packed_transfer_records(
+        root: &Path,
+        owner: &str,
+        suffix: &str,
+        mode: &str,
+    ) -> anyhow::Result<Value> {
+        let created = transfer_fixture_records(root, owner, suffix, true)?;
+        let session_id = created["session"]["id"].as_str().context("session id")?;
+        let started = start_transfer(root, owner, session_id, suffix, "start")?;
+        let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
+        pause_ack_transfer_with_git(
+            root,
+            owner,
+            transfer_id,
+            &format!("computer-{suffix}"),
+            1,
+            mode == "git",
+            "ack",
+        )?;
+        handle_workjet_session_transfer_pack_complete_command(
+            root,
+            &if mode == "git" {
+                git_pack_command(
+                    transfer_id,
+                    &format!("computer-{suffix}"),
+                    "generation",
+                    "pack",
+                )
+            } else {
+                copy_pack_command(
+                    transfer_id,
+                    &format!("computer-{suffix}"),
+                    "generation",
+                    "pack",
+                )
+            },
+            owner,
+            false,
+        )
+    }
+
+    fn packed_transfer(
+        root: &Path,
+        owner: &str,
+        suffix: &str,
+        mode: &str,
+    ) -> anyhow::Result<Value> {
+        create_workjet_rxdb_projection_tables(root)?;
+        create_workjet_session_rxdb_projection_tables(root)?;
+        packed_transfer_records(root, owner, suffix, mode)
+    }
+
+    fn apply_command(
+        transfer_id: &str,
+        suffix: &str,
+        mode: &str,
+        matching: bool,
+        key: &str,
+    ) -> BusinessCommand {
+        command(
+            "ctox.workjet.session.transfer.apply_complete",
+            None,
+            if mode == "git" {
+                json!({
+                    "transfer_id": transfer_id,
+                    "computer_id": format!("target-{suffix}"),
+                    "fence_epoch": 1,
+                    "observed_head": if matching { "1".repeat(40) } else { "9".repeat(40) },
+                    "observed_manifest_sha256": "0".repeat(64),
+                    "idempotency_key": key,
+                })
+            } else {
+                json!({
+                    "transfer_id": transfer_id,
+                    "computer_id": format!("target-{suffix}"),
+                    "fence_epoch": 1,
+                    "observed_manifest_sha256": "5".repeat(64),
+                    "observed_tree_sha256": if matching { "6".repeat(64) } else { "9".repeat(64) },
+                    "idempotency_key": key,
+                })
+            },
+        )
+    }
+
+    fn applied_transfer_records(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        let packed = packed_transfer_records(root, owner, suffix, "git")?;
+        let transfer_id = packed["transfer_id"].as_str().context("transfer id")?;
+        handle_workjet_session_transfer_apply_complete_command(
+            root,
+            &apply_command(transfer_id, suffix, "git", true, "apply"),
+            owner,
+            false,
+        )
+    }
+
+    fn applied_transfer(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        create_workjet_rxdb_projection_tables(root)?;
+        create_workjet_session_rxdb_projection_tables(root)?;
+        applied_transfer_records(root, owner, suffix)
+    }
+
+    fn confirm_command(
+        transfer_id: &str,
+        suffix: &str,
+        working_copy_id: &str,
+        key: &str,
+    ) -> BusinessCommand {
+        command(
+            "ctox.workjet.session.transfer.confirm_working_copy",
+            None,
+            json!({
+                "transfer_id": transfer_id,
+                "computer_id": format!("target-{suffix}"),
+                "fence_epoch": 1,
+                "working_copy_id": working_copy_id,
+                "path": format!("opaque://target-{suffix}/project-{suffix}"),
+                "idempotency_key": key,
+            }),
+        )
+    }
+
+    fn switched_transfer_records(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        let applied = applied_transfer_records(root, owner, suffix)?;
+        let transfer_id = applied["transfer_id"].as_str().context("transfer id")?;
+        let path = format!("opaque://target-{suffix}/project-{suffix}");
+        let working_copy_id = deterministic_working_copy_id(
+            &format!("project-{suffix}"),
+            &format!("target-{suffix}"),
+            &path,
+        );
+        handle_workjet_session_transfer_confirm_working_copy_command(
+            root,
+            &confirm_command(transfer_id, suffix, &working_copy_id, "confirm"),
+            owner,
+            false,
+        )
+    }
+
+    fn switched_transfer(root: &Path, owner: &str, suffix: &str) -> anyhow::Result<Value> {
+        create_workjet_rxdb_projection_tables(root)?;
+        create_workjet_session_rxdb_projection_tables(root)?;
+        switched_transfer_records(root, owner, suffix)
+    }
+
+    fn resume_ack_command(
+        transfer_id: &str,
+        computer_id: &str,
+        fence_epoch: i64,
+        key: &str,
+    ) -> BusinessCommand {
+        command(
+            "ctox.workjet.session.transfer.resume_ack",
+            None,
+            json!({
+                "transfer_id": transfer_id,
+                "computer_id": computer_id,
+                "fence_epoch": fence_epoch,
+                "worker_instance_id": "worker-target-1",
+                "idempotency_key": key,
+            }),
+        )
+    }
+
     #[test]
     fn workjet_session_transfer_state_table_matches_rfc() {
         let states = WORKJET_SESSION_TRANSFER_STATES
@@ -2368,6 +3572,10 @@ pub(crate) mod tests {
         assert_eq!(
             workjet_session_transfer_next_state("packed", "ship"),
             Some("shipping")
+        );
+        assert_eq!(
+            workjet_session_transfer_next_state("shipping", "apply_start"),
+            Some("applying")
         );
 
         for (state, verb) in [
@@ -2873,6 +4081,362 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn workjet_session_transfer_apply_complete_accepts_git_and_replays() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let packed = packed_transfer(root.path(), "owner-1", "apply-git", "git")?;
+        let transfer_id = packed["transfer_id"].as_str().context("transfer id")?;
+        let apply = apply_command(transfer_id, "apply-git", "git", true, "apply-once");
+        let first = handle_workjet_session_transfer_apply_complete_command(
+            root.path(),
+            &apply,
+            "owner-1",
+            false,
+        )?;
+        let second = handle_workjet_session_transfer_apply_complete_command(
+            root.path(),
+            &apply,
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(first["state"], "applied");
+        assert_eq!(first["transfer"]["observed_head"], "1".repeat(40));
+        assert_eq!(
+            first["transfer"]["observed_manifest_sha256"],
+            "0".repeat(64)
+        );
+        assert!(first["transfer"]["applied_at_ms"].as_i64().is_some());
+        assert_eq!(first["transfer"]["_rev"], second["transfer"]["_rev"]);
+        let audit_count: i64 = open_store(root.path())?.query_row(
+            "SELECT COUNT(*) FROM business_events WHERE record_id=?1 AND command_type='workjet.session.transfer.applied'",
+            [transfer_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(audit_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_apply_complete_accepts_copy() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let packed = packed_transfer(root.path(), "owner-1", "apply-copy", "copy")?;
+        let transfer_id = packed["transfer_id"].as_str().context("transfer id")?;
+        let applied = handle_workjet_session_transfer_apply_complete_command(
+            root.path(),
+            &apply_command(transfer_id, "apply-copy", "copy", true, "apply"),
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(applied["state"], "applied");
+        assert_eq!(applied["transfer"]["observed_tree_sha256"], "6".repeat(64));
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_apply_complete_fails_third_identical_mismatch() -> anyhow::Result<()>
+    {
+        let root = tempdir()?;
+        let packed = packed_transfer(root.path(), "owner-1", "apply-mismatch", "git")?;
+        let transfer_id = packed["transfer_id"].as_str().context("transfer id")?;
+        for attempt in 1..=3 {
+            let result = handle_workjet_session_transfer_apply_complete_command(
+                root.path(),
+                &apply_command(
+                    transfer_id,
+                    "apply-mismatch",
+                    "git",
+                    false,
+                    &format!("apply-{attempt}"),
+                ),
+                "owner-1",
+                false,
+            )?;
+            assert_eq!(result["error_code"], "apply_hash_mismatch");
+            assert_eq!(result["retryable"], true);
+            assert_eq!(
+                result["state"],
+                if attempt < 3 { "applying" } else { "failed" }
+            );
+        }
+        let conn = open_store(root.path())?;
+        let transfer =
+            outbound_load_record(&conn, TRANSFERS_COLLECTION, transfer_id)?.context("transfer")?;
+        assert_eq!(transfer["apply_mismatch_count"], 3);
+        assert_eq!(transfer["error_code"], "apply_hash_mismatch");
+        let session_id = transfer["session_id"].as_str().context("session id")?;
+        let session =
+            outbound_load_record(&conn, SESSIONS_COLLECTION, session_id)?.context("session")?;
+        assert_eq!(session["computer_id"], "computer-apply-mismatch");
+        assert_eq!(session["run_status"], "transferring");
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_apply_complete_rejects_wrong_computer_and_epoch(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let packed = packed_transfer(root.path(), "owner-1", "apply-actor", "git")?;
+        let transfer_id = packed["transfer_id"].as_str().context("transfer id")?;
+        let mut wrong_computer = apply_command(transfer_id, "apply-actor", "git", true, "computer");
+        wrong_computer.payload["computer_id"] = Value::String("computer-apply-actor".to_owned());
+        assert_eq!(
+            handle_workjet_session_transfer_apply_complete_command(
+                root.path(),
+                &wrong_computer,
+                "owner-1",
+                false,
+            )?["error_code"],
+            "computer_actor_mismatch"
+        );
+        let mut wrong_epoch = apply_command(transfer_id, "apply-actor", "git", true, "epoch");
+        wrong_epoch.payload["fence_epoch"] = Value::from(0);
+        assert_eq!(
+            handle_workjet_session_transfer_apply_complete_command(
+                root.path(),
+                &wrong_epoch,
+                "owner-1",
+                false,
+            )?["error_code"],
+            "session_fenced"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_confirm_working_copy_commits_all_switch_effects(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let applied = applied_transfer(root.path(), "owner-1", "confirm")?;
+        let transfer_id = applied["transfer_id"].as_str().context("transfer id")?;
+        let session_id = applied["session"]["id"].as_str().context("session id")?;
+        let source_working_copy_id = applied["transfer"]["source_working_copy_id"]
+            .as_str()
+            .context("source working copy id")?;
+        let target_path = "opaque://target-confirm/project-confirm";
+        let target_working_copy_id =
+            deterministic_working_copy_id("project-confirm", "target-confirm", target_path);
+        let result = handle_workjet_session_transfer_confirm_working_copy_command(
+            root.path(),
+            &confirm_command(transfer_id, "confirm", &target_working_copy_id, "confirm"),
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(result["state"], "resuming");
+        assert_eq!(result["fence_epoch"], 2);
+        assert_eq!(result["session"]["working_copy_id"], target_working_copy_id);
+        assert_eq!(result["session"]["computer_id"], "target-confirm");
+        assert_eq!(result["session"]["run_status"], "resuming");
+        assert_eq!(result["session"]["fence_epoch"], 2);
+        assert_eq!(result["transfer"]["fence_epoch"], 2);
+        assert!(result["transfer"]["switched_at_ms"].as_i64().is_some());
+        assert_eq!(
+            result["transfer"]["deadline_at_ms"]
+                .as_i64()
+                .unwrap_or_default()
+                - result["transfer"]["switched_at_ms"]
+                    .as_i64()
+                    .unwrap_or_default(),
+            120_000
+        );
+        let conn = open_store(root.path())?;
+        let source =
+            outbound_load_record(&conn, WORKING_COPIES_COLLECTION, source_working_copy_id)?
+                .context("source working copy")?;
+        let target =
+            outbound_load_record(&conn, WORKING_COPIES_COLLECTION, &target_working_copy_id)?
+                .context("target working copy")?;
+        assert_eq!(source["status"], "detached");
+        assert_eq!(target["status"], "active");
+        assert!(target["verified_at_ms"].as_i64().is_some());
+        assert_eq!(target["path"], target_path);
+        assert_eq!(
+            load_rxdb_collection_record(
+                root.path(),
+                WORKING_COPIES_COLLECTION,
+                &target_working_copy_id,
+            )?
+            .context("target projection")?["status"],
+            "active"
+        );
+        assert_eq!(
+            load_rxdb_collection_record(root.path(), SESSIONS_COLLECTION, session_id)?
+                .context("session projection")?["fence_epoch"],
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_confirm_working_copy_rejects_id_and_actor_mismatch(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let applied = applied_transfer(root.path(), "owner-1", "confirm-reject")?;
+        let transfer_id = applied["transfer_id"].as_str().context("transfer id")?;
+        let mismatch = handle_workjet_session_transfer_confirm_working_copy_command(
+            root.path(),
+            &confirm_command(transfer_id, "confirm-reject", "workjet_wc_wrong", "bad-id"),
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(mismatch["error_code"], "working_copy_id_mismatch");
+        let expected = deterministic_working_copy_id(
+            "project-confirm-reject",
+            "target-confirm-reject",
+            "opaque://target-confirm-reject/project-confirm-reject",
+        );
+        let mut wrong_actor = confirm_command(transfer_id, "confirm-reject", &expected, "actor");
+        wrong_actor.payload["computer_id"] = Value::String("computer-confirm-reject".to_owned());
+        assert_eq!(
+            handle_workjet_session_transfer_confirm_working_copy_command(
+                root.path(),
+                &wrong_actor,
+                "owner-1",
+                false,
+            )?["error_code"],
+            "computer_actor_mismatch"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_confirm_working_copy_replays_without_second_epoch(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let applied = applied_transfer(root.path(), "owner-1", "confirm-replay")?;
+        let transfer_id = applied["transfer_id"].as_str().context("transfer id")?;
+        let expected = deterministic_working_copy_id(
+            "project-confirm-replay",
+            "target-confirm-replay",
+            "opaque://target-confirm-replay/project-confirm-replay",
+        );
+        let confirm = confirm_command(transfer_id, "confirm-replay", &expected, "once");
+        let first = handle_workjet_session_transfer_confirm_working_copy_command(
+            root.path(),
+            &confirm,
+            "owner-1",
+            false,
+        )?;
+        let second = handle_workjet_session_transfer_confirm_working_copy_command(
+            root.path(),
+            &confirm,
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(first["fence_epoch"], 2);
+        assert_eq!(second["fence_epoch"], 2);
+        assert_eq!(first["session"]["_rev"], second["session"]["_rev"]);
+        assert_eq!(first["transfer"]["_rev"], second["transfer"]["_rev"]);
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_confirm_working_copy_requires_applied_state() -> anyhow::Result<()>
+    {
+        let root = tempdir()?;
+        let packed = packed_transfer(root.path(), "owner-1", "confirm-state", "git")?;
+        let transfer_id = packed["transfer_id"].as_str().context("transfer id")?;
+        let expected = deterministic_working_copy_id(
+            "project-confirm-state",
+            "target-confirm-state",
+            "opaque://target-confirm-state/project-confirm-state",
+        );
+        let result = handle_workjet_session_transfer_confirm_working_copy_command(
+            root.path(),
+            &confirm_command(transfer_id, "confirm-state", &expected, "confirm"),
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(result["error_code"], "transfer_illegal_state");
+        assert_eq!(result["state"], "shipping");
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_resume_ack_completes_and_replays() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let switched = switched_transfer(root.path(), "owner-1", "resume")?;
+        let transfer_id = switched["transfer_id"].as_str().context("transfer id")?;
+        let ack = resume_ack_command(transfer_id, "target-resume", 2, "resume-once");
+        let first = handle_workjet_session_transfer_resume_ack_command(
+            root.path(),
+            &ack,
+            "owner-1",
+            false,
+        )?;
+        let second = handle_workjet_session_transfer_resume_ack_command(
+            root.path(),
+            &ack,
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(first["state"], "completed");
+        assert_eq!(first["session"]["run_status"], "running");
+        assert!(first["session"].get("active_transfer_id").is_none());
+        assert_eq!(first["transfer"]["worker_instance_id"], "worker-target-1");
+        assert!(first["transfer"]["completed_at_ms"].as_i64().is_some());
+        assert_eq!(first["transfer"]["_rev"], second["transfer"]["_rev"]);
+        let audit_count: i64 = open_store(root.path())?.query_row(
+            "SELECT COUNT(*) FROM business_events WHERE record_id=?1 AND command_type='workjet.session.transfer.completed'",
+            [transfer_id],
+            |row| row.get(0),
+        )?;
+        assert_eq!(audit_count, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_resume_ack_rejects_source_and_old_epoch() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let switched = switched_transfer(root.path(), "owner-1", "resume-reject")?;
+        let transfer_id = switched["transfer_id"].as_str().context("transfer id")?;
+        assert_eq!(
+            handle_workjet_session_transfer_resume_ack_command(
+                root.path(),
+                &resume_ack_command(transfer_id, "computer-resume-reject", 2, "source"),
+                "owner-1",
+                false,
+            )?["error_code"],
+            "computer_actor_mismatch"
+        );
+        assert_eq!(
+            handle_workjet_session_transfer_resume_ack_command(
+                root.path(),
+                &resume_ack_command(transfer_id, "target-resume-reject", 1, "old-epoch"),
+                "owner-1",
+                false,
+            )?["error_code"],
+            "session_fenced"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_abort_in_resuming_requires_manual_intervention(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let switched = switched_transfer(root.path(), "owner-1", "resume-abort")?;
+        let transfer_id = switched["transfer_id"].as_str().context("transfer id")?;
+        let aborted = handle_workjet_session_transfer_abort_command(
+            root.path(),
+            &command(
+                "ctox.workjet.session.transfer.abort",
+                None,
+                json!({
+                    "transfer_id": transfer_id,
+                    "reason": "operator_cancel_after_switch",
+                    "idempotency_key": "abort-after-switch",
+                }),
+            ),
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(aborted["state"], "failed");
+        assert_eq!(aborted["transfer"]["error_code"], "manual_intervention");
+        assert_eq!(aborted["session"]["run_status"], "transfer_failed");
+        assert_eq!(aborted["session"]["computer_id"], "target-resume-abort");
+        Ok(())
+    }
+
+    #[test]
     fn workjet_session_transfer_abort_compensates_precommit_states_and_is_idempotent(
     ) -> anyhow::Result<()> {
         for (suffix, transfer_state, session_status) in [
@@ -2932,6 +4496,101 @@ pub(crate) mod tests {
             )?;
             assert_eq!(audit_count, 1, "abort replay must not duplicate audit");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_transfer_recovery_handles_expired_sides_and_is_idempotent(
+    ) -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let now = super::super::store::now_ms() as i64;
+
+        let pre_created = transfer_fixture(root.path(), "owner-1", "recovery-pre", true)?;
+        let pre_session_id = pre_created["session"]["id"]
+            .as_str()
+            .context("pre session id")?;
+        let pre = start_transfer(
+            root.path(),
+            "owner-1",
+            pre_session_id,
+            "recovery-pre",
+            "start",
+        )?;
+        let pre_transfer_id = pre["transfer_id"].as_str().context("pre transfer id")?;
+
+        let post = switched_transfer_records(root.path(), "owner-1", "recovery-post")?;
+        let post_transfer_id = post["transfer_id"].as_str().context("post transfer id")?;
+        let post_session_id = post["session"]["id"].as_str().context("post session id")?;
+
+        let fresh_created =
+            transfer_fixture_records(root.path(), "owner-1", "recovery-fresh", true)?;
+        let fresh_session_id = fresh_created["session"]["id"]
+            .as_str()
+            .context("fresh session id")?;
+        let fresh = start_transfer(
+            root.path(),
+            "owner-1",
+            fresh_session_id,
+            "recovery-fresh",
+            "start",
+        )?;
+        let fresh_transfer_id = fresh["transfer_id"].as_str().context("fresh transfer id")?;
+
+        let conn = open_store(root.path())?;
+        for (transfer_id, deadline) in [
+            (pre_transfer_id, now - 1),
+            (post_transfer_id, now - 1),
+            (fresh_transfer_id, now + 60_000),
+        ] {
+            let mut transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, transfer_id)?
+                .context("transfer")?;
+            transfer["deadline_at_ms"] = Value::from(deadline);
+            upsert_business_record(&conn, TRANSFERS_COLLECTION, transfer_id, now, transfer)?;
+        }
+        drop(conn);
+
+        let mut outcomes = run_workjet_session_transfer_recovery(root.path(), now);
+        outcomes.sort_by(|left, right| left.transfer_id.cmp(&right.transfer_id));
+        assert_eq!(outcomes.len(), 2);
+        let pre_outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.transfer_id == pre_transfer_id)
+            .context("pre outcome")?;
+        assert_eq!(pre_outcome.old_state, "pause_requested");
+        assert_eq!(pre_outcome.new_state, "rolled_back");
+        assert_eq!(pre_outcome.error_code, "pause_timeout");
+        let post_outcome = outcomes
+            .iter()
+            .find(|outcome| outcome.transfer_id == post_transfer_id)
+            .context("post outcome")?;
+        assert_eq!(post_outcome.old_state, "resuming");
+        assert_eq!(post_outcome.new_state, "failed");
+        assert_eq!(post_outcome.error_code, "resume_timeout");
+
+        let conn = open_store(root.path())?;
+        let pre_transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, pre_transfer_id)?
+            .context("pre transfer")?;
+        let pre_session = outbound_load_record(&conn, SESSIONS_COLLECTION, pre_session_id)?
+            .context("pre session")?;
+        assert_eq!(pre_transfer["state"], "rolled_back");
+        assert_eq!(pre_transfer["target_partial_cleanup_required"], true);
+        assert_eq!(pre_session["run_status"], "running");
+        assert!(pre_session.get("active_transfer_id").is_none());
+
+        let post_transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, post_transfer_id)?
+            .context("post transfer")?;
+        let post_session = outbound_load_record(&conn, SESSIONS_COLLECTION, post_session_id)?
+            .context("post session")?;
+        assert_eq!(post_transfer["state"], "failed");
+        assert_eq!(post_transfer["error_code"], "resume_timeout");
+        assert_eq!(post_session["run_status"], "transfer_failed");
+        assert_eq!(post_session["computer_id"], "target-recovery-post");
+
+        let fresh_transfer = outbound_load_record(&conn, TRANSFERS_COLLECTION, fresh_transfer_id)?
+            .context("fresh transfer")?;
+        assert_eq!(fresh_transfer["state"], "pause_requested");
+        drop(conn);
+        assert!(run_workjet_session_transfer_recovery(root.path(), now).is_empty());
         Ok(())
     }
 
