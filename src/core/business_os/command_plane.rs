@@ -266,7 +266,7 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 74] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 75] = [
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -335,6 +335,7 @@ pub(super) const EXACT_CONTROL_TYPES: [&str; 74] = [
     "ctox.workjet.session.transfer.confirm_working_copy",
     "ctox.workjet.session.transfer.pack_complete",
     "ctox.workjet.session.transfer.pause_ack",
+    "ctox.workjet.session.transfer.resume",
     "ctox.workjet.session.transfer.resume_ack",
     "ctox.workjet.session.transfer.start",
     "ctox.workjet.session.transfer.status",
@@ -975,6 +976,7 @@ impl CentralCommandPolicyRequirement {
                 | "ctox.workjet.session.transfer.pack_complete"
                 | "ctox.workjet.session.transfer.apply_complete"
                 | "ctox.workjet.session.transfer.confirm_working_copy"
+                | "ctox.workjet.session.transfer.resume"
                 | "ctox.workjet.session.transfer.resume_ack"
                 | "ctox.workjet.session.transfer.abort"
         ) {
@@ -1305,6 +1307,7 @@ fn dispatch_business_command(
         | "ctox.workjet.session.transfer.pack_complete"
         | "ctox.workjet.session.transfer.apply_complete"
         | "ctox.workjet.session.transfer.confirm_working_copy"
+        | "ctox.workjet.session.transfer.resume"
         | "ctox.workjet.session.transfer.resume_ack"
         | "ctox.workjet.session.transfer.abort"
         | "ctox.workjet.session.transfer.status" => {
