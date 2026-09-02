@@ -243,6 +243,24 @@ test('deleted tasks never lead or join a domain lineage', () => {
   assert.deepEqual(tasks[0].lineage_task_ids, ['task-live']);
 });
 
+test('counts stay hidden until the first reload finished and retries back off after failures', () => {
+  // Fresh module state: nothing loaded yet -> no numbers, only an ellipsis.
+  assert.equal(hooks.researchDataState(), 'syncing');
+  assert.equal(hooks.countText(138), '…');
+  assert.equal(hooks.countText(0), '…');
+  assert.equal(
+    hooks.taskSourceSummary({ id: 'task-x', knowledge_domain: 'drone_bearing_design' }),
+    'Quellen werden synchronisiert …',
+  );
+
+  assert.equal(hooks.failureRetryDelay(0), 5000);
+  assert.equal(hooks.failureRetryDelay(1), 10000);
+  assert.equal(hooks.failureRetryDelay(2), 20000);
+  assert.equal(hooks.failureRetryDelay(3), 40000);
+  assert.equal(hooks.failureRetryDelay(4), 60000);
+  assert.equal(hooks.failureRetryDelay(9), 60000);
+});
+
 test('sub-theme chips only offer clusters that match a source in the current list', () => {
   const all = hooks.availableSubthemes([], 'all');
   assert.deepEqual(all.map((theme) => theme.id), ['all']);
