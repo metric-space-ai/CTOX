@@ -13222,11 +13222,9 @@ async function workjetSessionControl(request = {}) {
         transfer_id: transferId,
         computer_id: boundedWorkjetSessionText(request.computerId, 'computerId', 256),
         fence_epoch: fenceEpoch,
-        last_terminal_turn_id: boundedWorkjetSessionText(
-          request.lastTerminalTurnId,
-          'lastTerminalTurnId',
-          160,
-        ),
+        last_terminal_turn_id: request.lastTerminalTurnId === null || request.lastTerminalTurnId === undefined
+          ? null
+          : boundedWorkjetSessionText(request.lastTerminalTurnId, 'lastTerminalTurnId', 160),
         git_repository: request.gitRepository,
         idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
       },
