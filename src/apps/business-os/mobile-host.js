@@ -164,6 +164,19 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
           },
         }));
     }
+    if (command.type === 'session.control' && allowedKeys(command, ['protocol', 'type', 'requestId', 'request'])) {
+      if (!SAFE_ID.test(command.requestId) || typeof globalThis.workjetSessionControl !== 'function') return;
+      Promise.resolve(globalThis.workjetSessionControl(command.request))
+        .then((result) => post({ type: 'session.control.result', requestId: command.requestId, result }))
+        .catch((error) => post({
+          type: 'session.control.result',
+          requestId: command.requestId,
+          error: {
+            code: String(error?.code || 'session-control-failed').slice(0, 128),
+            message: String(error?.message || 'Session control failed.').slice(0, 512),
+          },
+        }));
+    }
   };
 
   globalThis.addEventListener('workjet-business-os-host-command', receive);
