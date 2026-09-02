@@ -1144,6 +1144,9 @@ pub(super) fn handle_outbound_active_command(
         "outbound.provider.reconcile" => {
             outbound_handle_provider_reconcile(root, &conn, command, now)
         }
+        "outbound.research_policy.publish" => {
+            outbound_handle_research_policy_publish(root, &conn, command, now)
+        }
         "outbound.skillbook.save" => outbound_handle_skillbook_save(&conn, command, now),
         "outbound.skillbook.seed_defaults" => outbound_handle_skillbook_seed_defaults(&conn, now),
         "outbound.letter_template.save" => {
@@ -3511,6 +3514,88 @@ fn outbound_handle_campaign_status_set(
 
 /// Persist (or overwrite) an outbound skillbook record. Returned `version_number`
 /// is monotonically incremented per record so operators can audit edits.
+/// Publish the app's maintained research procedure and settings into the
+/// scraping area of the CTOX SQLite store, as the scrape target
+/// `<app>-policy` (`target_kind = "app-policy"`, the policy in `config`).
+///
+/// The research worker discovers it with `ctox scrape list-targets` /
+/// `ctox scrape show-target --target-key <app>-policy`. That keeps a long
+/// procedure out of the chat prompt and gives every later turn (continuation
+/// after a login, a repair task) the same binding instructions even when it
+/// never saw the original command payload.
+fn outbound_handle_research_policy_publish(
+    root: &Path,
+    conn: &Connection,
+    command: &BusinessCommand,
+    now: i64,
+) -> anyhow::Result<Value> {
+    let app = outbound_first_string(&[
+        outbound_string(&command.payload, &["app"]),
+        outbound_string(&command.payload, &["module"]),
+        Some(command.module.clone()).filter(|value| !value.trim().is_empty()),
+    ])
+    .unwrap_or_else(|| "outbound-lead-generation".to_string());
+    let app_slug = app
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    anyhow::ensure!(!app_slug.is_empty(), "app id is required");
+    let target_key = format!("{app_slug}-policy");
+    let mut policy = outbound_object_payload(&command.payload);
+    if let Some(object) = policy.as_object_mut() {
+        object.insert("app".to_string(), Value::String(app.clone()));
+        object.insert("published_at_ms".to_string(), Value::from(now));
+        object.insert(
+            "policy_contract".to_string(),
+            Value::String("ctox.outbound.research_policy.v1".to_string()),
+        );
+    }
+    let manifest = serde_json::json!({
+        "target_key": target_key,
+        "display_name": format!("{app} · Rechercheablauf und Einstellungen"),
+        // The policy is data, not a scraped site; the start URL is only the
+        // manifest's required anchor and is never fetched for a policy target.
+        "start_url": "https://ctox.local/app-policy",
+        "target_kind": "app-policy",
+        "status": "active",
+        "config": policy,
+        "output_schema": { "type": "object" },
+    });
+    let manifest_path = crate::paths::runtime_dir(root)
+        .join("scraping")
+        .join("app-policy")
+        .join(format!("{target_key}.json"));
+    if let Some(parent) = manifest_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest)?)?;
+    scrape::handle_scrape_command(
+        root,
+        &[
+            "upsert-target".to_string(),
+            "--input".to_string(),
+            manifest_path.to_string_lossy().to_string(),
+        ],
+    )?;
+    let record_id = format!("policy:{app_slug}");
+    let mut record = manifest["config"].clone();
+    outbound_put_string(&mut record, "id", record_id.clone());
+    upsert_business_record(conn, "outbound_research_policies", &record_id, now, record)?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "app": app,
+        "target_key": target_key,
+        "manifest_path": manifest_path.to_string_lossy(),
+        "record_id": record_id,
+    }))
+}
+
 fn outbound_handle_skillbook_save(
     conn: &Connection,
     command: &BusinessCommand,

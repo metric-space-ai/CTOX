@@ -54,6 +54,27 @@ The command id stands in the assignment sentence. The payload carries:
 - **A step naming a source names a tool.** "Handelsregister", "Northdata", "Impressum", "LinkedIn/XING by name search" map to `ctox web search --source`, `ctox web read`, `ctox scrape execute --target-key`, or the login path in §4. `ctox web sources list --country <iso>` gives the registered source ids.
 - **The procedure can also demand behavior**, not just sources: two independent sources per field, no Google snippet as proof, mark conflicts instead of resolving them, no Sellify handover in this run. Those sentences are rules for you, not prose.
 
+## 2b. Reflect the app before you research (scraping store)
+
+The app keeps more than the command payload: it deposits its procedure, its settings and its adapters in the **scraping area of the CTOX SQLite store**. Read that first — it is authoritative for every later turn, including a continuation after a login, where the original payload is out of reach.
+
+```bash
+ctox scrape list-targets                                   # every target this instance knows
+ctox scrape show-target --target-key outbound-lead-generation-policy   # the app's procedure and settings
+ctox scrape show-target --target-key <source-target>       # per-source config: tier, country hints, access mode, heal mode
+ctox scrape show-api    --target-key <source-target>       # how to query what that target already collected
+ctox scrape show-latest --target-key <source-target> --limit 20
+ctox scrape query-records --target-key <source-target> --where field=value
+ctox web sources list --country <DE|AT|CH>                 # registered source modules, tier, credential requirement
+ctox web sources info --id <source-id>
+```
+
+- **`<app>-policy` target** (`target_kind = app-policy`, here `outbound-lead-generation-policy`): its `config` holds `research_instructions` (steps 0..x), `followup_instructions`, `fields`, `person_priorities`, `min_independent_sources` and `source_policy` (which sources the operator enabled, which are validation-only, which need a credential). When it exists, it is the same procedure the payload carries; when payload and target disagree, the **payload wins for this run** (it is the newer, per-assignment copy) and you say so in the chat.
+- **Per-source targets** carry the app's settings for that source: `tier`, `country_hints`, `access_mode`, `allowed_domains`, `challenge_detection`, `heal_mode`, `expected_min_records`. Respect them — a target with `access_mode: public_native_api` is queried through its API, not scraped by hand.
+- **Already collected records.** Before you scrape a source again, look at what it already holds (`show-latest`, `query-records`). A fresh record from an earlier lead is a legitimate source; a stale one is a hint where to look, not evidence.
+- **Missing adapter.** If a source in the procedure has no target, that is a finding: use browser or search for this lead, and say in the closing message that the source has no adapter. Register a target only when the source will recur (§4).
+- **Never write policy yourself.** `upsert-target`, `register-script` and `register-source-module` are for scraping adapters. The app's policy target is written by the app when the operator saves the procedure; you read it.
+
 ## 3. The 32 fields
 
 Company (21): `firma_name`, `firma_fruehere_namen`, `firma_aktivitaetsstatus`, `firma_anschrift`, `firma_besucheranschrift`, `firma_postanschrift`, `firma_postfach`, `firma_plz`, `firma_ort`, `firma_land`, `firma_email`, `firma_domain`, `firma_telefon`, `firma_fax`, `firma_geschaeftstaetigkeit`, `firma_homepage_fact_sheet`, `firma_geschaeftsfuehrung`, `firma_prokura`, `wz_code`, `umsatz`, `mitarbeiter`.
