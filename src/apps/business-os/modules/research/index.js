@@ -12,7 +12,7 @@ import {
 // sonst ohne Query-Parameter geladen und vom Edge bis zu vier Stunden alt
 // ausgeliefert werden (Befund skf.ctox.dev 02.09.2026). Bei jeder Aenderung
 // an index.css oder locales/ hochzaehlen.
-const BUILD = '20260902-research-sync-state-v91';
+const BUILD = '20260902-research-sync-state-v92';
 const DEFAULT_AXIS_X = 'evidence_strength';
 const DEFAULT_AXIS_Y = 'topic_fit';
 const ROW_LIMIT = 5000;
@@ -434,6 +434,7 @@ const state = {
     postSyncRefreshes: 0,
     failureRetries: 0,
     failureRetryAt: 0,
+    loadedOnce: false,
   },
   initialDataReady: false,
   readiness: {},
@@ -797,6 +798,7 @@ async function refreshAllNow({ seed = false, retryEmptyKnowledge = true, mountTo
   await loadDashboardData();
   if (mountToken && state.mountToken !== mountToken) return;
   state.diagnostics.reloadFinishedAt = Date.now();
+  state.diagnostics.loadedOnce = true;
   scheduleFailureRetry(mountToken);
   render();
   refreshOpenTaskDialogDomainOptions();
@@ -835,7 +837,10 @@ function scheduleFailureRetry(mountToken = state.mountToken) {
 // leere Knowledge Base.
 function researchDataState() {
   if (diagnosticFailures().length) return 'failed';
-  if (!state.diagnostics.reloadFinishedAt) return 'syncing';
+  // Nur der allererste Reload zaehlt: jeder spaetere Reload setzt
+  // reloadFinishedAt zurueck, und die Sicht wuerde bei jeder Hintergrund-
+  // Aktualisierung von Zahlen auf Auslassungszeichen springen.
+  if (!state.diagnostics.loadedOnce) return 'syncing';
   const readiness = collectionReadiness('knowledge_tables');
   if (readiness && readiness.ready === false && !state.knowledgeBases.length) return 'syncing';
   return 'ready';
