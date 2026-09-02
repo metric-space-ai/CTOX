@@ -1216,6 +1216,32 @@ fn field_definition(field: &str) -> &'static str {
     }
 }
 
+/// Test-only: materialize an RxDB collection table in the tenant RxDB store so
+/// `store::upsert_rxdb_collection_record` / `load_rxdb_collection_record` see
+/// a real table. In production the browser peer creates these tables during
+/// replication; without one, the writer silently skips the upsert.
+#[cfg(test)]
+pub(super) fn seed_rxdb_collection_table_for_tests(
+    root: &Path,
+    collection: &str,
+) -> anyhow::Result<()> {
+    let path = store::rxdb_store_path(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let conn = rusqlite::Connection::open(&path)?;
+    conn.execute_batch(&format!(
+        "CREATE TABLE IF NOT EXISTS ctox_business_os__{collection}__v0 (
+            id TEXT PRIMARY KEY NOT NULL,
+            revision TEXT,
+            deleted INTEGER NOT NULL DEFAULT 0,
+            lastWriteTime REAL NOT NULL,
+            data TEXT NOT NULL
+        );"
+    ))?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1258,6 +1284,11 @@ mod tests {
             "fields": fields,
             "plan": []
         });
+        // Production always has the Business OS store (with its RxDB collection
+        // tables) before a research command runs; open it first so the lead
+        // upsert below lands in a real collection table instead of a no-op.
+        drop(store::open_store(root)?);
+        seed_rxdb_collection_table_for_tests(root, LEAD_COLLECTION)?;
         let task = enqueue_gap_closure_if_needed(root, &research_command, &mut phase_a_result)?
             .context("expected gap task")?;
         let conn = store::open_store(root)?;
