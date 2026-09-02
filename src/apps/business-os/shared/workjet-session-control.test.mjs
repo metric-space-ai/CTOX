@@ -47,6 +47,8 @@ test('Workjet session control is installed and stays on the projected RxDB comma
     'session.create',
     'session.transfer.start',
     'session.transfer.pause_ack',
+    'session.transfer.resume',
+    'session.transfer.resume_ack',
     'session.transfer.status',
     'session.transfer.abort',
   ]) {
@@ -57,6 +59,8 @@ test('Workjet session control is installed and stays on the projected RxDB comma
     'ctox.workjet.session.create',
     'ctox.workjet.session.transfer.start',
     'ctox.workjet.session.transfer.pause_ack',
+    'ctox.workjet.session.transfer.resume',
+    'ctox.workjet.session.transfer.resume_ack',
     'ctox.workjet.session.transfer.status',
     'ctox.workjet.session.transfer.abort',
   ]) {
@@ -152,6 +156,20 @@ test('Workjet session create/list is idempotent and transfer outcomes pass throu
             state: 'packing',
             retryable: false,
           });
+        } else if (command.command_type === 'ctox.workjet.session.transfer.resume') {
+          writeCommand(command, {
+            ok: true,
+            transfer_id: command.payload.transfer_id,
+            state: 'resuming',
+            retryable: false,
+          });
+        } else if (command.command_type === 'ctox.workjet.session.transfer.resume_ack') {
+          writeCommand(command, {
+            ok: true,
+            transfer_id: command.payload.transfer_id,
+            state: 'completed',
+            retryable: false,
+          });
         } else {
           writeCommand(command, { ok: true });
         }
@@ -242,6 +260,58 @@ test('Workjet session create/list is idempotent and transfer outcomes pass throu
     last_terminal_turn_id: 'turn-42',
     git_repository: true,
     idempotency_key: 'pause-key-1',
+  });
+
+  assert.deepEqual(await invoke({
+    action: 'session.transfer.resume',
+    commandId: 'resume-1',
+    transferId: 'workjet-transfer-1',
+    idempotencyKey: 'resume-key-1',
+  }), {
+    action: 'session.transfer.resume',
+    outcome: {
+      ok: true,
+      retryable: false,
+      transferId: 'workjet-transfer-1',
+      state: 'resuming',
+    },
+  });
+  const resumeCommand = dispatched.find(({ command }) => (
+    command.command_type === 'ctox.workjet.session.transfer.resume'
+  )).command;
+  assert.equal(resumeCommand.record_id, 'workjet-transfer-1');
+  assert.deepEqual(JSON.parse(JSON.stringify(resumeCommand.payload)), {
+    transfer_id: 'workjet-transfer-1',
+    idempotency_key: 'resume-key-1',
+  });
+
+  assert.deepEqual(await invoke({
+    action: 'session.transfer.resume_ack',
+    commandId: 'resume-ack-1',
+    transferId: 'workjet-transfer-1',
+    computerId: 'computer-2',
+    fenceEpoch: 2,
+    workerInstanceId: 'worker-1',
+    idempotencyKey: 'resume-ack-key-1',
+  }), {
+    action: 'session.transfer.resume_ack',
+    outcome: {
+      ok: true,
+      retryable: false,
+      transferId: 'workjet-transfer-1',
+      state: 'completed',
+    },
+  });
+  const resumeAckCommand = dispatched.find(({ command }) => (
+    command.command_type === 'ctox.workjet.session.transfer.resume_ack'
+  )).command;
+  assert.equal(resumeAckCommand.record_id, 'workjet-transfer-1');
+  assert.deepEqual(JSON.parse(JSON.stringify(resumeAckCommand.payload)), {
+    transfer_id: 'workjet-transfer-1',
+    computer_id: 'computer-2',
+    fence_epoch: 2,
+    worker_instance_id: 'worker-1',
+    idempotency_key: 'resume-ack-key-1',
   });
   assert.ok(dispatched.every(({ options }) => options.until === 'terminal'));
 

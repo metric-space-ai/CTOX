@@ -13235,6 +13235,56 @@ async function workjetSessionControl(request = {}) {
     };
   }
 
+  if (action === 'session.transfer.resume') {
+    assertWorkjetSessionPayloadKeys(request, new Set([
+      'action', 'commandId', 'transferId', 'idempotencyKey',
+    ]));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const transferId = boundedWorkjetSessionText(request.transferId, 'transferId', 160);
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.transfer.resume',
+      transferId,
+      {
+        transfer_id: transferId,
+        idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
+      },
+    );
+    return {
+      action: 'session.transfer.resume',
+      outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
+    };
+  }
+
+  if (action === 'session.transfer.resume_ack') {
+    assertWorkjetSessionPayloadKeys(request, new Set([
+      'action', 'commandId', 'transferId', 'computerId', 'fenceEpoch',
+      'workerInstanceId', 'idempotencyKey',
+    ]));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const transferId = boundedWorkjetSessionText(request.transferId, 'transferId', 160);
+    const fenceEpoch = request.fenceEpoch;
+    if (!Number.isInteger(fenceEpoch) || fenceEpoch < 0) {
+      throw new TypeError('Invalid Workjet session fenceEpoch.');
+    }
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.transfer.resume_ack',
+      transferId,
+      {
+        transfer_id: transferId,
+        computer_id: boundedWorkjetSessionText(request.computerId, 'computerId', 256),
+        fence_epoch: fenceEpoch,
+        worker_instance_id: boundedWorkjetSessionText(request.workerInstanceId, 'workerInstanceId', 256),
+        idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
+      },
+    );
+    return {
+      action: 'session.transfer.resume_ack',
+      outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
+    };
+  }
+
   if (action === 'session.transfer.status') {
     assertWorkjetSessionPayloadKeys(request, new Set(['action', 'commandId', 'transferId', 'sessionId']));
     const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
