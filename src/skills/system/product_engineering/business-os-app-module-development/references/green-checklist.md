@@ -56,6 +56,10 @@ Use this before claiming a Business OS app is done.
 - `index.css` is loaded by the module or otherwise available through the app contract.
 - App records use declared module collections through
   `ctx.db.collection('<declared-collection-name>')`.
+- Every declared app-owned collection has reviewed `data.read` and every
+  required `data.write` grant for the intended tenant actor/role.
+- The browser smoke runs as that same tenant actor/role; a local synthetic
+  admin smoke is not accepted as a substitute.
 - No legacy DB fallback exists: no `ctx.db[name]`, `ctx.db.collections`, direct
   `ctx.db.<collection>` property access, cached DB facade, raw IndexedDB, HTTP,
   or app-owned sync path.
@@ -119,6 +123,12 @@ Use this before claiming a Business OS app is done.
 - Tests cover record helper behavior and automation payloads.
 - `ctox business-os app validate <module-id> --installed` or `--source` passes.
 - `ctox business-os app smoke <module-id> --installed` passes.
+- Imported modules remain absent from the live catalog until static validation,
+  installed validation, browser smoke, and catalog refresh all pass. Failure,
+  timeout, cancellation, or provider outage removes any temporary smoke
+  visibility and cannot return `live=true`.
+- The completed command result contains `live=true`, source revision/snapshot
+  evidence, `asset_revision`, catalog revision, and catalog fingerprint.
 - If the app began standalone, the port removed app-owned persistence/sync and
   production code now uses shell-provided `ctx.db` and `ctx.commandBus`.
 - No service lifecycle command was used during the app build:

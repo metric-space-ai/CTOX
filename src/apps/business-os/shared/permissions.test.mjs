@@ -64,6 +64,10 @@ test('business actor resolves browser session role aliases', () => {
     id: 'owner-1',
     role: 'chef',
   });
+  assert.deepEqual(businessActorFromSession(userSession('admin-1', 'Admin')), {
+    id: 'admin-1',
+    role: 'admin',
+  });
   assert.deepEqual(businessActorFromSession({ user: { id: 'u1', role: 'team' } }), {
     id: 'u1',
     role: 'user',

@@ -6416,15 +6416,7 @@ fn missing_business_command_dependencies(
             .filter(|value| !value.is_empty());
         let record = load_rxdb_collection_record(root, collection, record_id)?;
         let available = record.as_ref().is_some_and(|record| {
-            let generation_matches = expected_generation.is_none_or(|expected| {
-                first_string_field(record, &["generation_id", "generationId"])
-                    .is_some_and(|actual| actual == expected)
-            });
-            let hash_matches = expected_hash.is_none_or(|expected| {
-                first_string_field(record, &["content_hash", "contentHash", "sha256"])
-                    .is_some_and(|actual| actual == expected)
-            });
-            generation_matches && hash_matches
+            business_command_dependency_matches_record(record, expected_generation, expected_hash)
         });
         if !available {
             missing.push(serde_json::json!({
@@ -6438,6 +6430,30 @@ fn missing_business_command_dependencies(
         }
     }
     Ok(missing)
+}
+
+fn business_command_dependency_matches_record(
+    record: &Value,
+    expected_generation: Option<&str>,
+    expected_hash: Option<&str>,
+) -> bool {
+    let generation_matches = expected_generation.is_none_or(|expected| {
+        first_string_field(
+            record,
+            &[
+                "generation_id",
+                "generationId",
+                "content_generation_id",
+                "contentGenerationId",
+            ],
+        )
+        .is_some_and(|actual| actual == expected)
+    });
+    let hash_matches = expected_hash.is_none_or(|expected| {
+        first_string_field(record, &["content_hash", "contentHash", "sha256"])
+            .is_some_and(|actual| actual == expected)
+    });
+    generation_matches && hash_matches
 }
 
 fn maybe_complete_documents_chat_markdown_edit_immediately(
@@ -6534,14 +6550,13 @@ fn maybe_materialize_and_complete_runtime_app_starter(
     command: &BusinessCommand,
     queue_task: Option<&channels::QueueTaskView>,
 ) -> anyhow::Result<Option<CommandAccepted>> {
-    if command.client_context.get("source").and_then(Value::as_str) == Some("business-os-mcp")
-        || command
-            .payload
-            .get("import_source")
-            .is_some_and(Value::is_object)
-    {
+    if command.client_context.get("source").and_then(Value::as_str) == Some("business-os-mcp") {
         return Ok(None);
     }
+    let is_import = command
+        .payload
+        .get("import_source")
+        .is_some_and(Value::is_object);
     let Some(queue_task) = queue_task else {
         return Ok(None);
     };
@@ -6571,6 +6586,9 @@ fn maybe_materialize_and_complete_runtime_app_starter(
             );
             return Ok(None);
         }
+    }
+    if is_import {
+        return Ok(None);
     }
     let Some(result) = complete_business_command_from_app_validation_success(
         root,
@@ -6636,6 +6654,15 @@ pub(super) fn materialize_runtime_app_starter_artifacts_at(
     let request_note = runtime_app_starter_request_note(command, action);
     let collection = runtime_app_starter_collection_name(module_id);
     let (archetype_id, archetype) = runtime_app_starter_v2_archetype(command)?;
+    let is_import = command
+        .payload
+        .get("import_source")
+        .is_some_and(Value::is_object);
+    let generator = if is_import {
+        "business-os-app-importer"
+    } else {
+        "ctox-runtime-app-starter-v2"
+    };
     let updated_at_ms = now_ms() as i64;
 
     fs::create_dir_all(module_dir.join("core"))
@@ -6686,7 +6713,12 @@ pub(super) fn materialize_runtime_app_starter_artifacts_at(
                 "summary": description,
                 "distribution": "ctox-runtime-installed-module",
                 "source_path": format!("installed-modules/{module_id}"),
-                "generator": "ctox-runtime-app-starter-v2",
+                "generator": generator,
+                "import_command_id": if is_import {
+                    command.id.as_deref().unwrap_or_default()
+                } else {
+                    ""
+                },
                 "archetype": archetype_id,
                 "last_request": request_note,
                 "updated_at_ms": updated_at_ms
@@ -9281,7 +9313,52 @@ pub(crate) fn record_business_os_app_import_smoke_success(
         snapshot_root.join("smoke-result.json"),
         serde_json::to_vec_pretty(&evidence)?,
     )?;
+    clear_business_os_app_import_smoke_attempt(root, command_id)?;
     Ok(())
+}
+
+pub(crate) fn begin_business_os_app_import_smoke_attempt(
+    root: &Path,
+    command_id: &str,
+    module_id: &str,
+) -> anyhow::Result<()> {
+    let snapshot_root = root
+        .join("runtime")
+        .join("business-os")
+        .join("app-imports")
+        .join(sanitize_business_os_workspace_component(command_id));
+    anyhow::ensure!(
+        snapshot_root.join("source-manifest.json").is_file(),
+        "app import source evidence is missing for `{command_id}`"
+    );
+    fs::write(
+        snapshot_root.join("smoke-in-progress.json"),
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "command_id": command_id,
+            "module_id": module_id,
+            "status": "running",
+            "started_at_ms": now_ms(),
+            "expires_at_ms": now_ms().saturating_add(5 * 60 * 1000),
+        }))?,
+    )?;
+    Ok(())
+}
+
+pub(crate) fn clear_business_os_app_import_smoke_attempt(
+    root: &Path,
+    command_id: &str,
+) -> anyhow::Result<()> {
+    let marker = root
+        .join("runtime")
+        .join("business-os")
+        .join("app-imports")
+        .join(sanitize_business_os_workspace_component(command_id))
+        .join("smoke-in-progress.json");
+    match fs::remove_file(&marker) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error).with_context(|| format!("failed to remove {}", marker.display())),
+    }
 }
 
 fn verify_business_os_app_import_smoke_success(
@@ -9334,6 +9411,14 @@ pub fn complete_business_command_from_app_validation_success(
     }
     let mut terminal_queue_task = channels::load_queue_task(root, task_id)?;
     let completed_at_ms = now_ms() as i64;
+    let import_source_revision =
+        business_os_app_import_source_revision(root, &command_id, &command)?;
+    let smoke_status = if import_source_revision.is_some() {
+        verify_business_os_app_import_smoke_success(root, &command_id, &module_id)?;
+        "passed"
+    } else {
+        "not_required"
+    };
     ensure_app_create_actor_lifecycle_assignment(
         root,
         &conn,
@@ -9347,14 +9432,6 @@ pub fn complete_business_command_from_app_validation_success(
         runtime_app_delivery_evidence(root, &module_id)?;
     let native_schema_refresh =
         refresh_native_peer_after_runtime_app_schema_change(root, &module_id, &install_target)?;
-    let import_source_revision =
-        business_os_app_import_source_revision(root, &command_id, &command)?;
-    let smoke_status = if import_source_revision.is_some() {
-        verify_business_os_app_import_smoke_success(root, &command_id, &module_id)?;
-        "passed"
-    } else {
-        "not_required"
-    };
     let result_payload = serde_json::json!({
             "module_id": module_id,
             "install_target": install_target,
@@ -9485,6 +9562,100 @@ fn refresh_native_peer_after_runtime_app_schema_change(
     }))
 }
 
+fn ensure_actor_collection_grants_for_module(
+    root: &Path,
+    conn: &Connection,
+    module_id: &str,
+    user_id: &str,
+    observed_at_ms: i64,
+) -> anyhow::Result<usize> {
+    let app_root = resolve_business_os_app_root(root)?;
+    let manifest_path = module_manifest_path(root, &app_root, module_id)?;
+    let manifest: Value = serde_json::from_slice(
+        &fs::read(&manifest_path)
+            .with_context(|| format!("failed to read app manifest {}", manifest_path.display()))?,
+    )
+    .with_context(|| format!("failed to parse app manifest {}", manifest_path.display()))?;
+    let owned_prefix = format!("{}_", module_id.replace('-', "_"));
+    let mut grant_count = 0usize;
+    for collection in module_manifest_collection_ids(&manifest)
+        .into_iter()
+        .filter(|collection| collection.starts_with(&owned_prefix))
+    {
+        for permission in ["data.read", "data.write"] {
+            let grant_id =
+                format!("app-access:{module_id}:user:{user_id}:{permission}:{collection}");
+            conn.execute(
+                "INSERT INTO business_permission_grants
+                    (grant_id, subject_type, subject_id, permission, scope_type, scope_id,
+                     active, reason, created_by, created_at_ms, updated_at_ms)
+                 VALUES (?1, 'user', ?2, ?3, 'collection', ?4, 1, ?5, ?2, ?6, ?6)
+                 ON CONFLICT(grant_id) DO UPDATE SET
+                    active = 1, reason = excluded.reason,
+                    created_by = excluded.created_by, updated_at_ms = excluded.updated_at_ms",
+                params![
+                    grant_id,
+                    user_id,
+                    permission,
+                    collection,
+                    "Validated app-owned collection grant for the creating actor",
+                    observed_at_ms,
+                ],
+            )?;
+            insert_business_event(
+                conn,
+                "business_permission_grants",
+                &grant_id,
+                "business_os.app_access.granted",
+                serde_json::json!({
+                    "grant_id": grant_id,
+                    "module_id": module_id,
+                    "subject_type": "user",
+                    "subject_id": user_id,
+                    "permission": permission,
+                    "collection": collection,
+                    "active": true,
+                    "reason": "Validated app-owned collection grant for the creating actor",
+                    "actor_id": user_id,
+                }),
+                observed_at_ms,
+            )?;
+            grant_count += 1;
+        }
+    }
+    Ok(grant_count)
+}
+
+pub(crate) fn ensure_business_os_app_import_actor_access(
+    root: &Path,
+    command_id: &str,
+    expected_module_id: &str,
+) -> anyhow::Result<usize> {
+    let conn = open_store(root)?;
+    let command = load_business_command(&conn, command_id)?;
+    let Some((module_id, install_target, _)) = business_os_app_command_target_metadata(&command)
+    else {
+        anyhow::bail!("business command `{command_id}` has no app target");
+    };
+    anyhow::ensure!(
+        command.command_type == "ctox.business_os.app.create"
+            && install_target == "runtime-installed-module"
+            && module_id == expected_module_id
+            && command
+                .payload
+                .get("import_source")
+                .is_some_and(Value::is_object),
+        "business command `{command_id}` does not match imported app `{expected_module_id}`"
+    );
+    let session = rxdb_authenticated_session(root, &command)?;
+    seed_session_user(&conn, &session)?;
+    let user_id = session_user_id(&session)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("app import command has no authenticated creating actor")?;
+    ensure_actor_collection_grants_for_module(root, &conn, &module_id, user_id, now_ms() as i64)
+}
+
 fn ensure_app_create_actor_lifecycle_assignment(
     root: &Path,
     conn: &Connection,
@@ -9514,6 +9685,7 @@ fn ensure_app_create_actor_lifecycle_assignment(
         true,
         observed_at_ms,
     )?;
+    ensure_actor_collection_grants_for_module(root, conn, module_id, user_id, observed_at_ms)?;
     let app_root = resolve_business_os_app_root(root)?;
     let manifest_path = module_manifest_path(root, &app_root, module_id)?;
     let version_app_root = app_root_for_module_manifest(&app_root, &manifest_path);
@@ -21811,7 +21983,7 @@ fn business_os_app_import_prompt_block(manifest: &Value) -> anyhow::Result<Strin
         .and_then(Value::as_str)
         .context("app import manifest has no resolved revision")?;
     Ok(format!(
-        "\nImported application source (immutable evidence):\n- source_directory: {source_directory}\n- source_kind: {}\n- resolved_revision: {revision}\n- manifest_sha256: {}\n- file_count: {}\n- total_bytes: {}\n\nPorting contract:\n- Treat source_directory as read-only evidence. Write only the requested runtime-installed module target.\n- Reimplement the complete user workflows as a functional Shell-V2 app; do not translate framework syntax mechanically.\n- The delivered app must have no QML, Quickshell, mpv, Python, shell, or original native runtime dependency.\n- Use shell-provided database handles for app-owned RxDB collections; do not import upstream rxdb or create an HTTP data bridge.\n- Browser media playback must use HTMLAudioElement with HTTPS streams. Filter or clearly mark HTTP-only streams; do not add an SSRF/media proxy.\n- Add deterministic fixtures for external APIs and audio, then run static validation and the real browser smoke before claiming completion.\n\nBounded implementation contract:\n- After the required plan update, inspect only the skill entrypoint. If app_directory is absent, the immediately following tool call MUST create app_directory and every validator-required file as a minimal functional skeleton; do not inspect source or references first.\n- Run the first validation immediately after bootstrapping the skeleton. Only then inspect the source entrypoints and one closest reference app; one bounded reference-catalog query is enough.\n- Continue from any existing target artifacts on later slices. Do not restart source or reference discovery, and never leave app_directory absent at the end of a slice.\n",
+        "\nImported application source (immutable evidence):\n- source_directory: {source_directory}\n- source_kind: {}\n- resolved_revision: {revision}\n- manifest_sha256: {}\n- file_count: {}\n- total_bytes: {}\n\nPorting contract:\n- Treat source_directory as read-only evidence. Write only the requested runtime-installed module target.\n- CTOX pre-materializes the canonical App Starter V2 in app_directory. Modify that validated starter in place instead of replacing its Shell-V2 wiring.\n- Reimplement the complete user workflows as a functional Shell-V2 app; do not translate framework syntax mechanically.\n- The delivered app must have no QML, Quickshell, mpv, Python, shell, or original native runtime dependency.\n- Use shell-provided database handles for app-owned RxDB collections; do not import upstream rxdb or create an HTTP data bridge.\n- Browser media playback must use HTMLAudioElement with HTTPS streams. Filter or clearly mark HTTP-only streams; do not add an SSRF/media proxy.\n- Add deterministic fixtures for external APIs and audio. The go/no-go gate requires exact data.read/data.write grants for every app-owned collection, static validation, and a real tenant-actor browser smoke.\n- Do not claim completion or catalog visibility yourself. CTOX publishes the imported module only after core-recorded passed smoke evidence.\n\nBounded implementation contract:\n- After the required plan update, inspect the skill entrypoint, the pre-materialized starter, and the immutable source evidence.\n- Run the first validation before substantial edits, then inspect the source entrypoints and one closest reference app; one bounded reference-catalog query is enough.\n- Continue from existing target artifacts on later slices. Do not restart source or reference discovery, and never leave app_directory invalid at the end of a slice.\n",
         manifest.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
         manifest.get("manifest_sha256").and_then(Value::as_str).unwrap_or(""),
         manifest.get("file_count").and_then(Value::as_u64).unwrap_or(0),
@@ -22012,7 +22184,7 @@ fn home_dir_from_ctox_runtime_root(root: &Path) -> Option<PathBuf> {
     None
 }
 
-fn sanitize_business_os_workspace_component(value: &str) -> String {
+pub(super) fn sanitize_business_os_workspace_component(value: &str) -> String {
     let mut output = value
         .chars()
         .map(|ch| {
@@ -22490,6 +22662,7 @@ Business OS app task metadata:
 - app_directory: {module_dir}
 - skill: business-os-app-module-development
 - resource.shell_v2_contract: src/skills/system/product_engineering/business-os-app-module-development/references/shell-v2-contract.md
+- canonical_starter: src/apps/business-os/app-starter/v2/ (pre-materialized for import jobs; modify it in place)
 - resource.module_contract: src/skills/system/product_engineering/business-os-app-module-development/references/module-contract.md
 - resource.design_guide: src/skills/system/product_engineering/business-os-app-module-development/references/design-guide.md
 - resource.standalone_porting: src/skills/system/product_engineering/business-os-app-module-development/references/standalone-porting.md
@@ -22498,6 +22671,7 @@ Business OS app task metadata:
 - resource.architecture_translation: src/skills/system/product_engineering/business-os-app-module-development/references/architecture-translation.md
 - reference_catalog: ctox business-os app references --query "<workflow data keywords>" --json --limit 8
 - validation: ctox business-os app validate {module_id} {mode_flag}
+- go_no_go: declared collections need reviewed data.read/data.write grants; validate and smoke with the real tenant actor; only core-recorded passed smoke evidence may publish an imported app.
 - tool_boundary: do not run ctox stop/start/upgrade, launchctl, systemctl, or service lifecycle commands during app creation; the running CTOX service is the required app runtime.
 "#
     )
@@ -23494,6 +23668,25 @@ fn room_secret_id(value: &str) -> String {
 pub(super) mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn desktop_file_dependency_accepts_content_generation_id() {
+        let record = serde_json::json!({
+            "content_generation_id": "gen-42",
+            "content_hash": "sha256-42",
+        });
+
+        assert!(business_command_dependency_matches_record(
+            &record,
+            Some("gen-42"),
+            Some("sha256-42"),
+        ));
+        assert!(!business_command_dependency_matches_record(
+            &record,
+            Some("gen-stale"),
+            Some("sha256-42"),
+        ));
+    }
 
     #[cfg(unix)]
     #[test]
@@ -28732,6 +28925,47 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn app_create_actor_collection_grants_cover_owned_collections_only() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        seed_test_business_os_app_root(root)?;
+        write_minimal_runtime_app_artifacts(root, "inventory")?;
+        let conn = open_store(root)?;
+
+        let count = ensure_actor_collection_grants_for_module(
+            root,
+            &conn,
+            "inventory",
+            "creator-user",
+            now_ms() as i64,
+        )?;
+        assert_eq!(count, 2);
+        let grants: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM business_permission_grants
+             WHERE subject_type = 'user'
+               AND subject_id = 'creator-user'
+               AND permission IN ('data.read', 'data.write')
+               AND scope_type = 'collection'
+               AND scope_id = 'inventory_records'
+               AND active = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(grants, 2);
+        let shared_collection_grants: i64 = conn.query_row(
+            "SELECT COUNT(*)
+             FROM business_permission_grants
+             WHERE subject_id = 'creator-user'
+               AND scope_id = 'business_commands'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(shared_collection_grants, 0);
+        Ok(())
+    }
+
+    #[test]
     fn app_validation_success_preserves_runtime_module_id_with_underscores() -> anyhow::Result<()> {
         let temp = tempdir()?;
         let root = temp.path();
@@ -29157,8 +29391,9 @@ pub(super) mod tests {
         assert!(prompt.contains("QML, Quickshell, mpv, Python, shell"));
         assert!(prompt.contains("HTMLAudioElement with HTTPS streams"));
         assert!(prompt.contains("shell-provided database handles"));
-        assert!(prompt.contains("the immediately following tool call MUST create app_directory"));
-        assert!(prompt.contains("Run the first validation immediately after bootstrapping"));
+        assert!(prompt.contains("pre-materializes the canonical App Starter V2"));
+        assert!(prompt.contains("real tenant-actor browser smoke"));
+        assert!(prompt.contains("only after core-recorded passed smoke evidence"));
         assert!(prompt.contains("Do not restart source or reference discovery"));
     }
 

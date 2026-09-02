@@ -11,6 +11,7 @@ import {
 } from './shared/app-lifecycle.js?v=20260831-shell-v2-unified-v325';
 import {
   BusinessOsPermissions,
+  businessActorFromSession,
   canModifyBusinessModule,
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
@@ -83,7 +84,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260831-crew-telemetry-v332';
+const APP_BUILD = '20260902-app-importer-gate-v333';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -13506,12 +13507,13 @@ function isTransientModuleLoadError(error) {
 
 function actorContext(session) {
   const user = session?.user || {};
+  const actor = businessActorFromSession(session, state.governance);
   return {
-    id: user.id || '',
+    id: actor.id,
     email: user.email || '',
     login: user.login || '',
     display_name: user.display_name || user.name || user.id || '',
-    role: user.role || 'user',
+    role: actor.role,
     is_admin: Boolean(user.is_admin),
   };
 }

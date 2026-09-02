@@ -617,7 +617,37 @@ fn business_os_app_module_validation_feedback(
         if import_source_kind.is_empty() {
             return Ok(None);
         }
+        let command_id = job
+            .queue_task_metadata
+            .get("business_os_command_id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if let Err(err) = crate::business_os::store::ensure_business_os_app_import_actor_access(
+            root,
+            command_id,
+            &target.module_id,
+        ) {
+            return Ok(Some(render_business_os_app_module_validation_feedback(
+                job,
+                &target,
+                &format!("App import collection access could not be prepared: {err:#}"),
+            )));
+        }
+        if let Err(err) = crate::business_os::store::begin_business_os_app_import_smoke_attempt(
+            root,
+            command_id,
+            &target.module_id,
+        ) {
+            return Ok(Some(render_business_os_app_module_validation_feedback(
+                job,
+                &target,
+                &format!("App import smoke gate could not be opened: {err:#}"),
+            )));
+        }
         if let Err(err) = crate::business_os::store::write_module_catalog_projection_to_rxdb(root) {
+            let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
+                root, command_id,
+            );
             return Ok(Some(render_business_os_app_module_validation_feedback(
                 job,
                 &target,
@@ -632,6 +662,10 @@ fn business_os_app_module_validation_feedback(
         ) {
             Ok(output) => output,
             Err(err) => {
+                let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
+                    root, command_id,
+                );
+                let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
                 return Ok(Some(render_business_os_app_module_validation_feedback(
                     job,
                     &target,
@@ -640,17 +674,16 @@ fn business_os_app_module_validation_feedback(
             }
         };
         if smoke.status.success() {
-            let command_id = job
-                .queue_task_metadata
-                .get("business_os_command_id")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
             if let Err(err) = crate::business_os::store::record_business_os_app_import_smoke_success(
                 root,
                 command_id,
                 &target.module_id,
                 &smoke.stdout,
             ) {
+                let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
+                    root, command_id,
+                );
+                let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
                 return Ok(Some(render_business_os_app_module_validation_feedback(
                     job,
                     &target,
@@ -661,6 +694,9 @@ fn business_os_app_module_validation_feedback(
             }
             return Ok(None);
         }
+        let _ =
+            crate::business_os::store::clear_business_os_app_import_smoke_attempt(root, command_id);
+        let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
         let stderr = String::from_utf8_lossy(&smoke.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&smoke.stdout).trim().to_string();
         let report = if !stderr.is_empty() {

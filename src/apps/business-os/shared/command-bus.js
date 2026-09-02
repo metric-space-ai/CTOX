@@ -13,6 +13,7 @@ import {
 const COMMAND_ACCEPT_TIMEOUT_MS = 45000;
 const COMMAND_SYNC_READY_TIMEOUT_MS = 45000;
 const COMMAND_SYNC_FLUSH_TIMEOUT_MS = 15000;
+const COMMAND_SYNC_FLUSH_MAX_TIMEOUT_MS = 120000;
 // A follower first gives the elected tab a short chance to flush and then
 // opens its own bounded WebRTC bridge when that leader is frozen or blocked
 // by a native browser dialog. That failover legitimately takes longer than a
@@ -462,7 +463,7 @@ async function submitRxdbCommand({ db, sync, session, command, dispatchStartedAt
   const syncPlan = await prepareCommandSync({ db: currentDb, sync, command });
   emitCommandLifecycle(commandId, command.command_type || command.type, 'sync_ready', submitStartedAt);
   try {
-    await flushSyncBridges(syncPlan.beforeCommand);
+    await flushSyncBridges(syncPlan.beforeCommand, [], syncPlan.flushTimeoutMs);
     const localWriteStartedAt = Date.now();
     await insertOrPatchCommandDocument(collection, commandId, doc);
     emitCommandLifecycle(commandId, command.command_type || command.type, 'local_inserted', submitStartedAt);
@@ -483,7 +484,11 @@ async function submitRxdbCommand({ db, sync, session, command, dispatchStartedAt
 
     let pushConfirmed = false;
     try {
-      const confirmations = await flushSyncBridges(syncPlan.submitBridges, [doc]);
+      const confirmations = await flushSyncBridges(
+        syncPlan.submitBridges,
+        [doc],
+        syncPlan.flushTimeoutMs,
+      );
       pushConfirmed = confirmations.length > 0 && confirmations.every(Boolean);
     } catch (error) {
       // The local insert is the submit atomicity boundary. A transient push
@@ -855,11 +860,18 @@ async function prepareCommandSync({ db, sync, command = null }) {
       afterCommand,
       leases,
       sync: currentSync,
+      flushTimeoutMs: commandSyncFlushTimeoutMs(command),
     };
   } catch (error) {
     await releaseSyncLeases(leases);
     throw error;
   }
+}
+
+function commandSyncFlushTimeoutMs(command) {
+  const explicit = Number(command?.sync_flush_timeout_ms || 0);
+  if (!Number.isFinite(explicit) || explicit <= 0) return COMMAND_SYNC_FLUSH_TIMEOUT_MS;
+  return Math.max(100, Math.min(COMMAND_SYNC_FLUSH_MAX_TIMEOUT_MS, explicit));
 }
 
 function commandSyncReadyTimeoutMs(command) {
@@ -1609,11 +1621,17 @@ function syncBridgeStatusSummary(status) {
   return `active peers: ${activePeerCount}, connections: ${connectionCount}, collection peer: ${demandPeer}`;
 }
 
-async function flushSyncBridges(bridges, documents = []) {
-  return Promise.all((bridges || []).map((bridge) => flushSyncBridge(bridge, documents)));
+async function flushSyncBridges(
+  bridges,
+  documents = [],
+  timeoutMs = COMMAND_SYNC_FLUSH_TIMEOUT_MS,
+) {
+  return Promise.all(
+    (bridges || []).map((bridge) => flushSyncBridge(bridge, documents, timeoutMs)),
+  );
 }
 
-async function flushSyncBridge(bridge, documents = []) {
+async function flushSyncBridge(bridge, documents = [], timeoutMs = COMMAND_SYNC_FLUSH_TIMEOUT_MS) {
   const resolvedBridge = syncBridgeFromHandle(bridge);
   if (resolvedBridge?.mode === 'follower') {
     if (typeof resolvedBridge.flush !== 'function') {
@@ -1649,7 +1667,7 @@ async function flushSyncBridge(bridge, documents = []) {
       // confirm that this command document reached the master.
       return state.awaitInSync?.();
     },
-    COMMAND_SYNC_FLUSH_TIMEOUT_MS,
+    timeoutMs,
     {
       code: 'sync_unavailable',
       message: 'CTOX Sync Engine could not push command dependencies before the deadline.',
