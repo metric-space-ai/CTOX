@@ -8,6 +8,7 @@ const {
   isModuleDemandOnlyCollection,
   moduleSyncCollections,
   createFollowerBridge,
+  flushLeaderDirtyCollection,
   createPendingCollectionBridge,
   shouldReplaceCachedBridgeForStart,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
@@ -60,11 +61,13 @@ assert(
 
 {
   let directFallbackCalls = 0;
+  let dirtyRequest = null;
   const follower = createFollowerBridge(
     'business_commands',
     { role: 'follower' },
     {
-      async notifyDirtyAndWait() {
+      async notifyDirtyAndWait(collection, ids) {
+        dirtyRequest = { collection, ids };
         throw new Error('leader is frozen');
       },
     },
@@ -73,8 +76,37 @@ assert(
     },
   );
   assert.equal(follower.flushTimeoutMs, COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS);
-  assert.deepEqual(await follower.flush(), { ok: true, mode: 'direct-fallback' });
+  assert.deepEqual(
+    await follower.flush([{ id: 'cmd-exact-follower-push' }]),
+    { ok: true, mode: 'direct-fallback' },
+  );
+  assert.deepEqual(dirtyRequest, {
+    collection: 'business_commands',
+    ids: ['cmd-exact-follower-push'],
+  });
   assert.equal(directFallbackCalls, 1, 'frozen leader falls back to a direct WebRTC bridge exactly once');
+}
+
+{
+  const pushed = [];
+  const raw = { id: 'cmd-shared-store', status: 'pending_sync', _rev: '1-a' };
+  await flushLeaderDirtyCollection({
+    state: {
+      collection: {
+        storageCollection: {
+          async findDocumentsById(ids) {
+            assert.deepEqual(ids, ['cmd-shared-store']);
+            return { 'cmd-shared-store': raw };
+          },
+        },
+      },
+      async pushDocumentsToRemotePeers(documents) {
+        pushed.push(...documents);
+        return true;
+      },
+    },
+  }, 'business_commands', ['cmd-shared-store']);
+  assert.deepEqual(pushed, [raw], 'leader targets the exact command after the shared store exposes it');
 }
 
 assert.equal(isDemandOnlyPullCollection('desktop_file_chunks'), true, 'desktop chunks are pull-demand-only');

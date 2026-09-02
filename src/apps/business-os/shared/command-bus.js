@@ -1663,7 +1663,7 @@ async function flushSyncBridge(bridge, documents = [], timeoutMs = COMMAND_SYNC_
       });
     }
     const acknowledgement = await withTimeout(
-      () => resolvedBridge.flush(),
+      () => resolvedBridge.flush(documents),
       followerSyncFlushTimeoutMs(resolvedBridge),
       {
         code: 'sync_unavailable',

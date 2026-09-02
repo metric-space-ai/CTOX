@@ -33,7 +33,7 @@ const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
 // those builds made the new tab follow the old, failed bridge forever. The
 // release epoch isolates only the local BroadcastChannel/Web Lock; both builds
 // still replicate through the same server-authoritative WebRTC room.
-const MULTI_TAB_COORDINATOR_EPOCH = '20260831-shell-v2-unified-v325';
+const MULTI_TAB_COORDINATOR_EPOCH = '20260902-import-exact-dirty-v335';
 const CTOX_BROWSER_CAPABILITIES = [
   'ctox-control-plane-v1',
   'ctox-role-bound-signaling-v1',
@@ -555,14 +555,9 @@ export function createSyncRuntime({
         });
       }
     }) || (() => {}));
-    multiTabUnsubscribers.push(multiTabCoordinator.onDirty?.(({ collection }) => (
+    multiTabUnsubscribers.push(multiTabCoordinator.onDirty?.(({ collection, ids }) => (
       Promise.resolve(bridges.get(normalizeCollectionName(collection)))
-        .then((bridge) => {
-          const state = bridge?.state;
-          if (!state) throw new Error(`Leader bridge for ${collection} is unavailable.`);
-          if (typeof state.pushToRemotePeers === 'function') return state.pushToRemotePeers();
-          return state.scheduleLocalWritePush?.();
-        })
+        .then((bridge) => flushLeaderDirtyCollection(bridge, collection, ids))
     )) || (() => {}));
     const storageListener = (event) => {
       const detail = event?.detail || {};
@@ -1156,9 +1151,12 @@ function createFollowerBridge(collection, status, coordinator = null, directFall
     state: null,
     multiTab: status,
     flushTimeoutMs: COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS,
-    async flush() {
+    async flush(documents = []) {
+      const ids = [...new Set((Array.isArray(documents) ? documents : [])
+        .map((document) => String(document?.id || document?.command_id || '').trim())
+        .filter(Boolean))];
       try {
-        return await coordinator?.notifyDirtyAndWait?.(collection, [], { timeoutMs: 1_000 });
+        return await coordinator?.notifyDirtyAndWait?.(collection, ids, { timeoutMs: 1_000 });
       } catch (error) {
         if (typeof directFallback !== 'function') throw error;
         await directFallback(error);
@@ -1167,6 +1165,35 @@ function createFollowerBridge(collection, status, coordinator = null, directFall
     },
     stop: async () => {},
   };
+}
+
+async function flushLeaderDirtyCollection(bridge, collection, ids = []) {
+  const state = bridge?.state;
+  if (!state) throw new Error(`Leader bridge for ${collection} is unavailable.`);
+  const exactIds = [...new Set((Array.isArray(ids) ? ids : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean))];
+  const storage = state.collection?.storageCollection;
+  if (
+    exactIds.length
+    && typeof storage?.findDocumentsById === 'function'
+    && typeof state.pushDocumentsToRemotePeers === 'function'
+  ) {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const found = await storage.findDocumentsById(exactIds);
+      const documents = exactIds
+        .map((id) => Array.isArray(found)
+          ? found.find((document) => String(document?.id || document?.command_id || '') === id)
+          : found?.[id])
+        .filter(Boolean);
+      if (documents.length === exactIds.length) {
+        return state.pushDocumentsToRemotePeers(documents);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+  }
+  if (typeof state.pushToRemotePeers === 'function') return state.pushToRemotePeers();
+  return state.scheduleLocalWritePush?.();
 }
 
 function createPendingCollectionBridge(collection, bridgePromise) {
@@ -3091,6 +3118,7 @@ export const __ctoxSyncTestHooks = {
   createPendingCollectionBridge,
   DEMAND_ONLY_COLLECTION_START_ERROR,
   createFollowerBridge,
+  flushLeaderDirtyCollection,
   COMMAND_FOLLOWER_DIRECT_OPEN_TIMEOUT_MS,
   COMMAND_FOLLOWER_DIRECT_FLUSH_TIMEOUT_MS,
   COMMAND_FOLLOWER_BRIDGE_TIMEOUT_MS,
