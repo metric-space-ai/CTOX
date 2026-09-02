@@ -13,6 +13,42 @@ if (document.documentElement.dataset.workjetMobileHost === 'true') {
     globalThis.workjetBusinessOsPostMessage?.(JSON.parse(raw));
   };
 
+  const boundedSessionTransferEvent = (event) => {
+    if (!event || typeof event !== 'object' || event.type !== 'workjet.session.transfer') return null;
+    const text = (value, maxLength) => {
+      if (typeof value !== 'string') return null;
+      const normalized = value.trim();
+      if (!normalized || [...normalized].length > maxLength
+        || /[\u0000-\u001f\u007f]/u.test(normalized)) return null;
+      return normalized;
+    };
+    const integer = (value) => Number.isInteger(value) && value >= 0 ? value : null;
+    const bounded = {
+      type: 'workjet.session.transfer',
+      transferId: text(event.transferId, 160),
+      sessionId: text(event.sessionId, 160),
+      state: text(event.state, 64),
+      fenceEpoch: integer(event.fenceEpoch),
+      sourceComputerId: text(event.sourceComputerId, 256),
+      targetComputerId: text(event.targetComputerId, 256),
+      deadlineAtMs: integer(event.deadlineAtMs),
+      updatedAtMs: integer(event.updatedAtMs),
+    };
+    if (Object.values(bounded).some((value) => value === null)) return null;
+    return Object.freeze(bounded);
+  };
+
+  const existingWorkjetHostBridge = globalThis.workjetHostBridge;
+  globalThis.workjetHostBridge = Object.freeze({
+    ...(existingWorkjetHostBridge && typeof existingWorkjetHostBridge === 'object'
+      ? existingWorkjetHostBridge
+      : {}),
+    postSessionTransferEvent(event) {
+      const bounded = boundedSessionTransferEvent(event);
+      if (bounded) post({ type: 'session.transfer.event', event: bounded });
+    },
+  });
+
   const descriptor = (appId) => catalog?.apps?.find((app) => app.id === appId) || null;
 
   const appIdForWindow = (element) => {

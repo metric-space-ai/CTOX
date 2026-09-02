@@ -46,6 +46,7 @@ test('Workjet session control is installed and stays on the projected RxDB comma
     'session.list',
     'session.create',
     'session.transfer.start',
+    'session.transfer.pause_ack',
     'session.transfer.status',
     'session.transfer.abort',
   ]) {
@@ -55,6 +56,7 @@ test('Workjet session control is installed and stays on the projected RxDB comma
     'ctox.workjet.session.list',
     'ctox.workjet.session.create',
     'ctox.workjet.session.transfer.start',
+    'ctox.workjet.session.transfer.pause_ack',
     'ctox.workjet.session.transfer.status',
     'ctox.workjet.session.transfer.abort',
   ]) {
@@ -143,6 +145,13 @@ test('Workjet session create/list is idempotent and transfer outcomes pass throu
             retryable: false,
             message: 'Workjet session is not running',
           });
+        } else if (command.command_type === 'ctox.workjet.session.transfer.pause_ack') {
+          writeCommand(command, {
+            ok: true,
+            transfer_id: command.payload.transfer_id,
+            state: 'packing',
+            retryable: false,
+          });
         } else {
           writeCommand(command, { ok: true });
         }
@@ -202,6 +211,38 @@ test('Workjet session create/list is idempotent and transfer outcomes pass throu
       message: 'Workjet session is not running',
     },
   });
+
+  const pauseAckRequest = {
+    action: 'session.transfer.pause_ack',
+    commandId: 'pause-ack-1',
+    transferId: 'workjet-transfer-1',
+    computerId: 'computer-1',
+    fenceEpoch: 1,
+    lastTerminalTurnId: 'turn-42',
+    gitRepository: true,
+    idempotencyKey: 'pause-key-1',
+  };
+  assert.deepEqual(await invoke(pauseAckRequest), {
+    action: 'session.transfer.pause_ack',
+    outcome: {
+      ok: true,
+      retryable: false,
+      transferId: 'workjet-transfer-1',
+      state: 'packing',
+    },
+  });
+  const pauseAckCommand = dispatched.find(({ command }) => (
+    command.command_type === 'ctox.workjet.session.transfer.pause_ack'
+  )).command;
+  assert.equal(pauseAckCommand.record_id, 'workjet-transfer-1');
+  assert.deepEqual(JSON.parse(JSON.stringify(pauseAckCommand.payload)), {
+    transfer_id: 'workjet-transfer-1',
+    computer_id: 'computer-1',
+    fence_epoch: 1,
+    last_terminal_turn_id: 'turn-42',
+    git_repository: true,
+    idempotency_key: 'pause-key-1',
+  });
   assert.ok(dispatched.every(({ options }) => options.until === 'terminal'));
 
   await assert.rejects(invoke({ action: 'session.unknown' }), /Unsupported Workjet session control action/);
@@ -216,6 +257,21 @@ test('Workjet session create/list is idempotent and transfer outcomes pass throu
     transferId: 'workjet-transfer-1',
     sessionId: 'workjet-session-1',
   }), /exactly one of transferId or sessionId/);
+  await assert.rejects(invoke({ ...pauseAckRequest, extra: true }), (error) => (
+    error?.name === 'TypeError' && /Unsupported Workjet session payload field: extra/.test(error.message)
+  ));
+  for (const invalidRequest of [
+    { ...pauseAckRequest, transferId: 't'.repeat(161) },
+    { ...pauseAckRequest, computerId: 'c'.repeat(257) },
+    { ...pauseAckRequest, lastTerminalTurnId: 't'.repeat(161) },
+    { ...pauseAckRequest, idempotencyKey: 'k'.repeat(161) },
+    { ...pauseAckRequest, fenceEpoch: -1 },
+    { ...pauseAckRequest, fenceEpoch: 1.5 },
+    { ...pauseAckRequest, fenceEpoch: '1' },
+    { ...pauseAckRequest, gitRepository: 'true' },
+  ]) {
+    await assert.rejects(invoke(invalidRequest), (error) => error?.name === 'TypeError');
+  }
 });
 
 test('Mobile host bridges session.control with bounded result errors', () => {
