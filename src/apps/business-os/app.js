@@ -433,6 +433,7 @@ function installAdvancedStatusInterface() {
   window.CTOX_BUSINESS_OS_APP = state;
   globalThis.workjetComputerControl = workjetComputerControl;
   globalThis.workjetProjectControl = workjetProjectControl;
+  globalThis.workjetSessionControl = workjetSessionControl;
   state.openModule = (moduleId, options = {}) => openModule(moduleId, options);
 }
 
@@ -12934,6 +12935,277 @@ async function waitForSyncBridgeReady(bridge, timeoutMs = 15000) {
     ]);
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+const WORKJET_SESSION_CONTROL_MAX_RESULTS = 100;
+const WORKJET_SESSION_CONTROL_TIMEOUT_MS = 30_000;
+
+async function workjetSessionControl(request = {}) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new TypeError('Workjet session control request must be an object.');
+  }
+  const action = boundedWorkjetSessionText(request.action, 'action', 64);
+  const ownerUserId = boundedWorkjetSessionText(actorContext(state.session).id, 'owner_user_id', 256);
+  const { sessionBridge } = await requireWorkjetSessionDataPlane();
+
+  if (action === 'session.list') {
+    assertWorkjetSessionPayloadKeys(request, new Set(['action']));
+    const commandId = `cmd_workjet_session_list_${newId()}`;
+    await dispatchWorkjetSessionCommand(commandId, 'ctox.workjet.session.list', ownerUserId, {
+      limit: WORKJET_SESSION_CONTROL_MAX_RESULTS,
+    });
+    await waitForSyncBridgeReady(sessionBridge, WORKJET_SESSION_CONTROL_TIMEOUT_MS);
+    return {
+      action: 'session.list',
+      sessions: await listProjectedWorkjetSessions(ownerUserId),
+    };
+  }
+
+  if (action === 'session.create') {
+    assertWorkjetSessionPayloadKeys(request, new Set([
+      'action', 'commandId', 'sessionId', 'projectId', 'workingCopyId', 'threadId', 'codingSessionId',
+    ]));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const sessionId = boundedOptionalWorkjetSessionText(request.sessionId, 'sessionId', 160);
+    const projectId = boundedWorkjetSessionText(request.projectId, 'projectId', 160);
+    const workingCopyId = boundedWorkjetSessionText(request.workingCopyId, 'workingCopyId', 160);
+    const threadId = boundedOptionalWorkjetSessionText(request.threadId, 'threadId', 160);
+    const codingSessionId = boundedOptionalWorkjetSessionText(request.codingSessionId, 'codingSessionId', 160);
+    const payload = { project_id: projectId, working_copy_id: workingCopyId };
+    if (sessionId) payload.session_id = sessionId;
+    if (threadId) payload.thread_id = threadId;
+    if (codingSessionId) payload.coding_session_id = codingSessionId;
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.create',
+      sessionId || projectId,
+      payload,
+    );
+    const outcome = await readTerminalCommandOutcome(commandId);
+    const projectedSessionId = boundedOptionalWorkjetSessionText(
+      outcome?.session?.id,
+      'outcome.session.id',
+      160,
+    ) || sessionId;
+    const session = await waitForProjectedWorkjetSession(
+      projectedSessionId,
+      ownerUserId,
+      sessionBridge,
+      WORKJET_SESSION_CONTROL_TIMEOUT_MS,
+      { projectId, workingCopyId },
+    );
+    return { action: 'session.create', session };
+  }
+
+  if (action === 'session.transfer.start') {
+    assertWorkjetSessionPayloadKeys(request, new Set([
+      'action', 'commandId', 'sessionId', 'targetComputerId', 'targetPath', 'idempotencyKey',
+    ]));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const sessionId = boundedWorkjetSessionText(request.sessionId, 'sessionId', 160);
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.transfer.start',
+      sessionId,
+      {
+        session_id: sessionId,
+        target_computer_id: boundedWorkjetSessionText(request.targetComputerId, 'targetComputerId', 160),
+        target_path: boundedWorkjetSessionText(request.targetPath, 'targetPath', 4096),
+        idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
+      },
+    );
+    return readTerminalCommandOutcome(commandId);
+  }
+
+  if (action === 'session.transfer.status') {
+    assertWorkjetSessionPayloadKeys(request, new Set(['action', 'commandId', 'transferId', 'sessionId']));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const transferId = boundedOptionalWorkjetSessionText(request.transferId, 'transferId', 160);
+    const sessionId = boundedOptionalWorkjetSessionText(request.sessionId, 'sessionId', 160);
+    if (Boolean(transferId) === Boolean(sessionId)) {
+      throw new TypeError('Workjet session transfer status requires exactly one of transferId or sessionId.');
+    }
+    const payload = transferId ? { transfer_id: transferId } : { session_id: sessionId };
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.transfer.status',
+      transferId || sessionId,
+      payload,
+    );
+    return readTerminalCommandOutcome(commandId);
+  }
+
+  if (action === 'session.transfer.abort') {
+    assertWorkjetSessionPayloadKeys(request, new Set([
+      'action', 'commandId', 'transferId', 'reason', 'idempotencyKey',
+    ]));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const transferId = boundedWorkjetSessionText(request.transferId, 'transferId', 160);
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.transfer.abort',
+      transferId,
+      {
+        transfer_id: transferId,
+        reason: boundedWorkjetSessionText(request.reason, 'reason', 512),
+        idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
+      },
+    );
+    return readTerminalCommandOutcome(commandId);
+  }
+
+  throw new Error(`Unsupported Workjet session control action: ${action}`);
+}
+
+async function dispatchWorkjetSessionCommand(commandId, commandType, recordId, payload) {
+  return state.commandBus.dispatch({
+    id: commandId,
+    command_id: commandId,
+    module: 'ctox',
+    command_type: commandType,
+    record_id: recordId,
+    payload,
+    client_context: {
+      source: 'workjet-session-control',
+      actor: actorContext(state.session),
+    },
+  }, { until: 'terminal', timeoutMs: WORKJET_SESSION_CONTROL_TIMEOUT_MS });
+}
+
+async function requireWorkjetSessionDataPlane() {
+  if (!state.commandBus?.dispatch || !state.db?.collection?.('business_commands')) {
+    throw new Error('Workjet session control is not ready.');
+  }
+  if (!state.db?.collection?.('workjet_sessions')) {
+    throw new Error('workjet_sessions collection is not registered.');
+  }
+  const commandBridge = await state.sync?.startCollection?.('business_commands');
+  await waitForSyncBridgeReady(commandBridge, 15_000);
+  const sessionBridge = await state.sync?.startCollection?.('workjet_sessions');
+  await waitForSyncBridgeReady(sessionBridge, 15_000);
+  return { commandBridge, sessionBridge };
+}
+
+async function listProjectedWorkjetSessions(ownerUserId) {
+  const collection = state.db?.collection?.('workjet_sessions');
+  const docs = await collection.find({
+    selector: { owner_user_id: { $eq: ownerUserId } },
+    limit: WORKJET_SESSION_CONTROL_MAX_RESULTS,
+  }).exec();
+  return docs
+    .map((doc) => boundedWorkjetSessionResult(doc?.toJSON?.() || doc))
+    .filter(Boolean)
+    .sort((left, right) => right.updatedAtMs - left.updatedAtMs || left.id.localeCompare(right.id));
+}
+
+async function waitForProjectedWorkjetSession(
+  sessionId,
+  ownerUserId,
+  bridge,
+  timeoutMs,
+  expected = {},
+) {
+  const collection = state.db?.collection?.('workjet_sessions');
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  while (Date.now() < deadline) {
+    try {
+      await bridge?.awaitInSync?.();
+      let rawSession = null;
+      if (sessionId) {
+        const doc = await collection.findOne(sessionId).exec();
+        rawSession = doc?.toJSON?.() || doc;
+      }
+      if (!rawSession && expected.projectId && expected.workingCopyId) {
+        const docs = await collection.find({
+          selector: {
+            owner_user_id: { $eq: ownerUserId },
+            project_id: { $eq: expected.projectId },
+            working_copy_id: { $eq: expected.workingCopyId },
+          },
+          limit: 2,
+        }).exec();
+        if (docs.length === 1) rawSession = docs[0]?.toJSON?.() || docs[0];
+      }
+      if (rawSession?.owner_user_id === ownerUserId
+        && (!expected.projectId || rawSession.project_id === expected.projectId)
+        && (!expected.workingCopyId || rawSession.working_copy_id === expected.workingCopyId)) {
+        const session = boundedWorkjetSessionResult(rawSession);
+        if (session) return session;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, 100));
+  }
+  const error = new Error(`Workjet session projection did not arrive${sessionId ? ` for ${sessionId}` : ''}.`);
+  error.code = 'workjet_session_projection_timeout';
+  if (lastError) error.cause = lastError;
+  throw error;
+}
+
+async function readTerminalCommandOutcome(commandId) {
+  const collection = state.db?.collection?.('business_commands');
+  const doc = await collection.findOne(commandId).exec();
+  const command = doc?.toJSON?.() || doc;
+  if (!command || !['completed', 'failed', 'cancelled'].includes(String(
+    command.terminal_status || command.status || '',
+  ))) {
+    throw new Error(`Terminal Workjet session command document is unavailable for ${commandId}.`);
+  }
+  const outcome = command.result?.outcome || command.result;
+  if (!outcome || typeof outcome !== 'object' || Array.isArray(outcome)) {
+    throw new Error(`Terminal Workjet session command outcome is unavailable for ${commandId}.`);
+  }
+  return Object.freeze({ ...outcome });
+}
+
+function boundedWorkjetSessionResult(value) {
+  if (!value || typeof value !== 'object' || value._deleted === true || value.is_deleted === true) {
+    return null;
+  }
+  const fenceEpoch = Number(value.fence_epoch);
+  const updatedAtMs = Number(value.updated_at_ms);
+  if (!Number.isInteger(fenceEpoch) || fenceEpoch < 0 || !Number.isFinite(updatedAtMs) || updatedAtMs < 0) {
+    return null;
+  }
+  return Object.freeze({
+    id: boundedWorkjetSessionText(value.id, 'session.id', 160),
+    projectId: boundedWorkjetSessionText(value.project_id, 'session.projectId', 160),
+    workingCopyId: boundedWorkjetSessionText(value.working_copy_id, 'session.workingCopyId', 160),
+    computerId: boundedWorkjetSessionText(value.computer_id, 'session.computerId', 256),
+    threadId: boundedOptionalWorkjetSessionText(value.thread_id, 'session.threadId', 160),
+    codingSessionId: boundedOptionalWorkjetSessionText(value.coding_session_id, 'session.codingSessionId', 160),
+    runStatus: boundedWorkjetSessionText(value.run_status, 'session.runStatus', 64),
+    fenceEpoch,
+    activeTransferId: boundedOptionalWorkjetSessionText(value.active_transfer_id, 'session.activeTransferId', 160),
+    updatedAtMs,
+  });
+}
+
+function boundedWorkjetSessionText(value, field, maxLength) {
+  if (typeof value !== 'string') throw new TypeError(`Invalid Workjet session ${field}.`);
+  const normalized = value.trim();
+  const hasControlCharacter = Array.from(normalized).some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || code === 127;
+  });
+  if (!normalized || [...normalized].length > maxLength || hasControlCharacter) {
+    throw new TypeError(`Invalid Workjet session ${field}.`);
+  }
+  return normalized;
+}
+
+function boundedOptionalWorkjetSessionText(value, field, maxLength) {
+  if (value === undefined || value === null) return null;
+  return boundedWorkjetSessionText(value, field, maxLength);
+}
+
+function assertWorkjetSessionPayloadKeys(payload, allowed) {
+  const unexpected = Object.keys(payload).filter((key) => !allowed.has(key));
+  if (unexpected.length) {
+    throw new TypeError(`Unsupported Workjet session payload field: ${unexpected[0]}`);
   }
 }
 
