@@ -23,6 +23,9 @@ This file is a resource index. Use the linked contracts and checklists as the wo
 3. Run `scripts/module_static_check.mjs <module-id>` — it enforces tokens,
    kit usage, and the mechanical grammar rules (e.g. no single-tab view
    bands). A red check is a finding, never an inconvenience.
+4. Start from the canonical files in `src/apps/business-os/app-starter/v2/`.
+   Import jobs receive this starter pre-materialized in `app_directory`; modify
+   it in place instead of rebuilding the module contract from memory.
 
 ## Tool Boundary
 
@@ -47,6 +50,7 @@ This file is a resource index. Use the linked contracts and checklists as the wo
 ## Resource Index
 
 - `references/module-contract.md`: file layout, manifest, schema, mount contract, persistence contract, automation contract, agent right-click context.
+- `references/shell-v2-contract.md`: shell ownership, collection permissions, import publication gate, and real-tenant acceptance.
 - `references/design-guide.md`: Business OS token contract, custom branding rules, UX patterns, and anti-patterns.
 - `references/impeccable-preflight.md`: mandatory frontend preflight for operational density, signature automation, windows, panes, and mobile.
 - `references/standalone-porting.md`: how to keep standalone vanilla apps portable into Business OS with `mount(ctx)` and mock context boundaries.
@@ -136,6 +140,12 @@ records so the agent knows what was clicked.
   `ctx.commandBus.dispatch(...)`; load `references/standalone-porting.md`.
 
 ## Validation
+
+For imports, this is a fail-closed Go/No-Go gate, not advisory prose. Keep the
+module non-live until every required check passes. Collection declaration is
+not authorization: verify reviewed `data.read` and required `data.write`
+grants for the actual acceptance actor/role before browser smoke. Test in the
+real tenant Shell v2 host; a localhost or synthetic admin smoke is insufficient.
 
 - Runtime app: `ctox business-os app validate <module-id> --installed`
 - Source app: `ctox business-os app validate <module-id> --source`

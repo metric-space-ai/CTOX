@@ -15,13 +15,13 @@ use super::store::{
     module_policy_decision, normalize_source_relative_path, now_ms, open_store,
     parse_business_app_semver_major, remove_module_from_layout_value, resolve_module_source_root,
     resolve_module_source_root_for_root, runtime_app_starter_is_owned, rxdb_desktop_file_chunks,
-    rxdb_desktop_file_document, sanitize_git_ref, save_module_layout, save_module_source_record,
-    seed_session_user, session_can_modify_module, session_has_workspace_permission,
-    source_relative_subpath, source_sanitize_slug, update_module_catalog_stamp_hash,
-    validate_github_repo, validate_runtime_app_starter_artifacts, validate_staged_catalog_module,
-    version_summary_row, write_module_source_snapshot, AppStoreInstallRequest, BusinessCommand,
-    BusinessOsSession, CommandOrigin, ModuleDeleteRequest, ModuleInstallTemplateRequest,
-    ModuleManifest, ModuleReleaseRequest, ModuleRollbackRequest,
+    rxdb_desktop_file_document, sanitize_business_os_workspace_component, sanitize_git_ref,
+    save_module_layout, save_module_source_record, seed_session_user, session_can_modify_module,
+    session_has_workspace_permission, source_relative_subpath, source_sanitize_slug,
+    update_module_catalog_stamp_hash, validate_github_repo, validate_runtime_app_starter_artifacts,
+    validate_staged_catalog_module, version_summary_row, write_module_source_snapshot,
+    AppStoreInstallRequest, BusinessCommand, BusinessOsSession, CommandOrigin, ModuleDeleteRequest,
+    ModuleInstallTemplateRequest, ModuleManifest, ModuleReleaseRequest, ModuleRollbackRequest,
     ModuleSourceRollbackSnapshotRequest, ModuleSourceSaveMutation, ModuleVersionListRequest,
     ModuleVersionRollbackRequest, RuntimeAppStarterAction, TemplateManifest,
 };
@@ -875,6 +875,9 @@ pub(super) fn load_installed_module_manifests(
             .with_context(|| format!("failed to read module manifest {}", path.display()))?;
         let manifest_value: Value = serde_json::from_str(&text)
             .with_context(|| format!("failed to parse module manifest {}", path.display()))?;
+        if !runtime_import_catalog_evidence_allows_module(root, &manifest_value) {
+            continue;
+        }
         if super::customer_apps::authorize_runtime_module(root, &entry.path(), &manifest_value)
             .is_err()
         {
@@ -905,6 +908,57 @@ pub(super) fn load_installed_module_manifests(
         manifests.push(manifest);
     }
     Ok(manifests)
+}
+
+fn runtime_import_catalog_evidence_allows_module(root: &Path, manifest: &Value) -> bool {
+    if manifest.pointer("/store/generator").and_then(Value::as_str)
+        != Some("business-os-app-importer")
+    {
+        return true;
+    }
+    let module_id = manifest
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if module_id.is_empty() {
+        return false;
+    }
+    let imports_root = root.join("runtime/business-os/app-imports");
+    let mut evidence_roots = Vec::new();
+    if let Some(command_id) = manifest
+        .pointer("/store/import_command_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let command_leaf = sanitize_business_os_workspace_component(command_id);
+        evidence_roots.push(imports_root.join(command_leaf));
+    } else if let Ok(entries) = fs::read_dir(&imports_root) {
+        evidence_roots.extend(entries.flatten().take(512).map(|entry| entry.path()));
+    }
+    evidence_roots.into_iter().any(|evidence_root| {
+        let passed = fs::read(evidence_root.join("smoke-result.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|evidence| {
+                evidence.get("status").and_then(Value::as_str) == Some("passed")
+                    && evidence.get("module_id").and_then(Value::as_str) == Some(module_id)
+            });
+        if passed {
+            return true;
+        }
+        fs::read(evidence_root.join("smoke-in-progress.json"))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+            .is_some_and(|evidence| {
+                evidence.get("status").and_then(Value::as_str) == Some("running")
+                    && evidence.get("module_id").and_then(Value::as_str) == Some(module_id)
+                    && evidence
+                        .get("expires_at_ms")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|expires_at_ms| expires_at_ms >= now_ms() as u64)
+            })
+    })
 }
 
 pub(super) fn normalize_catalog_installed_manifest(
@@ -2017,13 +2071,66 @@ mod tests {
         ensure_rollback_collection_schema_compatible, list_module_versions,
         module_catalog_source_id, module_policy_decision, normalize_catalog_installed_manifest,
         record_module_release, record_module_version, release_managed_shadow_source,
-        rollback_module_to_version, sync_module_version_records, validate_staged_catalog_module,
+        rollback_module_to_version, runtime_import_catalog_evidence_allows_module,
+        sync_module_version_records, validate_staged_catalog_module,
     };
     use rusqlite::{params, Connection};
     use serde_json::Value;
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[test]
+    fn imported_modules_need_a_passed_or_bounded_in_progress_smoke_gate() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let evidence_root = root.join("runtime/business-os/app-imports/cmd-import-radio");
+        fs::create_dir_all(&evidence_root)?;
+        let manifest = serde_json::json!({
+            "id": "radio",
+            "store": {
+                "generator": "business-os-app-importer",
+                "import_command_id": "cmd-import-radio"
+            }
+        });
+
+        assert!(!runtime_import_catalog_evidence_allows_module(
+            root, &manifest
+        ));
+        fs::write(
+            evidence_root.join("smoke-in-progress.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "module_id": "radio",
+                "status": "running",
+                "expires_at_ms": now_ms() + 60_000
+            }))?,
+        )?;
+        assert!(runtime_import_catalog_evidence_allows_module(
+            root, &manifest
+        ));
+        fs::write(
+            evidence_root.join("smoke-in-progress.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "module_id": "radio",
+                "status": "running",
+                "expires_at_ms": now_ms().saturating_sub(1)
+            }))?,
+        )?;
+        assert!(!runtime_import_catalog_evidence_allows_module(
+            root, &manifest
+        ));
+        fs::write(
+            evidence_root.join("smoke-result.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "module_id": "radio",
+                "status": "passed"
+            }))?,
+        )?;
+        assert!(runtime_import_catalog_evidence_allows_module(
+            root, &manifest
+        ));
+        Ok(())
+    }
 
     #[test]
     fn marketplace_buchhaltung_uses_catalog_installed_validation() -> anyhow::Result<()> {

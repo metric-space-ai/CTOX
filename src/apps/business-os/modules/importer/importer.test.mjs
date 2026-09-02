@@ -88,6 +88,7 @@ test('GitHub import creates one durable harness command with the porting skill',
   assert.equal(command.command_id, 'app-import-omarchy-radio-atlas-42');
   assert.equal(command.command_type, 'ctox.business_os.app.create');
   assert.equal(command.payload.install_target, 'runtime-installed-module');
+  assert.equal(command.sync_flush_timeout_ms, 60_000);
   assert.deepEqual(command.payload.required_skills, ['business-os-app-module-development']);
   assert.deepEqual(command.payload.import_source, {
     kind: 'github',
