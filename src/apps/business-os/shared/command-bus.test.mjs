@@ -590,6 +590,54 @@ test('submit keeps the local command pending when no native peer acknowledges it
   assert.equal(receipt.transient, true);
 });
 
+test('import command is inserted when immutable dependency flush misses its acknowledgement', async () => {
+  let stored = null;
+  let commandPushCount = 0;
+  const collection = {
+    async insert(doc) { stored = { ...doc }; },
+    findOne() { return { async exec() { return null; } }; },
+  };
+  const sync = {
+    async leaseCollection(collectionName) {
+      return {
+        collection: collectionName,
+        state: collectionName === 'business_commands'
+          ? {
+            demandStatus: { peerConnected: true },
+            async pushDocumentsToRemotePeers(documents) {
+              commandPushCount += 1;
+              assert.equal(documents[0].id, 'cmd-import-delivery-lag');
+              return true;
+            },
+          }
+          : {
+            demandStatus: { peerConnected: true },
+            async pushToRemotePeers() { await new Promise(() => {}); },
+          },
+        async release() {},
+      };
+    },
+  };
+  const bus = createCommandBus({
+    db: { raw: { business_commands: collection, ctox_queue_tasks: collection } },
+    sync,
+  });
+
+  const receipt = await bus.submit({
+    id: 'cmd-import-delivery-lag',
+    module: 'importer',
+    command_type: 'ctox.business_os.app.create',
+    dependencies: [{ collection: 'desktop_files', record_id: 'file-1', required: true }],
+    sync_collections: ['desktop_files', 'desktop_file_chunks'],
+    sync_flush_timeout_ms: 100,
+    allow_dependency_delivery_lag: true,
+  });
+
+  assert.equal(stored.id, 'cmd-import-delivery-lag');
+  assert.equal(commandPushCount, 1);
+  assert.equal(receipt.code, 'push_confirmed');
+});
+
 test('submit waits for the negotiated collection peer before inserting the command', async () => {
   let stored = null;
   let peerStates = new Map();

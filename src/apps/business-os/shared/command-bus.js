@@ -463,7 +463,23 @@ async function submitRxdbCommand({ db, sync, session, command, dispatchStartedAt
   const syncPlan = await prepareCommandSync({ db: currentDb, sync, command });
   emitCommandLifecycle(commandId, command.command_type || command.type, 'sync_ready', submitStartedAt);
   try {
-    await flushSyncBridges(syncPlan.beforeCommand, [], syncPlan.flushTimeoutMs);
+    try {
+      await flushSyncBridges(syncPlan.beforeCommand, [], syncPlan.flushTimeoutMs);
+    } catch (error) {
+      if (!commandAllowsDependencyDeliveryLag(command, error)) throw error;
+      // Imported file snapshots are immutable and the native command handler
+      // already has a durable waiting_dependencies state. A WebRTC flush can
+      // deliver every chunk yet miss its final acknowledgement (notably after
+      // leader failover). Preserve the authorized command locally so the
+      // normal command bridge can deliver it and native intake can verify the
+      // referenced generations instead of losing the job before insertion.
+      emitCommandLifecycle(
+        commandId,
+        command.command_type || command.type,
+        'dependency_push_unconfirmed',
+        submitStartedAt,
+      );
+    }
     const localWriteStartedAt = Date.now();
     await insertOrPatchCommandDocument(collection, commandId, doc);
     emitCommandLifecycle(commandId, command.command_type || command.type, 'local_inserted', submitStartedAt);
@@ -513,6 +529,12 @@ async function submitRxdbCommand({ db, sync, session, command, dispatchStartedAt
   } finally {
     await releaseSyncPlan(syncPlan);
   }
+}
+
+function commandAllowsDependencyDeliveryLag(command, error) {
+  if (command?.allow_dependency_delivery_lag !== true) return false;
+  return ['sync_unavailable', 'native_unavailable', 'projection_delayed']
+    .includes(cleanContextText(error?.code));
 }
 
 function localCommandReceipt({ db, sync, commandId, pushConfirmed }) {
@@ -1641,7 +1663,7 @@ async function flushSyncBridge(bridge, documents = [], timeoutMs = COMMAND_SYNC_
       });
     }
     const acknowledgement = await withTimeout(
-      () => resolvedBridge.flush(),
+      () => resolvedBridge.flush(documents),
       followerSyncFlushTimeoutMs(resolvedBridge),
       {
         code: 'sync_unavailable',
