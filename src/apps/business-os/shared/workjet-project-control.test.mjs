@@ -9,7 +9,7 @@ const controlStart = appSource.indexOf('const WORKJET_PROJECT_CONTROL_MAX_RESULT
 const controlEnd = appSource.indexOf('async function waitForSyncBridgeReady', controlStart);
 const controlSource = appSource.slice(controlStart, controlEnd);
 
-test('Workjet guest project control is installed and uses the RxDB command plane', () => {
+test('Workjet project control is installed and uses the RxDB command plane', () => {
   assert.match(appSource, /globalThis\.workjetProjectControl = workjetProjectControl/);
   assert.ok(controlStart >= 0 && controlEnd > controlStart, 'project control implementation exists');
   assert.match(controlSource, /action === 'project\.list'/);
@@ -29,7 +29,7 @@ test('Workjet guest project control is installed and uses the RxDB command plane
   assert.match(controlSource, /action: 'project\.create',\s+project:/);
 });
 
-test('Workjet guest project control supports logical projects with optional opaque working copies', () => {
+test('Workjet project control supports logical projects with optional opaque working copies', () => {
   assert.match(controlSource, /WORKJET_PROJECT_CONTROL_MAX_RESULTS = 100/);
   assert.match(controlSource, /boundedWorkjetProjectText\(request\.commandId, 'commandId', 128\)/);
   assert.match(controlSource, /boundedWorkjetProjectText\(request\.projectId, 'projectId', 128\)/);
@@ -55,7 +55,7 @@ test('Workjet guest project control supports logical projects with optional opaq
   assert.doesNotMatch(controlSource, /_rev\s*:/);
 });
 
-test('Workjet guest project create/list is idempotent across optional copies and computers', async () => {
+test('Workjet project create/list is idempotent across optional copies and computers', async () => {
   const collections = {
     workjet_projects: [],
     workjet_working_copies: [],
