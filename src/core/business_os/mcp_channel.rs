@@ -258,6 +258,8 @@ pub struct BusinessOsActionExecution {
     pub command_type: String,
     pub command_id: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub result: Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4474,6 +4476,44 @@ pub fn list_module_actions(
             ),
         ],
         "outbound-lead-generation" => vec![person_research_action_descriptor(&module.id)],
+        "ctox" => vec![
+            action_descriptor(
+                "workjet.session.transfer.start",
+                &module.id,
+                "Start Workjet session transfer",
+                "Start a native Workjet session transfer to another computer and path.",
+                "write",
+                false,
+                false,
+            ),
+            action_descriptor(
+                "workjet.session.transfer.status",
+                &module.id,
+                "Get Workjet session transfer status",
+                "Read the current native Workjet session transfer outcome.",
+                "read",
+                false,
+                false,
+            ),
+            action_descriptor(
+                "workjet.session.transfer.abort",
+                &module.id,
+                "Abort Workjet session transfer",
+                "Abort a native Workjet session transfer according to its current phase.",
+                "write",
+                false,
+                false,
+            ),
+            action_descriptor(
+                "workjet.session.transfer.resume",
+                &module.id,
+                "Request Workjet session resume",
+                "Nudge the target observer to resume a switched Workjet session.",
+                "write",
+                false,
+                false,
+            ),
+        ],
         _ => Vec::new(),
     });
     let has_external_sql = store::local_external_data_source_declarations(root)?
@@ -4528,7 +4568,7 @@ pub fn propose_action(
                 format!("Business OS action `{action_id}` is not allowed for module `{module_id}`"),
             ))
         })?;
-    let record_id = optional_string_arg(arguments, "record_id");
+    let mut record_id = optional_string_arg(arguments, "record_id");
     let title = optional_string_arg(arguments, "title").unwrap_or_else(|| action.title.clone());
     let objective =
         optional_string_arg(arguments, "objective").unwrap_or_else(|| action.description.clone());
@@ -4564,10 +4604,18 @@ pub fn propose_action(
             "workspace": &context.workspace
         });
     }
+    if is_workjet_session_transfer_action(module_id, &action.action_id) {
+        record_id = Some(workjet_session_transfer_record_id(
+            &action.action_id,
+            &payload,
+        )?);
+    }
     if is_native_mcp_control_action(module_id, &action.action_id) {
         return Ok(BusinessOsActionProposal {
             ok: true,
-            command_type: action.action_id.clone(),
+            command_type: native_mcp_control_command_type(module_id, &action.action_id)
+                .unwrap_or(action.action_id.as_str())
+                .to_string(),
             payload,
             client_context: serde_json::json!({
                 "channel": &context.channel,
@@ -4580,6 +4628,8 @@ pub fn propose_action(
                 "proposal_only": true,
                 "writeback_contract": if action.action_id == "web_stack.person_research" {
                     "person_research/native"
+                } else if is_workjet_session_transfer_action(module_id, &action.action_id) {
+                    "workjet_session_transfer/native"
                 } else {
                     "external_sql"
                 }
@@ -4679,6 +4729,8 @@ pub fn execute_action(
     }
     let writeback_contract = if action_id == "web_stack.person_research" {
         "person_research/native"
+    } else if is_workjet_session_transfer_action(module_id, action_id) {
+        "workjet_session_transfer/native"
     } else if is_native_mcp_control_action(module_id, action_id) {
         "external_sql"
     } else {
@@ -4743,14 +4795,21 @@ pub fn execute_action(
             .and_then(Value::as_str)
             .filter(|value| !value.trim().is_empty())
             .map(str::to_string);
+        let result = outcome.get("result").cloned().unwrap_or(Value::Null);
+        let ok = if is_workjet_session_transfer_action(module_id, action_id) {
+            result.get("ok").and_then(Value::as_bool).unwrap_or(false)
+        } else {
+            outcome.get("ok").and_then(Value::as_bool).unwrap_or(true)
+        };
         return Ok(BusinessOsActionExecution {
-            ok: outcome.get("ok").and_then(Value::as_bool).unwrap_or(true),
+            ok,
             action: proposal.action,
             module_id: module_id.to_string(),
             record_id: proposal.record_id,
             command_type: proposal.command_type,
             command_id,
             status,
+            result,
             task_id,
             task_status,
             confirmation_required: proposal.confirmation_required,
@@ -4777,6 +4836,7 @@ pub fn execute_action(
         command_type: proposal.command_type,
         command_id: accepted.command_id,
         status: accepted.status.to_string(),
+        result: Value::Null,
         task_id: accepted.task_id,
         task_status: accepted.task_status,
         confirmation_required: proposal.confirmation_required,
@@ -4784,12 +4844,64 @@ pub fn execute_action(
     })
 }
 
+fn is_workjet_session_transfer_action(module_id: &str, action_id: &str) -> bool {
+    module_id == "ctox"
+        && matches!(
+            action_id,
+            "workjet.session.transfer.start"
+                | "workjet.session.transfer.status"
+                | "workjet.session.transfer.abort"
+                | "workjet.session.transfer.resume"
+        )
+}
+
+fn native_mcp_control_command_type<'a>(module_id: &str, action_id: &'a str) -> Option<&'a str> {
+    if module_id != "ctox" {
+        return None;
+    }
+    match action_id {
+        "workjet.session.transfer.start" => Some("ctox.workjet.session.transfer.start"),
+        "workjet.session.transfer.status" => Some("ctox.workjet.session.transfer.status"),
+        "workjet.session.transfer.abort" => Some("ctox.workjet.session.transfer.abort"),
+        "workjet.session.transfer.resume" => Some("ctox.workjet.session.transfer.resume"),
+        _ => None,
+    }
+}
+
+fn workjet_session_transfer_record_id(action_id: &str, payload: &Value) -> anyhow::Result<String> {
+    let field = if action_id == "workjet.session.transfer.start" {
+        "session_id"
+    } else {
+        "transfer_id"
+    };
+    let value = payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            (action_id == "workjet.session.transfer.status")
+                .then(|| payload.get("session_id").and_then(Value::as_str))
+                .flatten()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .ok_or_else(|| {
+            anyhow::Error::new(BusinessOsMcpError::validation(
+                &format!("payload.{field}"),
+                format!("{action_id} requires a non-empty `{field}`"),
+            ))
+        })?;
+    Ok(value.to_string())
+}
+
 fn is_native_mcp_control_action(module_id: &str, action_id: &str) -> bool {
-    !module_id.trim().is_empty()
+    (!module_id.trim().is_empty()
         && matches!(
             action_id,
             "external_sql.sync.refresh" | "external_sql.write" | "web_stack.person_research"
-        )
+        ))
+        || is_workjet_session_transfer_action(module_id, action_id)
 }
 
 fn normalize_native_mcp_action_payload(action_id: &str, mut payload: Value) -> Value {
@@ -12488,6 +12600,230 @@ mod tests {
 
         assert!(!action_ids.contains(&"external_sql.sync.refresh"));
         assert!(!action_ids.contains(&"external_sql.write"));
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_transfer_actions_are_native_without_ack_actions() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_module(
+            root,
+            "ctox",
+            "CTOX",
+            &["workjet_sessions", "workjet_session_transfers"],
+        )?;
+        seed_default_mcp_admin(root)?;
+
+        let actions = list_module_actions(
+            root,
+            &test_context("business_os.list_module_actions"),
+            "ctox",
+        )?;
+        for (action_id, risk_class) in [
+            ("workjet.session.transfer.start", "write"),
+            ("workjet.session.transfer.status", "read"),
+            ("workjet.session.transfer.abort", "write"),
+            ("workjet.session.transfer.resume", "write"),
+        ] {
+            let descriptor = actions
+                .items
+                .iter()
+                .find(|action| action.action_id == action_id)
+                .with_context(|| format!("missing {action_id} descriptor"))?;
+            assert_eq!(descriptor.module_id, "ctox");
+            assert_eq!(descriptor.risk_class, risk_class);
+            assert!(!descriptor.external_effect);
+            assert!(!descriptor.confirmation_required);
+            assert!(is_native_mcp_control_action("ctox", action_id));
+        }
+        for ack_action in [
+            "workjet.session.transfer.pause_ack",
+            "workjet.session.transfer.pack_complete",
+            "workjet.session.transfer.apply_complete",
+            "workjet.session.transfer.confirm_working_copy",
+            "workjet.session.transfer.resume_ack",
+        ] {
+            assert!(!actions
+                .items
+                .iter()
+                .any(|action| action.action_id == ack_action));
+            assert!(!is_native_mcp_control_action("ctox", ack_action));
+        }
+        for (action_id, command_type, record_id, payload) in [
+            (
+                "workjet.session.transfer.start",
+                "ctox.workjet.session.transfer.start",
+                "session-1",
+                serde_json::json!({
+                    "session_id": "session-1",
+                    "target_computer_id": "computer-2",
+                    "target_path": "/opaque/path",
+                    "idempotency_key": "start-1",
+                }),
+            ),
+            (
+                "workjet.session.transfer.status",
+                "ctox.workjet.session.transfer.status",
+                "transfer-1",
+                serde_json::json!({ "transfer_id": "transfer-1" }),
+            ),
+            (
+                "workjet.session.transfer.abort",
+                "ctox.workjet.session.transfer.abort",
+                "transfer-1",
+                serde_json::json!({
+                    "transfer_id": "transfer-1",
+                    "reason": "owner_cancelled",
+                    "idempotency_key": "abort-1",
+                }),
+            ),
+            (
+                "workjet.session.transfer.resume",
+                "ctox.workjet.session.transfer.resume",
+                "transfer-1",
+                serde_json::json!({
+                    "transfer_id": "transfer-1",
+                    "idempotency_key": "resume-1",
+                }),
+            ),
+        ] {
+            let proposal = propose_action(
+                root,
+                &test_context("business_os.propose_action"),
+                "ctox",
+                action_id,
+                &serde_json::json!({ "payload": payload.clone() }),
+            )?;
+            assert_eq!(proposal.command_type, command_type);
+            assert_eq!(proposal.record_id.as_deref(), Some(record_id));
+            assert_eq!(proposal.payload, payload);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_transfer_start_dispatches_exact_native_command_and_outcome() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_module(
+            root,
+            "ctox",
+            "CTOX",
+            &["workjet_sessions", "workjet_session_transfers"],
+        )?;
+        seed_default_mcp_admin(root)?;
+        let payload = serde_json::json!({
+            "session_id": "workjet-session-missing",
+            "target_computer_id": "computer-target",
+            "target_path": "/opaque/target/path",
+            "idempotency_key": "transfer-start-key",
+        });
+        let executed = execute_action(
+            root,
+            &test_context("business_os.execute_action"),
+            "ctox",
+            "workjet.session.transfer.start",
+            &serde_json::json!({ "payload": payload.clone() }),
+        )?;
+
+        assert!(!executed.ok);
+        assert_eq!(executed.command_type, "ctox.workjet.session.transfer.start");
+        assert_eq!(
+            executed.record_id.as_deref(),
+            Some("workjet-session-missing")
+        );
+        assert_eq!(executed.result["ok"], false);
+        assert_eq!(executed.result["error_code"], "session_not_found");
+        assert_eq!(executed.result["retryable"], false);
+        assert!(executed.result["transfer_id"].as_str().is_some());
+        assert!(executed.result["state"].is_null());
+        let tool_result = mcp_tool_result(serde_json::to_value(&executed)?)?;
+        assert_eq!(
+            tool_result.pointer("/structuredContent/result/ok"),
+            Some(&Value::Bool(false))
+        );
+        assert_eq!(
+            tool_result
+                .pointer("/structuredContent/result/error_code")
+                .and_then(Value::as_str),
+            Some("session_not_found")
+        );
+        assert_eq!(
+            tool_result
+                .pointer("/structuredContent/result/retryable")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(tool_result
+            .pointer("/structuredContent/result/transfer_id")
+            .and_then(Value::as_str)
+            .is_some());
+        assert!(tool_result
+            .pointer("/structuredContent/result/state")
+            .is_some_and(Value::is_null));
+        let projected =
+            crate::mission::channels::business_command_projection(root, &executed.command_id)?;
+        assert_eq!(
+            projected["command_type"],
+            "ctox.workjet.session.transfer.start"
+        );
+        assert_eq!(projected["record_id"], "workjet-session-missing");
+        assert_eq!(projected["payload"], payload);
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_transfer_start_denies_foreign_user_scope() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        write_module(root, "ctox", "CTOX", &["workjet_sessions"])?;
+        seed_business_user(root, "chatgpt:test-user", "user")?;
+        let conn = store::open_store(root)?;
+        let now = now_ms() as i64;
+        store::upsert_business_record(
+            &conn,
+            "workjet_sessions",
+            "workjet-session-foreign",
+            now,
+            serde_json::json!({
+                "id": "workjet-session-foreign",
+                "owner_user_id": "owner-other",
+                "run_status": "running",
+                "is_deleted": false,
+                "updated_at_ms": now,
+            }),
+        )?;
+        drop(conn);
+        let outcome = execute_action(
+            root,
+            &test_context("business_os.execute_action"),
+            "ctox",
+            "workjet.session.transfer.start",
+            &serde_json::json!({
+                "payload": {
+                    "session_id": "workjet-session-foreign",
+                    "target_computer_id": "computer-target",
+                    "target_path": "/opaque/target/path",
+                    "idempotency_key": "foreign-key",
+                }
+            }),
+        );
+        match outcome {
+            Ok(executed) => {
+                assert!(!executed.ok);
+                assert!(matches!(
+                    executed.result["error_code"].as_str(),
+                    Some("role_or_scope_denied" | "session_not_owned")
+                ));
+            }
+            Err(error) => {
+                let typed = error
+                    .downcast_ref::<BusinessOsMcpError>()
+                    .context("expected typed foreign-scope MCP error")?;
+                assert_eq!(typed.code, BusinessOsMcpErrorCode::PermissionDenied);
+            }
+        }
         Ok(())
     }
 

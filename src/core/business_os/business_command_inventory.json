@@ -74,6 +74,7 @@
     "ctox.workjet.session.transfer.confirm_working_copy",
     "ctox.workjet.session.transfer.pack_complete",
     "ctox.workjet.session.transfer.pause_ack",
+    "ctox.workjet.session.transfer.resume",
     "ctox.workjet.session.transfer.resume_ack",
     "ctox.workjet.session.transfer.start",
     "ctox.workjet.session.transfer.status",
