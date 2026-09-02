@@ -217,6 +217,138 @@ pub(crate) fn load_workjet_session_fence_epoch(
     )
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PauseMaintenanceOutcome {
+    pub transfer_id: String,
+    pub session_id: String,
+    pub pause_slow_marked: bool,
+    pub hard_cancel_requested: bool,
+    pub cancelled_turns: usize,
+}
+
+pub(crate) fn run_workjet_session_pause_maintenance(
+    root: &Path,
+    now_ms: i64,
+) -> anyhow::Result<Vec<PauseMaintenanceOutcome>> {
+    let mut conn = open_store(root)?;
+    let transfers = {
+        let mut statement = conn.prepare(
+            "SELECT payload_json FROM business_records
+             WHERE collection=?1 AND deleted=0",
+        )?;
+        let rows = statement.query_map([TRANSFERS_COLLECTION], |row| row.get::<_, String>(0))?;
+        let mut transfers = Vec::new();
+        for row in rows {
+            transfers.push(serde_json::from_str::<Value>(&row?)?);
+        }
+        transfers
+    };
+    let mut outcomes = Vec::new();
+    for mut transfer in transfers {
+        if transfer.get("state").and_then(Value::as_str) != Some("pause_requested") {
+            continue;
+        }
+        let Some(transfer_id) = transfer
+            .get("id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let Some(session_id) = transfer
+            .get("session_id")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+        else {
+            continue;
+        };
+        let created_at_ms = transfer
+            .get("created_at_ms")
+            .and_then(Value::as_i64)
+            .unwrap_or(now_ms);
+        let age_ms = now_ms.saturating_sub(created_at_ms);
+        let pause_slow_marked = age_ms > 30_000
+            && transfer
+                .get("pause_slow_at_ms")
+                .and_then(Value::as_i64)
+                .is_none();
+        let hard_cancel_requested = age_ms > 45_000
+            && transfer
+                .get("hard_cancel_requested_at_ms")
+                .and_then(Value::as_i64)
+                .is_none();
+        if !pause_slow_marked && !hard_cancel_requested {
+            continue;
+        }
+        let cancelled_turns = if hard_cancel_requested {
+            crate::coding_agents::pi_sidecar::cancel_workjet_session_turns(&session_id)
+        } else {
+            0
+        };
+        if pause_slow_marked {
+            transfer["pause_slow_at_ms"] = Value::from(now_ms);
+        }
+        if hard_cancel_requested {
+            transfer["hard_cancel_requested_at_ms"] = Value::from(now_ms);
+            transfer["hard_cancelled_turns"] = Value::from(cancelled_turns as u64);
+        }
+        transfer["updated_at_ms"] = Value::from(now_ms);
+        let tx = conn.transaction()?;
+        upsert_business_record(
+            &tx,
+            TRANSFERS_COLLECTION,
+            &transfer_id,
+            now_ms,
+            transfer.clone(),
+        )?;
+        if pause_slow_marked {
+            insert_business_event(
+                &tx,
+                TRANSFERS_COLLECTION,
+                &transfer_id,
+                "workjet.session.transfer.pause_slow",
+                serde_json::json!({
+                    "event_type": "workjet.session.transfer.pause_slow",
+                    "transfer_id": transfer_id,
+                    "session_id": session_id,
+                    "age_ms": age_ms,
+                    "observed_at_ms": now_ms,
+                }),
+                now_ms,
+            )?;
+        }
+        if hard_cancel_requested {
+            insert_business_event(
+                &tx,
+                TRANSFERS_COLLECTION,
+                &transfer_id,
+                "workjet.session.transfer.hard_cancel_requested",
+                serde_json::json!({
+                    "event_type": "workjet.session.transfer.hard_cancel_requested",
+                    "transfer_id": transfer_id,
+                    "session_id": session_id,
+                    "age_ms": age_ms,
+                    "cancelled_turns": cancelled_turns,
+                    "observed_at_ms": now_ms,
+                }),
+                now_ms,
+            )?;
+        }
+        tx.commit()?;
+        if let Some(session) = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)? {
+            project_transfer_records(root, &session, &transfer)?;
+        }
+        outcomes.push(PauseMaintenanceOutcome {
+            transfer_id,
+            session_id,
+            pause_slow_marked,
+            hard_cancel_requested,
+            cancelled_turns,
+        });
+    }
+    Ok(outcomes)
+}
+
 pub(crate) fn persist_workjet_session_last_terminal_turn(
     root: &Path,
     session_id: &str,
@@ -3296,6 +3428,23 @@ pub(crate) mod tests {
             }),
         )?;
         Ok(())
+    }
+
+    pub(crate) fn workjet_session_fence_gate_fixture(
+        root: &Path,
+        owner: &str,
+        suffix: &str,
+    ) -> anyhow::Result<Value> {
+        transfer_fixture(root, owner, suffix, true)
+    }
+
+    pub(crate) fn workjet_session_fence_gate_start_transfer(
+        root: &Path,
+        owner: &str,
+        session_id: &str,
+        suffix: &str,
+    ) -> anyhow::Result<Value> {
+        start_transfer(root, owner, session_id, suffix, "fence-gate-start")
     }
 
     fn transfer_fixture_records(

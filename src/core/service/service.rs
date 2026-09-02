@@ -14509,9 +14509,53 @@ fn start_mission_maintenance_loop(root: std::path::PathBuf, state: Arc<Mutex<Sha
             // renewal, lease expired) is mechanically released or settled on
             // a bounded cadence instead of surviving its worker forever.
             run_orphaned_queue_lease_sweep(&root, &state);
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(i64::MAX as u128) as i64;
+            run_workjet_session_maintenance_tick(&root, &state, now_ms);
             thread::sleep(Duration::from_secs(MISSION_MAINTENANCE_POLL_SECS));
         }
     });
+}
+
+fn run_workjet_session_maintenance_tick(root: &Path, state: &Arc<Mutex<SharedState>>, now_ms: i64) {
+    match crate::business_os::run_workjet_session_pause_maintenance(root, now_ms) {
+        Ok(outcomes) => {
+            for outcome in outcomes {
+                if outcome.pause_slow_marked {
+                    let message = format!(
+                        "Workjet transfer {} pause_slow for session {}",
+                        outcome.transfer_id, outcome.session_id
+                    );
+                    eprintln!("[workjet-maintenance] {message}");
+                    push_event(state, message);
+                }
+                if outcome.hard_cancel_requested {
+                    let message = format!(
+                        "Workjet transfer {} hard-cancel requested for session {} (cancelled_turns={})",
+                        outcome.transfer_id, outcome.session_id, outcome.cancelled_turns
+                    );
+                    eprintln!("[workjet-maintenance] {message}");
+                    push_event(state, message);
+                }
+            }
+        }
+        Err(error) => {
+            let message = format!("Workjet transfer pause maintenance failed: {error:#}");
+            eprintln!("[workjet-maintenance] {message}");
+            push_event(state, message);
+        }
+    }
+    for outcome in crate::business_os::run_workjet_session_transfer_recovery(root, now_ms) {
+        let message = format!(
+            "Workjet transfer {} recovered {} -> {} ({})",
+            outcome.transfer_id, outcome.old_state, outcome.new_state, outcome.error_code
+        );
+        eprintln!("[workjet-maintenance] {message}");
+        push_event(state, message);
+    }
 }
 
 fn run_business_os_backup_retention_sweep(root: &Path, state: &Arc<Mutex<SharedState>>) {
@@ -24986,6 +25030,135 @@ mod tests {
         );
         clear_ticket_reconcile_gate_for_tests();
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mission_maintenance_recovers_expired_workjet_transfer_once_and_leaves_fresh_transfer(
+    ) -> anyhow::Result<()> {
+        fn load_record(root: &Path, collection: &str, record_id: &str) -> anyhow::Result<Value> {
+            let conn = crate::business_os::store::open_store(root)?;
+            let raw: String = conn.query_row(
+                "SELECT payload_json FROM business_records WHERE collection=?1 AND record_id=?2",
+                rusqlite::params![collection, record_id],
+                |row| row.get(0),
+            )?;
+            Ok(serde_json::from_str(&raw)?)
+        }
+        fn set_transfer_times(
+            root: &Path,
+            transfer_id: &str,
+            created_at_ms: i64,
+            deadline_at_ms: i64,
+        ) -> anyhow::Result<()> {
+            let conn = crate::business_os::store::open_store(root)?;
+            let mut transfer = load_record(root, "workjet_session_transfers", transfer_id)?;
+            transfer["created_at_ms"] = Value::from(created_at_ms);
+            transfer["deadline_at_ms"] = Value::from(deadline_at_ms);
+            conn.execute(
+                "UPDATE business_records SET payload_json=?2 WHERE collection='workjet_session_transfers' AND record_id=?1",
+                rusqlite::params![transfer_id, serde_json::to_string(&transfer)?],
+            )?;
+            Ok(())
+        }
+
+        let root = temp_root("mission-maintenance-workjet-transfer");
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .min(i64::MAX as u128) as i64;
+        let old_fixture = crate::business_os::workjet_session_fence_gate_fixture(
+            &root,
+            "maintenance-owner",
+            "maintenance-old",
+        )?;
+        let old_session_id = old_fixture["session"]["id"]
+            .as_str()
+            .context("old session id")?;
+        let old_transfer = crate::business_os::workjet_session_fence_gate_start_transfer(
+            &root,
+            "maintenance-owner",
+            old_session_id,
+            "maintenance-old",
+        )?;
+        let old_transfer_id = old_transfer["transfer_id"]
+            .as_str()
+            .context("old transfer id")?;
+        set_transfer_times(
+            &root,
+            old_transfer_id,
+            now_ms.saturating_sub(46_000),
+            now_ms.saturating_sub(1),
+        )?;
+
+        let fresh_fixture = crate::business_os::workjet_session_fence_gate_fixture(
+            &root,
+            "maintenance-owner",
+            "maintenance-fresh",
+        )?;
+        let fresh_session_id = fresh_fixture["session"]["id"]
+            .as_str()
+            .context("fresh session id")?;
+        let fresh_transfer = crate::business_os::workjet_session_fence_gate_start_transfer(
+            &root,
+            "maintenance-owner",
+            fresh_session_id,
+            "maintenance-fresh",
+        )?;
+        let fresh_transfer_id = fresh_transfer["transfer_id"]
+            .as_str()
+            .context("fresh transfer id")?;
+        set_transfer_times(
+            &root,
+            fresh_transfer_id,
+            now_ms.saturating_sub(5_000),
+            now_ms.saturating_add(55_000),
+        )?;
+
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        run_workjet_session_maintenance_tick(&root, &state, now_ms);
+        let recovered = load_record(&root, "workjet_session_transfers", old_transfer_id)?;
+        assert_eq!(
+            recovered.get("state").and_then(Value::as_str),
+            Some("rolled_back")
+        );
+        assert_eq!(
+            recovered.get("error_code").and_then(Value::as_str),
+            Some("pause_timeout")
+        );
+        assert_eq!(
+            recovered.get("pause_slow_at_ms").and_then(Value::as_i64),
+            Some(now_ms)
+        );
+        assert_eq!(
+            recovered
+                .get("hard_cancel_requested_at_ms")
+                .and_then(Value::as_i64),
+            Some(now_ms)
+        );
+        let fresh = load_record(&root, "workjet_session_transfers", fresh_transfer_id)?;
+        assert_eq!(
+            fresh.get("state").and_then(Value::as_str),
+            Some("pause_requested")
+        );
+        assert!(fresh.get("pause_slow_at_ms").is_none());
+        assert!(fresh.get("hard_cancel_requested_at_ms").is_none());
+
+        let event_count = lock_shared_state(&state).recent_events.len();
+        run_workjet_session_maintenance_tick(&root, &state, now_ms);
+        assert_eq!(
+            lock_shared_state(&state).recent_events.len(),
+            event_count,
+            "a second identical maintenance tick must be a no-op"
+        );
+        assert_eq!(
+            load_record(&root, "workjet_session_transfers", fresh_transfer_id)?
+                .get("state")
+                .and_then(Value::as_str),
+            Some("pause_requested")
+        );
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
     }
 
     #[test]

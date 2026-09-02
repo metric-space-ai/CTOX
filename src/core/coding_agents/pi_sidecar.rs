@@ -90,6 +90,32 @@ struct RunningTurn {
 }
 
 static RUNNING_WORKJET_TURNS: OnceLock<Mutex<HashMap<String, RunningTurn>>> = OnceLock::new();
+#[cfg(test)]
+static WORKJET_FAUX_DELAYS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+
+#[cfg(test)]
+fn set_workjet_faux_delay(session_id: &str, delay_ms: Option<u64>) {
+    let mut delays = WORKJET_FAUX_DELAYS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(delay_ms) = delay_ms {
+        delays.insert(session_id.to_owned(), delay_ms);
+    } else {
+        delays.remove(session_id);
+    }
+}
+
+#[cfg(test)]
+fn configured_workjet_faux_delay(fence: Option<&WorkjetTurnFence>) -> Option<u64> {
+    let session_id = fence?.session_id.as_str();
+    WORKJET_FAUX_DELAYS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(session_id)
+        .copied()
+}
 
 fn running_workjet_turns() -> &'static Mutex<HashMap<String, RunningTurn>> {
     RUNNING_WORKJET_TURNS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -584,6 +610,8 @@ fn run_pi_turn_owned(
         std::env::temp_dir().join(format!("ctox-pi-{endpoint_id}.sock")),
         format!("ctox-pi-{endpoint_id}"),
     );
+    #[cfg(test)]
+    let faux_delay_ms = faux_delay_ms.or_else(|| configured_workjet_faux_delay(fence));
     let mut daemon = spawn_sidecar(dist, &transport, faux, faux_delay_ms)?;
     if let Some(fence) = fence {
         daemon.registration = Some(register_workjet_turn(fence, &daemon)?);
@@ -1417,6 +1445,146 @@ mod tests {
         assert_eq!(
             session.get("last_terminal_turn_id").and_then(Value::as_str),
             Some("turn-no-kill")
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workjet_session_fence_kills_running_turn_and_applies_no_snapshot() -> anyhow::Result<()> {
+        let dist = require_faux_sidecar()?;
+        let root = tempfile::tempdir()?;
+        seed_faux_module(root.path(), "gate-widget")?;
+        let fixture = crate::business_os::workjet_session_fence_gate_fixture(
+            root.path(),
+            "gate-owner",
+            "fence-gate",
+        )?;
+        let session_id = fixture
+            .pointer("/session/id")
+            .and_then(Value::as_str)
+            .context("gate fixture session id")?
+            .to_owned();
+        assert_eq!(
+            fixture
+                .pointer("/session/fence_epoch")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+        set_workjet_faux_delay(&session_id, Some(3_000));
+
+        let turn_root = root.path().to_path_buf();
+        let turn_session_id = session_id.clone();
+        let worker = std::thread::spawn(move || {
+            crate::business_os::store::accept_rxdb_business_command(
+                &turn_root,
+                serde_json::json!({
+                    "id": "workjet-session-fence-gate-command",
+                    "module": "gate-widget",
+                    "type": "ctox.coding.turn",
+                    "payload": {
+                        "module_id": "gate-widget",
+                        "prompt": "long faux turn fenced by transfer.start",
+                        "faux": true,
+                        "workjet_session_id": turn_session_id,
+                        "fence_epoch": 0,
+                        "turn_id": "turn-fence-gate"
+                    },
+                    "client_context": {
+                        "actor": { "id": "gate-owner", "display_name": "Gate Owner" }
+                    }
+                }),
+            )
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let running = loop {
+            if let Some(running) = running_workjet_session_turn(&session_id) {
+                break running;
+            }
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "gate turn did not register in time"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        println!(
+            "workjet_session_fence gate registered pid={} epoch={} started_at_ms={}",
+            running.pid, running.start_epoch, running.started_at_ms
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        let alive_before_cancel = Command::new("kill")
+            .args(["-0", &running.pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        assert!(
+            alive_before_cancel,
+            "registered sidecar pid must be running before transfer.start"
+        );
+
+        let transfer = crate::business_os::workjet_session_fence_gate_start_transfer(
+            root.path(),
+            "gate-owner",
+            &session_id,
+            "fence-gate",
+        )?;
+        assert_eq!(transfer.get("fence_epoch").and_then(Value::as_u64), Some(1));
+        let outcome = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("gate coding turn panicked"))??;
+        set_workjet_faux_delay(&session_id, None);
+
+        assert_eq!(
+            outcome.get("status").and_then(Value::as_str),
+            Some("failed")
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/error_code")
+                .and_then(Value::as_str),
+            Some("session_fenced")
+        );
+        assert_eq!(
+            outcome
+                .pointer("/result/session_id")
+                .and_then(Value::as_str),
+            Some(session_id.as_str())
+        );
+        let files = project_module_source(root.path(), "gate-widget")?;
+        assert!(
+            !files.keys().any(|path| path.ends_with("faux-marker.js")),
+            "cancelled turn must apply no faux snapshot"
+        );
+        assert!(
+            running_workjet_session_turn(&session_id).is_none(),
+            "registry must be empty after cancellation"
+        );
+        let alive = Command::new("kill")
+            .args(["-0", &running.pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false);
+        println!(
+            "workjet_session_fence gate pid={} alive_after_cancel={alive}",
+            running.pid
+        );
+        assert!(!alive, "sidecar pid must be reaped after hard cancellation");
+        let conn = crate::business_os::store::open_store(root.path())?;
+        let session_json: String = conn.query_row(
+            "SELECT payload_json FROM business_records WHERE collection='workjet_sessions' AND record_id=?1",
+            [&session_id],
+            |row| row.get(0),
+        )?;
+        let session: Value = serde_json::from_str(&session_json)?;
+        assert_eq!(session.get("fence_epoch").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            session.get("last_terminal_turn_id").and_then(Value::as_str),
+            Some("turn-fence-gate")
         );
         Ok(())
     }
