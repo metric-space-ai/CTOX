@@ -166,7 +166,15 @@ ctox business-os commands dispatch --json '{
 }'
 ```
 
-- `field_status` covers **every requested field** with a terminal status; a missing field means the work is not finished.
+### Validation rules the daemon enforces (get them right on the first attempt)
+
+- `field_status` covers **every requested field** with a terminal status; a missing or extra field is rejected.
+- Every `field_status` entry is an object with `status`; `value` only for `verified`.
+- For a `verified` field the value in `result.fields.<field>.value` must be **identical** to `field_status.<field>.value` — same string, no reformatting, no added prefix.
+- Every populated `person_*` value, in `result.fields` and in `person_records`, needs the `person_key` of the person it belongs to. Keep the `person_key` from `known_person_records` for a Sellify person; invent a stable one only for a new person.
+- `result.fields` holds objects (`{"value": …, "sources": [...]}`), never bare strings.
+- Every evidence entry needs `field_key`, `source_id`, `url`; person evidence also `person_key`.
+- Person fields describe the priority contact(s) you actually found: when you report persons in `person_records`, set the matching `person_*` fields `verified` with their `person_key` instead of `no_match`. `no_match` on a person field means you found no such person at all.
 - Person fields carry a `person_key`; `result.fields` holds structured objects only, never free text.
 - `research_command_id` is your own command id; `gap_task_id` stays empty for a chat assignment (it is only set when the daemon handed you a queue task "Lückenschluss: …" — then copy it from that task).
 - Done means the dispatch answered `ok: true` with status `accepted` or `completed`. Report the counts (verified / no_match / action_required / unsupported) and the persons found in one short chat message.
