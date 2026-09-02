@@ -8,6 +8,8 @@
 use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "linux")]
+use std::collections::HashSet;
 use std::collections::{BTreeMap, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -166,6 +168,131 @@ fn configure_managed_linux_sandbox(cli_overrides: &mut Vec<(String, toml::Value)
     let _ = cli_overrides;
 }
 
+#[cfg(target_os = "linux")]
+fn push_canonical_readable_directory(
+    roots: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    path: &Path,
+) {
+    let Ok(canonical) = std::fs::canonicalize(path) else {
+        return;
+    };
+    if canonical.is_dir() && seen.insert(canonical.clone()) {
+        roots.push(canonical);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_symlink_chain(path: &Path) -> Option<PathBuf> {
+    const MAX_SYMLINK_DEPTH: usize = 40;
+
+    let mut current = path.to_path_buf();
+    let mut seen = HashSet::new();
+    for _ in 0..MAX_SYMLINK_DEPTH {
+        if !seen.insert(current.clone()) {
+            return None;
+        }
+        match std::fs::read_link(&current) {
+            Ok(target) => {
+                current = if target.is_absolute() {
+                    target
+                } else {
+                    current.parent()?.join(target)
+                };
+            }
+            Err(_) => return std::fs::canonicalize(current).ok(),
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn collect_managed_worker_default_readable_roots(
+    exe: Option<&Path>,
+    path_entries: &[PathBuf],
+    resolv_conf_target: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(exe) = exe {
+        if let Ok(canonical_exe) = std::fs::canonicalize(exe) {
+            if let Some(bin_dir) = canonical_exe
+                .parent()
+                .filter(|path| path.file_name().is_some_and(|name| name == "bin"))
+            {
+                if let Some(release_root) = bin_dir.parent() {
+                    push_canonical_readable_directory(&mut roots, &mut seen, release_root);
+
+                    if let Some(ctox_lib_dir) = release_root
+                        .parent()
+                        .filter(|path| path.file_name().is_some_and(|name| name == "releases"))
+                        .and_then(Path::parent)
+                    {
+                        let current_root = ctox_lib_dir.join("current");
+                        let current_is_symlink = std::fs::symlink_metadata(&current_root)
+                            .map(|metadata| metadata.file_type().is_symlink())
+                            .unwrap_or(false);
+                        if current_is_symlink
+                            && std::fs::canonicalize(&current_root).ok().as_deref()
+                                == Some(release_root)
+                            && seen.insert(current_root.clone())
+                        {
+                            // Preserve the stable alias as well as its canonical release target.
+                            // Landlock resolves the alias when installing its path-beneath rule.
+                            roots.push(current_root);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for path_entry in path_entries {
+        let path_entry = if path_entry.as_os_str().is_empty() {
+            Path::new(".")
+        } else {
+            path_entry.as_path()
+        };
+        if path_entry.join("ctox").is_file() {
+            push_canonical_readable_directory(&mut roots, &mut seen, path_entry);
+        }
+    }
+    push_canonical_readable_directory(&mut roots, &mut seen, Path::new("/usr/local/bin"));
+
+    for resolver_dir in ["/run/systemd/resolve", "/run/resolvconf"] {
+        push_canonical_readable_directory(&mut roots, &mut seen, Path::new(resolver_dir));
+    }
+    if let Some(target_parent) = resolv_conf_target.and_then(Path::parent) {
+        push_canonical_readable_directory(&mut roots, &mut seen, target_parent);
+    }
+
+    roots
+}
+
+#[cfg(target_os = "linux")]
+fn managed_worker_default_readable_roots_for(
+    exe: &Path,
+    path_entries: &[PathBuf],
+    resolv_conf_target: Option<&Path>,
+) -> Vec<PathBuf> {
+    collect_managed_worker_default_readable_roots(Some(exe), path_entries, resolv_conf_target)
+}
+
+#[cfg(target_os = "linux")]
+fn managed_worker_default_readable_roots() -> Vec<PathBuf> {
+    let exe = std::env::current_exe().ok();
+    let path_entries = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let resolv_conf_target = resolve_symlink_chain(Path::new("/etc/resolv.conf"));
+    collect_managed_worker_default_readable_roots(
+        exe.as_deref(),
+        &path_entries,
+        resolv_conf_target.as_deref(),
+    )
+}
+
 fn managed_worker_sandbox_policy(
     read_only_sandbox: bool,
     additional_writable_roots: &[PathBuf],
@@ -178,7 +305,6 @@ fn managed_worker_sandbox_policy(
     let mut policy = SandboxPolicy::new_workspace_write_policy();
     if let SandboxPolicy::WorkspaceWrite {
         writable_roots,
-        read_only_access,
         network_access,
         ..
     } = &mut policy
@@ -188,7 +314,14 @@ fn managed_worker_sandbox_policy(
             .iter()
             .filter_map(|path| AbsolutePathBuf::from_absolute_path(path.clone()).ok())
             .collect();
-        if !additional_readable_roots.is_empty() {
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    if !additional_readable_roots.is_empty() {
+        if let SandboxPolicy::WorkspaceWrite {
+            read_only_access, ..
+        } = &mut policy
+        {
             *read_only_access = ctox_protocol::protocol::ReadOnlyAccess::Restricted {
                 include_platform_defaults: true,
                 readable_roots: additional_readable_roots
@@ -198,6 +331,7 @@ fn managed_worker_sandbox_policy(
             };
         }
     }
+
     #[cfg(target_os = "linux")]
     if let SandboxPolicy::WorkspaceWrite {
         read_only_access,
@@ -206,15 +340,28 @@ fn managed_worker_sandbox_policy(
         ..
     } = &mut policy
     {
-        if matches!(
-            read_only_access,
-            ctox_protocol::protocol::ReadOnlyAccess::FullAccess
-        ) {
-            *read_only_access = ctox_protocol::protocol::ReadOnlyAccess::Restricted {
-                include_platform_defaults: true,
-                readable_roots: Vec::new(),
-            };
-        }
+        let mut readable_paths = managed_worker_default_readable_roots();
+        readable_paths.extend_from_slice(additional_readable_roots);
+        let mut seen = HashSet::new();
+        let readable_roots = readable_paths
+            .into_iter()
+            .filter_map(|path| AbsolutePathBuf::from_absolute_path(path).ok())
+            .filter(|path| seen.insert(path.as_path().to_path_buf()))
+            .collect::<Vec<_>>();
+        let preview = readable_roots
+            .iter()
+            .take(3)
+            .map(|path| path.as_path().display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        eprintln!(
+            "[harness] managed worker readable roots: {} ({preview})",
+            readable_roots.len()
+        );
+        *read_only_access = ctox_protocol::protocol::ReadOnlyAccess::Restricted {
+            include_platform_defaults: true,
+            readable_roots,
+        };
         *exclude_tmpdir_env_var = true;
         *exclude_slash_tmp = true;
     }
@@ -2249,6 +2396,50 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn managed_worker_default_readable_roots_cover_install_wrapper_and_resolver() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("create readable-roots fixture");
+        let ctox_lib = temp.path().join("x/lib/ctox");
+        let release_root = ctox_lib.join("releases/r1");
+        let exe = release_root.join("bin/ctox-real");
+        std::fs::create_dir_all(exe.parent().expect("release bin directory"))
+            .expect("create release bin directory");
+        std::fs::write(&exe, b"fixture").expect("create ctox executable fixture");
+        symlink("releases/r1", ctox_lib.join("current")).expect("create current symlink");
+
+        let wrapper_dir = temp.path().join("home/.local/bin");
+        std::fs::create_dir_all(&wrapper_dir).expect("create wrapper directory");
+        std::fs::write(wrapper_dir.join("ctox"), b"fixture").expect("create ctox wrapper fixture");
+
+        let resolver_dir = temp.path().join("run/systemd/resolve");
+        let resolver_target = resolver_dir.join("stub-resolv.conf");
+        std::fs::create_dir_all(&resolver_dir).expect("create resolver directory");
+        std::fs::write(&resolver_target, b"nameserver 127.0.0.53")
+            .expect("create resolver fixture");
+
+        let roots = managed_worker_default_readable_roots_for(
+            &exe,
+            std::slice::from_ref(&wrapper_dir),
+            Some(&resolver_target),
+        );
+
+        assert!(roots.contains(&release_root.canonicalize().expect("canonical release root")));
+        assert!(roots.contains(&ctox_lib.join("current")));
+        assert!(roots.contains(
+            &wrapper_dir
+                .canonicalize()
+                .expect("canonical wrapper directory")
+        ));
+        assert!(roots.contains(
+            &resolver_dir
+                .canonicalize()
+                .expect("canonical resolver directory")
+        ));
+    }
+
     #[test]
     fn managed_linux_workers_cannot_read_sibling_workspaces() {
         use ctox_protocol::protocol::ReadOnlyAccess;
@@ -2259,6 +2450,7 @@ mod tests {
         assert!(matches!(
             policy,
             SandboxPolicy::WorkspaceWrite {
+                writable_roots,
                 read_only_access: ReadOnlyAccess::Restricted {
                     include_platform_defaults: true,
                     readable_roots,
@@ -2266,7 +2458,7 @@ mod tests {
                 exclude_tmpdir_env_var: true,
                 exclude_slash_tmp: true,
                 ..
-            } if readable_roots.is_empty()
+            } if writable_roots.is_empty() && !readable_roots.is_empty()
         ));
 
         #[cfg(not(target_os = "linux"))]
