@@ -207,6 +207,22 @@ fn resolve_symlink_chain(path: &Path) -> Option<PathBuf> {
 }
 
 #[cfg(target_os = "linux")]
+/// Adds the directory that holds the symlink-resolved `ctox` wrapper (for
+/// example `~/.local/bin` behind `/usr/local/bin/ctox`).
+fn push_ctox_wrapper_target_directory(
+    roots: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+    wrapper: &Path,
+) {
+    let Some(target) = resolve_symlink_chain(wrapper) else {
+        return;
+    };
+    if let Some(parent) = target.parent() {
+        push_canonical_readable_directory(roots, seen, parent);
+    }
+}
+
+#[cfg(target_os = "linux")]
 fn collect_managed_worker_default_readable_roots(
     exe: Option<&Path>,
     path_entries: &[PathBuf],
@@ -256,9 +272,16 @@ fn collect_managed_worker_default_readable_roots(
         };
         if path_entry.join("ctox").is_file() {
             push_canonical_readable_directory(&mut roots, &mut seen, path_entry);
+            push_ctox_wrapper_target_directory(&mut roots, &mut seen, &path_entry.join("ctox"));
         }
     }
     push_canonical_readable_directory(&mut roots, &mut seen, Path::new("/usr/local/bin"));
+    // The installer links `/usr/local/bin/ctox` to the per-user wrapper in
+    // `~/.local/bin/ctox`, and the daemon's PATH (systemd user unit) usually
+    // does not contain `~/.local/bin`. Landlock resolves the symlink, so the
+    // wrapper's real directory must be readable too, or every `ctox` execve
+    // from a worker fails with EACCES even though `/usr/local/bin` is allowed.
+    push_ctox_wrapper_target_directory(&mut roots, &mut seen, Path::new("/usr/local/bin/ctox"));
 
     for resolver_dir in ["/run/systemd/resolve", "/run/resolvconf"] {
         push_canonical_readable_directory(&mut roots, &mut seen, Path::new(resolver_dir));
