@@ -68,24 +68,41 @@ export function defaultStreamFn(): StreamFn {
   return piStream as unknown as StreamFn;
 }
 
+function fauxDelayMsFromEnv(): number {
+  const raw = process.env.CTOX_PI_SIDECAR_FAUX_DELAY_MS;
+  if (raw === undefined) return 0;
+  if (!/^\d+$/.test(raw)) {
+    throw new Error("CTOX_PI_SIDECAR_FAUX_DELAY_MS must be a nonnegative integer");
+  }
+  return Number(raw);
+}
+
 /**
  * Deterministic write-then-stop stream for offline integration tests and the
  * `CTOX_PI_SIDECAR_FAUX` daemon mode — NO real model. It issues one `write`
  * tool call, then stops once the tool result returns. Never used for real turns.
+ * An optional faux-only delay gives cancellation tests a controlled running turn.
  */
 export function fauxStreamFn(
   write: { path: string; content: string } = { path: "faux-marker.js", content: "// faux\n" },
+  delayMs = fauxDelayMsFromEnv(),
 ): StreamFn {
+  if (!Number.isSafeInteger(delayMs) || delayMs < 0 || delayMs >= CTOX_PI_TURN_TIMEOUT_MS) {
+    throw new Error("faux delay must be a nonnegative integer below the turn timeout");
+  }
   return (_model, context) => {
     const stream = createAssistantMessageEventStream();
     const hasToolResult = context.messages.some((message) => message.role === "toolResult");
-    stream.push({
-      type: "done",
-      reason: hasToolResult ? "stop" : "toolUse",
-      message: hasToolResult
-        ? createVercelPiCodingTextMessage("Done (faux).")
-        : createVercelPiCodingToolCallMessage("write", write, "faux-w1"),
-    });
+    const pushDone = () =>
+      stream.push({
+        type: "done",
+        reason: hasToolResult ? "stop" : "toolUse",
+        message: hasToolResult
+          ? createVercelPiCodingTextMessage("Done (faux).")
+          : createVercelPiCodingToolCallMessage("write", write, "faux-w1"),
+      });
+    if (delayMs === 0) pushDone();
+    else setTimeout(pushDone, delayMs);
     return stream;
   };
 }
