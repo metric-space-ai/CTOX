@@ -405,6 +405,184 @@ async function waitForDataPlaneReady(timeoutMs = 30000) {
   return true;
 }
 
+const WORKJET_SESSION_EVENT_BUFFER_LIMIT = 64;
+const WORKJET_SESSION_EVENT_DEDUPE_LIMIT = 1024;
+const WORKJET_SESSION_TRANSFER_TERMINAL_STATES = new Set(['completed', 'rolled_back', 'failed']);
+
+function createWorkjetSessionEvents() {
+  let registeredComputerIds = new Set();
+  let transferCollection = null;
+  let transferSubscription = null;
+  let startPromise = null;
+  let generation = 0;
+  const bufferedEvents = [];
+  const emittedKeys = new Set();
+  const emittedKeyOrder = [];
+
+  const matchesRegistration = (event) => registeredComputerIds.has(event.sourceComputerId)
+    || registeredComputerIds.has(event.targetComputerId);
+
+  const bufferEvent = (event) => {
+    bufferedEvents.push(event);
+    while (bufferedEvents.length > WORKJET_SESSION_EVENT_BUFFER_LIMIT) bufferedEvents.shift();
+  };
+
+  const postEvent = (event) => {
+    const post = globalThis.workjetHostBridge?.postSessionTransferEvent;
+    if (typeof post !== 'function') {
+      bufferEvent(event);
+      return;
+    }
+    try {
+      const result = post.call(globalThis.workjetHostBridge, event);
+      result?.catch?.(() => bufferEvent(event));
+    } catch (error) {
+      bufferEvent(event);
+    }
+  };
+
+  const flushBufferedEvents = () => {
+    if (!bufferedEvents.length) return;
+    const pending = bufferedEvents.splice(0, bufferedEvents.length);
+    for (const event of pending) {
+      if (matchesRegistration(event)) postEvent(event);
+    }
+  };
+
+  const rememberEvent = (event) => {
+    const key = `${event.transferId}\0${event.state}\0${event.updatedAtMs}`;
+    if (emittedKeys.has(key)) return false;
+    emittedKeys.add(key);
+    emittedKeyOrder.push(key);
+    while (emittedKeyOrder.length > WORKJET_SESSION_EVENT_DEDUPE_LIMIT) {
+      emittedKeys.delete(emittedKeyOrder.shift());
+    }
+    return true;
+  };
+
+  const emitRecord = (value) => {
+    let event = null;
+    try {
+      event = boundedWorkjetSessionTransferEvent(value?.toJSON?.() || value);
+    } catch (error) {
+      return;
+    }
+    if (!event || !matchesRegistration(event) || !rememberEvent(event)) return;
+    flushBufferedEvents();
+    postEvent(event);
+  };
+
+  const ensureStarted = () => {
+    if (transferSubscription || startPromise || registeredComputerIds.size === 0) {
+      return startPromise || Promise.resolve();
+    }
+    const expectedGeneration = generation;
+    const startup = (async () => {
+      await waitForDataPlaneReady();
+      if (expectedGeneration !== generation || registeredComputerIds.size === 0) return;
+      const collection = state.db?.collection?.('workjet_session_transfers');
+      if (!collection?.$?.subscribe) {
+        throw new Error('workjet_session_transfers collection is not registered.');
+      }
+      const transferBridge = await state.sync?.startCollection?.('workjet_session_transfers');
+      await waitForSyncBridgeReady(transferBridge, 15_000);
+      if (expectedGeneration !== generation || registeredComputerIds.size === 0) return;
+      transferCollection = collection;
+      transferSubscription = collection.$.subscribe((change) => {
+        emitRecord(change?.documentData || change?.document || change);
+      });
+    })();
+    startPromise = startup;
+    startup.catch(() => {
+      if (startPromise === startup) startPromise = null;
+    });
+    return startup;
+  };
+
+  return Object.freeze({
+    register(request = {}) {
+      if (!request || typeof request !== 'object' || Array.isArray(request)) {
+        throw new TypeError('Workjet session event registration must be an object.');
+      }
+      const unexpected = Object.keys(request).filter((key) => key !== 'computerIds');
+      if (unexpected.length) {
+        throw new TypeError(`Unsupported Workjet session event registration field: ${unexpected[0]}`);
+      }
+      if (!Array.isArray(request.computerIds) || request.computerIds.length > 256) {
+        throw new TypeError('Invalid Workjet session event computerIds.');
+      }
+      registeredComputerIds = new Set(request.computerIds.map((computerId) => (
+        boundedWorkjetSessionText(computerId, 'event.computerId', 256)
+      )));
+      flushBufferedEvents();
+      ensureStarted().catch((error) => {
+        console.warn('[business-os] Workjet session transfer event stream unavailable', error);
+      });
+      return Object.freeze({ registered: registeredComputerIds.size });
+    },
+    unregister() {
+      generation += 1;
+      registeredComputerIds.clear();
+      bufferedEvents.splice(0, bufferedEvents.length);
+      emittedKeys.clear();
+      emittedKeyOrder.splice(0, emittedKeyOrder.length);
+      try { transferSubscription?.unsubscribe?.(); } catch (error) {}
+      transferSubscription = null;
+      transferCollection = null;
+      startPromise = null;
+    },
+    async snapshot() {
+      if (registeredComputerIds.size === 0) return [];
+      await ensureStarted();
+      const collection = transferCollection || state.db?.collection?.('workjet_session_transfers');
+      if (!collection?.find) return [];
+      const docs = await collection.find().exec();
+      return docs
+        .map((doc) => {
+          try { return boundedWorkjetSessionTransferEvent(doc?.toJSON?.() || doc); } catch (error) { return null; }
+        })
+        .filter((event) => event
+          && !WORKJET_SESSION_TRANSFER_TERMINAL_STATES.has(event.state)
+          && matchesRegistration(event))
+        .sort((left, right) => left.updatedAtMs - right.updatedAtMs
+          || left.transferId.localeCompare(right.transferId));
+    },
+  });
+}
+
+function boundedWorkjetSessionTransferEvent(value) {
+  if (!value || typeof value !== 'object' || value._deleted === true || value.is_deleted === true) {
+    return null;
+  }
+  const fenceEpoch = value.fence_epoch;
+  const deadlineAtMs = value.deadline_at_ms;
+  const updatedAtMs = value.updated_at_ms;
+  if (!Number.isInteger(fenceEpoch) || fenceEpoch < 0
+    || !Number.isInteger(deadlineAtMs) || deadlineAtMs < 0
+    || !Number.isInteger(updatedAtMs) || updatedAtMs < 0) {
+    throw new TypeError('Invalid Workjet session transfer event numbers.');
+  }
+  return Object.freeze({
+    type: 'workjet.session.transfer',
+    transferId: boundedWorkjetSessionText(value.id, 'event.transferId', 160),
+    sessionId: boundedWorkjetSessionText(value.session_id, 'event.sessionId', 160),
+    state: boundedWorkjetSessionText(value.state, 'event.state', 64),
+    fenceEpoch,
+    sourceComputerId: boundedWorkjetSessionText(
+      value.source_computer_id,
+      'event.sourceComputerId',
+      256,
+    ),
+    targetComputerId: boundedWorkjetSessionText(
+      value.target_computer_id,
+      'event.targetComputerId',
+      256,
+    ),
+    deadlineAtMs,
+    updatedAtMs,
+  });
+}
+
 function installAdvancedStatusInterface() {
   const api = {
     version: 'business-os-advanced-status-v1',
@@ -434,6 +612,7 @@ function installAdvancedStatusInterface() {
   globalThis.workjetComputerControl = workjetComputerControl;
   globalThis.workjetProjectControl = workjetProjectControl;
   globalThis.workjetSessionControl = workjetSessionControl;
+  globalThis.workjetSessionEvents = createWorkjetSessionEvents();
   state.openModule = (moduleId, options = {}) => openModule(moduleId, options);
 }
 
@@ -13017,6 +13196,41 @@ async function workjetSessionControl(request = {}) {
     );
     return {
       action: 'session.transfer.start',
+      outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
+    };
+  }
+
+  if (action === 'session.transfer.pause_ack') {
+    assertWorkjetSessionPayloadKeys(request, new Set([
+      'action', 'commandId', 'transferId', 'computerId', 'fenceEpoch',
+      'lastTerminalTurnId', 'gitRepository', 'idempotencyKey',
+    ]));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const transferId = boundedWorkjetSessionText(request.transferId, 'transferId', 160);
+    const fenceEpoch = request.fenceEpoch;
+    if (!Number.isInteger(fenceEpoch) || fenceEpoch < 0) {
+      throw new TypeError('Invalid Workjet session fenceEpoch.');
+    }
+    if (typeof request.gitRepository !== 'boolean') {
+      throw new TypeError('Invalid Workjet session gitRepository.');
+    }
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.transfer.pause_ack',
+      transferId,
+      {
+        transfer_id: transferId,
+        computer_id: boundedWorkjetSessionText(request.computerId, 'computerId', 256),
+        fence_epoch: fenceEpoch,
+        last_terminal_turn_id: request.lastTerminalTurnId === null || request.lastTerminalTurnId === undefined
+          ? null
+          : boundedWorkjetSessionText(request.lastTerminalTurnId, 'lastTerminalTurnId', 160),
+        git_repository: request.gitRepository,
+        idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
+      },
+    );
+    return {
+      action: 'session.transfer.pause_ack',
       outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
     };
   }

@@ -386,7 +386,8 @@ struct TransferPauseAckPayload {
     transfer_id: String,
     computer_id: String,
     fence_epoch: i64,
-    last_terminal_turn_id: String,
+    #[serde(default)]
+    last_terminal_turn_id: Option<String>,
     git_repository: bool,
     idempotency_key: String,
 }
@@ -1240,8 +1241,14 @@ fn handle_workjet_session_transfer_pause_ack_command(
     let actor_user_id = bounded_required(authorized_owner_user_id, "owner_user_id", 256)?;
     let transfer_id = bounded_required(&payload.transfer_id, "transfer_id", 160)?;
     let computer_id = bounded_required(&payload.computer_id, "computer_id", 256)?;
-    let last_terminal_turn_id =
-        bounded_required(&payload.last_terminal_turn_id, "last_terminal_turn_id", 160)?;
+    // RFC §6.3 step 11: the ack names the last terminal turn when one ran;
+    // a session whose worker never executed a turn has none to name.
+    let last_terminal_turn_id = match payload.last_terminal_turn_id.as_deref() {
+        Some(value) if !value.trim().is_empty() => {
+            Some(bounded_required(value, "last_terminal_turn_id", 160)?)
+        }
+        _ => None,
+    };
     let idempotency_key = bounded_required(&payload.idempotency_key, "idempotency_key", 160)?;
     if payload.fence_epoch < 0 {
         return Ok(transfer_error(
@@ -1365,12 +1372,18 @@ fn handle_workjet_session_transfer_pause_ack_command(
     };
     transfer["state"] = Value::String(next_state.to_owned());
     transfer["source_git_repository"] = Value::Bool(payload.git_repository);
-    transfer["last_terminal_turn_id"] = Value::String(last_terminal_turn_id.clone());
+    transfer["last_terminal_turn_id"] = last_terminal_turn_id
+        .clone()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
     transfer["pause_acked_at_ms"] = Value::from(now);
     transfer["deadline_at_ms"] = Value::from(now.saturating_add(packing_timeout_ms));
     transfer["updated_at_ms"] = Value::from(now);
     session["run_status"] = Value::String("paused".to_owned());
-    session["last_terminal_turn_id"] = Value::String(last_terminal_turn_id.clone());
+    session["last_terminal_turn_id"] = last_terminal_turn_id
+        .clone()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
     session["updated_at_ms"] = Value::from(now);
 
     let tx = conn.transaction()?;
@@ -3312,6 +3325,43 @@ pub(crate) mod tests {
             owner,
             false,
         )
+    }
+
+    #[test]
+    fn workjet_session_transfer_pause_ack_accepts_missing_last_terminal_turn() -> anyhow::Result<()>
+    {
+        let root = tempdir()?;
+        let created = transfer_fixture(root.path(), "owner-1", "pause-ack-none", true)?;
+        let session_id = created["session"]["id"].as_str().context("session id")?;
+        let started = start_transfer(
+            root.path(),
+            "owner-1",
+            session_id,
+            "pause-ack-none",
+            "start",
+        )?;
+        let transfer_id = started["transfer_id"].as_str().context("transfer id")?;
+        let result = handle_workjet_session_transfer_pause_ack_command(
+            root.path(),
+            &command(
+                "ctox.workjet.session.transfer.pause_ack",
+                None,
+                json!({
+                    "transfer_id": transfer_id,
+                    "computer_id": "computer-pause-ack-none",
+                    "fence_epoch": 1,
+                    "git_repository": true,
+                    "idempotency_key": "ack-none",
+                }),
+            ),
+            "owner-1",
+            false,
+        )?;
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["state"], "packing");
+        assert!(result["session"]["last_terminal_turn_id"].is_null());
+        assert!(result["transfer"]["last_terminal_turn_id"].is_null());
+        Ok(())
     }
 
     fn pause_ack_transfer(
