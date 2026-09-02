@@ -206,6 +206,42 @@ pub fn run_workjet_session_transfer_recovery(root: &Path, now_ms: i64) -> Vec<Re
     run_workjet_session_transfer_recovery_inner(root, now_ms).unwrap_or_default()
 }
 
+pub(crate) fn load_workjet_session_fence_epoch(
+    root: &Path,
+    session_id: &str,
+) -> anyhow::Result<Option<u64>> {
+    let conn = open_store(root)?;
+    Ok(
+        outbound_load_record(&conn, SESSIONS_COLLECTION, session_id)?
+            .and_then(|session| session.get("fence_epoch").and_then(Value::as_u64)),
+    )
+}
+
+pub(crate) fn persist_workjet_session_last_terminal_turn(
+    root: &Path,
+    session_id: &str,
+    turn_id: &str,
+) -> anyhow::Result<()> {
+    let mut conn = open_store(root)?;
+    let Some(mut session) = outbound_load_record(&conn, SESSIONS_COLLECTION, session_id)? else {
+        return Ok(());
+    };
+    let now_ms = super::store::now_ms() as i64;
+    session["last_terminal_turn_id"] = Value::String(turn_id.to_owned());
+    session["updated_at_ms"] = Value::from(now_ms);
+    let tx = conn.transaction()?;
+    upsert_business_record(
+        &tx,
+        SESSIONS_COLLECTION,
+        session_id,
+        now_ms,
+        session.clone(),
+    )?;
+    tx.commit()?;
+    upsert_rxdb_collection_record(root, SESSIONS_COLLECTION, session_id, now_ms, session)?;
+    Ok(())
+}
+
 fn run_workjet_session_transfer_recovery_inner(
     root: &Path,
     now_ms: i64,
@@ -1210,6 +1246,29 @@ fn handle_workjet_session_transfer_start_command(
         now,
     )?;
     tx.commit()?;
+
+    // The epoch commit wins authority first; cancellation is then a best-effort
+    // liveness action. The second fence in pi_sidecar remains the write-safety
+    // boundary even when there was no process to kill or kill races completion.
+    let cancelled_turns =
+        crate::coding_agents::pi_sidecar::cancel_workjet_session_turns(&session_id);
+    if let Err(error) = insert_business_event(
+        &conn,
+        TRANSFERS_COLLECTION,
+        &transfer_id,
+        "workjet.session.transfer.turn_cancel_requested",
+        serde_json::json!({
+            "event_type": "workjet.session.transfer.turn_cancel_requested",
+            "transfer_id": transfer_id,
+            "session_id": session_id,
+            "cancelled_turns": cancelled_turns,
+            "fence_epoch": fence_epoch,
+            "observed_at_ms": now,
+        }),
+        now,
+    ) {
+        eprintln!("failed to audit Workjet turn cancellation for {transfer_id}: {error:#}");
+    }
 
     let session = outbound_load_record(&conn, SESSIONS_COLLECTION, &session_id)?
         .context("failed to reload started Workjet session")?;

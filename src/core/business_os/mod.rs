@@ -90,4 +90,7 @@ pub use server::BusinessOsServeOptions;
 
 pub(crate) use external_sql_sync::start_background_sync;
 pub(crate) use person_research_command::recover_once as recover_person_research_commands_once;
+pub(crate) use store_workjet_sessions::{
+    load_workjet_session_fence_epoch, persist_workjet_session_last_terminal_turn,
+};
 pub use store_workjet_sessions::{run_workjet_session_transfer_recovery, RecoveryOutcome};

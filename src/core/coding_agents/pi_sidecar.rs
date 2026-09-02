@@ -9,10 +9,13 @@
 //! drop; it never shares the daemon's process authority with the CTOX daemon.
 use anyhow::Context;
 use serde_json::Value;
+use std::collections::HashMap;
+use std::fmt;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 use crate::execution::models::local_transport::{LocalStream, LocalTransport};
@@ -28,6 +31,149 @@ struct PreparedCodingTurnModel {
     provider: String,
     model_id: String,
     account_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WorkjetTurnFence {
+    pub session_id: String,
+    pub start_epoch: u64,
+    pub turn_id: Option<String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct CodingTurnFailure {
+    error_code: &'static str,
+    session_id: String,
+    message: String,
+}
+
+impl CodingTurnFailure {
+    fn new(error_code: &'static str, session_id: &str, message: impl Into<String>) -> Self {
+        Self {
+            error_code,
+            session_id: session_id.to_owned(),
+            message: message.into(),
+        }
+    }
+
+    pub(crate) fn error_code(&self) -> &'static str {
+        self.error_code
+    }
+
+    pub(crate) fn session_id(&self) -> &str {
+        &self.session_id
+    }
+}
+
+impl fmt::Display for CodingTurnFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CodingTurnFailure {}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RunningTurnInfo {
+    pub start_epoch: u64,
+    pub pid: u32,
+    pub started_at_ms: i64,
+    pub cancelled: bool,
+}
+
+struct RunningTurn {
+    start_epoch: u64,
+    pid: u32,
+    started_at_ms: i64,
+    cancelled: bool,
+    child: Arc<Mutex<Option<Child>>>,
+}
+
+static RUNNING_WORKJET_TURNS: OnceLock<Mutex<HashMap<String, RunningTurn>>> = OnceLock::new();
+
+fn running_workjet_turns() -> &'static Mutex<HashMap<String, RunningTurn>> {
+    RUNNING_WORKJET_TURNS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_running_workjet_turns() -> std::sync::MutexGuard<'static, HashMap<String, RunningTurn>> {
+    running_workjet_turns()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn now_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+pub(crate) fn running_workjet_session_turn(session_id: &str) -> Option<RunningTurnInfo> {
+    lock_running_workjet_turns()
+        .get(session_id)
+        .map(|turn| RunningTurnInfo {
+            start_epoch: turn.start_epoch,
+            pid: turn.pid,
+            started_at_ms: turn.started_at_ms,
+            cancelled: turn.cancelled,
+        })
+}
+
+pub fn cancel_workjet_session_turns(session_id: &str) -> usize {
+    let child = {
+        let mut turns = lock_running_workjet_turns();
+        let Some(turn) = turns.get_mut(session_id) else {
+            return 0;
+        };
+        turn.cancelled = true;
+        Arc::clone(&turn.child)
+    };
+    let mut child = child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(mut process) = child.take() {
+        let _ = process.kill();
+        let _ = process.wait();
+    }
+    1
+}
+
+struct RunningTurnRegistration {
+    session_id: String,
+    pid: u32,
+}
+
+impl Drop for RunningTurnRegistration {
+    fn drop(&mut self) {
+        let mut turns = lock_running_workjet_turns();
+        if turns.get(&self.session_id).map(|turn| turn.pid) == Some(self.pid) {
+            turns.remove(&self.session_id);
+        }
+    }
+}
+
+struct TerminalTurnGuard {
+    root: PathBuf,
+    fence: WorkjetTurnFence,
+}
+
+impl Drop for TerminalTurnGuard {
+    fn drop(&mut self) {
+        let Some(turn_id) = self.fence.turn_id.as_deref() else {
+            return;
+        };
+        if let Err(error) = crate::business_os::persist_workjet_session_last_terminal_turn(
+            &self.root,
+            &self.fence.session_id,
+            turn_id,
+        ) {
+            eprintln!(
+                "failed to persist terminal Workjet turn {} for {}: {error:#}",
+                turn_id, self.fence.session_id
+            );
+        }
+    }
 }
 
 /// Path to the built sidecar bundle relative to the repo root (dev / tests).
@@ -265,16 +411,35 @@ pub fn resolve_coding_model_preset(root: &Path, preset_id: &str) -> anyhow::Resu
 }
 
 /// A spawned sidecar daemon listening on private platform IPC. Killed + cleaned
-/// on drop so a turn can never leak a live agent process.
+/// on drop so a turn can never leak a live agent process. The child slot is
+/// shared with the Workjet cancellation registry; exactly one path can take it.
 struct SidecarDaemon {
-    child: Child,
+    child: Arc<Mutex<Option<Child>>>,
     unix_socket_path: Option<PathBuf>,
+    registration: Option<RunningTurnRegistration>,
+}
+
+impl SidecarDaemon {
+    fn pid(&self) -> u32 {
+        self.child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(Child::id)
+            .unwrap_or(0)
+    }
 }
 
 impl Drop for SidecarDaemon {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let mut child = self
+            .child
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(mut process) = child.take() {
+            let _ = process.kill();
+            let _ = process.wait();
+        }
         if let Some(path) = &self.unix_socket_path {
             let _ = std::fs::remove_file(path);
         }
@@ -285,6 +450,7 @@ fn spawn_sidecar(
     dist: &Path,
     transport: &LocalTransport,
     faux: bool,
+    faux_delay_ms: Option<u64>,
 ) -> anyhow::Result<SidecarDaemon> {
     anyhow::ensure!(
         dist.exists(),
@@ -307,14 +473,57 @@ fn spawn_sidecar(
         .stderr(Stdio::null());
     if faux {
         command.env("CTOX_PI_SIDECAR_FAUX", "1");
+        if let Some(delay_ms) = faux_delay_ms {
+            command.env("CTOX_PI_SIDECAR_FAUX_DELAY_MS", delay_ms.to_string());
+        }
     }
     let child = command
         .spawn()
         .context("spawn pi-sidecar daemon (is `node` on PATH?)")?;
     Ok(SidecarDaemon {
-        child,
+        child: Arc::new(Mutex::new(Some(child))),
         unix_socket_path: transport.unix_socket_path().map(Path::to_path_buf),
+        registration: None,
     })
+}
+
+fn register_workjet_turn(
+    fence: &WorkjetTurnFence,
+    daemon: &SidecarDaemon,
+) -> anyhow::Result<RunningTurnRegistration> {
+    let pid = daemon.pid();
+    let mut turns = lock_running_workjet_turns();
+    if turns.contains_key(&fence.session_id) {
+        return Err(CodingTurnFailure::new(
+            "transfer_illegal_state",
+            &fence.session_id,
+            "Workjet session already has a running coding turn",
+        )
+        .into());
+    }
+    turns.insert(
+        fence.session_id.clone(),
+        RunningTurn {
+            start_epoch: fence.start_epoch,
+            pid,
+            started_at_ms: now_unix_ms(),
+            cancelled: false,
+            child: Arc::clone(&daemon.child),
+        },
+    );
+    Ok(RunningTurnRegistration {
+        session_id: fence.session_id.clone(),
+        pid,
+    })
+}
+
+impl RunningTurnRegistration {
+    fn cancelled(&self) -> bool {
+        lock_running_workjet_turns()
+            .get(&self.session_id)
+            .filter(|turn| turn.pid == self.pid)
+            .is_some_and(|turn| turn.cancelled)
+    }
 }
 
 fn connect_with_retry(
@@ -358,43 +567,82 @@ fn read_line(stream: &mut LocalStream, max_bytes: usize) -> anyhow::Result<Vec<u
     Ok(buffer)
 }
 
-/// Run one bounded turn through a freshly spawned sidecar daemon: send `request`
-/// (a `CtoxTurnRequest` JSON), return the `CtoxTurnResponse` JSON. `faux` runs
-/// the sidecar's offline no-model mode (owner integration tests).
-pub fn run_pi_turn(dist: &Path, request: &Value, faux: bool) -> anyhow::Result<Value> {
+struct CompletedPiTurn {
+    response: Value,
+    daemon: SidecarDaemon,
+}
+
+fn run_pi_turn_owned(
+    dist: &Path,
+    request: &Value,
+    faux: bool,
+    fence: Option<&WorkjetTurnFence>,
+    faux_delay_ms: Option<u64>,
+) -> anyhow::Result<CompletedPiTurn> {
     let endpoint_id = Uuid::new_v4();
     let transport = LocalTransport::ipc_for_host(
         std::env::temp_dir().join(format!("ctox-pi-{endpoint_id}.sock")),
         format!("ctox-pi-{endpoint_id}"),
     );
-    let _daemon = spawn_sidecar(dist, &transport, faux)?;
-    let mut stream = connect_with_retry(&transport, Duration::from_secs(10))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(30)))
-        .context("set pi-sidecar write timeout")?;
-    stream
-        .set_read_timeout(Some(PI_TURN_TIMEOUT))
-        .context("set pi-sidecar turn timeout")?;
+    let mut daemon = spawn_sidecar(dist, &transport, faux, faux_delay_ms)?;
+    if let Some(fence) = fence {
+        daemon.registration = Some(register_workjet_turn(fence, &daemon)?);
+    }
+    let exchange = (|| -> anyhow::Result<Value> {
+        let mut stream = connect_with_retry(&transport, Duration::from_secs(10))?;
+        stream
+            .set_write_timeout(Some(Duration::from_secs(30)))
+            .context("set pi-sidecar write timeout")?;
+        stream
+            .set_read_timeout(Some(PI_TURN_TIMEOUT))
+            .context("set pi-sidecar turn timeout")?;
 
-    let mut line = serde_json::to_string(request).context("serialize turn request")?;
-    anyhow::ensure!(
-        line.len() < MAX_PI_TURN_REQUEST_BYTES,
-        "sidecar turn request is too large"
-    );
-    line.push('\n');
-    stream
-        .write_all(line.as_bytes())
-        .context("write turn request")?;
-    stream.flush().ok();
+        let mut line = serde_json::to_string(request).context("serialize turn request")?;
+        anyhow::ensure!(
+            line.len() < MAX_PI_TURN_REQUEST_BYTES,
+            "sidecar turn request is too large"
+        );
+        line.push('\n');
+        stream
+            .write_all(line.as_bytes())
+            .context("write turn request")?;
+        stream.flush().ok();
 
-    let response_bytes = read_line(&mut stream, MAX_PI_TURN_RESPONSE_BYTES)?;
-    anyhow::ensure!(
-        !response_bytes.is_empty(),
-        "sidecar closed without a response"
-    );
-    let response: Value =
-        serde_json::from_slice(&response_bytes).context("parse turn response JSON")?;
-    Ok(response)
+        let response_bytes = read_line(&mut stream, MAX_PI_TURN_RESPONSE_BYTES)?;
+        anyhow::ensure!(
+            !response_bytes.is_empty(),
+            "sidecar closed without a response"
+        );
+        serde_json::from_slice(&response_bytes).context("parse turn response JSON")
+    })();
+    let response = match exchange {
+        Ok(response) => response,
+        Err(error)
+            if daemon
+                .registration
+                .as_ref()
+                .is_some_and(RunningTurnRegistration::cancelled) =>
+        {
+            let session_id = fence
+                .map(|fence| fence.session_id.as_str())
+                .unwrap_or_default();
+            return Err(CodingTurnFailure::new(
+                "session_fenced",
+                session_id,
+                "Workjet coding turn was cancelled by a newer fence epoch",
+            )
+            .into());
+        }
+        Err(error) => return Err(error),
+    };
+    Ok(CompletedPiTurn { response, daemon })
+}
+
+/// Run one bounded turn through a freshly spawned sidecar daemon: send `request`
+/// (a `CtoxTurnRequest` JSON), return the `CtoxTurnResponse` JSON. `faux` runs
+/// the sidecar's offline no-model mode (owner integration tests).
+pub fn run_pi_turn(dist: &Path, request: &Value, faux: bool) -> anyhow::Result<Value> {
+    Ok(run_pi_turn_owned(dist, request, faux, None, None)?.response)
 }
 
 /// Project a module's synced app source (`business_module_source_files` records)
@@ -481,7 +729,39 @@ pub fn run_module_coding_turn(
     faux: bool,
     model_override: Option<Value>,
 ) -> anyhow::Result<Value> {
-    run_module_coding_turn_inner(root, dist, module_id, prompt, faux, model_override, None)
+    run_module_coding_turn_inner(
+        root,
+        dist,
+        module_id,
+        prompt,
+        faux,
+        model_override,
+        None,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn run_module_coding_turn_for_workjet_session(
+    root: &Path,
+    dist: &Path,
+    module_id: &str,
+    prompt: &str,
+    faux: bool,
+    model_override: Option<Value>,
+    fence: WorkjetTurnFence,
+) -> anyhow::Result<Value> {
+    run_module_coding_turn_inner(
+        root,
+        dist,
+        module_id,
+        prompt,
+        faux,
+        model_override,
+        None,
+        Some(fence),
+        None,
+    )
 }
 
 fn prepare_coding_turn_model(
@@ -726,6 +1006,28 @@ pub(crate) fn run_coding_preset_smoke_with_subscription_proxy_for_test(
     run_coding_preset_smoke_inner(root, dist, preset_id, None, None, Some(proxy_base_url))
 }
 
+fn ensure_workjet_turn_not_fenced(
+    root: &Path,
+    fence: &WorkjetTurnFence,
+    daemon: &SidecarDaemon,
+) -> anyhow::Result<()> {
+    let cancelled = daemon
+        .registration
+        .as_ref()
+        .is_none_or(RunningTurnRegistration::cancelled);
+    let current_epoch =
+        crate::business_os::load_workjet_session_fence_epoch(root, &fence.session_id)?;
+    if cancelled || current_epoch != Some(fence.start_epoch) {
+        return Err(CodingTurnFailure::new(
+            "session_fenced",
+            &fence.session_id,
+            "Workjet coding turn was fenced before snapshot apply",
+        )
+        .into());
+    }
+    Ok(())
+}
+
 /// Internal owner seam. Production always leaves
 /// `coding_plan_upstream_override` unset. Tests use a controlled loopback
 /// upstream so the complete preset -> account -> bridge -> Pi route can be
@@ -738,7 +1040,13 @@ fn run_module_coding_turn_inner(
     faux: bool,
     model_override: Option<Value>,
     coding_plan_upstream_override: Option<&str>,
+    fence: Option<WorkjetTurnFence>,
+    faux_delay_ms: Option<u64>,
 ) -> anyhow::Result<Value> {
+    let _terminal_turn = fence.clone().map(|fence| TerminalTurnGuard {
+        root: root.to_path_buf(),
+        fence,
+    });
     let files = project_module_source(root, module_id)?;
     let mut request = serde_json::json!({
         "id": module_id,
@@ -758,23 +1066,32 @@ fn run_module_coding_turn_inner(
         request["model"] = prepared.model;
         coding_plan_bridge = prepared.coding_plan_bridge;
     }
-    let response = run_pi_turn(dist, &request, faux)?;
+    let completed = run_pi_turn_owned(dist, &request, faux, fence.as_ref(), faux_delay_ms)?;
     drop(coding_plan_bridge);
     anyhow::ensure!(
-        response.get("ok").and_then(Value::as_bool) == Some(true),
+        completed.response.get("ok").and_then(Value::as_bool) == Some(true),
         "pi-sidecar turn failed: {}",
-        response
+        completed
+            .response
             .get("error")
             .and_then(Value::as_str)
             .unwrap_or("unknown")
     );
     let empty = Vec::new();
-    let snapshot = response
+    let snapshot = completed
+        .response
         .get("snapshot")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
+    if let Some(fence) = fence.as_ref() {
+        // RFC §25: this is the load-bearing second fence immediately before
+        // entering the snapshot write path. A completed in-memory snapshot is
+        // discarded when cancellation or an epoch bump won the race.
+        ensure_workjet_turn_not_fenced(root, fence, &completed.daemon)?;
+    }
     let applied = apply_turn_snapshot(root, module_id, snapshot)?;
-    let message_count = response
+    let message_count = completed
+        .response
         .get("messages")
         .and_then(Value::as_array)
         .map(Vec::len)
@@ -817,6 +1134,92 @@ mod tests {
             .status()
             .map(|status| status.success())
             .unwrap_or(false)
+    }
+
+    fn require_faux_sidecar() -> anyhow::Result<PathBuf> {
+        let dist = sidecar_dist_path(&repo_root());
+        anyhow::ensure!(
+            dist.exists(),
+            "pi-sidecar gate requires built bundle at {} (run `npm ci && npm run build` in src/core/coding_agents/pi-sidecar)",
+            dist.display()
+        );
+        anyhow::ensure!(node_available(), "pi-sidecar gate requires `node` on PATH");
+        Ok(dist)
+    }
+
+    fn seed_faux_module(root: &Path, module_id: &str) -> anyhow::Result<()> {
+        use crate::business_os::store::{load_module_source_records, ModuleSourceLoadMutation};
+
+        let app_root = root.join("src").join("apps").join("business-os");
+        let module_root = app_root.join("modules").join(module_id);
+        std::fs::create_dir_all(&module_root)?;
+        std::fs::write(app_root.join("index.html"), b"<!doctype html>")?;
+        std::fs::write(
+            module_root.join("module.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "id": module_id,
+                "title": "Widget",
+                "entry": format!("modules/{module_id}/index.html")
+            }))?,
+        )?;
+        std::fs::write(module_root.join("index.js"), "export const v = 1;\n")?;
+        load_module_source_records(
+            root,
+            &ModuleSourceLoadMutation {
+                module_id: module_id.to_owned(),
+            },
+        )?;
+        Ok(())
+    }
+
+    fn seed_test_workjet_session(
+        root: &Path,
+        session_id: &str,
+        fence_epoch: u64,
+    ) -> anyhow::Result<()> {
+        let conn = crate::business_os::store::open_store(root)?;
+        let now = now_unix_ms();
+        let payload = serde_json::json!({
+            "id": session_id,
+            "owner_user_id": "owner",
+            "run_status": "running",
+            "fence_epoch": fence_epoch,
+            "updated_at_ms": now,
+            "is_deleted": false,
+        });
+        conn.execute(
+            "INSERT INTO business_records
+                (collection, record_id, rev, deleted, updated_at_ms, payload_json)
+             VALUES ('workjet_sessions', ?1, 'test-rev', 0, ?2, ?3)
+             ON CONFLICT(collection, record_id) DO UPDATE SET
+                updated_at_ms=excluded.updated_at_ms,
+                payload_json=excluded.payload_json",
+            rusqlite::params![session_id, now, serde_json::to_string(&payload)?],
+        )?;
+        Ok(())
+    }
+
+    fn bump_test_workjet_session_epoch(root: &Path, session_id: &str) -> anyhow::Result<u64> {
+        let conn = crate::business_os::store::open_store(root)?;
+        let raw: String = conn.query_row(
+            "SELECT payload_json FROM business_records
+             WHERE collection='workjet_sessions' AND record_id=?1",
+            [session_id],
+            |row| row.get(0),
+        )?;
+        let mut payload: Value = serde_json::from_str(&raw)?;
+        let next = payload
+            .get("fence_epoch")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .checked_add(1)
+            .context("test fence epoch overflow")?;
+        payload["fence_epoch"] = Value::from(next);
+        conn.execute(
+            "UPDATE business_records SET payload_json=?2 WHERE collection='workjet_sessions' AND record_id=?1",
+            rusqlite::params![session_id, serde_json::to_string(&payload)?],
+        )?;
+        Ok(next)
     }
 
     fn spawn_anthropic_edit_upstream(
@@ -946,6 +1349,144 @@ mod tests {
             })
             .unwrap_or(false);
         assert!(has_marker, "faux write should round-trip over the socket");
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_fence_discards_completed_snapshot_after_epoch_bump_without_kill(
+    ) -> anyhow::Result<()> {
+        let dist = require_faux_sidecar()?;
+        let root = tempfile::tempdir()?;
+        seed_faux_module(root.path(), "fenced-widget")?;
+        seed_test_workjet_session(root.path(), "session-no-kill", 0)?;
+
+        let turn_root = root.path().to_path_buf();
+        let turn_dist = dist.clone();
+        let worker = std::thread::spawn(move || {
+            run_module_coding_turn_inner(
+                &turn_root,
+                &turn_dist,
+                "fenced-widget",
+                "produce a snapshot that must be fenced",
+                true,
+                None,
+                None,
+                Some(WorkjetTurnFence {
+                    session_id: "session-no-kill".to_owned(),
+                    start_epoch: 0,
+                    turn_id: Some("turn-no-kill".to_owned()),
+                }),
+                Some(1_000),
+            )
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running_workjet_session_turn("session-no-kill").is_none() {
+            anyhow::ensure!(Instant::now() < deadline, "turn did not register in time");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(
+            bump_test_workjet_session_epoch(root.path(), "session-no-kill")?,
+            1
+        );
+
+        let error = worker
+            .join()
+            .map_err(|_| anyhow::anyhow!("fenced turn thread panicked"))?
+            .expect_err("new epoch must discard the completed snapshot");
+        let failure = error
+            .downcast_ref::<CodingTurnFailure>()
+            .context("fenced turn must return a coded failure")?;
+        assert_eq!(failure.error_code(), "session_fenced");
+        let files = project_module_source(root.path(), "fenced-widget")?;
+        assert!(
+            !files.keys().any(|path| path.ends_with("faux-marker.js")),
+            "the stale in-memory snapshot must not reach module source"
+        );
+        assert!(
+            running_workjet_session_turn("session-no-kill").is_none(),
+            "registry must be empty after the fenced outcome"
+        );
+        let conn = crate::business_os::store::open_store(root.path())?;
+        let session: String = conn.query_row(
+            "SELECT payload_json FROM business_records WHERE collection='workjet_sessions' AND record_id='session-no-kill'",
+            [],
+            |row| row.get(0),
+        )?;
+        let session: Value = serde_json::from_str(&session)?;
+        assert_eq!(
+            session.get("last_terminal_turn_id").and_then(Value::as_str),
+            Some("turn-no-kill")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn workjet_session_fence_registry_rejects_a_second_parallel_turn_and_cleans_up(
+    ) -> anyhow::Result<()> {
+        let dist = require_faux_sidecar()?;
+        let root = tempfile::tempdir()?;
+        seed_faux_module(root.path(), "parallel-widget")?;
+        seed_test_workjet_session(root.path(), "session-parallel", 0)?;
+        let request = serde_json::json!({
+            "id": "parallel-widget",
+            "prompt": "hold the registry",
+            "files": project_module_source(root.path(), "parallel-widget")?,
+            "maxAssistantTurns": 4
+        });
+        let fence = WorkjetTurnFence {
+            session_id: "session-parallel".to_owned(),
+            start_epoch: 0,
+            turn_id: Some("turn-parallel-1".to_owned()),
+        };
+        let first_dist = dist.clone();
+        let first_request = request.clone();
+        let first_fence = fence.clone();
+        let first = std::thread::spawn(move || {
+            run_pi_turn_owned(
+                &first_dist,
+                &first_request,
+                true,
+                Some(&first_fence),
+                Some(5_000),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while running_workjet_session_turn("session-parallel").is_none() {
+            anyhow::ensure!(
+                Instant::now() < deadline,
+                "first turn did not register in time"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+
+        let second = match run_pi_turn_owned(&dist, &request, true, Some(&fence), None) {
+            Ok(_) => anyhow::bail!("a second turn for one Workjet session must be rejected"),
+            Err(error) => error,
+        };
+        let failure = second
+            .downcast_ref::<CodingTurnFailure>()
+            .context("parallel rejection must be a coded failure")?;
+        assert_eq!(failure.error_code(), "transfer_illegal_state");
+        assert_eq!(cancel_workjet_session_turns("session-parallel"), 1);
+        let first_error = match first
+            .join()
+            .map_err(|_| anyhow::anyhow!("first parallel turn panicked"))?
+        {
+            Ok(_) => anyhow::bail!("cancelled first turn must fail fenced"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            first_error
+                .downcast_ref::<CodingTurnFailure>()
+                .context("cancelled first turn must be coded")?
+                .error_code(),
+            "session_fenced"
+        );
+        assert!(
+            running_workjet_session_turn("session-parallel").is_none(),
+            "registry must be empty after duplicate and cancellation outcomes"
+        );
         Ok(())
     }
 

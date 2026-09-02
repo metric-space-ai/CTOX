@@ -12651,7 +12651,7 @@ pub(super) fn handle_workspace_control_command(
                     ))
                 },
                 |session| {
-                    let _admission =
+                    let admission =
                         match admit_coding_turn_session(root, session, &command.payload)? {
                             Ok(admission) => admission,
                             Err(result) => {
@@ -12695,14 +12695,30 @@ pub(super) fn handle_workspace_control_command(
                                 root, preset_id,
                             )?;
                         let dist = crate::coding_agents::pi_sidecar::resolve_sidecar_dist(root)?;
-                        crate::coding_agents::pi_sidecar::run_module_coding_turn(
-                            root,
-                            &dist,
-                            &module_id,
-                            prompt,
-                            faux,
-                            model_override,
-                        )
+                        if let Some(admission) = admission {
+                            crate::coding_agents::pi_sidecar::run_module_coding_turn_for_workjet_session(
+                                root,
+                                &dist,
+                                &module_id,
+                                prompt,
+                                faux,
+                                model_override,
+                                crate::coding_agents::pi_sidecar::WorkjetTurnFence {
+                                    session_id: admission.session_id,
+                                    start_epoch: admission.fence_epoch,
+                                    turn_id: admission.turn_id,
+                                },
+                            )
+                        } else {
+                            crate::coding_agents::pi_sidecar::run_module_coding_turn(
+                                root,
+                                &dist,
+                                &module_id,
+                                prompt,
+                                faux,
+                                model_override,
+                            )
+                        }
                     })();
                     return match outcome {
                         Ok(outcome) => write_rxdb_control_command_outcome(
@@ -12713,12 +12729,28 @@ pub(super) fn handle_workspace_control_command(
                             Some("completed"),
                             outcome,
                         ),
-                        Err(error) => write_rxdb_failed_control_command_outcome(
-                            root,
-                            &command,
-                            "coding_turn",
-                            error,
-                        ),
+                        Err(error) => {
+                            if let Some(failure) = error.downcast_ref::<
+                                crate::coding_agents::pi_sidecar::CodingTurnFailure,
+                            >() {
+                                write_rxdb_coding_turn_failure_outcome(
+                                    root,
+                                    &command,
+                                    coding_turn_failure_result(
+                                        failure.error_code(),
+                                        failure.session_id(),
+                                        &failure.to_string(),
+                                    ),
+                                )
+                            } else {
+                                write_rxdb_failed_control_command_outcome(
+                                    root,
+                                    &command,
+                                    "coding_turn",
+                                    error,
+                                )
+                            }
+                        }
                     };
                 },
             )?
