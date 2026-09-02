@@ -1973,6 +1973,58 @@ pub(crate) fn inspect_business_command(root: &Path, command_id: &str) -> Result<
     })))
 }
 
+/// Bind an already-created queue task to a Business OS command so owner
+/// resolution (`inspect_business_command_for_task`) and the harness command
+/// session can follow the task back to the human who issued the command.
+///
+/// Returns `Ok(true)` when the task is linked to the command afterwards
+/// (freshly inserted or already present). Returns `Ok(false)` without
+/// touching anything when the command is unknown to the core ledger or already
+/// bound to a different task: a command links to at most one task, and the
+/// caller must surface an unlinked task instead of failing the research.
+pub(crate) fn link_business_command_task(
+    root: &Path,
+    command_id: &str,
+    task_id: &str,
+) -> Result<bool> {
+    let command_id = command_id.trim();
+    let task_id = task_id.trim();
+    anyhow::ensure!(
+        !command_id.is_empty() && !task_id.is_empty(),
+        "business command task link requires command_id and task_id"
+    );
+    let db_path = resolve_db_path(root, None);
+    let conn = open_channel_db(&db_path)?;
+    let command_known: Option<i64> = conn
+        .query_row(
+            "SELECT 1 FROM business_command_aggregates WHERE command_id = ?1",
+            params![command_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if command_known.is_none() {
+        return Ok(false);
+    }
+    let existing_task: Option<String> = conn
+        .query_row(
+            "SELECT task_id FROM business_command_task_links WHERE command_id = ?1",
+            params![command_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    match existing_task.as_deref() {
+        Some(existing) if existing == task_id => return Ok(true),
+        Some(_) => return Ok(false),
+        None => {}
+    }
+    conn.execute(
+        "INSERT INTO business_command_task_links (command_id, task_id, created_at_ms)
+         VALUES (?1, ?2, ?3)",
+        params![command_id, task_id, epoch_millis()],
+    )?;
+    Ok(true)
+}
+
 pub(crate) fn inspect_business_command_for_task(
     root: &Path,
     task_id: &str,

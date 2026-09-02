@@ -10698,19 +10698,39 @@ fn configure_business_os_mcp_session_for_queue_job(
         return Ok(false);
     };
     let command = channels::business_command_projection(root, &command_id)?;
-    if command.get("command_type").and_then(Value::as_str) != Some("business_os.chat.task") {
-        return Ok(false);
-    }
-    let Some(writeback_contract) = command
-        .pointer("/payload/writeback_contract")
-        .filter(|contract| {
-            contract
-                .get("allowed_actions")
-                .and_then(Value::as_array)
-                .is_some_and(|actions| !actions.is_empty())
-        })
-        .cloned()
-    else {
+    let command_type = command.get("command_type").and_then(Value::as_str);
+    let writeback_contract = match command_type {
+        Some("business_os.chat.task") => command
+            .pointer("/payload/writeback_contract")
+            .filter(|contract| {
+                contract
+                    .get("allowed_actions")
+                    .and_then(Value::as_array)
+                    .is_some_and(|actions| !actions.is_empty())
+            })
+            .cloned(),
+        // Person-research gap-closure tasks are queue jobs spawned by a
+        // `web_stack.person_research` command. They finish through the typed
+        // `outbound.lead.research_writeback` command, so the bound session
+        // carries exactly that action; the token binds the worker to the
+        // command's verified human actor (auth-assist and auth sessions are
+        // attributed to that person, never to the harness).
+        Some("web_stack.person_research") if is_person_research_gap_closure_job(job) => {
+            person_research_gap_closure_metadata(job).map(|metadata| {
+                serde_json::json!({
+                    "allowed_actions": [{
+                        "module_id": metadata_string(metadata, "module")
+                            .unwrap_or_else(|| "outbound-lead-generation".to_string()),
+                        "action_id": PERSON_RESEARCH_GAP_CLOSURE_WRITEBACK_COMMAND,
+                    }],
+                    "record_id": metadata_string(metadata, "record_id"),
+                    "gap_task_id": person_research_gap_closure_task_id(job),
+                })
+            })
+        }
+        _ => None,
+    };
+    let Some(writeback_contract) = writeback_contract else {
         return Ok(false);
     };
     let payload_hash = command
@@ -13227,6 +13247,27 @@ fn enforce_job_outcome_witness(
     expected_artifact_refs: Vec<ArtifactRef>,
     delivered_artifact_refs: Vec<ArtifactRef>,
 ) -> Result<Option<String>> {
+    enforce_job_outcome_witness_with_audit_key(
+        root,
+        job,
+        "test-review-audit-pass",
+        expected_artifact_refs,
+        delivered_artifact_refs,
+    )
+}
+
+/// Test-only witness driver with an explicit review audit key. Production
+/// rounds carry a per-slice verification run id as audit key, so repeated
+/// rejections of the same job produce distinct transition proofs; tests that
+/// count rejection rounds must vary the key the same way.
+#[cfg(test)]
+fn enforce_job_outcome_witness_with_audit_key(
+    root: &Path,
+    job: &QueuedPrompt,
+    review_audit_key: &str,
+    expected_artifact_refs: Vec<ArtifactRef>,
+    delivered_artifact_refs: Vec<ArtifactRef>,
+) -> Result<Option<String>> {
     if expected_artifact_refs.is_empty() {
         return Ok(None);
     }
@@ -13264,7 +13305,7 @@ fn enforce_job_outcome_witness(
             event,
             actor: "ctox-test-reviewed-terminal-gate".to_string(),
             evidence: CoreEvidenceRefs {
-                review_audit_key: Some("test-review-audit-pass".to_string()),
+                review_audit_key: Some(review_audit_key.to_string()),
                 verification_id: Some(verification_id),
                 expected_artifact_refs,
                 delivered_artifact_refs,
@@ -43268,8 +43309,14 @@ Im Workspace muss synthesis/helper-run.json existieren."
         let expected = expected_outcome_artifacts_for_job(&job);
 
         for rejection in 1..=PERSON_RESEARCH_GAP_CLOSURE_MAX_RECOVERY_ROUNDS {
-            enforce_job_outcome_witness(&root, &job, expected.clone(), Vec::new())
-                .expect_err("missing gap witness must reject completion");
+            enforce_job_outcome_witness_with_audit_key(
+                &root,
+                &job,
+                &format!("test-review-audit-round-{rejection}"),
+                expected.clone(),
+                Vec::new(),
+            )
+            .expect_err("missing gap witness must reject completion");
             assert_eq!(
                 outcome_witness_rejection_count(&root, &job).unwrap(),
                 rejection

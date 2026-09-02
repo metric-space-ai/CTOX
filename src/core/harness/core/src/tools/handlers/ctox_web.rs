@@ -4,6 +4,7 @@ use std::process::Stdio;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
+use crate::config::types::McpServerTransportConfig;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
@@ -15,6 +16,9 @@ use crate::tools::registry::ToolKind;
 pub struct CtoxWebHandler;
 pub struct CtoxDocHandler;
 pub struct CtoxBrowserAutomationHandler;
+
+const AUTH_ASSIST_BOUND_CONTEXT_ERROR: &str =
+    "auth assist requires a bound business chat or queue task";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -314,18 +318,10 @@ impl ToolHandler for CtoxWebHandler {
             }
             "ctox_web_auth_assist_request" => {
                 let args: CtoxWebAuthAssistRequestArgs = parse_arguments(&arguments)?;
-                command
-                    .arg("business-os")
-                    .arg("web-stack")
-                    .arg("auth-assist-request")
-                    .arg("--source-id")
-                    .arg(args.source_id);
-                if let Some(target_url) = args.target_url {
-                    command.arg("--target-url").arg(target_url);
-                }
-                if let Some(requesting_task_id) = args.requesting_task_id {
-                    command.arg("--task-id").arg(requesting_task_id);
-                }
+                let command_session = require_auth_assist_command_session(
+                    business_os_command_session_from_turn(&turn),
+                )?;
+                append_auth_assist_request_args(&mut command, args, command_session);
             }
             "ctox_web_auth_assist_status" => {
                 let args: CtoxWebAuthAssistStatusArgs = parse_arguments(&arguments)?;
@@ -400,6 +396,48 @@ impl ToolHandler for CtoxWebHandler {
             stdout.trim().to_string(),
             Some(true),
         ))
+    }
+}
+
+fn business_os_command_session_from_turn(turn: &crate::codex::TurnContext) -> Option<&str> {
+    let server = turn.config.mcp_servers.get().get("ctox-business-os")?;
+    let McpServerTransportConfig::StreamableHttp { http_headers, .. } = &server.transport else {
+        return None;
+    };
+    http_headers
+        .as_ref()?
+        .get("X-CTOX-Business-Command-Session")
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+fn require_auth_assist_command_session(
+    command_session: Option<&str>,
+) -> Result<&str, FunctionCallError> {
+    command_session.ok_or_else(|| {
+        FunctionCallError::RespondToModel(AUTH_ASSIST_BOUND_CONTEXT_ERROR.to_string())
+    })
+}
+
+fn append_auth_assist_request_args(
+    command: &mut Command,
+    args: CtoxWebAuthAssistRequestArgs,
+    command_session: &str,
+) {
+    command
+        .arg("business-os")
+        .arg("web-stack")
+        .arg("auth-assist-request")
+        .arg("--source-id")
+        .arg(args.source_id)
+        .arg("--command-session")
+        .arg(command_session);
+    if let Some(target_url) = args.target_url {
+        command.arg("--target-url").arg(target_url);
+    }
+    if let Some(requesting_task_id) = args.requesting_task_id {
+        command.arg("--login-hint").arg(requesting_task_id);
     }
 }
 
@@ -626,5 +664,44 @@ mod tests {
             path,
             std::path::Path::new("/workspace/task-1/research/deep-research/call_research_42")
         );
+    }
+
+    #[test]
+    fn auth_assist_uses_bound_command_session_and_never_model_text_as_task_id() {
+        let mut command = Command::new("ctox");
+        append_auth_assist_request_args(
+            &mut command,
+            CtoxWebAuthAssistRequestArgs {
+                source_id: "leadfeeder.com".to_string(),
+                target_url: Some("https://app.leadfeeder.com/".to_string()),
+                requesting_task_id: Some("KUKA Deutschland GmbH".to_string()),
+            },
+            "signed-command-session",
+        );
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--command-session", "signed-command-session"] })
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--login-hint", "KUKA Deutschland GmbH"])
+        );
+        assert!(!args.iter().any(|arg| arg == "--task-id"));
+    }
+
+    #[test]
+    fn auth_assist_missing_binding_returns_clear_model_error() {
+        let error = require_auth_assist_command_session(None).expect_err("binding is required");
+        assert!(matches!(
+            error,
+            FunctionCallError::RespondToModel(message)
+                if message == "auth assist requires a bound business chat or queue task"
+        ));
     }
 }

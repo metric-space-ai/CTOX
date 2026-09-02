@@ -16162,16 +16162,33 @@ pub(super) fn authorize_recoverable_background_control_command(
 
     let mut recovered = command.clone();
     recovered.origin = CommandOrigin::TrustedLocal;
-    recovered.client_context = serde_json::json!({
-        "actor": {
-            "id": actor_id,
-            "display_name": actor
-                .get("display_name")
-                .and_then(Value::as_str)
-                .unwrap_or(actor_id),
-        },
-        "recovered_from": "ctox-business-command-authorization-v1",
-    });
+    let mut recovered_context = recovered
+        .client_context
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    recovered_context.insert(
+        "owner_user_id".to_string(),
+        Value::String(actor_id.to_string()),
+    );
+    recovered_context.insert("actor".to_string(), actor.clone());
+    recovered_context.insert(
+        "recovered_from".to_string(),
+        Value::String("ctox-business-command-authorization-v1".to_string()),
+    );
+    recovered.client_context = Value::Object(recovered_context);
+    let conn = open_store(root)?;
+    conn.execute(
+        "UPDATE business_commands
+         SET client_context_json = ?1, observed_at_ms = ?2
+         WHERE command_id = ?3",
+        params![
+            serde_json::to_string(&recovered.client_context)?,
+            now_ms() as i64,
+            command_id,
+        ],
+    )?;
+    drop(conn);
     let session = rxdb_authenticated_session(root, &recovered)?;
     let decision = module_policy_decision(root, &session, permission, &recovered.module)?;
     anyhow::ensure!(
@@ -38311,6 +38328,20 @@ pub(super) mod tests {
             crate::business_os::person_research_command::recover_once(root)?,
             1
         );
+        let conn = open_store(root)?;
+        let recovered_context_json: String = conn.query_row(
+            "SELECT client_context_json FROM business_commands WHERE command_id = ?1",
+            [command_id],
+            |row| row.get(0),
+        )?;
+        let recovered_context: Value = serde_json::from_str(&recovered_context_json)?;
+        assert_eq!(recovered_context["owner_user_id"], "researcher");
+        assert_eq!(recovered_context["actor"]["id"], "researcher");
+        assert_eq!(
+            recovered_context["recovered_from"],
+            "ctox-business-command-authorization-v1"
+        );
+        drop(conn);
         let mut terminal = Value::Null;
         for _ in 0..100 {
             terminal = channels::business_command_projection(root, command_id)?;

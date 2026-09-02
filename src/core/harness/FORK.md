@@ -40,6 +40,15 @@ Attribution rule:
 
 - When a file under this subtree differs from the imported snapshot, describe it as a CTOX fork delta, not as an ambiguous upstream version.
 
+## 2026-09 Bound Web-Stack Auth Assist
+
+The typed `ctox_web_auth_assist_request` fork tool no longer treats model-provided
+`requesting_task_id` text as a durable task identity. It forwards that text only
+as a login hint and requires the signed Business OS command-session binding from
+the managed thread configuration. The CLI receives that token through
+`--command-session`; an unbound harness turn fails before any auth-assist command
+is enqueued, so browser sessions cannot silently fall back to `ctox_harness`.
+
 ## 2026-07 Persistent CTOX Runtime Context
 
 CTOX uses the existing turn-context and rollout machinery for a durable normal

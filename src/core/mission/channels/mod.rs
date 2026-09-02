@@ -71,14 +71,15 @@ pub(crate) use command_saga::{
     claim_business_command_waiting_dependencies, claim_business_command_with_queue,
     claim_business_control_command, complete_business_command_saga_step,
     complete_business_control_command, fail_business_command_saga_step, inspect_business_command,
-    inspect_business_command_for_task, mark_business_command_outbox_delivered,
-    mark_business_command_outbox_failed, pending_business_command_outbox,
-    persist_business_command_worker_result, progress_business_control_command,
-    reconcile_business_command_invariants, record_business_command_intake_failure,
-    record_business_command_review, record_business_command_saga_step_evidence,
-    resolve_business_command_intake_failures, retry_failed_app_create_business_command,
-    runtime_business_command_action_snapshot, start_business_command_saga,
-    start_runtime_business_command_saga, transition_business_command_for_task,
+    inspect_business_command_for_task, link_business_command_task,
+    mark_business_command_outbox_delivered, mark_business_command_outbox_failed,
+    pending_business_command_outbox, persist_business_command_worker_result,
+    progress_business_control_command, reconcile_business_command_invariants,
+    record_business_command_intake_failure, record_business_command_review,
+    record_business_command_saga_step_evidence, resolve_business_command_intake_failures,
+    retry_failed_app_create_business_command, runtime_business_command_action_snapshot,
+    start_business_command_saga, start_runtime_business_command_saga,
+    transition_business_command_for_task,
 };
 pub(crate) use route_status::QueueRouteStatus;
 

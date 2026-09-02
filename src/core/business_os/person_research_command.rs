@@ -1382,6 +1382,47 @@ fn safe_runtime_source_identifier(value: &str, max_len: usize) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
+fn verified_research_owner_user_id(client_context: &Value) -> Option<&str> {
+    [
+        "/owner_user_id",
+        "/actor/id",
+        "/user_id",
+        "/native_authorization/actor/id",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        client_context
+            .pointer(pointer)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn authenticated_capture_args(
+    source_id: &str,
+    company: &str,
+    country: Country,
+    command_id: &str,
+    owner_user_id: &str,
+) -> Vec<String> {
+    vec![
+        "source-capture".to_string(),
+        "--source-id".to_string(),
+        source_id.to_string(),
+        "--company".to_string(),
+        company.to_string(),
+        "--country".to_string(),
+        country.as_iso().to_string(),
+        "--task-id".to_string(),
+        command_id.to_string(),
+        "--owner-user-id".to_string(),
+        owner_user_id.to_string(),
+        "--timeout-ms".to_string(),
+        "180000".to_string(),
+    ]
+}
+
 fn execute(
     root: &Path,
     command_id: &str,
@@ -1392,15 +1433,7 @@ fn execute(
         Value::String(value) => serde_json::from_str(value).unwrap_or(Value::Null),
         _ => client_context.clone(),
     };
-    let owner_user_id = ["/owner_user_id", "/actor/id", "/user_id"]
-        .into_iter()
-        .find_map(|pointer| {
-            parsed_client_context
-                .pointer(pointer)
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-        });
+    let owner_user_id = verified_research_owner_user_id(&parsed_client_context);
     let request: PersonResearchCommandRequest = serde_json::from_value(payload.clone())
         .context("invalid web_stack.person_research payload")?;
     let company = request.company.trim();
@@ -1427,6 +1460,15 @@ fn execute(
         .join("person")
         .join(safe_workspace_segment(command_id));
     let auto_browser_capture = request.auto_browser_capture;
+    // Fail before any adapter work: authenticated capture must run as the human
+    // who asked for the research, never as the harness worker. Without a
+    // verified owner on the command there is nothing an auth session could be
+    // attributed to, so the command is rejected up front instead of after the
+    // Phase-A adapters have already spent their budget.
+    if auto_browser_capture {
+        owner_user_id
+            .context("authenticated person-research capture requires a verified command owner")?;
+    }
     let research_instructions_len = request.research_instructions.len();
     let known_person_records = request
         .known_person_records
@@ -1521,6 +1563,8 @@ fn execute(
         )?;
     }
     if auto_browser_capture {
+        let owner_user_id = owner_user_id
+            .context("authenticated person-research capture requires a verified command owner")?;
         let capture_tasks =
             crate::service::business_os::authenticated_person_research_capture_tasks(&result);
         let mut capture_runs = Vec::new();
@@ -1534,24 +1578,9 @@ fn execute(
                 remaining_tasks.push(task);
                 continue;
             };
-            let capture_args = vec![
-                "source-capture".to_string(),
-                "--source-id".to_string(),
-                source_id.clone(),
-                "--company".to_string(),
-                company.to_string(),
-                "--country".to_string(),
-                country.as_iso().to_string(),
-                "--task-id".to_string(),
-                payload
-                    .get("command_id")
-                    .and_then(Value::as_str)
-                    .unwrap_or(company)
-                    .to_string(),
-                "--timeout-ms".to_string(),
-                "180000".to_string(),
-            ];
-            match crate::service::business_os::run_business_os_web_stack_source_capture(
+            let capture_args =
+                authenticated_capture_args(&source_id, company, country, command_id, owner_user_id);
+            match crate::service::business_os::run_business_os_web_stack_source_capture_trusted(
                 root,
                 &capture_args,
             ) {
@@ -1993,6 +2022,50 @@ mod tests {
         assert_eq!(commands[0].status, "accepted");
         assert_eq!(commands[1].status, "running");
         Ok(())
+    }
+
+    #[test]
+    fn authenticated_capture_args_bind_command_id_and_native_authorization_owner() {
+        let context = serde_json::json!({
+            "native_authorization": {
+                "actor": { "id": "michael.welsch@metric-space.ai" }
+            }
+        });
+        let owner = verified_research_owner_user_id(&context).expect("verified owner");
+        let args = authenticated_capture_args(
+            "leadfeeder.com",
+            "KUKA Deutschland GmbH",
+            Country::De,
+            "leadgen-lead-research-fd2769a3",
+            owner,
+        );
+
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--task-id", "leadgen-lead-research-fd2769a3"] }));
+        assert!(args
+            .windows(2)
+            .any(|pair| { pair == ["--owner-user-id", "michael.welsch@metric-space.ai"] }));
+        assert!(!args
+            .windows(2)
+            .any(|pair| { pair == ["--task-id", "KUKA Deutschland GmbH"] }));
+    }
+
+    #[test]
+    fn verified_research_owner_uses_required_priority_order() {
+        let context = serde_json::json!({
+            "owner_user_id": "owner",
+            "actor": { "id": "actor" },
+            "user_id": "user",
+            "native_authorization": { "actor": { "id": "native" } }
+        });
+        assert_eq!(verified_research_owner_user_id(&context), Some("owner"));
+        assert_eq!(
+            verified_research_owner_user_id(&serde_json::json!({
+                "native_authorization": { "actor": { "id": "native" } }
+            })),
+            Some("native")
+        );
     }
 
     #[test]

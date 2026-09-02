@@ -4,7 +4,7 @@
 use crate::core_state as csm;
 use anyhow::Result;
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -359,6 +359,84 @@ fn outbound_email_belongs_to_thread(
     Ok(count > 0)
 }
 
+/// Prefix of `OutboundCommunication` artifact keys that point at the durable
+/// Business OS command ledger instead of the communication ledger.
+const BUSINESS_COMMAND_ARTIFACT_PREFIX: &str = "business-command:";
+/// File name of the Business OS store; it lives next to the core db in the
+/// runtime directory (see `crate::business_os::store` and `crate::paths`).
+const BUSINESS_OS_STORE_FILE: &str = "business-os.sqlite3";
+
+/// Resolve an artifact keyed as
+/// `business-command:<command_type>:<record_id>:<task_id>` against the Business
+/// OS command ledger. `task_id` is the trailing remainder and may itself contain
+/// colons (queue keys look like `queue:system::<id>`). The artifact counts as
+/// `accepted` once an accepted or completed command of that type carries
+/// `payload.record_id == record_id` and `payload.gap_task_id == task_id`; the
+/// service-side witness (`person_research_gap_closure_writeback_exists`) applies
+/// the same rule, so both sides agree on what a delivered writeback is.
+fn load_business_command_artifact_state(conn: &Connection, key: &str) -> Result<Option<String>> {
+    let Some(rest) = key.strip_prefix(BUSINESS_COMMAND_ARTIFACT_PREFIX) else {
+        return Ok(None);
+    };
+    let Some((command_type, rest)) = rest.split_once(':') else {
+        return Ok(None);
+    };
+    let Some((record_id, task_id)) = rest.split_once(':') else {
+        return Ok(None);
+    };
+    if command_type.is_empty() || record_id.is_empty() || task_id.is_empty() {
+        return Ok(None);
+    }
+    let core_db_path: Option<String> = conn
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(core_db_path) = core_db_path.filter(|path| !path.is_empty()) else {
+        return Ok(None);
+    };
+    let store_path = Path::new(&core_db_path).with_file_name(BUSINESS_OS_STORE_FILE);
+    if !store_path.is_file() {
+        return Ok(None);
+    }
+    let store = Connection::open_with_flags(
+        &store_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    store.busy_timeout(std::time::Duration::from_millis(2_000))?;
+    let has_table: Option<String> = store
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'business_commands'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if has_table.is_none() {
+        return Ok(None);
+    }
+    let mut statement = store.prepare(
+        "SELECT payload_json
+         FROM business_commands
+         WHERE command_type = ?1
+           AND status IN ('accepted', 'completed')
+         ORDER BY observed_at_ms DESC",
+    )?;
+    let rows = statement.query_map(params![command_type], |row| row.get::<_, String>(0))?;
+    for payload_json in rows {
+        let payload_json = payload_json?;
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(&payload_json) else {
+            continue;
+        };
+        let field = |name: &str| payload.get(name).and_then(serde_json::Value::as_str);
+        if field("record_id") == Some(record_id) && field("gap_task_id") == Some(task_id) {
+            return Ok(Some("accepted".to_string()));
+        }
+    }
+    Ok(None)
+}
+
 fn load_artifact_terminal_state(
     conn: &Connection,
     artifact: &csm::ArtifactRef,
@@ -392,6 +470,12 @@ fn load_artifact_terminal_state(
             }
         }
         csm::ArtifactKind::OutboundCommunication => {
+            if artifact
+                .primary_key
+                .starts_with(BUSINESS_COMMAND_ARTIFACT_PREFIX)
+            {
+                return load_business_command_artifact_state(conn, &artifact.primary_key);
+            }
             if let Some((channel, thread_key)) = artifact.primary_key.split_once(':') {
                 conn.query_row(
                     r#"
