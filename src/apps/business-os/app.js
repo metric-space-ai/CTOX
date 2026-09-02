@@ -13021,6 +13021,43 @@ async function workjetSessionControl(request = {}) {
     };
   }
 
+  if (action === 'session.transfer.pause_ack') {
+    assertWorkjetSessionPayloadKeys(request, new Set([
+      'action', 'commandId', 'transferId', 'computerId', 'fenceEpoch',
+      'lastTerminalTurnId', 'gitRepository', 'idempotencyKey',
+    ]));
+    const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
+    const transferId = boundedWorkjetSessionText(request.transferId, 'transferId', 160);
+    const fenceEpoch = request.fenceEpoch;
+    if (!Number.isInteger(fenceEpoch) || fenceEpoch < 0) {
+      throw new TypeError('Invalid Workjet session fenceEpoch.');
+    }
+    if (typeof request.gitRepository !== 'boolean') {
+      throw new TypeError('Invalid Workjet session gitRepository.');
+    }
+    await dispatchWorkjetSessionCommand(
+      commandId,
+      'ctox.workjet.session.transfer.pause_ack',
+      transferId,
+      {
+        transfer_id: transferId,
+        computer_id: boundedWorkjetSessionText(request.computerId, 'computerId', 256),
+        fence_epoch: fenceEpoch,
+        last_terminal_turn_id: boundedWorkjetSessionText(
+          request.lastTerminalTurnId,
+          'lastTerminalTurnId',
+          160,
+        ),
+        git_repository: request.gitRepository,
+        idempotency_key: boundedWorkjetSessionText(request.idempotencyKey, 'idempotencyKey', 160),
+      },
+    );
+    return {
+      action: 'session.transfer.pause_ack',
+      outcome: normalizeWorkjetTransferOutcome(await readTerminalCommandOutcome(commandId)),
+    };
+  }
+
   if (action === 'session.transfer.status') {
     assertWorkjetSessionPayloadKeys(request, new Set(['action', 'commandId', 'transferId', 'sessionId']));
     const commandId = boundedWorkjetSessionText(request.commandId, 'commandId', 128);
