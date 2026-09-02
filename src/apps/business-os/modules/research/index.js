@@ -1430,7 +1430,14 @@ async function loadDashboardData() {
   );
   const curatedTable = tableForKey(base, task.curated_table_key) || firstTableMatching(base, /library|curated/i);
   const measurementTable = tableForKey(base, task.measurements_table_key) || firstTableMatching(base, /measure|load|point/i);
-  const derivedMeasurementTable = tableForKey(base, 'derived_bearing_loads');
+  // Abgeleitete Kraefte/Momente: die Tabelle derived_propeller_load_points
+  // traegt Schub, Drehmoment und Leistung aus CT/CP (T = CT*rho*n^2*D^4,
+  // P = CP*rho*n^3*D^5, Q = P/(2*pi*n)). derived_bearing_loads ist seit der
+  // Quarantaene der Legacy-Ableitung (26.07.2026) leer; die Sicht zeigte
+  // deshalb 0 Zeilen, obwohl 3.925 verifizierte Ableitungen vorlagen
+  // (skf.ctox.dev, 02.09.2026).
+  const derivedMeasurementTable = tableForKey(base, 'derived_propeller_load_points')
+    || tableForKey(base, 'derived_bearing_loads');
   const graphNodeTable = tableForKey(base, task.payload?.graph_contract?.nodes_table_key || 'semantic_graph_nodes') || firstTableMatching(base, /semantic.*graph.*node|concept.*node/i);
   const graphEdgeTable = tableForKey(base, task.payload?.graph_contract?.edges_table_key || 'semantic_graph_edges') || firstTableMatching(base, /semantic.*graph.*edge|concept.*edge/i);
   const [candidateRows, sourceRows, curatedRows, measurementRows, derivedMeasurementRows, graphNodeRows, graphEdgeRows] = await Promise.all([
