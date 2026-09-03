@@ -10694,6 +10694,24 @@ async function loadTemplates() {
   };
 }
 
+function injectedModuleCatalogSnapshot() {
+  const config = (typeof window !== 'undefined' && window.CTOX_BUSINESS_OS_CONFIG) || null;
+  const snapshot = config?.module_catalog_snapshot || config?.moduleCatalogSnapshot || null;
+  if (!snapshot || typeof snapshot !== 'object' || !Array.isArray(snapshot.modules)) return null;
+  return snapshot;
+}
+
+function moduleCatalogProjectionRevisionMs(catalog) {
+  if (!catalog || typeof catalog !== 'object') return 0;
+  const revision = String(catalog.revision || catalog.catalog_revision || '').match(/^\d+/)?.[0];
+  const candidates = [
+    Number(revision || 0),
+    Number(catalog.updated_at_ms || catalog.updatedAtMs || 0),
+    Number(catalog.lastWriteTime || catalog._meta?.lwt || 0),
+  ].filter(Number.isFinite);
+  return candidates.length ? Math.max(...candidates) : 0;
+}
+
 async function loadModuleCatalog(timeoutMs = 60000, options = {}) {
   if (allowsCompleteQaModuleCatalog()) {
     return normalizeModuleCatalog(await loadPackagedModuleCatalog());
@@ -10702,15 +10720,20 @@ async function loadModuleCatalog(timeoutMs = 60000, options = {}) {
   if (!coll) throw new Error('business_module_catalog collection is required for shell module metadata');
 
   const cachedCatalog = await readModuleCatalogProjection(coll);
+  const injectedCatalog = injectedModuleCatalogSnapshot();
+  const projectedCatalog = injectedCatalog
+    && moduleCatalogProjectionRevisionMs(injectedCatalog) >= moduleCatalogProjectionRevisionMs(cachedCatalog)
+    ? injectedCatalog
+    : cachedCatalog;
   const shellCatalog = options.allowShellSeed === false ? null : await loadPackagedModuleCatalog();
 
-  if (cachedCatalog) {
+  if (projectedCatalog) {
     state.sync?.startCollection?.('business_module_catalog').catch((error) => {
       console.warn('[business-os] module catalog sync warmup failed after cached startup', error);
     });
 
     if (shellCatalog && Array.isArray(shellCatalog.modules)) {
-      const merged = mergePackagedCatalogModules(cachedCatalog.modules, shellCatalog.modules);
+      const merged = mergePackagedCatalogModules(projectedCatalog.modules, shellCatalog.modules);
       for (const id of merged.changedIds) {
         if (!state.shellCatalogMergedIds.has(id)) {
           state.shellCatalogMergedIds.add(id);
@@ -10719,15 +10742,15 @@ async function loadModuleCatalog(timeoutMs = 60000, options = {}) {
       }
       if (merged.changed) {
         const mergedCatalog = {
-          ...cachedCatalog,
+          ...projectedCatalog,
           modules: merged.modules,
           updated_at_ms: Date.now(),
-          source: cachedCatalog.source || 'business-os-shell',
+          source: projectedCatalog.source || 'business-os-shell',
         };
         return normalizeModuleCatalog(mergedCatalog);
       }
     }
-    return normalizeModuleCatalog(cachedCatalog);
+    return normalizeModuleCatalog(projectedCatalog);
   }
 
   const syncStart = state.sync?.startCollection?.('business_module_catalog');

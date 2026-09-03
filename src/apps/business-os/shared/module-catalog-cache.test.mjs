@@ -5,6 +5,8 @@ const source = await readFile(new URL('../app.js', import.meta.url), 'utf8');
 const fetcher = source.match(/function fetchPackagedModuleRegistry\(\)[\s\S]*?\n\}/)?.[0] || '';
 const loader = source.match(/async function loadPackagedModuleCatalog\(\)[\s\S]*?\n\}/)?.[0] || '';
 const catalogLoader = source.match(/async function loadModuleCatalog\([^]*?\n\}/)?.[0] || '';
+const injectedCatalogLoader = source.match(/function injectedModuleCatalogSnapshot\([^]*?\n\}/)?.[0] || '';
+const catalogRevision = source.match(/function moduleCatalogProjectionRevisionMs\([^]*?\n\}/)?.[0] || '';
 const initialOpen = source.match(/try \{\n\s+const workspaceSession[\s\S]*?flushDeferredCatalogRefresh\(\);\n\s+\}/)?.[0] || '';
 
 assert.match(loader, /fetchPackagedModuleRegistry\(\)/);
@@ -38,6 +40,21 @@ assert.match(
   catalogLoader,
   /if \(allowsCompleteQaModuleCatalog\(\)\) \{[\s\S]*?loadPackagedModuleCatalog\(\)/,
   'the isolated all-source QA catalog must not merge runtime or customer modules from RxDB',
+);
+assert.match(
+  injectedCatalogLoader,
+  /module_catalog_snapshot/,
+  'the server-authoritative bootstrap snapshot must be available while WebRTC catches up',
+);
+assert.match(
+  catalogRevision,
+  /catalog\.revision[\s\S]*catalog\.updated_at_ms[\s\S]*catalog\.lastWriteTime/,
+  'catalog selection must compare native projection revisions instead of trusting browser cache age',
+);
+assert.match(
+  catalogLoader,
+  /moduleCatalogProjectionRevisionMs\(injectedCatalog\) >= moduleCatalogProjectionRevisionMs\(cachedCatalog\)/,
+  'a newer native bootstrap projection must replace stale browser catalog metadata',
 );
 
 console.log('runtime module catalog cache contract OK');
