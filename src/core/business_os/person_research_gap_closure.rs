@@ -429,6 +429,10 @@ pub(super) fn handle_research_writeback(
         !requested_fields.is_empty(),
         "research writeback field_status must not be empty"
     );
+    // Erst retten, dann pruefen: Einzelverstoesse duerfen die Arbeit einer
+    // ganzen Firma nicht mehr vernichten (Befund 03.09.2026, 14 von 19).
+    let mut request = request;
+    let rejections = sanitize_research_writeback(&mut request, &requested_fields)?;
     validate_field_status_keys(&requested_fields, &request.field_status)?;
     validate_result_shape(&request.result, &requested_fields)?;
     validate_result_field_status_consistency(&request.result, &request.field_status)?;
@@ -457,10 +461,14 @@ pub(super) fn handle_research_writeback(
         lead["gap_task_id"] = Value::String(request.gap_task_id.clone());
     }
     lead["research_phase"] = Value::Null;
-    let needs_review = request
-        .field_status
-        .values()
-        .any(|field| matches!(field.status.as_str(), "no_match" | "action_required"));
+    // Ein verworfenes oder fehlendes Feld ist ein Grund zur Pruefung durch einen
+    // Menschen - sonst haette die Rettung "abgeschlossen" gemeldet, obwohl
+    // Felder fehlen.
+    let needs_review = !rejections.is_empty()
+        || request
+            .field_status
+            .values()
+            .any(|field| matches!(field.status.as_str(), "no_match" | "action_required"));
     let terminal_lead_status = if needs_review {
         "needs_review"
     } else {
@@ -481,6 +489,9 @@ pub(super) fn handle_research_writeback(
         "gap_task_id": request.gap_task_id,
         "research_status": if needs_review { "needs_review" } else { "completed" },
         "field_status": request.field_status,
+        // Der Agent erfaehrt genau, was verworfen wurde, und kann im selben
+        // Auftrag nachliefern statt die ganze Firma neu zu recherchieren.
+        "rejections": rejections,
     }))
 }
 
@@ -637,6 +648,271 @@ fn validate_task_correlation(
         "gap task id does not match writeback"
     );
     Ok(())
+}
+
+/// Rettet die Arbeit einer Recherche, deren Rueckschreiben in Details gegen den
+/// Vertrag verstoesst.
+///
+/// Gemessen am 03.09.2026 auf THESEN: von 19 Chemie-Firmen endeten 14 als
+/// "failed", obwohl die Recherche gelaufen war - eine Firma hatte 19 Felder und
+/// 32 Feldstatus und verlor trotzdem alles, weil EIN Beleg keine http-URL trug.
+/// Die haeufigsten Gruende (12 x person_key ungleich, 7 x person_key fehlt,
+/// 4 x Wert weicht ab, 3 x Wert auf nicht-verifiziertem Feld, 1 x Beleg-URL)
+/// betreffen immer nur EINZELNE Felder oder Belege.
+///
+/// Diese Bereinigung wirft deshalb genau das Betroffene weg statt des Ganzen.
+/// Die Schutzrichtung bleibt: nichts Unbelegtes wird "verified". Ein verworfenes
+/// Feld faellt auf `unsupported` mit Begruendung, der Lead landet zwingend in
+/// `needs_review`, und die Ablehnungen gehen als Liste an den Aufrufer zurueck,
+/// damit der Agent im naechsten Zug genau die Luecken schliessen kann.
+fn sanitize_research_writeback(
+    request: &mut ResearchWritebackRequest,
+    requested_fields: &[String],
+) -> anyhow::Result<Vec<String>> {
+    let mut rejections: Vec<String> = Vec::new();
+    let requested: BTreeSet<&String> = requested_fields.iter().collect();
+    let mut verworfene_felder: BTreeSet<String> = BTreeSet::new();
+
+    let fields = request
+        .result
+        .fields
+        .as_object_mut()
+        .context("research writeback result.fields must be an object")?;
+    let mut entfernen: Vec<String> = Vec::new();
+    for (field, value) in fields.iter() {
+        let grund = if !requested.contains(field) {
+            Some("nicht angefordert".to_string())
+        } else if parse_requested_fields(&[field.clone()]).is_err() {
+            Some("kein bekanntes Recherchefeld".to_string())
+        } else if !value.is_object() {
+            Some("kein strukturiertes Objekt".to_string())
+        } else if value
+            .get("value")
+            .is_some_and(|inner| !inner.is_null() && !research_value_is_populated(inner))
+        {
+            Some("Wert ist weder leer noch ein befuellter Skalar".to_string())
+        } else if field.starts_with("person_")
+            && value.get("value").is_some_and(research_value_is_populated)
+            && !value
+                .get("person_key")
+                .and_then(Value::as_str)
+                .is_some_and(|key| !key.trim().is_empty())
+        {
+            Some("person_key fehlt".to_string())
+        } else {
+            None
+        };
+        if let Some(grund) = grund {
+            rejections.push(format!("result.fields.{field}: {grund}"));
+            entfernen.push(field.clone());
+        }
+    }
+    for field in entfernen {
+        fields.remove(&field);
+        verworfene_felder.insert(field);
+    }
+
+    let vorher = request.result.person_records.len();
+    request.result.person_records.retain(|person| {
+        person
+            .get("person_key")
+            .and_then(Value::as_str)
+            .is_some_and(|key| !key.trim().is_empty())
+    });
+    if request.result.person_records.len() != vorher {
+        rejections.push(format!(
+            "result.person_records: {} Eintraege ohne person_key verworfen",
+            vorher - request.result.person_records.len()
+        ));
+    }
+
+    let mut belege: Vec<Value> = Vec::new();
+    for (index, evidence) in request.result.evidence.iter().enumerate() {
+        let field = evidence
+            .get("field_key")
+            .or_else(|| evidence.get("field"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let url_ok = evidence
+            .get("url")
+            .or_else(|| evidence.get("source_url"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|value| url::Url::parse(value).ok())
+            .is_some_and(|url| {
+                matches!(url.scheme(), "http" | "https") && url.host_str().is_some()
+            });
+        let grund = match field.as_deref() {
+            None => Some("field_key fehlt".to_string()),
+            Some(field) if !requested.contains(&field.to_string()) => {
+                Some(format!("Feld {field} war nicht angefordert"))
+            }
+            Some(field) if verworfene_felder.contains(field) => {
+                Some(format!("Feld {field} wurde bereits verworfen"))
+            }
+            Some(field) if parse_requested_fields(&[field.to_string()]).is_err() => {
+                Some(format!("Feld {field} ist kein bekanntes Recherchefeld"))
+            }
+            Some(_) if !url_ok => Some("Beleg-URL ist keine http(s)-Adresse".to_string()),
+            Some(_)
+                if !evidence
+                    .get("source_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty()) =>
+            {
+                Some("source_id fehlt".to_string())
+            }
+            Some(_)
+                if !evidence
+                    .get("quote")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty()) =>
+            {
+                Some("Zitat fehlt".to_string())
+            }
+            Some(field)
+                if field.starts_with("person_")
+                    && !evidence
+                        .get("person_key")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| !value.trim().is_empty()) =>
+            {
+                Some("person_key fehlt".to_string())
+            }
+            Some(_) => None,
+        };
+        match grund {
+            Some(grund) => rejections.push(format!("result.evidence[{index}]: {grund}")),
+            None => belege.push(evidence.clone()),
+        }
+    }
+    request.result.evidence = belege;
+
+    // Feldstatus gegen das Ergebnis abgleichen. Ein Widerspruch verwirft NUR
+    // dieses Feld, nie die ganze Firma.
+    let fields_snapshot = request.result.fields.clone();
+    let leer = serde_json::Map::new();
+    let fields_ro = fields_snapshot.as_object().unwrap_or(&leer);
+    let mut demotieren: Vec<(String, String)> = Vec::new();
+    for (field, status) in request.field_status.iter() {
+        if !requested.contains(field) {
+            demotieren.push((field.clone(), "nicht angefordert".to_string()));
+            continue;
+        }
+        let eintrag = fields_ro.get(field);
+        let ergebniswert = eintrag.and_then(|entry| entry.get("value"));
+        if status.status == "verified" {
+            if verworfene_felder.contains(field) {
+                demotieren.push((field.clone(), "Ergebnisfeld wurde verworfen".to_string()));
+                continue;
+            }
+            if let Some(wert) = ergebniswert.filter(|value| !value.is_null()) {
+                if wert != &status.value {
+                    demotieren.push((
+                        field.clone(),
+                        "Wert in result und field_status stimmen nicht ueberein".to_string(),
+                    ));
+                    continue;
+                }
+            }
+            if field.starts_with("person_") {
+                let person_key = eintrag
+                    .and_then(|entry| entry.get("person_key"))
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty());
+                match person_key {
+                    None => {
+                        demotieren
+                            .push((field.clone(), "person_key im Ergebnis fehlt".to_string()));
+                        continue;
+                    }
+                    Some(person_key) => {
+                        if !status.sources.iter().all(|source| {
+                            source.person_key.as_deref().map(str::trim) == Some(person_key)
+                        }) {
+                            demotieren.push((
+                                field.clone(),
+                                "person_key in Beleg und Ergebnis nicht identisch".to_string(),
+                            ));
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (field, grund) in demotieren {
+        rejections.push(format!("field_status.{field}: {grund}"));
+        verworfene_felder.insert(field.clone());
+        if let Some(map) = request.result.fields.as_object_mut() {
+            map.remove(&field);
+        }
+        if requested.contains(&field) {
+            let status = request.field_status.entry(field).or_insert(FieldStatus {
+                status: String::new(),
+                value: Value::Null,
+                sources: Vec::new(),
+                attempts: Vec::new(),
+                reason: String::new(),
+                extra: BTreeMap::new(),
+            });
+            status.status = "unsupported".to_string();
+            status.value = Value::Null;
+            status.sources.clear();
+            status.reason = "Vom Rueckschreiben verworfen, siehe rejections".to_string();
+        } else {
+            request.field_status.remove(&field);
+        }
+    }
+
+    // Nicht-verifizierte Felder duerfen keinen Wert tragen: den Wert entfernen,
+    // nicht das Feld verlieren.
+    for (field, status) in request.field_status.iter_mut() {
+        if status.status == "verified" {
+            continue;
+        }
+        if research_value_is_populated(&status.value) {
+            rejections.push(format!(
+                "field_status.{field}: Wert auf nicht-verifiziertem Feld entfernt"
+            ));
+            status.value = Value::Null;
+        }
+        if let Some(map) = request.result.fields.as_object_mut() {
+            if let Some(entry) = map.get_mut(field) {
+                if entry.get("value").is_some_and(research_value_is_populated) {
+                    rejections.push(format!(
+                        "result.fields.{field}: Wert auf nicht-verifiziertem Feld entfernt"
+                    ));
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("value".to_string(), Value::Null);
+                    }
+                }
+            }
+        }
+    }
+
+    // Nicht gelieferte Felder ergaenzen, damit der Feldsatz vollstaendig bleibt.
+    for field in requested_fields {
+        if request.field_status.contains_key(field) {
+            continue;
+        }
+        rejections.push(format!("field_status.{field}: nicht geliefert"));
+        request.field_status.insert(
+            field.clone(),
+            FieldStatus {
+                status: "unsupported".to_string(),
+                value: Value::Null,
+                sources: Vec::new(),
+                attempts: Vec::new(),
+                reason: "Vom Rueckschreiben nicht geliefert".to_string(),
+                extra: BTreeMap::new(),
+            },
+        );
+    }
+
+    Ok(rejections)
 }
 
 fn validate_field_status_keys(
@@ -1738,6 +2014,73 @@ mod tests {
         assert_eq!(lead["gap_task_id"], task.message_key);
         assert_eq!(lead["data"]["firma_domain"], "example.test");
         assert_eq!(lead["field_status"]["firma_domain"]["status"], "verified");
+        Ok(())
+    }
+
+    /// Der Befund vom 03.09.2026: EIN fehlerhafter Beleg hat die Recherche einer
+    /// ganzen Firma vernichtet. Jetzt bleibt das gute Feld erhalten, das
+    /// schlechte faellt begruendet heraus, und der Lead geht in die Pruefung.
+    #[test]
+    fn writeback_rettet_gute_felder_und_verwirft_nur_den_fehlerhaften_beleg() -> anyhow::Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let record_id = "lead-teilrettung";
+        let research_command_id = "research-teilrettung";
+        let (_, task) =
+            create_gap_fixture(temp.path(), research_command_id, record_id, "firma_domain")?;
+        let command = writeback_command(
+            record_id,
+            serde_json::json!({
+                "record_id": record_id,
+                "module": "outbound-lead-generation",
+                "research_command_id": research_command_id,
+                "gap_task_id": task.message_key,
+                "field_status": {
+                    "firma_domain": {
+                        "status": "verified",
+                        "value": "example.test",
+                        "sources": [
+                            {"source_id": "official", "url": "https://example.test/imprint", "quote": "Example AG"},
+                            {"source_id": "register", "url": "https://register.test/example", "quote": "example.test"}
+                        ],
+                        "attempts": []
+                    }
+                },
+                "result": {
+                    "fields": {"firma_domain": {"value": "example.test"}},
+                    "person_records": [{"name": "Ohne Schluessel"}],
+                    "evidence": [
+                        {"field_key": "firma_domain", "source_id": "official", "url": "ftp://example.test/datei", "quote": "Example AG"}
+                    ]
+                }
+            }),
+        );
+
+        let result = handle_research_writeback(temp.path(), &command)?;
+        let lead = store::load_rxdb_collection_record(temp.path(), LEAD_COLLECTION, record_id)?
+            .context("lead missing after writeback")?;
+        // Das belegte Feld ueberlebt.
+        assert_eq!(lead["data"]["firma_domain"], "example.test");
+        assert_eq!(lead["field_status"]["firma_domain"]["status"], "verified");
+        // Der fehlerhafte Beleg und der Personendatensatz ohne Schluessel sind weg.
+        let ablehnungen = result["rejections"]
+            .as_array()
+            .context("rejections fehlen in der Antwort")?;
+        assert!(
+            ablehnungen
+                .iter()
+                .any(|entry| entry.as_str().is_some_and(|text| text.contains("evidence"))),
+            "der nicht-http-Beleg muss als Ablehnung erscheinen: {ablehnungen:?}"
+        );
+        assert!(
+            ablehnungen.iter().any(|entry| entry
+                .as_str()
+                .is_some_and(|text| text.contains("person_records"))),
+            "der Personendatensatz ohne person_key muss als Ablehnung erscheinen: {ablehnungen:?}"
+        );
+        // Verworfenes heisst: ein Mensch schaut drauf.
+        assert_eq!(result["research_status"], "needs_review");
+        assert_eq!(lead["research_status"], "needs_review");
         Ok(())
     }
 
