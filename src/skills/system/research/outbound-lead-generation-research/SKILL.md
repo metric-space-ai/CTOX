@@ -228,6 +228,7 @@ Build the writeback in this order, then send it once: (1) collect the terminal s
 - Person fields describe the priority contact(s) you actually found: when you report persons in `person_records`, set the matching `person_*` fields `verified` with their `person_key` instead of `no_match`. `no_match` on a person field means you found no such person at all.
 - Person fields carry a `person_key`; `result.fields` holds structured objects only, never free text.
 - `research_command_id` is your own command id; `gap_task_id` stays empty for a chat assignment (it is only set when the daemon handed you a queue task "Lückenschluss: …" — then copy it from that task).
+- **Dispatch exactly one command: the writeback.** Never dispatch read commands (`outbound.task.readback`, `outbound.lead.read`, `outbound.queue_task.read`, `outbound.lead.show` or anything similar) to check your own result. Every dispatched command becomes its own queue task and its own agent turn — twelve such reads once blocked a whole campaign for three hours. Read state with `ctox business-os commands inspect <your writeback command id>`, and stop there.
 - Done means the dispatch answered `ok: true` with status `accepted` or `completed`. Report the counts (verified / no_match / action_required / unsupported) and the persons found in one short chat message.
 
 ## 8. Unblocking across turns (login, captcha, MFA)
