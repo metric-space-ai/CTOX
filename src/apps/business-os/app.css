@@ -9038,9 +9038,14 @@ button.shell-window-header-meta:focus-visible,
 
 /* v2 keeps the established focus hierarchy without reintroducing the v1
    overlay. Only the active app owns visible resize chrome. */
+/* Owner-Befund 03.09.2026: "warum sind hintergrund apps immer noch
+   transparent?" - `opacity` auf einem Fenster macht das GANZE Fenster
+   durchsichtig, samt Inhalt: Schreibtischsymbole und die Sitzungsliste der
+   Browser-App schienen durch die Outbound-App hindurch. Die Fokushierarchie
+   braucht keine Durchsichtigkeit; Helligkeit und Schatten unterscheiden
+   genauso deutlich und lassen das Fenster deckend. */
 :root .shell-window[data-shell-contract="v2"]:not(.is-focused) {
-  opacity: 0.86;
-  filter: saturate(0.36) brightness(0.78);
+  filter: saturate(0.5) brightness(0.72);
   box-shadow: 0 14px 38px rgb(0 0 0 / 0.42) !important;
 }
 
