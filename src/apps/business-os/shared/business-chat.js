@@ -4656,14 +4656,19 @@ function installChatStyles() {
     .ctox-chat-root {
       position: fixed;
       left: 18px;
-      right: 96px;
+      /* Die ausgeklappte Leiste laeuft ueber die gesamte Fensterbreite. Sie
+         sparte hier 132px fuer den Kaefer-Melder aus; der waechst beim
+         Ueberfahren aber auf bis zu 280px und lag ohnehin ueber der Leiste —
+         die Luecke kostete nur sichtbare Laenge. Der Melder sitzt jetzt im
+         rechten Ende der Leiste (Freiraum: --ctox-chat-reporter-slot). */
+      right: 18px;
       bottom: 18px;
       z-index: 60;
       display: grid;
       grid-template-rows: auto auto;
       gap: var(--space-2);
       width: auto;
-      max-width: calc(100dvw - 132px);
+      max-width: calc(100dvw - 36px);
       box-sizing: border-box;
       pointer-events: none;
       min-width: 0;
@@ -4708,6 +4713,13 @@ function installChatStyles() {
     }
     .ctox-chat-dock:hover {
       border-color: color-mix(in srgb, var(--line) 55%, transparent);
+    }
+    /* Der Kaefer-Melder steht fest unten rechts (position: fixed). Solange die
+       Leiste ueber die volle Breite laeuft, endet sie unter ihm — deshalb haelt
+       sie an ihrem rechten Ende genau seinen Platz frei, statt die Leiste
+       vorzeitig abzuschneiden. */
+    body:not([data-shell-chat-dock-side]) .ctox-chat-dock:not(.is-collapsed) {
+      padding-right: var(--ctox-chat-reporter-slot, 58px);
     }
     .ctox-chat-dock.has-visible-chats {
       grid-template-columns: 88px var(--ctox-date-pill-width) minmax(136px, auto) 34px;

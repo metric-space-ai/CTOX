@@ -1586,7 +1586,10 @@ function installReporterStyles() {
     .ctox-report-fab {
       position: fixed;
       right: 18px;
-      bottom: 18px;
+      /* Die Crew-Leiste laeuft ueber die volle Breite und ist 56px hoch (unten
+         18px). 26px setzt den 40px hohen Melder mittig in ihr rechtes Ende,
+         statt ihn darunter kleben zu lassen. */
+      bottom: 26px;
       /* Shell windows live at z-index 50. The standing reporter must remain
          clickable above them while staying below shell menus and dialogs. */
       z-index: 220;
