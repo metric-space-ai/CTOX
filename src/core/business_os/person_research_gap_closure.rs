@@ -816,6 +816,33 @@ fn sanitize_research_writeback(
                     continue;
                 }
             }
+            // Am 03.09.2026 auf THESEN nachgezaehlt: von 265 als "verified"
+            // gemeldeten Feldern trugen 56 nur EINE Quelle und 100 weniger als
+            // zwei verschiedene Quell-Hosts. Der Vertrag verlangt zwei
+            // unabhaengige Hosts - geprueft wurde das aber nur auf dem
+            // Warteschlangenweg (validate_terminal_field). Die Chemie-Kampagne
+            // lief ueber den Chatweg, wo die Regel schlicht nicht existierte.
+            // "verified" bedeutete damit nicht, was es behauptet.
+            let hosts = status
+                .sources
+                .iter()
+                .filter_map(|source| {
+                    url::Url::parse(source.url.trim()).ok().and_then(|url| {
+                        url.host_str()
+                            .map(|host| host.trim_start_matches("www.").to_ascii_lowercase())
+                    })
+                })
+                .collect::<BTreeSet<_>>();
+            if hosts.len() < 2 {
+                demotieren.push((
+                    field.clone(),
+                    format!(
+                        "verified verlangt zwei unabhaengige Quell-Hosts, gefunden: {}",
+                        hosts.len()
+                    ),
+                ));
+                continue;
+            }
             if field.starts_with("person_") {
                 let person_key = eintrag
                     .and_then(|entry| entry.get("person_key"))
@@ -2081,6 +2108,62 @@ mod tests {
         // Verworfenes heisst: ein Mensch schaut drauf.
         assert_eq!(result["research_status"], "needs_review");
         assert_eq!(lead["research_status"], "needs_review");
+        Ok(())
+    }
+
+    /// Gemessen am 03.09.2026: 100 von 265 "verified" Feldern hatten weniger
+    /// als zwei verschiedene Quell-Hosts. Auf dem Chatweg pruefte das niemand.
+    #[test]
+    fn verified_mit_nur_einem_quell_host_wird_nicht_als_belegt_uebernommen() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let record_id = "lead-eine-quelle";
+        let research_command_id = "research-eine-quelle";
+        let (_, task) =
+            create_gap_fixture(temp.path(), research_command_id, record_id, "firma_domain")?;
+        let command = writeback_command(
+            record_id,
+            serde_json::json!({
+                "record_id": record_id,
+                "module": "outbound-lead-generation",
+                "research_command_id": research_command_id,
+                "gap_task_id": task.message_key,
+                "field_status": {
+                    "firma_domain": {
+                        "status": "verified",
+                        "value": "example.test",
+                        // Zwei Belege, aber derselbe Host - das ist EINE Quelle.
+                        "sources": [
+                            {"source_id": "seite-1", "url": "https://example.test/imprint", "quote": "Example AG"},
+                            {"source_id": "seite-2", "url": "https://example.test/kontakt", "quote": "example.test"}
+                        ],
+                        "attempts": []
+                    }
+                },
+                "result": {
+                    "fields": {"firma_domain": {"value": "example.test"}},
+                    "person_records": [],
+                    "evidence": []
+                }
+            }),
+        );
+
+        let result = handle_research_writeback(temp.path(), &command)?;
+        let lead = store::load_rxdb_collection_record(temp.path(), LEAD_COLLECTION, record_id)?
+            .context("lead missing after writeback")?;
+        assert_eq!(
+            lead["field_status"]["firma_domain"]["status"], "unsupported",
+            "ein einziger Quell-Host darf nicht als belegt durchgehen"
+        );
+        assert_eq!(result["research_status"], "needs_review");
+        let ablehnungen = result["rejections"]
+            .as_array()
+            .context("rejections fehlen")?;
+        assert!(
+            ablehnungen.iter().any(|entry| entry
+                .as_str()
+                .is_some_and(|text| text.contains("zwei unabhaengige Quell-Hosts"))),
+            "der Grund muss benannt sein: {ablehnungen:?}"
+        );
         Ok(())
     }
 
