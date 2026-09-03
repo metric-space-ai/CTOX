@@ -1114,7 +1114,9 @@ function exportVisibleTasks(state) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = `ctox-tasks-${exportedAt.slice(0, 19).replace(/[:T]/g, '-')}.json`;
-  document.body.appendChild(anchor);
+  // Wie oben: der Download-Anker gehoert in den Modul-Host, nicht auf den
+  // Desktop-Body.
+  (state.ctx?.host || document.documentElement).appendChild(anchor);
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);

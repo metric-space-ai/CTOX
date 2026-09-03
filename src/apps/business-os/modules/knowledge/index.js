@@ -3518,7 +3518,10 @@ function downloadTextFile(filename, content, type = 'text/plain;charset=utf-8') 
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
-  document.body.append(link);
+  // Der Desktop-Body ist nicht der Host dieses Moduls: ein Anker dort haengt
+  // ausserhalb des App-Fensters (siehe scripts/assert-shell-v2-contract.mjs,
+  // Regel body-overlay).
+  (els.root || state.ctx?.host || document.documentElement).append(link);
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);
