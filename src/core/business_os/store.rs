@@ -29051,7 +29051,7 @@ pub(super) mod tests {
                     "target": "app"
                 },
                 "client_context": {
-                    "source": "business-os-app-creator-native-test",
+                    "source": "business-os-mcp",
                     "target": "app"
                 }
             }),
