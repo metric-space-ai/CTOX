@@ -2929,6 +2929,7 @@ function sessionShardMarkup(session, tabCount, ctx = null, listView = 'cards') {
 // Die vier Zustaende kommen ohne neue Felder aus; sie stehen alle schon im
 // Sitzungsdatensatz.
 const SITZUNG_ZUSTAENDE = Object.freeze({
+  anmeldung: { symbol: '🔑', klasse: 'is-anmeldung', text: 'Anmeldung – hier bestätigen' },
   eingriff: { symbol: '⚠', klasse: 'is-eingriff', text: 'Eingriff nötig' },
   nutzer: { symbol: '👤', klasse: 'is-nutzer', text: 'Sie steuern' },
   automatik: { symbol: '⚙', klasse: 'is-automatik', text: 'Automatik' },
@@ -2944,16 +2945,28 @@ function browserSitzungZustand(session, ctx, jetzt = Date.now()) {
     .test(`${fehler} ${titel}`);
   const lauft = ['active', 'running', 'ready', 'capturing'].includes(
     String(session.runtime_status || session.status || '').toLowerCase());
-  if (lauft && wartetAufMensch) return SITZUNG_ZUSTAENDE.eingriff;
   if (!lauft) return SITZUNG_ZUSTAENDE.ruhend;
 
   // 2. Steuert der angemeldete Nutzer selbst — mit GUELTIGER Pacht?
+  //    Das kommt VOR dem Eingriff-Zustand. Am 03.09.2026 wurde eine Sitzung,
+  //    die der Nutzer gerade selbst fuhr, als "Eingriff nötig" gefuehrt, nur
+  //    weil die geoeffnete Seite "Login" im Titel trug. Wer selbst am Steuer
+  //    sitzt, braucht keine Aufforderung einzugreifen.
   const meine = browserActorIds(ctx?.session) || [];
   const steuernder = String(session.controller_user_id || '');
   const pachtBis = Number(session.controller_lease_expires_at_ms || 0);
-  if (steuernder && meine.includes(steuernder) && pachtBis > jetzt) {
-    return SITZUNG_ZUSTAENDE.nutzer;
+  const selbstAmSteuer = Boolean(steuernder && meine.includes(steuernder) && pachtBis > jetzt);
+
+  // 2a. Eine Anmeldesitzung des Web Stack ist der EINZIGE Ort, an dem der
+  //     Knopf "Erledigt – Recherche fortsetzen" erscheint. Sie muss in der
+  //     Liste als solche erkennbar sein - sonst sucht man den Knopf an einer
+  //     Sitzung, die ihn nie zeigen kann (Owner-Befund 03.09.2026).
+  if (String(session.payload?.purpose || '') === 'web_stack_auth'
+    && String(session.payload?.auth_assist_status || '') !== 'completed') {
+    return SITZUNG_ZUSTAENDE.anmeldung;
   }
+  if (selbstAmSteuer) return SITZUNG_ZUSTAENDE.nutzer;
+  if (wartetAufMensch) return SITZUNG_ZUSTAENDE.eingriff;
   // 3. Sonst faehrt sie jemand anderes — Recherche, Adapter, anderer Nutzer.
   //    Diese Sitzungen NICHT versehentlich uebernehmen: ein Zugriff bricht
   //    einen laufenden Rechercheschritt ab.

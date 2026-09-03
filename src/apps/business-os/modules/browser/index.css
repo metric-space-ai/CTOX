@@ -753,6 +753,14 @@
 .browser-session.is-eingriff {
   background: color-mix(in srgb, var(--ctox-warn, #e0a33a) 10%, transparent);
 }
+/* Anmeldesitzung: der einzige Ort, an dem "Erledigt - Recherche fortsetzen"
+   erscheint. Sie muss in der Liste sofort auffindbar sein. */
+.browser-session.is-anmeldung .browser-session-zustand {
+  color: var(--ctox-warn, #e0a33a);
+}
+.browser-session.is-anmeldung {
+  background: color-mix(in srgb, var(--ctox-warn, #e0a33a) 14%, transparent);
+}
 .browser-session.is-nutzer .browser-session-zustand {
   color: var(--ctox-accent, #7fd4b0);
 }
