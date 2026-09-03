@@ -2026,7 +2026,9 @@ fn app_development_contract(
         skill_resources: vec![
             "business-os-skill://business-os-app-module-development/SKILL.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/module-contract.md".to_string(),
+            "business-os-skill://business-os-app-module-development/references/shell-v2-contract.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/design-guide.md".to_string(),
+            "business-os-skill://business-os-app-module-development/references/impeccable-preflight.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/standalone-porting.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/dos-and-donts.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/green-checklist.md".to_string(),
@@ -2193,10 +2195,19 @@ pub fn read_app_skill_resource(
     context.validate()?;
     let base = "src/skills/system/product_engineering/business-os-app-module-development";
     let requested = resource.trim().trim_start_matches('/');
+    let requested = requested
+        .strip_prefix("business-os-skill://business-os-app-module-development/")
+        .unwrap_or(requested);
     let relative = match requested {
         "SKILL.md" | "skill" => "SKILL.md",
         "module-contract" | "references/module-contract.md" => "references/module-contract.md",
+        "shell-v2-contract" | "references/shell-v2-contract.md" => {
+            "references/shell-v2-contract.md"
+        }
         "design-guide" | "references/design-guide.md" => "references/design-guide.md",
+        "impeccable-preflight" | "references/impeccable-preflight.md" => {
+            "references/impeccable-preflight.md"
+        }
         "standalone-porting" | "references/standalone-porting.md" => {
             "references/standalone-porting.md"
         }
@@ -2213,7 +2224,9 @@ pub fn read_app_skill_resource(
             relative,
             "SKILL.md"
                 | "references/module-contract.md"
+                | "references/shell-v2-contract.md"
                 | "references/design-guide.md"
+                | "references/impeccable-preflight.md"
                 | "references/standalone-porting.md"
                 | "references/dos-and-donts.md"
                 | "references/green-checklist.md"
@@ -9280,6 +9293,14 @@ mod tests {
             skill_root.join("references/design-guide.md"),
             "# Design Guide\n",
         )?;
+        std::fs::write(
+            skill_root.join("references/shell-v2-contract.md"),
+            "# Shell v2 Contract\n",
+        )?;
+        std::fs::write(
+            skill_root.join("references/impeccable-preflight.md"),
+            "# Impeccable Preflight\n",
+        )?;
         let context = test_context("business_os.read_app_skill_resource");
         let result = read_app_skill_resource(temp.path(), &context, "design-guide")?;
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
@@ -9293,6 +9314,23 @@ mod tests {
             .get("content")
             .and_then(Value::as_str)
             .is_some_and(|content| content.contains("Design Guide")));
+        let contract_uri =
+            "business-os-skill://business-os-app-module-development/references/design-guide.md";
+        let contract_resource = read_app_skill_resource(temp.path(), &context, contract_uri)?;
+        assert_eq!(
+            contract_resource.get("uri").and_then(Value::as_str),
+            Some(contract_uri)
+        );
+        let shell = read_app_skill_resource(temp.path(), &context, "shell-v2-contract")?;
+        assert!(shell
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains("Shell v2 Contract")));
+        let preflight = read_app_skill_resource(temp.path(), &context, "impeccable-preflight")?;
+        assert!(preflight
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains("Impeccable Preflight")));
         let traversal = read_app_skill_resource(temp.path(), &context, "../../AGENTS.md");
         assert!(
             traversal.is_err(),
