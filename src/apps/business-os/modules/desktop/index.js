@@ -54,6 +54,8 @@ const FALLBACK_LABELS = {
     emptyDesktop: 'Keine Icons auf dem Desktop.',
     syncingData: 'Daten werden synchronisiert.',
     openInModule: 'Öffnen',
+    openUnavailable: 'Diese App ist auf dieser Instanz nicht verfügbar.',
+    openUnavailableDetail: '„{label}" verweist auf {target} — dieses Modul steht im Katalog dieser Instanz nicht (mehr) zur Verfügung.',
     chatWithCtox: 'Mit CTOX chatten',
     askCtox: 'Frage stellen',
     workWithData: 'Daten ändern',
@@ -91,6 +93,8 @@ const FALLBACK_LABELS = {
     emptyDesktop: 'No icons on the desktop.',
     syncingData: 'Syncing data.',
     openInModule: 'Open',
+    openUnavailable: 'This app is not available on this instance.',
+    openUnavailableDetail: '"{label}" points at {target}, which is not (or no longer) in this instance catalog.',
     chatWithCtox: 'Chat with CTOX',
     askCtox: 'Ask question',
     workWithData: 'Change data',
@@ -547,7 +551,7 @@ export async function mount(ctx) {
     el.addEventListener('keydown', (event) => {
       if (event.key === 'Enter' || event.key === ' ') {
         event.preventDefault();
-        launcher.open(doc.target_module);
+        openDesktopTarget(doc);
       }
     });
     el.addEventListener('contextmenu', (event) => onIconContextMenu(event, doc));
@@ -565,7 +569,7 @@ export async function mount(ctx) {
         }
         el.classList.add('selected');
       },
-      onActivate: () => launcher.open(doc.target_module),
+      onActivate: () => openDesktopTarget(doc),
       onMoved: async (iconId, position) => {
         const updatedAt = Date.now();
         rememberIconPosition(iconId, position, updatedAt);
@@ -613,7 +617,7 @@ export async function mount(ctx) {
     const app = moduleForDesktopTarget(doc.target_module);
     const canRenameApp = isRuntimeInstalledApp(app);
     ctx.contextMenu.show(event, [
-      { label: t('openInModule', 'Öffnen'), icon: '↗', action: () => launcher.open(doc.target_module) },
+      { label: t('openInModule', 'Öffnen'), icon: '↗', action: () => openDesktopTarget(doc) },
       {
         label: pinned ? t('unpinFromTaskbar', 'Von Bar lösen') : t('pinToTaskbar', 'An Bar anheften'),
         icon: pinned ? '−' : '+',
@@ -629,6 +633,25 @@ export async function mount(ctx) {
       { type: 'separator' },
       { label: t('deleteIcon', 'Icon entfernen'), icon: '−', action: safeAction(() => deleteIcon(doc.id)) },
     ]);
+  }
+
+  // launcher.open() meldet ein fehlendes Ziel nur mit `false` zurueck. Alle drei
+  // Oeffnen-Wege (Doppelklick, Enter, Kontextmenue) haben diesen Rueckgabewert
+  // verworfen: ein Icon, dessen Zielmodul nicht (mehr) im Katalog dieser Instanz
+  // steht, tat auf Klick GAR NICHTS — kein Fenster, keine Meldung. Genau so
+  // sieht ein "kaputtes" Kontextmenue aus. Der Fehlschlag wird jetzt benannt.
+  function openDesktopTarget(doc) {
+    const targetModule = doc?.target_module || '';
+    if (launcher.open(targetModule)) return true;
+    notify({
+      type: 'warning',
+      title: t('openUnavailable', 'Diese App ist auf dieser Instanz nicht verfügbar.'),
+      message: formatMessage(
+        t('openUnavailableDetail', '„{label}" verweist auf {target} — dieses Modul steht im Katalog dieser Instanz nicht (mehr) zur Verfügung.'),
+        { label: desktopIconLabel(doc), target: targetModule || '—' },
+      ),
+    });
+    return false;
   }
 
   function safeAction(action) {

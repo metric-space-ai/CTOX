@@ -59,5 +59,7 @@
   "menuApple": "CTOX",
   "menuAboutDesktop": "About desktop",
   "trayClock": "Clock",
-  "ctoxLiveActivity": "CTOX live"
+  "ctoxLiveActivity": "CTOX live",
+  "openUnavailable": "This app is not available on this instance.",
+  "openUnavailableDetail": "\"{label}\" points at {target}, which is not (or no longer) in this instance catalog."
 }

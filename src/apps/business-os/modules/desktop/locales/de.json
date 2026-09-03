@@ -59,5 +59,7 @@
   "menuApple": "CTOX",
   "menuAboutDesktop": "Über Desktop",
   "trayClock": "Uhr",
-  "ctoxLiveActivity": "CTOX live"
+  "ctoxLiveActivity": "CTOX live",
+  "openUnavailable": "Diese App ist auf dieser Instanz nicht verfügbar.",
+  "openUnavailableDetail": "„{label}\" verweist auf {target} — dieses Modul steht im Katalog dieser Instanz nicht (mehr) zur Verfügung."
 }
