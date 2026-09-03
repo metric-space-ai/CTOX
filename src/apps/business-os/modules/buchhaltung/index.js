@@ -1183,7 +1183,8 @@ function downloadJson(filename, value) {
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
-  document.body.appendChild(link);
+  link.style.display = 'none';
+  (state.ctx?.host || document.documentElement).appendChild(link);
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 0);
@@ -3197,10 +3198,11 @@ function triggerDatevExport() {
   const link = document.createElement("a");
   link.setAttribute("href", url);
   link.setAttribute("download", `DATEV_EXTF_${start}_${end}.csv`);
-  document.body.appendChild(link);
+  link.style.display = "none";
+  (state.ctx?.host || document.documentElement).appendChild(link);
   link.click();
   setTimeout(() => {
-    document.body.removeChild(link);
+    link.remove();
     URL.revokeObjectURL(url);
   }, 1000);
 }

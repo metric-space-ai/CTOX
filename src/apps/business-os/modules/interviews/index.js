@@ -416,7 +416,7 @@ export async function mount(ctx) {
       search: grammar.search, status: grammar.status, band: grammar.band, nowMs: Date.now(),
     });
     const payload = { schema: PRIMARY, exported_at_ms: Date.now(), records: visible };
-    downloadTextFile('interview-meetings.json', JSON.stringify(payload, null, 2), 'application/json');
+    downloadTextFile('interview-meetings.json', JSON.stringify(payload, null, 2), 'application/json', ctx.host);
   }
 
   async function onRootClick(event) {
@@ -645,13 +645,16 @@ function normalizeImported(raw, index) {
   return record;
 }
 
-function downloadTextFile(filename, content, mimeType) {
+// `host` ist der App-Host des Moduls und wird vom Aufrufer durchgereicht -
+// der Anker darf nie auf document.body und damit ausserhalb des Fensters landen.
+function downloadTextFile(filename, content, mimeType, host) {
   const blob = new Blob([content], { type: mimeType || 'text/plain;charset=utf-8' });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
-  document.body.append(link);
+  link.style.display = 'none';
+  (host || document.documentElement).append(link);
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);

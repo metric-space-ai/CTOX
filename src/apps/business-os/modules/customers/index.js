@@ -4619,7 +4619,10 @@ function downloadTextFile(filename, content, mimeType) {
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
-  document.body.append(link);
+  link.style.display = 'none';
+  // Transiente Anker gehoeren in den App-Host, nie auf document.body - dort
+  // liegen sie ausserhalb des Modulfensters auf dem Desktop.
+  (state.ctx?.host || document.documentElement).append(link);
   link.click();
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1000);

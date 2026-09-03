@@ -744,7 +744,8 @@ function downloadJsonFile(filename, payload) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = filename;
-  document.body.appendChild(anchor);
+  anchor.style.display = 'none';
+  (state.ctx?.host || document.documentElement).appendChild(anchor);
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -1440,7 +1441,7 @@ function pickZipFile() {
       input.remove();
       resolve(file);
     }, { once: true });
-    document.body.appendChild(input);
+    (state.ctx?.host || document.documentElement).appendChild(input);
     input.click();
   });
 }
@@ -2559,12 +2560,22 @@ export const __appStoreTestHooks = {
   versionsButtonHtml,
 };
 
+// Das Menue ist echtes UI und gehoert in den Modul-Root ([data-app-store-root]),
+// nicht auf document.body: dort liegt es ausserhalb des Fensters und deckt den
+// Desktop ab. Der Modul-Root ist auch der Bezugsrahmen der Positionierung.
+function appStoreContextMenuHost(state) {
+  return state.ctx?.host?.querySelector('[data-app-store-root]')
+    || state.ctx?.host
+    || document.documentElement;
+}
+
 function ensureAppStoreContextMenuElement(state) {
-  if (state.contextMenu?.isConnected) return state.contextMenu;
-  const menu = document.createElement('div');
+  const host = appStoreContextMenuHost(state);
+  if (state.contextMenu?.isConnected && state.contextMenu.parentNode === host) return state.contextMenu;
+  const menu = state.contextMenu || document.createElement('div');
   menu.className = 'ctox-context-menu app-store-context-menu';
   menu.hidden = true;
-  document.body.append(menu);
+  host.append(menu);
   state.contextMenu = menu;
   return menu;
 }
@@ -2728,11 +2739,16 @@ function renderAppStoreContextMenu(state, context, x, y) {
   menu.style.left = '0px';
   menu.style.top = '0px';
   const rect = menu.getBoundingClientRect();
+  // x/y sind Viewport-Koordinaten. Seit das Menue im Modul-Root haengt, misst
+  // position:absolute gegen dessen Polsterkante (der Root hat keinen Rahmen),
+  // also erst umrechnen und dann im Fenster statt im Viewport klemmen.
+  const host = menu.parentElement || appStoreContextMenuHost(state);
+  const hostRect = host.getBoundingClientRect();
   const clampNumber = (val, min, max) => Math.min(max, Math.max(min, val));
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  menu.style.left = `${clampNumber(x, 8, maxLeft)}px`;
-  menu.style.top = `${clampNumber(y, 8, maxTop)}px`;
+  const maxLeft = Math.max(8, host.clientWidth - rect.width - 8);
+  const maxTop = Math.max(8, host.clientHeight - rect.height - 8);
+  menu.style.left = `${clampNumber(x - hostRect.left, 8, maxLeft)}px`;
+  menu.style.top = `${clampNumber(y - hostRect.top, 8, maxTop)}px`;
 
   const form = menu.querySelector('[data-app-store-context-chat-form]');
   const textarea = menu.querySelector('[data-app-store-context-message]');

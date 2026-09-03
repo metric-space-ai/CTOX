@@ -541,21 +541,28 @@ function moduleIconUrl(moduleId) {
   return new URL(`../${moduleId}/icon.svg`, import.meta.url).pathname;
 }
 
-// One shared floating name chip for the narrow rail. position:fixed so the
-// pane's overflow clipping cannot swallow it; skipped once inline labels show.
+// One shared floating name chip for the narrow rail. It escapes the pane's
+// overflow clipping by living on the module root (never on document.body,
+// where it would float over the desktop outside the app window) and is
+// positioned absolutely against that root; skipped once inline labels show.
 let railChip = null;
 function showRailChip(item, title) {
   const rail = item.closest('.coding-agents-left');
   if (!rail || rail.getBoundingClientRect().width >= 150) return;
+  const host = item.closest('[data-coding-agents-root]') || els.root;
+  if (!host) return;
   if (!railChip) {
     railChip = document.createElement('div');
     railChip.className = 'coding-agents-rail-chip';
-    document.body.appendChild(railChip);
   }
+  if (railChip.parentNode !== host) host.appendChild(railChip);
   const rect = item.getBoundingClientRect();
+  // Der Modul-Root ist der Bezugsrahmen (position:relative, kein Rahmen):
+  // Viewport-Koordinaten des Eintrags in Root-Koordinaten umrechnen.
+  const hostRect = host.getBoundingClientRect();
   railChip.textContent = title;
-  railChip.style.left = `${Math.round(rect.right + 8)}px`;
-  railChip.style.top = `${Math.round(rect.top + rect.height / 2)}px`;
+  railChip.style.left = `${Math.round(rect.right - hostRect.left + 8)}px`;
+  railChip.style.top = `${Math.round(rect.top - hostRect.top + rect.height / 2)}px`;
   railChip.hidden = false;
 }
 function hideRailChip() {
@@ -1262,7 +1269,8 @@ function downloadJsonFile(filename, payload) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = filename;
-  document.body.appendChild(anchor);
+  anchor.style.display = 'none';
+  (els.root || state.ctx?.host || document.documentElement).appendChild(anchor);
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);

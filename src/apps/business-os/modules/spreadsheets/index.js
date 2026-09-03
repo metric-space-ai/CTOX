@@ -1751,7 +1751,7 @@ function openExportModal(state) {
       }
       const bytes = await state.editorHandle.export();
       const downloadName = ensureExtension(slugFilename(record.title || 'export'), '.xlsx');
-      downloadBlob(bytes, XLSX_MIME, downloadName);
+      downloadBlob(bytes, XLSX_MIME, downloadName, state.ctx?.host);
       state.ctx.notifications?.success?.(`Export abgeschlossen: ${downloadName}`);
     } catch (err) {
       console.error(err);
@@ -1762,15 +1762,18 @@ function openExportModal(state) {
   state.ctx.openLeftDrawer(wrapper);
 }
 
-function downloadBlob(content, mime, downloadName) {
+// `host` ist der App-Host des Moduls und wird vom Aufrufer durchgereicht -
+// der Anker darf nie auf document.body und damit ausserhalb des Fensters landen.
+function downloadBlob(content, mime, downloadName, host) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = downloadName;
-  document.body.appendChild(link);
+  link.style.display = 'none';
+  (host || document.documentElement).appendChild(link);
   link.click();
-  document.body.removeChild(link);
+  link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 

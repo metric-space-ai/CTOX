@@ -23,6 +23,9 @@
 .app-store-module[data-app-store-root] {
   --app-store-local-accent: var(--app-accent);
   --app-store-local-ink: var(--app-accent-foreground);
+  /* Bezugsrahmen fuer das Kontextmenue: es haengt jetzt im Modul-Root statt
+     auf document.body und wird per position:absolute dagegen positioniert. */
+  position: relative;
 }
 
 /* --- Sidebar layout glue (kit .ctox-pane-body > flex column) --- */

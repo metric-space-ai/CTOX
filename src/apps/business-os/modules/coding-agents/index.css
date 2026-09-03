@@ -182,9 +182,10 @@
   .coding-agents-left .coding-agents-footer span { display: inline; }
   .coding-agents-rail-mark { display: none; }
 }
-/* Floating name chip (document.body child, fixed — pane clipping can't eat it). */
+/* Floating name chip: child of the module root (never document.body), absolutely
+   positioned against it — outside the panes, so pane clipping can't eat it. */
 .coding-agents-rail-chip {
-  position: fixed;
+  position: absolute;
   transform: translateY(-50%);
   z-index: 1000;
   padding: 4px 10px;
@@ -264,6 +265,9 @@
    Explicit grid pins — hidden resizers must never shift panes.
    ========================================================================== */
 .coding-agents-module {
+  /* Bezugsrahmen fuer den schwebenden Namens-Chip der schmalen Leiste: er
+     haengt im Modul-Root statt auf document.body. */
+  position: relative;
   /* Chat keeps a hard minimum: side maxes must never starve the center track.
      The project column is a narrow icon rail by default; dragging its resizer
      widens it into a labelled list. */

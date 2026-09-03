@@ -707,7 +707,10 @@ function exportCreatorRequests() {
     a.href = url;
     a.download = 'creator-app-requests.json';
     a.rel = 'noopener';
-    document.body.appendChild(a);
+    a.style.display = 'none';
+    // Der Host des Moduls liegt im state, weil der Export ausserhalb von
+    // mount() laeuft und dort kein ctx im Gueltigkeitsbereich ist.
+    (state.ctx?.host || document.documentElement).appendChild(a);
     a.click();
     a.remove();
     addConsoleLog(`[INFO] ${payload.length} App-Auftraege exportiert.`, 'info');

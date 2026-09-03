@@ -1373,7 +1373,10 @@ async function auditExport() {
     const anchor = document.createElement('a');
     anchor.href = url;
     anchor.download = `outbound-audit-${campaign.id}-${Date.now()}.json`;
-    document.body.appendChild(anchor);
+    anchor.style.display = 'none';
+    // Der App-Host haengt am geteilten Modul-State (stateRef), den das
+    // Outbound-Modul beim Mounten setzt.
+    (stateRef?.ctx?.host || document.documentElement).appendChild(anchor);
     anchor.click();
     anchor.remove();
     URL.revokeObjectURL(url);

@@ -397,7 +397,8 @@ function exportVisibleReports() {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = `ctox-reports-${exportedAt.slice(0, 19).replace(/[:T]/g, '-')}.json`;
-  document.body.appendChild(anchor);
+  anchor.style.display = 'none';
+  (state.ctx?.host || document.documentElement).appendChild(anchor);
   anchor.click();
   anchor.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);

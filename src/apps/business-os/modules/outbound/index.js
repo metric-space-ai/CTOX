@@ -4597,7 +4597,8 @@ function exportQualificationTable() {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = `${slugifyFileName(campaign.name || 'outbound')}-tabelle.xls`;
-  document.body.append(anchor);
+  anchor.style.display = 'none';
+  (state.ctx?.host || document.documentElement).append(anchor);
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 500);
@@ -7641,7 +7642,8 @@ function downloadJson(fileName, payload) {
   const anchor = document.createElement('a');
   anchor.href = url;
   anchor.download = fileName;
-  document.body.append(anchor);
+  anchor.style.display = 'none';
+  (state.ctx?.host || document.documentElement).append(anchor);
   anchor.click();
   anchor.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 500);

@@ -1699,7 +1699,7 @@ export async function mount(ctx) {
   function exportSelectedMail() {
     const records = selectedMailRecords();
     if (!records.length) return;
-    downloadJson({ schema: 'ctox.mail.bulk-export.v1', exported_at: new Date().toISOString(), records }, `ctox-mail-auswahl-${records.length}.json`);
+    downloadJson({ schema: 'ctox.mail.bulk-export.v1', exported_at: new Date().toISOString(), records }, `ctox-mail-auswahl-${records.length}.json`, ctx.host);
     notify('success', `${records.length} ${t('recordsExported', 'Datensätze exportiert.')}`);
   }
 
@@ -1841,7 +1841,7 @@ export async function mount(ctx) {
       exported_at: new Date().toISOString(),
       scope: { type: view.scopeType, id: view.scopeId, account_key: view.accountKey || null },
       records,
-    }, `ctox-mail-${new Date().toISOString().slice(0, 10)}.json`);
+    }, `ctox-mail-${new Date().toISOString().slice(0, 10)}.json`, ctx.host);
     notify('success', `${records.length} ${t('recordsExported', 'Datensätze exportiert.')}`);
   }
 
@@ -2329,7 +2329,9 @@ function extractImportRecipients(payload = {}) {
   return parseRecipientAddresses(chunks.join('\n'));
 }
 
-function downloadJson(payload, filename) {
+// `host` ist der App-Host des Moduls: mail hat keinen Modul-State, deshalb
+// wird der Host vom Aufrufer durchgereicht statt global gesucht.
+function downloadJson(payload, filename, host) {
   let url = '';
   try {
     url = URL.createObjectURL(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }));
@@ -2337,7 +2339,8 @@ function downloadJson(payload, filename) {
     link.href = url;
     link.download = filename;
     link.rel = 'noopener';
-    document.body.append(link);
+    link.style.display = 'none';
+    (host || document.documentElement).append(link);
     link.click();
     link.remove();
   } finally {

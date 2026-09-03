@@ -312,7 +312,8 @@ export async function mount(ctx) {
       const anchor = document.createElement('a');
       anchor.href = url;
       anchor.download = `esign-signature-requests-${rows.length}.json`;
-      document.body.appendChild(anchor);
+      anchor.style.display = 'none';
+      (ctx.host || document.documentElement).appendChild(anchor);
       anchor.click();
       anchor.remove();
       ctx.notifications?.info?.(text.exportDone);
