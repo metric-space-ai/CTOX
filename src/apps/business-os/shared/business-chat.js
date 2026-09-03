@@ -9,7 +9,7 @@ import { renderGlobalCtoxAgentScopeHtml } from './shell-permissions-ui.js?v=2026
 import {
   normalizeWorkjetCategory,
   workjetCategoryStyle,
-} from './workjet-theme.js?v=20260831-ctox-desktopapp-ports-v328';
+} from './workjet-theme.js?v=20260903-entertainment-import-v336';
 
 const CHAT_STYLE_ID = 'ctox-business-chat-style';
 const CHAT_STATE_KEY = 'ctox.businessOs.chat.v1';

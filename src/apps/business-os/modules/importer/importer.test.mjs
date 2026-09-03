@@ -2,13 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import {
+  appIdentityFromSource,
   buildAppImportCommand,
   isImportableFile,
+  importFileByteLimit,
   isRecoverableDispatchError,
   isTextFile,
   moduleIdFromSource,
+  normalizeImportCategory,
   parseGitHubUrl,
   shouldSkipPath,
+  standaloneHtmlEntryPath,
   validModuleId,
 } from './index.js';
 
@@ -47,10 +51,29 @@ test('source filtering keeps agent-relevant runtimes and excludes generated tree
 test('module ids follow the launcher slug contract', () => {
   assert.equal(moduleIdFromSource('omarchy-radio-atlas'), 'omarchy-radio-atlas');
   assert.equal(moduleIdFromSource('Radio Atlas!'), 'radio-atlas');
+  assert.equal(moduleIdFromSource('black-hole-standalone-v6.html'), 'black-hole');
+  assert.equal(moduleIdFromSource('my-noise-pet-crt-v5 2.html'), 'my-noise-pet-crt');
   assert.equal(validModuleId('radio-atlas'), true);
   assert.equal(validModuleId('-bad'), false);
   assert.equal(validModuleId('Bad'), false);
   assert.equal(validModuleId('x'), false);
+});
+
+test('standalone HTML imports derive clean app identity and an explicit profile', () => {
+  assert.deepEqual(appIdentityFromSource(
+    'blocks-ce-worldfixed-lighting-v2.html',
+    '<title>Blocks CE – WebGL Castle Builder</title>',
+  ), { moduleId: 'blocks-ce', appTitle: 'Blocks CE' });
+  assert.deepEqual(appIdentityFromSource(
+    'black-hole-standalone-v6.html',
+    '<title>Black Hole Studio · Standalone</title>',
+  ), { moduleId: 'black-hole-studio', appTitle: 'Black Hole Studio' });
+  assert.equal(standaloneHtmlEntryPath(['black-hole-standalone-v6.html']), 'black-hole-standalone-v6.html');
+  assert.equal(standaloneHtmlEntryPath(['index.html', 'icon.svg']), null);
+  assert.equal(importFileByteLimit(['black-hole.html']), 8 * 1024 * 1024);
+  assert.equal(importFileByteLimit(['main.qml']), 512 * 1024);
+  assert.equal(importFileByteLimit(['index.html', 'icon.svg']), 512 * 1024);
+  assert.equal(normalizeImportCategory('Unterhaltung'), 'entertainment');
 });
 
 test('native-peer acknowledgement timeouts keep the durable job observable', () => {
@@ -77,6 +100,7 @@ test('GitHub import creates one durable harness command with the porting skill',
   const command = buildAppImportCommand({
     moduleId: 'omarchy-radio-atlas',
     appTitle: 'Omarchy Radio Atlas',
+    category: 'entertainment',
     now: 42,
     importSource: {
       kind: 'github',
@@ -88,6 +112,8 @@ test('GitHub import creates one durable harness command with the porting skill',
   assert.equal(command.command_id, 'app-import-omarchy-radio-atlas-42');
   assert.equal(command.command_type, 'ctox.business_os.app.create');
   assert.equal(command.payload.install_target, 'runtime-installed-module');
+  assert.equal(command.payload.category, 'entertainment');
+  assert.equal(command.payload.desired_version, '1.0.0');
   assert.equal(command.sync_flush_timeout_ms, 15_000);
   assert.equal(command.allow_dependency_delivery_lag, false);
   assert.deepEqual(command.payload.required_skills, ['business-os-app-module-development']);
@@ -127,9 +153,11 @@ test('presentation is a one-click source, porting, live flow', async () => {
   assert.match(html, /data-imp-step="source"/);
   assert.match(html, /data-imp-step="progress"/);
   assert.match(html, /data-imp-step="done"/);
+  assert.match(html, /data-imp-category/);
   assert.equal((html.match(/data-imp-phase/g) || []).length, 5);
   assert.doesNotMatch(html, /data-imp-install/);
   assert.doesNotMatch(html, /data-imp-back/);
+  assert.doesNotMatch(html, /data-imp-pick-files-input[^>]*\bmultiple\b/);
 
   assert.match(css, /\.imp-job-phases/);
   assert.match(css, /prefers-reduced-motion:\s*reduce/);
@@ -140,6 +168,7 @@ test('presentation is a one-click source, porting, live flow', async () => {
   assert.doesNotMatch(js, /transcodeApp|scaffoldModule|createWritable|mode: 'readwrite'/);
   assert.match(js, /result\.live === true/);
   assert.match(js, /result\.smoke_status/);
+  assert.match(js, /target\.search = source\.search/);
 
   assert.equal(manifest.layout.shell, 'windowed');
   assert.deepEqual(manifest.presentation.initial_size, { width: 860, height: 600 });

@@ -12,7 +12,7 @@ test('public shell loads the versioned Workjet contract before shell overrides',
   const appIndex = html.indexOf('app.css');
   assert.ok(contractIndex >= 0, 'index.html must load the Workjet contract');
   assert.ok(contractIndex < appIndex, 'contract must load before app.css');
-  assert.match(html, /6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6/);
+  assert.match(html, /5173a1155a9a5f1f28ed43afcb004693dd95c073cabfae8157cd01c7e8830419/);
 });
 
 test('shell maps public targets to categories and applies them to active chrome', async () => {
@@ -20,8 +20,9 @@ test('shell maps public targets to categories and applies them to active chrome'
   const desktop = await read('modules/desktop/index.js');
   const desktopCss = await read('modules/desktop/index.css');
 
-  assert.match(app, /workjet-theme\.js\?v=20260826-workjet-ui-contract-v1/);
+  assert.match(app, /workjet-theme\.js\?v=20260903-entertainment-import-v336/);
   assert.match(app, /workjetCategoryForModule\(mod\)/);
+  assert.match(app, /state\.schemaRegistrations\.delete\(activeModuleId\)/);
   assert.match(app, /applyWorkjetCategory\(win\.element, entry\.category \|\| 'imported'\)/);
   assert.match(app, /applyWorkjetCategory\(win\.element, descriptor\.category\)/);
   assert.match(app, /applyWorkjetCategory\(button, target\.category/);
@@ -46,7 +47,7 @@ test('shell primitives stay neutral in light/dark and category color is state-sc
 
 test('chat dock and windows use contract category metadata instead of module palettes', async () => {
   const chat = await read('shared/business-chat.js');
-  assert.match(chat, /workjet-theme\.js\?v=20260826-workjet-ui-contract-v1/);
+  assert.match(chat, /workjet-theme\.js\?v=20260903-entertainment-import-v336/);
   assert.match(chat, /data-workjet-category="\$\{escapeAttr\(category\)\}"/);
   assert.match(chat, /--shell-category-accent/);
   assert.match(chat, /--accent: var\(--shell-category-accent, var\(--workjet-accent, #1b4ed8\)\)/);

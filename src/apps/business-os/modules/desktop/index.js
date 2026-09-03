@@ -13,7 +13,7 @@ import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
   workjetCategoryForModule,
-} from '../../shared/workjet-theme.js?v=20260826-workjet-ui-contract-v1';
+} from '../../shared/workjet-theme.js?v=20260903-entertainment-import-v336';
 
 const STYLE_BUILD = '20260826-workjet-ui-contract-v1';
 const LAYOUT_DOC_ID = 'layout';

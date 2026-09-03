@@ -654,6 +654,23 @@ fn business_os_app_module_validation_feedback(
                 &format!("App catalog projection before browser smoke failed: {err:#}"),
             )));
         }
+        if let Err(err) =
+            crate::business_os::store::refresh_native_peer_after_runtime_app_schema_change(
+                root,
+                &target.module_id,
+                "runtime-installed-module",
+            )
+        {
+            let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
+                root, command_id,
+            );
+            let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
+            return Ok(Some(render_business_os_app_module_validation_feedback(
+                job,
+                &target,
+                &format!("App collection replication could not be prepared before browser smoke: {err:#}"),
+            )));
+        }
         let smoke_args = vec!["--installed".to_string(), "--json".to_string()];
         let smoke = match super::business_os_app_testing::run_business_os_app_smoke(
             root,

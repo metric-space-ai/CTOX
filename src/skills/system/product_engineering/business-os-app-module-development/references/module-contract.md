@@ -18,12 +18,18 @@ index.html
 index.css
 index.js
 icon.svg
-core/records.mjs
-core/automation.mjs
+[core/records.mjs]
+[core/automation.mjs]
 locales/en.json
 locales/de.json
 tests/*.test.mjs
 ```
+
+Bracketed files are optional for interaction-only `creative-tool`, `game`,
+`interactive-media-workbench`, and `simulation` archetypes. Do not keep unused
+starter record or automation helpers just to satisfy a template. Runtime apps
+may place static media and geometry under `assets/` and attribution in
+`NOTICE.md`.
 
 Keep extra files rare. Use extra local ESM helpers only when the app would otherwise become harder to read.
 Place local browser ESM helpers under `lib/*.mjs` and vendored browser ESM

@@ -1,7 +1,7 @@
 {
   "id": "importer",
   "title": "App Importer",
-  "description": "Start a durable CTOX harness job that snapshots a public GitHub repository or local project folder and ports its workflows into a validated Shell-V2 Business OS app.",
+  "description": "Start a durable CTOX harness job that snapshots a public GitHub repository, local source file, or project folder and ports its workflows into a validated Shell-V2 Business OS app.",
   "entry": "modules/importer/index.html",
   "collections": [],
   "layout": {
@@ -14,7 +14,7 @@
     "right": "Live application evidence"
   },
   "category": "development",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "developer": "CTOX",
   "license": "AGPL-3.0-only",
   "tags": [

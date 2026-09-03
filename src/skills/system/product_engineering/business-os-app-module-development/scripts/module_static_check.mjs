@@ -63,8 +63,15 @@ const allowedInstalledRootFiles = new Set([
   'index.css',
   'index.js',
   'icon.svg',
+  'NOTICE.md',
 ]);
-const allowedInstalledRootDirs = new Set(['core', 'lib', 'locales', 'tests', 'vendor']);
+const allowedInstalledRootDirs = new Set(['assets', 'core', 'lib', 'locales', 'tests', 'vendor']);
+const interactionOnlyArchetypes = new Set([
+  'creative-tool',
+  'game',
+  'interactive-media-workbench',
+  'simulation',
+]);
 const semverPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
 
 function fail(message) {
@@ -1258,7 +1265,6 @@ const requiredFiles = [
   'icon.svg',
   'locales/de.json',
   'locales/en.json',
-  ...(installedMode && !catalogInstalledMode ? ['core/automation.mjs', 'core/records.mjs'] : []),
 ];
 
 for (const file of requiredFiles) {
@@ -1517,23 +1523,26 @@ if (runtimeModuleMode && !catalogInstalledMode) {
 }
 
 if (installedMode && !catalogInstalledMode) {
+  const requiresBusinessAutomation = !interactionOnlyArchetypes.has(
+    String(manifest?.archetype || '').trim().toLowerCase(),
+  );
   if (!/\bctx\??\.db\b|\bstate\.ctx\??\.db\b/.test(runtimeText)) {
     fail('installed module must persist records through the shell-provided ctx.db collection handle');
   }
-  if (!hasCommandBusDispatchInvocation(runtimeText)) {
+  if (requiresBusinessAutomation && !hasCommandBusDispatchInvocation(runtimeText)) {
     fail('installed module must dispatch at least one automation through ctx.commandBus.dispatch');
   }
   const hasChatTaskAutomation = /\bbusiness_os\.chat\.task\b/.test(nonTestModuleText)
     && hasBusinessOsChatTaskCommandType(nonTestModuleText);
   const hasTicketAutomation = /\bctox\.ticket\./.test(nonTestModuleText)
     && hasCtoxTicketCommandType(nonTestModuleText);
-  if (!hasChatTaskAutomation && !hasTicketAutomation) {
+  if (requiresBusinessAutomation && !hasChatTaskAutomation && !hasTicketAutomation) {
     fail('installed module must include a supported automation command: business_os.chat.task or ctox.ticket.*');
   }
-  if (hasChatTaskAutomation && !/\brecord_snapshot\b/.test(nonTestModuleText)) {
+  if (requiresBusinessAutomation && hasChatTaskAutomation && !/\brecord_snapshot\b/.test(nonTestModuleText)) {
     fail('installed module automation must include payload.record_snapshot');
   }
-  if (!hasPrimaryCreateAffordance(indexHtml, indexJs)) {
+  if (requiresBusinessAutomation && !hasPrimaryCreateAffordance(indexHtml, indexJs)) {
     fail('installed module must expose a primary create action for its main business record');
   }
   for (const message of collectInstalledMountMarkupFailures(indexHtml, indexJs)) fail(message);

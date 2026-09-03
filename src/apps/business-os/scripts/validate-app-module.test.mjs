@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -992,7 +992,6 @@ function writeSourceModule(root, moduleId, overrides = {}) {
     automationJs: [
       'export function buildFollowUpCommand(record = {}) {',
       '  return {',
-      "    type: 'ctox.ticket.local.create',",
       "    command_type: 'ctox.ticket.local.create',",
       "    module: 'ticketautomation',",
       "    record_id: record.id || 'demo',",
@@ -1013,7 +1012,6 @@ function writeSourceModule(root, moduleId, overrides = {}) {
       "import assert from 'node:assert/strict';",
       "import { buildFollowUpCommand } from '../core/automation.mjs';",
       "const command = buildFollowUpCommand({ id: 'demo', title: 'Demo' });",
-      "assert.equal(command.type, 'ctox.ticket.local.create');",
       "assert.equal(command.command_type, 'ctox.ticket.local.create');",
       "assert.equal(command.payload.status, 'open');",
       '',
@@ -1135,6 +1133,33 @@ function writeSourceModule(root, moduleId, overrides = {}) {
   assert.notEqual(run.status, 0);
   assert.match(run.stderr, /forbidden module artifact .*package\.json/);
   assert.match(run.stderr, /unexpected installed-module root entry.*node_modules/);
+}
+
+{
+  const root = makeWorkspace();
+  const moduleId = 'interactiveatlas';
+  const collection = `${moduleId}_records`;
+  const dir = writeInstalledModule(root, moduleId, {
+    manifest: { archetype: 'interactive-media-workbench' },
+    indexHtml: '<main class="validator-module ctox-pane"><canvas aria-label="Interactive globe"></canvas></main>\n',
+    indexJs: [
+      'export async function mount(ctx) {',
+      `  const records = ctx.db.collection('${collection}');`,
+      '  void records;',
+      "  ctx.host.innerHTML = await fetch(new URL('./index.html', import.meta.url)).then((res) => res.text());",
+      '  return () => { ctx.host.replaceChildren(); };',
+      '}',
+      '',
+    ].join('\n'),
+    testJs: "import assert from 'node:assert/strict';\nassert.equal(1 + 1, 2);\n",
+  });
+  mkdirSync(join(dir, 'assets'), { recursive: true });
+  writeJson(join(dir, 'assets/countries.json'), { type: 'FeatureCollection', features: [] });
+  writeFileSync(join(dir, 'NOTICE.md'), 'Map data: Natural Earth (public domain).\n');
+  rmSync(join(dir, 'core/automation.mjs'));
+  rmSync(join(dir, 'core/records.mjs'));
+  const run = runValidator(root, moduleId, '--installed');
+  assert.equal(run.status, 0, `${run.stderr}\n${run.stdout}`);
 }
 
 {

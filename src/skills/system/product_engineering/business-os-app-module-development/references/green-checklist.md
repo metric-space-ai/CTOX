@@ -131,6 +131,14 @@ Use this before claiming a Business OS app is done.
   evidence, `asset_revision`, catalog revision, and catalog fingerprint.
 - If the app began standalone, the port removed app-owned persistence/sync and
   production code now uses shell-provided `ctx.db` and `ctx.commandBus`.
+- For an imported source, the immutable entry point was rendered first and its
+  visual/interaction inventory is attached to the result evidence.
+- Source and mounted screenshots were compared at matching desktop and narrow
+  viewports; recognizable composition, typography, density, motion, canvas or
+  WebGL output, audio, and primary controls remain equivalent.
+- Every source workflow has interaction proof. No starter sample record,
+  generic CRUD label, placeholder panel, dead control, static imitation, or
+  undocumented partial implementation remains.
 - No service lifecycle command was used during the app build:
   no `ctox stop/start/upgrade`, `launchctl`, `systemctl`, bootout, disable, or
   daemon restart.

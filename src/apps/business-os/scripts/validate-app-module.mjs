@@ -171,9 +171,11 @@ const INSTALLED_MODULE_ROOT_FILES = new Set([
   'index.css',
   'index.js',
   'icon.svg',
+  'NOTICE.md',
 ]);
 
 const INSTALLED_MODULE_ROOT_DIRS = new Set([
+  'assets',
   'core',
   'lib',
   'locales',

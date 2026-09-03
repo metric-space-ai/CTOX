@@ -7,6 +7,7 @@ export const WORKJET_CATEGORY_IDS = Object.freeze([
   'workspace',
   'collaboration',
   'productivity',
+  'entertainment',
   'development',
   'engineering',
   'knowledge',
@@ -27,6 +28,9 @@ const WORKJET_CATEGORY_SET = new Set(WORKJET_CATEGORY_IDS);
 const CATEGORY_ALIASES = Object.freeze({
   management: 'operations',
   manage: 'operations',
+  unterhaltung: 'entertainment',
+  games: 'entertainment',
+  game: 'entertainment',
   recherche: 'research',
   'web-data': 'research',
   'web-and-data': 'research',

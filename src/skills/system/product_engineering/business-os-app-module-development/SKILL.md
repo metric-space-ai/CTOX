@@ -26,6 +26,10 @@ This file is a resource index. Use the linked contracts and checklists as the wo
 4. Start from the canonical files in `src/apps/business-os/app-starter/v2/`.
    Import jobs receive this starter pre-materialized in `app_directory`; modify
    it in place instead of rebuilding the module contract from memory.
+5. For an imported source, open `references/standalone-porting.md`, render the
+   immutable source entry point, and write down its visual and interaction
+   inventory before changing the starter. The starter is a valid Shell-V2
+   wiring template, not the imported product's UI.
 
 ## Tool Boundary
 
@@ -138,6 +142,9 @@ records so the agent knows what was clicked.
 - If the user provides or requests a standalone vanilla app first, keep the app
   portable through `mount(ctx)`, `ctx.db.collection(...)`, and
   `ctx.commandBus.dispatch(...)`; load `references/standalone-porting.md`.
+- For importer jobs, preserve source identity and behavior. A generic dashboard,
+  static screenshot imitation, starter CRUD surface, or subset of the source
+  controls is a failed port even when validate/smoke passes mechanically.
 
 ## Validation
 

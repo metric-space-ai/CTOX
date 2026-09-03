@@ -66,7 +66,7 @@ import {
   WORKJET_CATEGORY_IDS,
   workjetCategoryForModule,
   workjetCategoryForTarget,
-} from './shared/workjet-theme.js?v=20260831-shell-v2-unified-v325';
+} from './shared/workjet-theme.js?v=20260903-entertainment-import-v336';
 import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260831-shell-v2-unified-v325';
 import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260831-shell-v2-unified-v325';
 import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260831-shell-v2-unified-v325';
@@ -84,8 +84,8 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260903-shell-v2-context-menu-v336';
-const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
+const APP_BUILD = '20260903-app-import-fidelity-v337';
+const WORKJET_UI_CONTRACT_BUILD = '5173a1155a9a5f1f28ed43afcb004693dd95c073cabfae8157cd01c7e8830419';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
 const shellGenerationReloadGuard = createShellGenerationReloadGuard({
@@ -9490,6 +9490,11 @@ async function refreshModules() {
         || activeModuleSignatureAfter !== activeModuleSignatureBefore
       )
     ) {
+      state.schemaRegistrations.delete(activeModuleId);
+      state.schemaImportRetries.set(
+        activeModuleId,
+        Number(state.schemaImportRetries.get(activeModuleId) || 0) + 1,
+      );
       console.info('[business-os] active module catalog changed; remounting module', {
         module_id: activeModuleId,
         revision_before: activeModuleRevisionBefore,
@@ -11451,7 +11456,7 @@ const OFFLINE_FALLBACK_CATALOG = {
     {
       "id": "importer",
       "title": "App Importer",
-      "description": "Bring a coding-agent app into CTOX: pick a folder or a GitHub repo, transcode React/TypeScript to plain ESM, review the report, and install it as a versioned Business OS app.",
+      "description": "Start a durable CTOX harness job that snapshots a public GitHub repository, local source file, or project folder and ports its workflows into a validated Shell-V2 Business OS app.",
       "entry": "modules/importer/index.html",
       "collections": [],
       "layout": {
@@ -11460,22 +11465,22 @@ const OFFLINE_FALLBACK_CATALOG = {
         "shell_geometry_contract": "business-os-v2-global-1",
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-importer\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"grad-importer\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#0ea5e9\" /><stop offset=\"100%\" stop-color=\"#6366f1\" /></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"12\" rx=\"2.5\" fill=\"url(#grad-importer)\" fill-opacity=\"0.12\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linejoin=\"round\"></rect><path d=\"M12 3v9\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\"></path><path d=\"M8.5 8.5 12 12l3.5-3.5\" stroke=\"url(#grad-importer)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path></svg>",
         "left": "Source: folder or GitHub",
-        "center": "Transcode report and module details",
-        "right": "Install into local-modules"
+        "center": "Durable porting and validation progress",
+        "right": "Live application evidence"
       },
-      "category": "Development",
-      "version": "0.1.0",
+      "category": "development",
+      "version": "0.3.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
         "import",
         "porting",
-        "react",
-        "typescript",
+        "shell-v2",
+        "harness",
         "coding-agent"
       ],
       "store": {
-        "summary": "The hand-over moment: a coding agent conceived the app, the importer raises it — transcoded to plain ESM, versioned, yours.",
+        "summary": "Turn a public GitHub repository or local source snapshot into a durable, agent-ported and validated Shell-V2 app.",
         "repository": "metric-space-ai/ctox",
         "source_path": "modules/importer",
         "installable": false,
@@ -11589,7 +11594,10 @@ const OFFLINE_FALLBACK_CATALOG = {
         "business_module_commits",
         "business_module_source_blob_chunks",
         "workjet_projects",
-        "workjet_working_copies"
+        "workjet_working_copies",
+        "workjet_computers",
+        "workjet_sessions",
+        "workjet_session_transfers"
       ],
       "layout": {
         "shell": "windowed",
@@ -12046,7 +12054,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         }
       },
       "category": "Research",
-      "version": "1.0.14",
+      "version": "1.0.16",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -14227,6 +14235,7 @@ const LAUNCHER_CATEGORY_LABELS = Object.freeze({
   workspace: { de: '🗂️ Arbeitsbereich', en: '🗂️ Workspace' },
   collaboration: { de: '🤝 Zusammenarbeit', en: '🤝 Collaboration' },
   productivity: { de: '⚡ Produktivität', en: '⚡ Productivity' },
+  entertainment: { de: '🎮 Unterhaltung', en: '🎮 Entertainment' },
   development: { de: '🛠️ Entwicklung', en: '🛠️ Development' },
   engineering: { de: '⚙️ Engineering', en: '⚙️ Engineering' },
   knowledge: { de: '📚 Wissen', en: '📚 Knowledge' },

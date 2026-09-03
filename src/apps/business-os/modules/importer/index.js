@@ -6,9 +6,15 @@ import {
 } from '../../shared/file-integrity.js?v=20260816-browser-sync-guards-v141';
 
 const MAX_FILES = 400;
-const MAX_LOCAL_FILE_BYTES = 8 * 1024 * 1024;
+const MAX_FILE_BYTES = 512 * 1024;
+const MAX_STANDALONE_HTML_BYTES = 8 * 1024 * 1024;
 const MAX_LOCAL_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
+const IMPORT_CATEGORIES = new Set([
+  'workspace', 'collaboration', 'productivity', 'entertainment', 'development',
+  'engineering', 'knowledge', 'research', 'sales', 'recruiting', 'finance',
+  'operations', 'governance', 'security', 'analytics', 'system', 'imported',
+]);
 const TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled', 'canceled', 'blocked']);
 const RECOVERABLE_DISPATCH_PATTERNS = [
   /webrtc native peer did not open for business_commands/i,
@@ -62,8 +68,24 @@ export function isImportableFile(path) {
   return Boolean(String(path || '').trim()) && !shouldSkipPath(path);
 }
 
+export function standaloneHtmlEntryPath(paths) {
+  const normalized = Array.from(paths || []).map((path) => String(path || '').replaceAll('\\', '/'));
+  return normalized.length === 1 && /\.html?$/i.test(normalized[0]) ? normalized[0] : null;
+}
+
+export function importFileByteLimit(paths) {
+  return standaloneHtmlEntryPath(paths) ? MAX_STANDALONE_HTML_BYTES : MAX_FILE_BYTES;
+}
+
 export function validModuleId(id) {
   return /^[a-z0-9][a-z0-9-]{1,63}$/.test(id);
+}
+
+export function normalizeImportCategory(value) {
+  const slug = String(value || '').normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+    .trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  const normalized = slug === 'unterhaltung' ? 'entertainment' : slug;
+  return IMPORT_CATEGORIES.has(normalized) ? normalized : 'imported';
 }
 
 export function isRecoverableDispatchError(error) {
@@ -76,6 +98,10 @@ export function isRecoverableDispatchError(error) {
 export function moduleIdFromSource(value) {
   const normalized = String(value || '')
     .replace(/\.git$/i, '')
+    .replace(/\.(?:html?|xhtml)$/i, '')
+    .replace(/(?:\s+|[-_.]+)\(?\d+\)?$/i, '')
+    .replace(/(?:[-_.\s]+v\d+(?:\.\d+){0,2})$/i, '')
+    .replace(/(?:[-_.\s]+standalone)$/i, '')
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
@@ -84,17 +110,54 @@ export function moduleIdFromSource(value) {
   return validModuleId(normalized) ? normalized : `imported-app-${Date.now()}`;
 }
 
-function titleFromModuleId(moduleId) {
+export function titleFromModuleId(moduleId) {
   return String(moduleId || '').split('-')
     .filter(Boolean)
     .map((part) => `${part.charAt(0).toUpperCase()}${part.slice(1)}`)
     .join(' ');
 }
 
+function decodeTitleEntities(value) {
+  return String(value || '')
+    .replace(/&amp;/gi, '&')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;|&apos;/gi, "'")
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&#(\d+);/g, (_, code) => String.fromCodePoint(Number(code)))
+    .replace(/&#x([\da-f]+);/gi, (_, code) => String.fromCodePoint(Number.parseInt(code, 16)));
+}
+
+export function appIdentityFromSource(fileName, sourceText = '') {
+  const titleMatch = String(sourceText || '').match(/<title\b[^>]*>([\s\S]*?)<\/title>/i);
+  let title = decodeTitleEntities(titleMatch?.[1] || '')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (title) {
+    const segments = title.split(/\s+[·|–—]\s+/);
+    while (segments.length > 1 && /^(?:standalone|webgl\b.*|html\b.*|browser\b.*|demo\b.*)$/i.test(segments.at(-1))) {
+      segments.pop();
+    }
+    title = segments.join(' — ');
+  }
+  const fallbackId = moduleIdFromSource(fileName);
+  title = title || titleFromModuleId(fallbackId);
+  if (/^[A-Z0-9\s—_-]+$/.test(title)) {
+    title = title.toLowerCase().replace(/(^|[\s—_-])([a-z])/g, (_, prefix, letter) => `${prefix}${letter.toUpperCase()}`);
+  }
+  for (const acronym of ['AI', 'CE', 'CRT', 'HTML', 'VR']) {
+    title = title.replace(new RegExp(`\\b${acronym}\\b`, 'gi'), acronym);
+  }
+  return { moduleId: moduleIdFromSource(title), appTitle: title };
+}
+
 export function buildAppImportCommand({
   moduleId,
   appTitle,
   importSource,
+  category = 'entertainment',
   actor = null,
   now = Date.now(),
 }) {
@@ -124,13 +187,13 @@ export function buildAppImportCommand({
     allow_dependency_delivery_lag: files.length > 0,
     payload: {
       title: `Import ${title}`,
-      instruction: `Port the complete supplied application into a functional Shell-V2 Business OS app named ${title}. Preserve its user workflows rather than translating framework syntax.`,
+      instruction: `Port the complete supplied application into a functional Shell-V2 Business OS app named ${title}. Preserve its visual identity, interactions, content density, animation, audio and game state. Use the generated starter only as contract scaffolding; remove all placeholder UI and records. Compare the mounted result against the source at matching viewports before claiming parity.`,
       module_id: moduleId,
       app_id: moduleId,
       app_title: title,
       description: `Shell-V2 port of ${title}`,
-      category: 'development',
-      desired_version: '0.1.0',
+      category: normalizeImportCategory(category),
+      desired_version: '1.0.0',
       install_target: 'runtime-installed-module',
       target: 'app',
       mode: 'app',
@@ -168,7 +231,7 @@ async function readDirectoryFiles(dirHandle) {
         throw new Error(`invalid_path:${relativePath}`);
       }
       const file = await entry.getFile();
-      if (file.size > MAX_LOCAL_FILE_BYTES) {
+      if (file.size > MAX_STANDALONE_HTML_BYTES) {
         throw Object.assign(new Error('file_too_large'), { path: relativePath, size: file.size });
       }
       snapshotBytes += file.size;
@@ -178,13 +241,22 @@ async function readDirectoryFiles(dirHandle) {
   }
   await walk(dirHandle, '');
   if (!files.length) throw new Error('no_importable_files');
+  const standaloneHtml = standaloneHtmlEntryPath(files.map((source) => source.relativePath));
+  if (!standaloneHtml) {
+    const oversized = files.find((source) => source.file.size > MAX_FILE_BYTES);
+    if (oversized) throw Object.assign(new Error('file_too_large'), {
+      path: oversized.relativePath, size: oversized.file.size,
+    });
+  }
   return files;
 }
 
 async function readSelectedFiles(fileList) {
   const files = [];
   let snapshotBytes = 0;
-  for (const file of Array.from(fileList || [])) {
+  const selected = Array.from(fileList || []);
+  const fileLimit = importFileByteLimit(selected.map((file) => file?.name));
+  for (const file of selected) {
     const relativePath = String(file?.webkitRelativePath || file?.name || '').replaceAll('\\', '/');
     if (!relativePath || shouldSkipPath(relativePath) || !isImportableFile(relativePath)) continue;
     if (files.length >= MAX_FILES) {
@@ -193,7 +265,7 @@ async function readSelectedFiles(fileList) {
     if (relativePath.length > 240 || relativePath.split('/').some((part) => !part || part === '..')) {
       throw new Error(`invalid_path:${relativePath}`);
     }
-    if (file.size > MAX_LOCAL_FILE_BYTES) {
+    if (file.size > fileLimit) {
       throw Object.assign(new Error('file_too_large'), { path: relativePath, size: file.size });
     }
     snapshotBytes += file.size;
@@ -299,10 +371,15 @@ async function stageDesktopSnapshot(ctx, { folderName, sourceFiles }, onProgress
       size_bytes: source.bytes.byteLength,
     });
   }
+  const standaloneHtml = standaloneHtmlEntryPath(sourceFiles.map((source) => source.relativePath));
   return {
     kind: 'desktop-folder',
     snapshot_id: snapshotId,
     folder_name: folderName || 'Imported app',
+    ...(standaloneHtml ? {
+      profile: 'standalone-html',
+      entry_path: standaloneHtml,
+    } : {}),
     files: manifest,
   };
 }
@@ -338,17 +415,27 @@ function commandErrorText(command) {
     || commandResult(command)?.error || 'The porting job did not complete.');
 }
 
+function moduleAssetUrl(relativePath) {
+  const source = new URL(import.meta.url);
+  const target = new URL(relativePath, source);
+  target.search = source.search;
+  return target;
+}
+
 async function loadModuleMarkup() {
-  const response = await fetch(new URL('./index.html', import.meta.url));
+  const response = await fetch(moduleAssetUrl('./index.html'));
   if (!response.ok) throw new Error(`importer markup unavailable: ${response.status}`);
   return response.text();
 }
 
 function ensureStyles() {
-  if (document.getElementById('importer-module-styles')) return;
+  const href = moduleAssetUrl('./index.css').href;
+  const existing = document.getElementById('importer-module-styles');
+  if (existing?.href === href) return;
+  existing?.remove();
   const styleLink = document.createElement('link');
   styleLink.rel = 'stylesheet';
-  styleLink.href = new URL('./index.css', import.meta.url).href;
+  styleLink.href = href;
   styleLink.id = 'importer-module-styles';
   document.head.appendChild(styleLink);
 }
@@ -372,6 +459,7 @@ export async function mount(ctx) {
     sourceSection: q('[data-imp-source-section]'), progressSection: q('[data-imp-progress-section]'),
     doneSection: q('[data-imp-done-section]'), githubForm: q('[data-imp-github-form]'),
     githubUrl: q('[data-imp-github-url]'), githubBtn: q('[data-imp-github-btn]'),
+    category: q('[data-imp-category]'),
     pickFiles: q('[data-imp-pick-files]'), pickFilesInput: q('[data-imp-pick-files-input]'),
     pickFolder: q('[data-imp-pick-folder]'), sourceHint: q('[data-imp-source-hint]'),
     commandId: q('[data-imp-command-id]'), moduleId: q('[data-imp-module-id]'),
@@ -458,7 +546,13 @@ export async function mount(ctx) {
     if (!ctx?.commandBus?.dispatch) throw new Error('command_bus_unavailable');
     state.moduleId = moduleId;
     state.live = false;
-    const command = buildAppImportCommand({ moduleId, appTitle, importSource, actor: actorContext() });
+    const command = buildAppImportCommand({
+      moduleId,
+      appTitle,
+      importSource,
+      category: refs.category?.value || 'entertainment',
+      actor: actorContext(),
+    });
     state.commandId = command.id;
     refs.commandId.textContent = command.id;
     refs.moduleId.textContent = moduleId;
@@ -517,9 +611,10 @@ export async function mount(ctx) {
       const importSource = await stageDesktopFileSnapshot(ctx, selectedFiles, (current, total, path) => {
         refs.sourceHint.textContent = `${current}/${total} · ${path}`;
       });
-      const moduleId = moduleIdFromSource(selectedFiles[0].name.replace(/\.[^.]+$/, ''));
+      const firstSource = await selectedFiles[0].text();
+      const identity = appIdentityFromSource(selectedFiles[0].name, firstSource);
       notify('');
-      await dispatchImport(moduleId, titleFromModuleId(moduleId), importSource);
+      await dispatchImport(identity.moduleId, identity.appTitle, importSource);
     } catch (error) {
       notify(t('fileFailed', 'The file import could not be started: {error}', { error: error?.message || error }), true);
     } finally {

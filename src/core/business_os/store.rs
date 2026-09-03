@@ -9533,7 +9533,7 @@ pub fn complete_business_command_from_app_validation_success(
     Ok(Some(command_payload))
 }
 
-fn refresh_native_peer_after_runtime_app_schema_change(
+pub(crate) fn refresh_native_peer_after_runtime_app_schema_change(
     root: &Path,
     module_id: &str,
     install_target: &str,
@@ -9577,11 +9577,13 @@ fn ensure_actor_collection_grants_for_module(
     )
     .with_context(|| format!("failed to parse app manifest {}", manifest_path.display()))?;
     let owned_prefix = format!("{}_", module_id.replace('-', "_"));
-    let mut grant_count = 0usize;
-    for collection in module_manifest_collection_ids(&manifest)
+    let owned_collections = module_manifest_collection_ids(&manifest)
         .into_iter()
         .filter(|collection| collection.starts_with(&owned_prefix))
-    {
+        .collect::<Vec<_>>();
+    let expected_grant_count = owned_collections.len() * 2;
+    let mut grant_count = 0usize;
+    for collection in owned_collections {
         for permission in ["data.read", "data.write"] {
             let grant_id =
                 format!("app-access:{module_id}:user:{user_id}:{permission}:{collection}");
@@ -9623,6 +9625,10 @@ fn ensure_actor_collection_grants_for_module(
             grant_count += 1;
         }
     }
+    anyhow::ensure!(
+        grant_count == expected_grant_count,
+        "app `{module_id}` collection grants are incomplete: expected {expected_grant_count}, wrote {grant_count}"
+    );
     Ok(grant_count)
 }
 
@@ -21548,7 +21554,7 @@ fn extract_pdf_literal_text(bytes: &[u8]) -> String {
 
 const BUSINESS_OS_APP_IMPORT_MAX_FILES: usize = 400;
 const BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES: u64 = 512 * 1024;
-const BUSINESS_OS_APP_IMPORT_MAX_DESKTOP_FILE_BYTES: u64 = 8 * 1024 * 1024;
+const BUSINESS_OS_APP_IMPORT_MAX_STANDALONE_HTML_BYTES: u64 = 8 * 1024 * 1024;
 const BUSINESS_OS_APP_IMPORT_MAX_ARCHIVE_BYTES: u64 = 25 * 1024 * 1024;
 const BUSINESS_OS_APP_IMPORT_MAX_TOTAL_BYTES: u64 = 50 * 1024 * 1024;
 
@@ -21871,6 +21877,41 @@ fn materialize_desktop_folder_app_import_source(
         "desktop-folder import exceeds {} files",
         BUSINESS_OS_APP_IMPORT_MAX_FILES
     );
+    let profile = import_source
+        .get("profile")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    anyhow::ensure!(
+        profile.is_empty() || profile == "standalone-html",
+        "unsupported desktop-folder import profile `{profile}`"
+    );
+    let entry_path = import_source
+        .get("entry_path")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or_default();
+    if profile == "standalone-html" {
+        anyhow::ensure!(
+            files.len() == 1,
+            "standalone-html import requires exactly one file"
+        );
+        anyhow::ensure!(
+            !entry_path.is_empty(),
+            "standalone-html import entry_path is required"
+        );
+        let entry = PathBuf::from(entry_path);
+        validate_app_import_relative_path(&entry)?;
+        anyhow::ensure!(
+            entry
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| {
+                    matches!(value.to_ascii_lowercase().as_str(), "html" | "htm")
+                }),
+            "standalone-html import entry_path must be an HTML file"
+        );
+    }
     let mut seen = HashSet::new();
     let mut file_manifest = Vec::with_capacity(files.len());
     let mut total_bytes = 0_u64;
@@ -21883,6 +21924,12 @@ fn materialize_desktop_folder_app_import_source(
             .context("desktop-folder import file is missing relative_path")?;
         let relative = PathBuf::from(&relative_path);
         validate_app_import_relative_path(&relative)?;
+        if profile == "standalone-html" {
+            anyhow::ensure!(
+                relative_path == entry_path,
+                "standalone-html import entry_path does not match its source file"
+            );
+        }
         anyhow::ensure!(
             seen.insert(relative.clone()),
             "duplicate app import path `{relative_path}`"
@@ -21898,10 +21945,14 @@ fn materialize_desktop_folder_app_import_source(
             &file_id,
             Some(&generation_id),
         )?;
+        let file_limit = if profile == "standalone-html" {
+            BUSINESS_OS_APP_IMPORT_MAX_STANDALONE_HTML_BYTES
+        } else {
+            BUSINESS_OS_APP_IMPORT_MAX_FILE_BYTES
+        };
         anyhow::ensure!(
-            materialized.size_bytes <= BUSINESS_OS_APP_IMPORT_MAX_DESKTOP_FILE_BYTES,
-            "app import file `{relative_path}` exceeds {} bytes",
-            BUSINESS_OS_APP_IMPORT_MAX_DESKTOP_FILE_BYTES
+            materialized.size_bytes <= file_limit,
+            "app import file `{relative_path}` exceeds {file_limit} bytes"
         );
         total_bytes = total_bytes.saturating_add(materialized.size_bytes);
         anyhow::ensure!(
@@ -21932,6 +21983,8 @@ fn materialize_desktop_folder_app_import_source(
         "kind": "desktop-folder",
         "snapshot_id": snapshot_id,
         "folder_name": import_source.get("folder_name").and_then(Value::as_str).unwrap_or_default(),
+        "profile": profile,
+        "entry_path": entry_path,
         "resolved_revision": format!("desktop-folder:{manifest_sha}"),
         "manifest_sha256": manifest_sha,
         "file_count": file_manifest.len(),
@@ -21983,8 +22036,10 @@ fn business_os_app_import_prompt_block(manifest: &Value) -> anyhow::Result<Strin
         .and_then(Value::as_str)
         .context("app import manifest has no resolved revision")?;
     Ok(format!(
-        "\nImported application source (immutable evidence):\n- source_directory: {source_directory}\n- source_kind: {}\n- resolved_revision: {revision}\n- manifest_sha256: {}\n- file_count: {}\n- total_bytes: {}\n\nPorting contract:\n- Treat source_directory as read-only evidence. Write only the requested runtime-installed module target.\n- CTOX pre-materializes the canonical App Starter V2 in app_directory. Modify that validated starter in place instead of replacing its Shell-V2 wiring.\n- Reimplement the complete user workflows as a functional Shell-V2 app; do not translate framework syntax mechanically.\n- The delivered app must have no QML, Quickshell, mpv, Python, shell, or original native runtime dependency.\n- Use shell-provided database handles for app-owned RxDB collections; do not import upstream rxdb or create an HTTP data bridge.\n- Browser media playback must use HTMLAudioElement with HTTPS streams. Filter or clearly mark HTTP-only streams; do not add an SSRF/media proxy.\n- Add deterministic fixtures for external APIs and audio. The go/no-go gate requires exact data.read/data.write grants for every app-owned collection, static validation, and a real tenant-actor browser smoke.\n- Do not claim completion or catalog visibility yourself. CTOX publishes the imported module only after core-recorded passed smoke evidence.\n\nBounded implementation contract:\n- After the required plan update, inspect the skill entrypoint, the pre-materialized starter, and the immutable source evidence.\n- Run the first validation before substantial edits, then inspect the source entrypoints and one closest reference app; one bounded reference-catalog query is enough.\n- Continue from existing target artifacts on later slices. Do not restart source or reference discovery, and never leave app_directory invalid at the end of a slice.\n",
+        "\nImported application source (immutable evidence):\n- source_directory: {source_directory}\n- source_kind: {}\n- source_profile: {}\n- entry_path: {}\n- resolved_revision: {revision}\n- manifest_sha256: {}\n- file_count: {}\n- total_bytes: {}\n\nPorting contract:\n- Treat source_directory as read-only evidence. Write only the requested runtime-installed module target.\n- CTOX pre-materializes the canonical App Starter V2 in app_directory. Keep its valid Shell-V2 wiring, but treat its visible UI and sample records as disposable scaffolding rather than product design.\n- Remove every placeholder record, generic CRUD label, demo panel, and unused starter control before release.\n- Reimplement the complete user workflows as a functional Shell-V2 app; do not translate framework syntax mechanically.\n- For standalone HTML sources, first render entry_path and record a visual/interaction inventory. Preserve its recognizable composition, content density, typography, controls, animation, audio, game logic, keyboard/pointer behavior, and saved state unless Shell V2 requires a documented adaptation.\n- Compare source and mounted app at matching desktop and narrow viewports. A merely mountable app, static imitation, or generic dashboard is a failed port.\n- The delivered app must have no QML, Quickshell, mpv, Python, shell, or original native runtime dependency.\n- Use shell-provided database handles for app-owned RxDB collections; do not import upstream rxdb or create an HTTP data bridge.\n- Browser media playback must use HTMLAudioElement with HTTPS streams. Filter or clearly mark HTTP-only streams; do not add an SSRF/media proxy.\n- Add deterministic fixtures for external APIs and audio. The go/no-go gate requires exact data.read/data.write grants for every app-owned collection, static validation, and a real tenant-actor browser smoke.\n- The final report must enumerate every source workflow and its passing test or explicitly mark the job failed; partial parity must never be published as live.\n- Do not claim completion or catalog visibility yourself. CTOX publishes the imported module only after core-recorded passed smoke evidence.\n\nBounded implementation contract:\n- After the required plan update, inspect the skill entrypoint, the pre-materialized starter, and the immutable source evidence.\n- Run the first validation before substantial edits, then inspect the source entrypoints and one closest reference app; one bounded reference-catalog query is enough.\n- Continue from existing target artifacts on later slices. Do not restart source or reference discovery, and never leave app_directory invalid at the end of a slice.\n",
         manifest.get("kind").and_then(Value::as_str).unwrap_or("unknown"),
+        manifest.get("profile").and_then(Value::as_str).unwrap_or("default"),
+        manifest.get("entry_path").and_then(Value::as_str).unwrap_or(""),
         manifest.get("manifest_sha256").and_then(Value::as_str).unwrap_or(""),
         manifest.get("file_count").and_then(Value::as_u64).unwrap_or(0),
         manifest.get("total_bytes").and_then(Value::as_u64).unwrap_or(0),
@@ -29387,7 +29442,11 @@ pub(super) mod tests {
         }))
         .unwrap();
         assert!(prompt.contains("source_directory: /tmp/source"));
+        assert!(prompt.contains("source_profile: default"));
         assert!(prompt.contains("functional Shell-V2 app"));
+        assert!(prompt.contains("disposable scaffolding"));
+        assert!(prompt.contains("visual/interaction inventory"));
+        assert!(prompt.contains("partial parity must never be published as live"));
         assert!(prompt.contains("QML, Quickshell, mpv, Python, shell"));
         assert!(prompt.contains("HTMLAudioElement with HTTPS streams"));
         assert!(prompt.contains("shell-provided database handles"));

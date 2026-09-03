@@ -478,6 +478,19 @@ function moduleKind(item) {
   return 'local';
 }
 
+const CATEGORY_LABELS = Object.freeze({
+  workspace: 'Arbeitsplatz', collaboration: 'Zusammenarbeit', productivity: 'Produktivität',
+  entertainment: 'Unterhaltung', development: 'Entwicklung', engineering: 'Engineering',
+  knowledge: 'Wissen', research: 'Recherche', sales: 'Vertrieb', recruiting: 'Recruiting',
+  finance: 'Finanzen', operations: 'Betrieb', governance: 'Governance', security: 'Sicherheit',
+  analytics: 'Analytik', system: 'System', imported: 'Weitere Apps',
+});
+
+function displayCategory(value, fallback) {
+  const category = String(value || fallback || '').trim();
+  return CATEGORY_LABELS[category.toLowerCase()] || category;
+}
+
 function normalizeMarketplace(items) {
   return items.map(normalizeMarketplaceItem).filter(Boolean);
 }
@@ -491,7 +504,7 @@ function normalizeMarketplaceItem(item) {
     module_id: id,
     title: item.title || item.name || id,
     description: item.description || '',
-    category: String(item.category || 'Marketplace'),
+    category: displayCategory(item.category, 'Marketplace'),
     version: item.version || item.release || 'latest',
     developer: item.developer || item.publisher || item.owner || repoOwner(item.repo) || 'GitHub',
     license: item.license || 'unknown',
@@ -529,7 +542,7 @@ function normalizeItem(item, kind) {
     launch_kind: item.launch_kind || 'module',
     title: item.title || item.default_title || id,
     description: item.description || '',
-    category: String(item.category || item.source || (item.core ? 'System' : 'Local')),
+    category: displayCategory(item.category || item.source, item.core ? 'System' : 'Local'),
     version: item.version || item.release || 'v1',
     developer: item.developer || item.publisher || 'CTOX',
     license: item.license || 'AGPL-3.0-only',

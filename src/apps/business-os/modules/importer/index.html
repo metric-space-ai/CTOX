@@ -31,6 +31,20 @@
         <h2 data-imp-copy="sourceHeading">Port an existing app into Shell V2.</h2>
         <p data-imp-copy="sourceIntro">A public GitHub repository starts immediately. Local files or a folder are first secured through CTOX DB.</p>
       </header>
+      <div class="imp-import-options">
+        <label>
+          <span data-imp-copy="categoryLabel">Category</span>
+          <select class="ctox-input" data-imp-category>
+            <option value="entertainment" data-imp-copy="categoryEntertainment" selected>Entertainment</option>
+            <option value="productivity" data-imp-copy="categoryProductivity">Productivity</option>
+            <option value="development" data-imp-copy="categoryDevelopment">Development</option>
+            <option value="knowledge" data-imp-copy="categoryKnowledge">Knowledge</option>
+            <option value="research" data-imp-copy="categoryResearch">Research</option>
+            <option value="operations" data-imp-copy="categoryOperations">Operations</option>
+            <option value="imported" data-imp-copy="categoryOther">Other</option>
+          </select>
+        </label>
+      </div>
       <form class="imp-github" data-imp-github-form>
         <label for="imp-github-url" data-imp-copy="githubLabel">Public GitHub repository</label>
         <div class="imp-input-row">
@@ -43,7 +57,7 @@
       </form>
       <div class="imp-divider"><span data-imp-copy="or">or</span></div>
       <div class="imp-local-sources">
-        <input type="file" data-imp-pick-files-input multiple hidden />
+        <input type="file" data-imp-pick-files-input hidden />
         <button type="button" class="imp-folder" data-imp-pick-files>
           <span class="imp-folder-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none"><path d="M7 3.5h7l4 4V20H7z" /><path d="M14 3.5V8h4" /></svg></span>
           <span><strong data-imp-copy="fileHeading">Choose source file</strong><small data-imp-source-hint data-imp-copy="sourceHint">Files are synced securely with CTOX.</small></span>
