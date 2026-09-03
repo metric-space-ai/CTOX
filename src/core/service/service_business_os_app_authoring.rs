@@ -644,16 +644,6 @@ fn business_os_app_module_validation_feedback(
                 &format!("App import smoke gate could not be opened: {err:#}"),
             )));
         }
-        if let Err(err) = crate::business_os::store::write_module_catalog_projection_to_rxdb(root) {
-            let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
-                root, command_id,
-            );
-            return Ok(Some(render_business_os_app_module_validation_feedback(
-                job,
-                &target,
-                &format!("App catalog projection before browser smoke failed: {err:#}"),
-            )));
-        }
         if let Err(err) =
             crate::business_os::store::refresh_native_peer_after_runtime_app_schema_change(
                 root,
@@ -664,7 +654,6 @@ fn business_os_app_module_validation_feedback(
             let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
                 root, command_id,
             );
-            let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
             return Ok(Some(render_business_os_app_module_validation_feedback(
                 job,
                 &target,
@@ -682,7 +671,6 @@ fn business_os_app_module_validation_feedback(
                 let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
                     root, command_id,
                 );
-                let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
                 return Ok(Some(render_business_os_app_module_validation_feedback(
                     job,
                     &target,
@@ -700,7 +688,6 @@ fn business_os_app_module_validation_feedback(
                 let _ = crate::business_os::store::clear_business_os_app_import_smoke_attempt(
                     root, command_id,
                 );
-                let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
                 return Ok(Some(render_business_os_app_module_validation_feedback(
                     job,
                     &target,
@@ -713,7 +700,6 @@ fn business_os_app_module_validation_feedback(
         }
         let _ =
             crate::business_os::store::clear_business_os_app_import_smoke_attempt(root, command_id);
-        let _ = crate::business_os::store::write_module_catalog_projection_to_rxdb(root);
         let stderr = String::from_utf8_lossy(&smoke.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&smoke.stdout).trim().to_string();
         let report = if !stderr.is_empty() {

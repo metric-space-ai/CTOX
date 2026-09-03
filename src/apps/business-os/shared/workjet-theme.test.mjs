@@ -28,6 +28,7 @@ test('normalizes the complete Workjet category vocabulary and safe aliases', () 
     'governance',
     'security',
     'analytics',
+    'entertainment',
     'system',
     'imported',
   ]);
@@ -67,6 +68,7 @@ test('targets and rendered elements use the same canonical category refs', () =>
     category: 'Workspace',
   }), 'workspace');
   assert.equal(workjetCategoryForTarget({ kind: 'app', category: 'Development' }), 'development');
+  assert.equal(workjetCategoryForTarget({ kind: 'app', category: 'Entertainment' }), 'entertainment');
 
   const style = workjetCategoryStyle('Security');
   assert.equal(style.id, 'security');

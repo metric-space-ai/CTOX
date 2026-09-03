@@ -43,9 +43,9 @@ Required `ctx` boundary:
 
 1. Start from the pre-materialized App Starter V2 files: `module.json`,
    `collections.schema.json`, `schema.js`, `index.html`, `index.css`,
-   `index.js`, `icon.svg`, and focused tests. Keep their valid Shell-V2 wiring,
-   then replace their visible placeholder UI, sample records, and generic CRUD
-   semantics completely.
+   `index.js`, one local `icon.svg` or `icon.png`, and focused tests. Keep their
+   valid Shell-V2 wiring, then replace their visible placeholder UI, sample
+   records, and generic CRUD semantics completely.
 2. Move the standalone app's root render into `mount(ctx)`.
 3. Replace direct storage, localStorage, IndexedDB, REST, or in-memory stores
    with `ctx.db.collection('<module_scoped_collection>')`.

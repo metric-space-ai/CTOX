@@ -63,6 +63,7 @@ const allowedInstalledRootFiles = new Set([
   'index.css',
   'index.js',
   'icon.svg',
+  'icon.png',
   'NOTICE.md',
 ]);
 const allowedInstalledRootDirs = new Set(['assets', 'core', 'lib', 'locales', 'tests', 'vendor']);
@@ -1015,6 +1016,16 @@ function hasCommandBusDispatchInvocation(text) {
   return false;
 }
 
+function omitsGenericBusinessWorkflow(manifest) {
+  const category = String(manifest?.category || '').trim().toLowerCase();
+  const actions = manifest?.data_runtime?.actions;
+  return ['entertainment', 'game', 'games', 'unterhaltung'].includes(category)
+    && actions
+    && typeof actions === 'object'
+    && !Array.isArray(actions)
+    && Object.keys(actions).length === 0;
+}
+
 function collectLegacyDbFacadeFailures(file, text) {
   const source = stripJsComments(text);
   const messages = [];
@@ -1255,6 +1266,14 @@ if (!existsSync(moduleDir)) {
   fail(`${rel(moduleDir)} does not exist`);
 }
 
+const manifest = existsSync(join(moduleDir, 'module.json')) ? readJson(join(moduleDir, 'module.json')) : null;
+const requiresGenericBusinessWorkflow = !omitsGenericBusinessWorkflow(manifest);
+const requiresBusinessAutomation = requiresGenericBusinessWorkflow && !interactionOnlyArchetypes.has(
+  String(manifest?.archetype || '').trim().toLowerCase(),
+);
+const declaredIconFile = ['icon.svg', 'icon.png'].includes(manifest?.icon)
+  ? manifest.icon
+  : 'icon.svg';
 const requiredFiles = [
   'module.json',
   'collections.schema.json',
@@ -1262,9 +1281,14 @@ const requiredFiles = [
   'index.html',
   'index.css',
   'index.js',
-  'icon.svg',
+  declaredIconFile,
   'locales/de.json',
   'locales/en.json',
+  ...(installedMode && !catalogInstalledMode
+    ? [
+      ...(requiresBusinessAutomation ? ['core/automation.mjs', 'core/records.mjs'] : []),
+    ]
+    : []),
 ];
 
 for (const file of requiredFiles) {
@@ -1282,7 +1306,6 @@ if (runtimeModuleMode && !catalogInstalledMode && existsSync(moduleDir)) {
   }
 }
 
-const manifest = existsSync(join(moduleDir, 'module.json')) ? readJson(join(moduleDir, 'module.json')) : null;
 const schemaDoc = existsSync(join(moduleDir, 'collections.schema.json'))
   ? readJson(join(moduleDir, 'collections.schema.json'))
   : null;
@@ -1359,14 +1382,33 @@ if (manifest) {
     if (manifest.store?.installable === true) {
       fail('module.json store.installable must not be true for runtime-installed modules');
     }
-    if (manifest.icon !== 'icon.svg') {
-      fail('module.json icon must be icon.svg for runtime-installed modules');
+    if (!['icon.svg', 'icon.png'].includes(manifest.icon)) {
+      fail('module.json icon must be icon.svg or icon.png for runtime-installed modules');
     }
     if (Object.prototype.hasOwnProperty.call(manifest, 'icon_path') || Object.prototype.hasOwnProperty.call(manifest, 'iconPath')) {
-      fail('module.json icon_path is forbidden for runtime-installed modules; use icon: "icon.svg"');
+      fail('module.json icon_path is forbidden for runtime-installed modules; use a local icon.svg or icon.png');
     }
     if (Object.prototype.hasOwnProperty.call(manifest, 'icon_url') || Object.prototype.hasOwnProperty.call(manifest, 'iconUrl')) {
-      fail('module.json icon_url is forbidden for runtime-installed modules; use local icon.svg');
+      fail('module.json icon_url is forbidden for runtime-installed modules; use a local icon.svg or icon.png');
+    }
+    if (manifest.icon === 'icon.png') {
+      const iconPath = join(moduleDir, 'icon.png');
+      if (existsSync(iconPath)) {
+        const icon = readFileSync(iconPath);
+        const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        if (icon.length < 24 || !icon.subarray(0, 8).equals(signature) || icon.toString('ascii', 12, 16) !== 'IHDR') {
+          fail('icon.png must be a valid PNG with an IHDR header');
+        } else {
+          const width = icon.readUInt32BE(16);
+          const height = icon.readUInt32BE(20);
+          if (width !== height || width < 60 || width > 1024) {
+            fail('icon.png must be square and between 60x60 and 1024x1024 pixels');
+          }
+          if (icon.length > 512 * 1024) {
+            fail('icon.png must not exceed 512 KiB');
+          }
+        }
+      }
     }
   }
   if (!sourceShellModuleMode && manifest.layout?.right && !manifest.layout?.third_pane_justification) {
@@ -1376,7 +1418,7 @@ if (manifest) {
     fail('module.json layout.right_resizer is forbidden');
   }
   if (installedMode && (manifest.layout?.icon_svg || manifest.icon_svg || manifest.iconSvg)) {
-    fail('module.json inline icon fields are forbidden; keep SVG markup in icon.svg');
+    fail('module.json inline icon fields are forbidden; use a local icon.svg or icon.png');
   }
   const manifestText = JSON.stringify(manifest);
   if (installedMode && /<\s*svg\b/i.test(manifestText)) {
@@ -1523,20 +1565,19 @@ if (runtimeModuleMode && !catalogInstalledMode) {
 }
 
 if (installedMode && !catalogInstalledMode) {
-  const requiresBusinessAutomation = !interactionOnlyArchetypes.has(
-    String(manifest?.archetype || '').trim().toLowerCase(),
-  );
   if (!/\bctx\??\.db\b|\bstate\.ctx\??\.db\b/.test(runtimeText)) {
     fail('installed module must persist records through the shell-provided ctx.db collection handle');
   }
-  if (requiresBusinessAutomation && !hasCommandBusDispatchInvocation(runtimeText)) {
+  const hasCommandBusDispatch = hasCommandBusDispatchInvocation(runtimeText);
+  if (requiresBusinessAutomation && !hasCommandBusDispatch) {
     fail('installed module must dispatch at least one automation through ctx.commandBus.dispatch');
   }
   const hasChatTaskAutomation = /\bbusiness_os\.chat\.task\b/.test(nonTestModuleText)
     && hasBusinessOsChatTaskCommandType(nonTestModuleText);
   const hasTicketAutomation = /\bctox\.ticket\./.test(nonTestModuleText)
     && hasCtoxTicketCommandType(nonTestModuleText);
-  if (requiresBusinessAutomation && !hasChatTaskAutomation && !hasTicketAutomation) {
+  if ((requiresBusinessAutomation || hasCommandBusDispatch)
+    && !hasChatTaskAutomation && !hasTicketAutomation) {
     fail('installed module must include a supported automation command: business_os.chat.task or ctox.ticket.*');
   }
   if (requiresBusinessAutomation && hasChatTaskAutomation && !/\brecord_snapshot\b/.test(nonTestModuleText)) {
