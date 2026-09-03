@@ -1174,12 +1174,82 @@ pub(super) fn handle_outbound_active_command(
             outbound_handle_research_source_adapter(root, &conn, command, now, "auth_requested")
         }
         "outbound.sellify.lookup" => outbound_handle_sellify_lookup(root, command),
+        "outbound.research_source.registry_read" => {
+            outbound_handle_research_source_registry_read(root, command)
+        }
         other => anyhow::bail!("unsupported active outbound command: {other}"),
     }
 }
 
 fn outbound_handle_sellify_lookup(root: &Path, command: &BusinessCommand) -> anyhow::Result<Value> {
     outbound_sellify_lookup(root, &command.payload)
+}
+
+/// Liest die WAHRHEIT der Scrape-Registry, damit die Quellenliste der App nicht
+/// laenger ihre eigenen, veralteten Datensaetze anzeigt.
+///
+/// Owner-Befund 03.09.2026: "diese ganze adapter liste steht ueberall nur
+/// status geht nicht, status funktioniert nicht". Gemessen: die Registry fuehrt
+/// 21 Ziele, alle `active`, waehrend die App Pruefergebnisse vom 31.08. und
+/// "noch nie geprueft" anzeigte - sie las nur ihre eigenen Adapterdatensaetze.
+///
+/// Reiner Lesebefehl: keine Ausfuehrung, keine Aenderung an einem Ziel.
+fn outbound_handle_research_source_registry_read(
+    root: &Path,
+    command: &BusinessCommand,
+) -> anyhow::Result<Value> {
+    let antwort = scrape::dispatch_capturing(root, &["list-targets".to_string()])
+        .context("scrape registry could not be read")?;
+    let ziele = antwort
+        .as_array()
+        .cloned()
+        .or_else(|| {
+            antwort
+                .as_object()
+                .and_then(|map| map.values().find_map(|v| v.as_array().cloned()))
+        })
+        .unwrap_or_default();
+    let gesucht = command
+        .payload
+        .get("target_keys")
+        .and_then(Value::as_array)
+        .map(|werte| {
+            werte
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<std::collections::BTreeSet<_>>()
+        });
+    let mut eintraege = Vec::new();
+    for ziel in ziele {
+        let key = ziel
+            .get("target_key")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        if key.is_empty() {
+            continue;
+        }
+        if let Some(gesucht) = &gesucht {
+            if !gesucht.contains(&key) {
+                continue;
+            }
+        }
+        eintraege.push(serde_json::json!({
+            "target_key": key,
+            "target_id": ziel.get("target_id").and_then(Value::as_str).unwrap_or_default(),
+            "display_name": ziel.get("display_name").and_then(Value::as_str).unwrap_or_default(),
+            "status": ziel.get("status").and_then(Value::as_str).unwrap_or_default(),
+            "target_kind": ziel.get("target_kind").and_then(Value::as_str).unwrap_or_default(),
+            "start_url": ziel.get("start_url").and_then(Value::as_str).unwrap_or_default(),
+            "latest_script_revision_no": ziel.get("latest_script_revision_no").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    Ok(serde_json::json!({
+        "ok": true,
+        "schema": "ctox.outbound.research_source_registry.v1",
+        "targets": eintraege,
+    }))
 }
 
 pub(super) fn outbound_sellify_lookup(root: &Path, payload: &Value) -> anyhow::Result<Value> {

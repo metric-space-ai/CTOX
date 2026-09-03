@@ -2930,6 +2930,7 @@ function sessionShardMarkup(session, tabCount, ctx = null, listView = 'cards') {
 // Sitzungsdatensatz.
 const SITZUNG_ZUSTAENDE = Object.freeze({
   anmeldung: { symbol: '🔑', klasse: 'is-anmeldung', text: 'Anmeldung – hier bestätigen' },
+  anmeldungRuhend: { symbol: '🔑', klasse: 'is-anmeldung', text: 'Anmeldung nötig – Sitzung starten' },
   eingriff: { symbol: '⚠', klasse: 'is-eingriff', text: 'Eingriff nötig' },
   nutzer: { symbol: '👤', klasse: 'is-nutzer', text: 'Sie steuern' },
   automatik: { symbol: '⚙', klasse: 'is-automatik', text: 'Automatik' },
@@ -2945,6 +2946,20 @@ function browserSitzungZustand(session, ctx, jetzt = Date.now()) {
     .test(`${fehler} ${titel}`);
   const lauft = ['active', 'running', 'ready', 'capturing'].includes(
     String(session.runtime_status || session.status || '').toLowerCase());
+  // 1a. Eine Anmeldesitzung des Web Stack zaehlt AUCH IM RUHENDEN Zustand als
+  //     Eingriff. Am 03.09.2026 gemessen: acht Anmeldeauftraege fuer
+  //     dnbhoovers.com standen in der Warteschlange, die zugehoerige Sitzung
+  //     trug vollstaendige Metadaten - war aber `disconnected` und stand
+  //     deshalb als schlichtes "Ruhend" zwischen dreissig anderen. Niemand
+  //     konnte sehen, dass GENAU DIESE Sitzung die Recherche blockiert.
+  const anmeldung = String(session.payload?.purpose || '') === 'web_stack_auth'
+    && String(session.payload?.auth_assist_status || '') !== 'completed'
+    && session.payload?.authenticated !== true;
+  if (anmeldung) {
+    return lauft
+      ? SITZUNG_ZUSTAENDE.anmeldung
+      : SITZUNG_ZUSTAENDE.anmeldungRuhend;
+  }
   if (!lauft) return SITZUNG_ZUSTAENDE.ruhend;
 
   // 2. Steuert der angemeldete Nutzer selbst — mit GUELTIGER Pacht?
@@ -2957,14 +2972,6 @@ function browserSitzungZustand(session, ctx, jetzt = Date.now()) {
   const pachtBis = Number(session.controller_lease_expires_at_ms || 0);
   const selbstAmSteuer = Boolean(steuernder && meine.includes(steuernder) && pachtBis > jetzt);
 
-  // 2a. Eine Anmeldesitzung des Web Stack ist der EINZIGE Ort, an dem der
-  //     Knopf "Erledigt – Recherche fortsetzen" erscheint. Sie muss in der
-  //     Liste als solche erkennbar sein - sonst sucht man den Knopf an einer
-  //     Sitzung, die ihn nie zeigen kann (Owner-Befund 03.09.2026).
-  if (String(session.payload?.purpose || '') === 'web_stack_auth'
-    && String(session.payload?.auth_assist_status || '') !== 'completed') {
-    return SITZUNG_ZUSTAENDE.anmeldung;
-  }
   if (selbstAmSteuer) return SITZUNG_ZUSTAENDE.nutzer;
   if (wartetAufMensch) return SITZUNG_ZUSTAENDE.eingriff;
   // 3. Sonst faehrt sie jemand anderes — Recherche, Adapter, anderer Nutzer.

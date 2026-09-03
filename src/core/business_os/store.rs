@@ -12342,6 +12342,7 @@ pub(crate) fn is_recoverable_background_control_command_type(command_type: &str)
             "outbound.research_source.generate_adapter"
                 | "outbound.research_source.test"
                 | "outbound.research_source.auth_assist"
+                | "outbound.research_source.registry_read"
                 | "outbound.sellify.lookup"
         )
 }
