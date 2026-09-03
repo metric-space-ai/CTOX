@@ -2193,6 +2193,9 @@ pub fn read_app_skill_resource(
     context.validate()?;
     let base = "src/skills/system/product_engineering/business-os-app-module-development";
     let requested = resource.trim().trim_start_matches('/');
+    let requested = requested
+        .strip_prefix("business-os-skill://business-os-app-module-development/")
+        .unwrap_or(requested);
     let relative = match requested {
         "SKILL.md" | "skill" => "SKILL.md",
         "module-contract" | "references/module-contract.md" => "references/module-contract.md",
@@ -9293,6 +9296,13 @@ mod tests {
             .get("content")
             .and_then(Value::as_str)
             .is_some_and(|content| content.contains("Design Guide")));
+        let contract_uri =
+            "business-os-skill://business-os-app-module-development/references/design-guide.md";
+        let contract_resource = read_app_skill_resource(temp.path(), &context, contract_uri)?;
+        assert_eq!(
+            contract_resource.get("uri").and_then(Value::as_str),
+            Some(contract_uri)
+        );
         let traversal = read_app_skill_resource(temp.path(), &context, "../../AGENTS.md");
         assert!(
             traversal.is_err(),
