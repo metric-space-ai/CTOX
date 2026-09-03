@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import {
   appIdentityFromSource,
   buildAppImportCommand,
+  confirmSnapshotDocuments,
   isImportableFile,
   importFileByteLimit,
   isRecoverableDispatchError,
@@ -15,6 +16,62 @@ import {
   standaloneHtmlEntryPath,
   validModuleId,
 } from './index.js';
+
+test('snapshot upload retries targeted pushes until the native peer acknowledges every row', async () => {
+  const releases = [];
+  let attempts = 0;
+  const ctx = {
+    sync: {
+      async leaseCollection(collection, reason) {
+        assert.equal(collection, 'desktop_file_chunks');
+        assert.equal(reason, 'app-import-snapshot:desktop_file_chunks');
+        const attempt = ++attempts;
+        return {
+          bridge: {
+            state: {
+              async pushDocumentsToRemotePeers(rows) {
+                assert.deepEqual(rows.map((row) => row.id), ['chunk-1', 'chunk-2']);
+                if (attempt === 1) throw new Error('peer reconnected during push');
+                return true;
+              },
+            },
+          },
+          async release() { releases.push(attempt); },
+        };
+      },
+    },
+  };
+  await confirmSnapshotDocuments(ctx, 'desktop_file_chunks', [
+    { id: 'chunk-1' }, { id: 'chunk-2' },
+  ], { timeoutMs: 100, retryMs: 0 });
+  assert.equal(attempts, 2);
+  assert.deepEqual(releases, [1, 2]);
+});
+
+test('snapshot upload accepts a multi-tab leader acknowledgement', async () => {
+  let released = false;
+  const rows = [{ id: 'file-1' }];
+  const ctx = {
+    sync: {
+      async leaseCollection() {
+        return {
+          bridge: {
+            mode: 'follower',
+            async flush(received) {
+              assert.deepEqual(received, rows);
+              return { ok: true };
+            },
+          },
+          async release() { released = true; },
+        };
+      },
+    },
+  };
+  assert.equal(await confirmSnapshotDocuments(
+    ctx, 'desktop_files', rows, { timeoutMs: 100, retryMs: 0 },
+  ), true);
+  assert.equal(released, true);
+});
 
 test('parseGitHubUrl accepts only public GitHub repository URLs', () => {
   assert.deepEqual(parseGitHubUrl('https://github.com/AksharP5/omarchy-radio-atlas'), {

@@ -10,6 +10,8 @@ const MAX_FILE_BYTES = 512 * 1024;
 const MAX_STANDALONE_HTML_BYTES = 8 * 1024 * 1024;
 const MAX_LOCAL_SNAPSHOT_BYTES = 50 * 1024 * 1024;
 const CHUNK_SIZE = 16 * 1024;
+const SNAPSHOT_SYNC_TIMEOUT_MS = 120_000;
+const SNAPSHOT_SYNC_RETRY_MS = 500;
 const IMPORT_CATEGORIES = new Set([
   'workspace', 'collaboration', 'productivity', 'entertainment', 'development',
   'engineering', 'knowledge', 'research', 'sales', 'recruiting', 'finance',
@@ -291,6 +293,59 @@ async function writeChunkDocuments(collection, rows) {
   return undefined;
 }
 
+function snapshotSyncBridge(handle) {
+  return handle?.bridge || handle;
+}
+
+function snapshotSyncAcknowledged(result) {
+  return result === true || result?.ok === true;
+}
+
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export async function confirmSnapshotDocuments(
+  ctx,
+  collection,
+  documents,
+  { timeoutMs = SNAPSHOT_SYNC_TIMEOUT_MS, retryMs = SNAPSHOT_SYNC_RETRY_MS } = {},
+) {
+  const rows = Array.isArray(documents) ? documents.filter(Boolean) : [];
+  if (!rows.length) return true;
+  const sync = ctx?.sync;
+  if (typeof sync?.leaseCollection !== 'function') {
+    throw new Error(`${collection}_sync_lease_unavailable`);
+  }
+  const deadline = Date.now() + timeoutMs;
+  let lastError = null;
+  do {
+    let lease = null;
+    try {
+      lease = await sync.leaseCollection(collection, `app-import-snapshot:${collection}`);
+      const bridge = snapshotSyncBridge(lease);
+      let acknowledgement = false;
+      if (bridge?.mode === 'follower' && typeof bridge.flush === 'function') {
+        acknowledgement = await bridge.flush(rows);
+      } else if (typeof bridge?.state?.pushDocumentsToRemotePeers === 'function') {
+        acknowledgement = await bridge.state.pushDocumentsToRemotePeers(rows);
+      } else {
+        throw new Error(`${collection}_targeted_push_unavailable`);
+      }
+      if (snapshotSyncAcknowledged(acknowledgement)) return true;
+      lastError = new Error(`${collection}_push_unconfirmed`);
+    } catch (error) {
+      lastError = error;
+    } finally {
+      await lease?.release?.().catch(() => null);
+    }
+    if (Date.now() < deadline) await wait(Math.min(retryMs, Math.max(0, deadline - Date.now())));
+  } while (Date.now() < deadline);
+  const failure = new Error(`${collection}_snapshot_sync_timeout`);
+  failure.cause = lastError;
+  throw failure;
+}
+
 async function stageDesktopSnapshot(ctx, { folderName, sourceFiles }, onProgress = () => {}) {
   const desktopFiles = ctx?.db?.collection?.('desktop_files');
   const desktopChunks = ctx?.db?.collection?.('desktop_file_chunks');
@@ -299,7 +354,7 @@ async function stageDesktopSnapshot(ctx, { folderName, sourceFiles }, onProgress
   const snapshotId = `app-import-${crypto.randomUUID()}`;
   const folderId = `fs_${snapshotId}`;
   const folderPath = `/Business OS/App Imports/${snapshotId}`;
-  await desktopFiles.upsert({
+  const folderDocument = {
     id: folderId,
     parent_id: 'fs_root',
     path: folderPath,
@@ -313,7 +368,8 @@ async function stageDesktopSnapshot(ctx, { folderName, sourceFiles }, onProgress
     is_deleted: false,
     created_at_ms: now,
     updated_at_ms: now,
-  });
+  };
+  await desktopFiles.upsert(folderDocument);
 
   const manifest = [];
   for (const [index, source] of sourceFiles.entries()) {
@@ -342,7 +398,8 @@ async function stageDesktopSnapshot(ctx, { folderName, sourceFiles }, onProgress
       };
     }));
     await writeChunkDocuments(desktopChunks, rows);
-    await desktopFiles.upsert({
+    await confirmSnapshotDocuments(ctx, 'desktop_file_chunks', rows);
+    const fileDocument = {
       id: fileId,
       parent_id: folderId,
       path: `${folderPath}/${source.relativePath}`,
@@ -362,7 +419,9 @@ async function stageDesktopSnapshot(ctx, { folderName, sourceFiles }, onProgress
       is_deleted: false,
       created_at_ms: now,
       updated_at_ms: now,
-    });
+    };
+    await desktopFiles.upsert(fileDocument);
+    await confirmSnapshotDocuments(ctx, 'desktop_files', [folderDocument, fileDocument]);
     manifest.push({
       file_id: fileId,
       generation_id: generationId,
