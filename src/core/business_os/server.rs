@@ -3544,6 +3544,12 @@ fn shell_generation_mismatch_response(
 }
 
 fn runtime_module_static_authorized(root: &Path, rel: &str) -> bool {
+    // The packaged registry is shell metadata, not a module directory. Treating
+    // its file name as a module id makes a fresh Shell-V2 boot fail at the
+    // mandatory catalog fetch even though the signed slot contains the file.
+    if rel == "modules/registry.json" {
+        return true;
+    }
     let mut parts = rel.split('/');
     let source = parts.next().unwrap_or_default();
     if source == "modules" {
@@ -4242,6 +4248,10 @@ mod tests {
             source_root.join("modules/rem-source/module.json"),
             br#"{"id":"rem-source","version":"1.0.0"}"#,
         )?;
+        assert!(runtime_module_static_authorized(
+            root.path(),
+            "modules/registry.json"
+        ));
         assert!(!runtime_module_static_authorized(
             root.path(),
             "modules/rem-source/index.js"
