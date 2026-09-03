@@ -2028,6 +2028,7 @@ fn app_development_contract(
             "business-os-skill://business-os-app-module-development/references/module-contract.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/shell-v2-contract.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/design-guide.md".to_string(),
+            "business-os-skill://business-os-app-module-development/references/impeccable-preflight.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/standalone-porting.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/dos-and-donts.md".to_string(),
             "business-os-skill://business-os-app-module-development/references/green-checklist.md".to_string(),
@@ -2204,6 +2205,9 @@ pub fn read_app_skill_resource(
             "references/shell-v2-contract.md"
         }
         "design-guide" | "references/design-guide.md" => "references/design-guide.md",
+        "impeccable-preflight" | "references/impeccable-preflight.md" => {
+            "references/impeccable-preflight.md"
+        }
         "standalone-porting" | "references/standalone-porting.md" => {
             "references/standalone-porting.md"
         }
@@ -2222,6 +2226,7 @@ pub fn read_app_skill_resource(
                 | "references/module-contract.md"
                 | "references/shell-v2-contract.md"
                 | "references/design-guide.md"
+                | "references/impeccable-preflight.md"
                 | "references/standalone-porting.md"
                 | "references/dos-and-donts.md"
                 | "references/green-checklist.md"
@@ -9292,6 +9297,10 @@ mod tests {
             skill_root.join("references/shell-v2-contract.md"),
             "# Shell v2 Contract\n",
         )?;
+        std::fs::write(
+            skill_root.join("references/impeccable-preflight.md"),
+            "# Impeccable Preflight\n",
+        )?;
         let context = test_context("business_os.read_app_skill_resource");
         let result = read_app_skill_resource(temp.path(), &context, "design-guide")?;
         assert_eq!(result.get("ok").and_then(Value::as_bool), Some(true));
@@ -9317,6 +9326,11 @@ mod tests {
             .get("content")
             .and_then(Value::as_str)
             .is_some_and(|content| content.contains("Shell v2 Contract")));
+        let preflight = read_app_skill_resource(temp.path(), &context, "impeccable-preflight")?;
+        assert!(preflight
+            .get("content")
+            .and_then(Value::as_str)
+            .is_some_and(|content| content.contains("Impeccable Preflight")));
         let traversal = read_app_skill_resource(temp.path(), &context, "../../AGENTS.md");
         assert!(
             traversal.is_err(),
