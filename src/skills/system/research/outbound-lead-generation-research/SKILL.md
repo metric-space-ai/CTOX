@@ -215,12 +215,16 @@ ctox business-os commands dispatch --json '{
 
 ### Validation rules the daemon enforces (get them right on the first attempt)
 
+Build the writeback in this order, then send it once: (1) collect the terminal status per field, (2) copy each verified value **identically** into `result.fields`, (3) attach sources with absolute URLs, (4) give every person value and its evidence the same `person_key`, (5) check that the key set equals `payload.fields`. These five are the reasons live runs were rejected.
+
 - `field_status` covers **every field of `payload.fields`** (normally all 32) with a terminal status; a missing or extra field is rejected. Reporting only the fields you worked on is not accepted — an untouched field is `no_match` (with its evidence) or keeps the status it had.
 - Every `field_status` entry is an object with `status`; `value` only for `verified`.
 - For a `verified` field the value in `result.fields.<field>.value` must be **identical** to `field_status.<field>.value` — same string, no reformatting, no added prefix.
 - Every populated `person_*` value, in `result.fields` and in `person_records`, needs the `person_key` of the person it belongs to. Keep the `person_key` from `known_person_records` for a Sellify person; invent a stable one only for a new person.
 - `result.fields` holds objects (`{"value": …, "sources": [...]}`), never bare strings.
-- Every evidence entry needs `field_key`, `source_id`, `url`; person evidence also `person_key`.
+- Every evidence entry needs `field_key`, `source_id`, `url`; person evidence also `person_key`, and it must be **the same `person_key`** the value in `result.fields` carries.
+- Every `url` — in sources and in evidence — is an absolute `http(s)://` URL. A file path, a note or an empty string is rejected.
+- A **non-verified** field (`no_match`, `unsupported`, `action_required`) must NOT carry a populated `value`. State the reason instead.
 - Person fields describe the priority contact(s) you actually found: when you report persons in `person_records`, set the matching `person_*` fields `verified` with their `person_key` instead of `no_match`. `no_match` on a person field means you found no such person at all.
 - Person fields carry a `person_key`; `result.fields` holds structured objects only, never free text.
 - `research_command_id` is your own command id; `gap_task_id` stays empty for a chat assignment (it is only set when the daemon handed you a queue task "Lückenschluss: …" — then copy it from that task).
