@@ -294,7 +294,11 @@ test('desktop launchers stay desaturated for every open window, including minimi
 
 test('the global right-click handoff stays a compact shell popover', () => {
   assert.match(appSource, /class="ctox-context-chat-form"/);
-  assert.match(appCss, /\.ctox-global-context-menu\s*\{[\s\S]*?width:\s*min\(360px, calc\(100vw - 16px\)\)/);
-  assert.match(appCss, /\.ctox-context-textarea\s*\{[\s\S]*?min-height:\s*62px[\s\S]*?max-height:\s*124px/);
-  assert.match(appCss, /\.ctox-context-mode\s*\{[\s\S]*?grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.doesNotMatch(appSource, /className = 'ctox-context-menu ctox-global-context-menu'/);
+  assert.match(appSource, /className = 'ctox-global-context-menu'/);
+  assert.match(appSource, /class="ctox-context-composer" hidden/);
+  assert.match(appCss, /\.ctox-global-context-menu\s*\{[\s\S]*?position:\s*fixed[\s\S]*?width:\s*min\(292px, calc\(100vw - 16px\)\)/);
+  assert.match(appCss, /\.ctox-context-textarea\s*\{[\s\S]*?min-height:\s*54px[\s\S]*?max-height:\s*104px/);
+  assert.match(appCss, /\.ctox-context-mode\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\)/);
+  assert.match(appCss, /data-stage="compose"[\s\S]*?grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
 });

@@ -5722,18 +5722,27 @@ body[data-auth-state="locked"] .topbar {
 .ctox-global-context-menu {
   position: fixed;
   z-index: 1200;
-  width: min(360px, calc(100vw - 16px));
+  width: min(292px, calc(100vw - 16px));
   max-width: calc(100vw - 16px);
-  max-height: min(560px, calc(100vh - 16px));
+  max-height: min(440px, calc(100vh - 16px));
   box-sizing: border-box;
-  padding: 9px;
+  padding: 6px;
   border: 1px solid var(--line);
-  border-radius: var(--control-radius);
-  background: var(--surface);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
   color: var(--text);
-  box-shadow: var(--panel-shadow);
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.26), 0 2px 8px rgba(0, 0, 0, 0.16);
   overflow-y: auto;
   overscroll-behavior: contain;
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  transform-origin: top left;
+  animation: ctox-shell-menu-in 110ms var(--ease-standard);
+}
+
+@keyframes ctox-shell-menu-in {
+  from { opacity: 0; transform: translateY(-3px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }
 
 .ctox-global-context-menu[hidden] {
@@ -5742,14 +5751,19 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-chat-form {
   display: grid;
-  gap: 7px;
+  gap: 5px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
 }
 
 .ctox-context-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: var(--space-2);
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 4px 4px 7px;
 }
 
 .ctox-context-heading {
@@ -5773,7 +5787,7 @@ body[data-auth-state="locked"] .topbar {
   font-size: var(--fs-sm);
   font-weight: 800;
   line-height: var(--lh-tight);
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
 }
 
 .ctox-context-heading span {
@@ -5781,21 +5795,21 @@ body[data-auth-state="locked"] .topbar {
   font-size: var(--fs-micro);
   font-weight: 640;
   line-height: var(--lh-tight);
-  -webkit-line-clamp: 2;
+  -webkit-line-clamp: 1;
 }
 
 .ctox-context-close-btn {
   flex: 0 0 auto;
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 22px;
+  height: 22px;
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
   color: var(--text-muted, var(--muted));
   font: inherit;
-  font-size: 16px;
+  font-size: 14px;
   line-height: 1;
   cursor: pointer;
   transition: background-color var(--motion-base) var(--ease-standard), border-color var(--motion-base) var(--ease-standard), color var(--motion-base) var(--ease-standard);
@@ -5803,22 +5817,22 @@ body[data-auth-state="locked"] .topbar {
 
 .ctox-context-mode {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 5px;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 1px;
 }
 
 .ctox-context-mode label {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   min-width: 0;
-  min-height: 30px;
+  min-height: 32px;
   box-sizing: border-box;
-  padding: 5px 7px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--surface-2);
-  color: var(--muted);
+  padding: 5px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
   font-size: var(--fs-meta);
   font-weight: 720;
   cursor: pointer;
@@ -5828,11 +5842,12 @@ body[data-auth-state="locked"] .topbar {
 .ctox-context-mode label::before {
   content: "";
   flex: 0 0 auto;
-  width: 8px;
-  height: 8px;
-  border: 1px solid currentColor;
-  border-radius: 999px;
-  opacity: 0.72;
+  width: 5px;
+  height: 5px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--text-muted, var(--muted));
+  opacity: 0.55;
 }
 
 .ctox-context-mode-copy {
@@ -5853,19 +5868,56 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .ctox-context-mode label.is-selected {
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
-  background: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  border-color: transparent;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--text);
 }
 
 .ctox-context-mode label.is-selected::before {
   background: var(--accent);
-  box-shadow: inset 0 0 0 2px var(--surface);
+  box-shadow: none;
   opacity: 1;
 }
 
+.ctox-context-mode label:hover,
+.ctox-context-mode label:focus-visible {
+  background: color-mix(in srgb, var(--text) 7%, transparent);
+  outline: none;
+}
+
+.ctox-context-chat-form[data-stage="actions"] .ctox-context-mode label.is-selected {
+  background: transparent;
+}
+
+.ctox-context-composer {
+  display: grid;
+  gap: 6px;
+  padding: 6px 4px 4px;
+  border-top: 1px solid var(--hairline, var(--line));
+}
+
+.ctox-context-composer[hidden] {
+  display: none !important;
+}
+
+.ctox-context-chat-form[data-stage="compose"] .ctox-context-mode {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 3px;
+}
+
+.ctox-context-chat-form[data-stage="compose"] .ctox-context-mode label {
+  justify-content: center;
+  min-height: 27px;
+  padding: 3px 5px;
+  font-size: var(--fs-micro);
+}
+
+.ctox-context-chat-form[data-stage="compose"] .ctox-context-mode label::before {
+  display: none;
+}
+
 .ctox-context-mode-help {
-  margin: -2px 0 0;
+  margin: 0;
   color: var(--text-muted, var(--muted));
   font-size: var(--fs-meta);
   font-weight: 650;
@@ -5877,7 +5929,7 @@ body[data-auth-state="locked"] .topbar {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: color-mix(in srgb, var(--surface-2) 82%, var(--surface));
-  padding: 7px 8px;
+  padding: 6px 7px;
 }
 
 .ctox-agent-scope-title {
@@ -5964,8 +6016,8 @@ body[data-auth-state="locked"] .topbar {
 }
 
 .ctox-context-textarea {
-  min-height: 62px;
-  max-height: 124px;
+  min-height: 54px;
+  max-height: 104px;
   padding: 8px;
   font-size: var(--fs-meta);
   line-height: 1.35;

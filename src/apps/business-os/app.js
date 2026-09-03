@@ -84,7 +84,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260902-import-exact-dirty-v335';
+const APP_BUILD = '20260903-shell-v2-context-menu-v336';
 const WORKJET_UI_CONTRACT_BUILD = '6121ac0cd76c1abad54d6d6e7e3483bb4f31f3ed36f4f1eb24d329a8ce99b5b6';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -14540,7 +14540,12 @@ function initGlobalCtoxContextMenu() {
   // instead of treating a detached node as initialized.
   globalCtoxContextMenuEl = null;
   globalCtoxContextMenuEl = document.createElement('div');
-  globalCtoxContextMenuEl.className = 'ctox-context-menu ctox-global-context-menu';
+  // This is a shell-owned popover, not one of the legacy module forms styled
+  // through shared/base.css. Keeping the classes separate prevents the later
+  // module stylesheet from turning this fixed popover into a 560px absolute
+  // panel and breaking viewport clamping.
+  globalCtoxContextMenuEl.className = 'ctox-global-context-menu';
+  globalCtoxContextMenuEl.setAttribute('role', 'dialog');
   globalCtoxContextMenuEl.hidden = true;
   document.body.appendChild(globalCtoxContextMenuEl);
 
@@ -14908,7 +14913,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
   const subtitle = context.label || shellText('moduleTitles')?.[mod.id] || mod.title || mod.id;
 
   globalCtoxContextMenuEl.innerHTML = `
-    <form class="ctox-context-chat-form" novalidate>
+    <form class="ctox-context-chat-form" data-stage="actions" novalidate>
       <header class="ctox-context-header">
         <div class="ctox-context-heading">
           <strong>${escapeHtml(titleText)}</strong>
@@ -14916,11 +14921,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
         </div>
         <button type="button" class="ctox-context-close-btn" aria-label="${escapeHtml(closeLabel)}">×</button>
       </header>
-      ${renderCompactGlobalCtoxAgentScopeHtml({
-        view: agentScope,
-        labels: { scopeTitle: lang === 'de' ? 'CTOX Zugriff' : 'CTOX access' },
-      })}
-      <div class="ctox-context-mode" role="radiogroup" aria-label="Aktion">
+      <div class="ctox-context-mode" role="menu" aria-label="Aktion">
         ${renderGlobalCtoxContextModeHtml({
           canModify,
           canSelfExecute,
@@ -14937,32 +14938,41 @@ function showGlobalCtoxContextMenu(context, x, y) {
           },
         })}
       </div>
-      <p class="ctox-context-mode-help" data-ctox-context-mode-help></p>
-      <label class="ctox-context-user-row" hidden>
-        <span class="ctox-context-user-label">${escapeHtml(reviewerLabel)}</span>
-        <input class="ctox-context-user-input" type="text" autocomplete="off" list="ctox-context-user-options" placeholder="${escapeHtml(reviewerPlaceholder)}">
-        <datalist id="ctox-context-user-options" data-ctox-context-user-options>${initialUserOptions}</datalist>
-      </label>
-      <textarea class="ctox-context-textarea" placeholder="${escapeHtml(placeholderText)}"></textarea>
-      <footer class="ctox-context-footer">
-        <span class="ctox-context-status"></span>
-        <button type="submit" class="ctox-context-submit-btn">${escapeHtml(sendLabel)}</button>
-      </footer>
+      <div class="ctox-context-composer" hidden>
+        ${renderCompactGlobalCtoxAgentScopeHtml({
+          view: agentScope,
+          labels: { scopeTitle: lang === 'de' ? 'CTOX Zugriff' : 'CTOX access' },
+        })}
+        <p class="ctox-context-mode-help" data-ctox-context-mode-help></p>
+        <label class="ctox-context-user-row" hidden>
+          <span class="ctox-context-user-label">${escapeHtml(reviewerLabel)}</span>
+          <input class="ctox-context-user-input" type="text" autocomplete="off" list="ctox-context-user-options" placeholder="${escapeHtml(reviewerPlaceholder)}">
+          <datalist id="ctox-context-user-options" data-ctox-context-user-options>${initialUserOptions}</datalist>
+        </label>
+        <textarea class="ctox-context-textarea" placeholder="${escapeHtml(placeholderText)}"></textarea>
+        <footer class="ctox-context-footer">
+          <span class="ctox-context-status"></span>
+          <button type="submit" class="ctox-context-submit-btn">${escapeHtml(sendLabel)}</button>
+        </footer>
+      </div>
     </form>
   `;
 
   globalCtoxContextMenuEl.hidden = false;
 
-  // Clamp positioning
-  globalCtoxContextMenuEl.style.left = '0px';
-  globalCtoxContextMenuEl.style.top = '0px';
-  const rect = globalCtoxContextMenuEl.getBoundingClientRect();
-  const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
-  const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
-  globalCtoxContextMenuEl.style.left = `${Math.min(maxLeft, Math.max(8, x))}px`;
-  globalCtoxContextMenuEl.style.top = `${Math.min(maxTop, Math.max(8, y))}px`;
+  const positionMenu = () => {
+    globalCtoxContextMenuEl.style.left = '0px';
+    globalCtoxContextMenuEl.style.top = '0px';
+    const rect = globalCtoxContextMenuEl.getBoundingClientRect();
+    const maxLeft = Math.max(8, window.innerWidth - rect.width - 8);
+    const maxTop = Math.max(8, window.innerHeight - rect.height - 8);
+    globalCtoxContextMenuEl.style.left = `${Math.min(maxLeft, Math.max(8, x))}px`;
+    globalCtoxContextMenuEl.style.top = `${Math.min(maxTop, Math.max(8, y))}px`;
+  };
+  positionMenu();
 
   const form = globalCtoxContextMenuEl.querySelector('form');
+  const composer = globalCtoxContextMenuEl.querySelector('.ctox-context-composer');
   const textarea = globalCtoxContextMenuEl.querySelector('.ctox-context-textarea');
   const userRow = globalCtoxContextMenuEl.querySelector('.ctox-context-user-row');
   const userInput = globalCtoxContextMenuEl.querySelector('.ctox-context-user-input');
@@ -14976,7 +14986,12 @@ function showGlobalCtoxContextMenu(context, x, y) {
     hideGlobalCtoxContextMenu();
   });
 
-  const modeLabels = globalCtoxContextMenuEl.querySelectorAll('.ctox-context-mode label');
+  const modeLabels = Array.from(globalCtoxContextMenuEl.querySelectorAll('.ctox-context-mode label'));
+  modeLabels.forEach((label, index) => {
+    label.setAttribute('role', 'menuitemradio');
+    label.setAttribute('aria-checked', label.querySelector('input')?.checked ? 'true' : 'false');
+    label.tabIndex = index === 0 ? 0 : -1;
+  });
   const syncModeInputs = () => {
     const mode = new FormData(form).get('contextMode') || 'data';
     const selectedModeLabel = globalCtoxContextMenuEl.querySelector('.ctox-context-mode label.is-selected')
@@ -15011,15 +15026,45 @@ function showGlobalCtoxContextMenu(context, x, y) {
             ? dataPlaceholderText
             : placeholderText;
   };
+  const openComposer = (label) => {
+    modeLabels.forEach((modeLabel) => {
+      modeLabel.classList.toggle('is-selected', modeLabel === label);
+      modeLabel.tabIndex = modeLabel === label ? 0 : -1;
+      modeLabel.setAttribute('aria-checked', modeLabel === label ? 'true' : 'false');
+    });
+    const input = label.querySelector('input');
+    if (input) input.checked = true;
+    form.dataset.stage = 'compose';
+    composer.hidden = false;
+    syncModeInputs();
+    requestAnimationFrame(() => {
+      positionMenu();
+      textarea.focus();
+    });
+  };
   modeLabels.forEach(label => {
     label.addEventListener('click', () => {
-      modeLabels.forEach(l => l.classList.remove('is-selected'));
-      label.classList.add('is-selected');
-      const input = label.querySelector('input');
-      if (input) input.checked = true;
-      syncModeInputs();
+      openComposer(label);
     });
   });
+  globalCtoxContextMenuEl.onkeydown = (event) => {
+    const focusedIndex = modeLabels.indexOf(document.activeElement);
+    if (focusedIndex < 0) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openComposer(modeLabels[focusedIndex]);
+      return;
+    }
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    event.preventDefault();
+    const nextIndex = event.key === 'Home'
+      ? 0
+      : event.key === 'End'
+        ? modeLabels.length - 1
+        : (focusedIndex + (event.key === 'ArrowDown' ? 1 : -1) + modeLabels.length) % modeLabels.length;
+    modeLabels.forEach((label, index) => { label.tabIndex = index === nextIndex ? 0 : -1; });
+    modeLabels[nextIndex]?.focus();
+  };
   syncModeInputs();
   populateGlobalCtoxUserOptions(userOptionsEl).catch((error) => {
     console.warn('[business-os] failed to populate context user picker:', error);
@@ -15183,9 +15228,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
     }
   });
 
-  requestAnimationFrame(() => {
-    textarea.focus();
-  });
+  requestAnimationFrame(() => modeLabels[0]?.focus());
 }
 
 function hideGlobalCtoxContextMenu() {

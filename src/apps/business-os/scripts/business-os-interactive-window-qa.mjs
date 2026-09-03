@@ -798,6 +798,20 @@ async function exerciseWindowHeaderActions(page, windowLocator) {
   const globalMenu = page.locator('.ctox-global-context-menu:visible');
   await globalMenu.waitFor({ state: 'visible', timeout: 3000 });
   result.contextMenu = true;
+  const initialMenuBox = await globalMenu.boundingBox();
+  if (!initialMenuBox || initialMenuBox.width > 300 || initialMenuBox.height > 190) {
+    throw new Error(`Global context menu is not compact: ${JSON.stringify(initialMenuBox)}`);
+  }
+  if (await globalMenu.locator('.ctox-context-composer:visible').count()) {
+    throw new Error('Global context menu opened with the composer expanded');
+  }
+  const askAction = globalMenu.locator('.ctox-context-mode label').filter({ hasText: /Frage stellen|Ask question/ }).first();
+  await askAction.click();
+  await globalMenu.locator('.ctox-context-composer:visible').waitFor({ state: 'visible', timeout: 1000 });
+  const expandedMenuBox = await globalMenu.boundingBox();
+  if (!expandedMenuBox || expandedMenuBox.width > 300 || expandedMenuBox.height > 440) {
+    throw new Error(`Expanded global context composer escaped its compact bounds: ${JSON.stringify(expandedMenuBox)}`);
+  }
   if (!result.context?.app_id || result.context.pointer?.x !== pointer.x || result.context.pointer?.y !== pointer.y) {
     throw new Error(`Global context menu lost its app or pointer context: ${JSON.stringify(result.context)}`);
   }
