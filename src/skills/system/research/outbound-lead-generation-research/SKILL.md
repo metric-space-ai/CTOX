@@ -95,6 +95,10 @@ Person (11, per contact, keyed by a stable `person_key`): `person_geschlecht`, `
 
 Contacts: at least one per category, in this order — Geschäftsführung/Gesamtverantwortung, Prokura, Leitung Finanzen, Einkauf, Supply Chain Management, Operations, Technik, Entwicklung. Sellify contacts are kept under their `person_key` and completed.
 
+**Every category is worked, not only the one that is easy.** The register gives you two for free: Geschäftsführung **and Prokura** — a name in `firma_prokura` is a person, so write it as a person record with `person_funktion` "Prokura", never only as a company field. The operational categories (Finanzen, Einkauf, Supply Chain, Operations, Technik, Entwicklung) come from the company website (Team, Über uns, Kontakt, Presse, Karriere pages, press releases, Impressum) and from LinkedIn/XING name search. Work them in order; a category ends `no_match` only after a documented search and two documented reads for it. Report per category what you found, in the closing message.
+
+**E-mail and its validation belong to every person.** For each person with a name and a known company domain: derive the address from the pattern the company demonstrably uses (take it from a published address on the site or from a Sellify address of the same company, never from a guessed convention alone), then validate it with the configured validation source (`experte.de`, MailTester) and write the outcome to `person_email_validation`. Validation is a source of technical deliverability only: it never counts as the second independent source for the person's identity or employment. Without a demonstrable pattern the field is `no_match` with that reason — never a guessed address.
+
 ## 4. The CLI you work with
 
 ### Search, read, sources, adapter batch
