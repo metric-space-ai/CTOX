@@ -19,8 +19,8 @@ use super::rxdb_peer_commands::{
     project_appsec_command_result, project_support_command_result, project_threads_command_result,
 };
 use super::rxdb_peer_intake_state::{
-    business_command_document_is_terminal, resolve_business_command_intake_failure_history,
-    PendingBusinessCommandIntakeOutcome,
+    business_command_document_is_terminal, is_pending_desktop_file_replication_error,
+    resolve_business_command_intake_failure_history, PendingBusinessCommandIntakeOutcome,
 };
 pub(super) use super::rxdb_peer_intake_state::{
     is_transient_business_command_store_error, transient_business_command_retry_document,
@@ -235,7 +235,12 @@ pub(super) async fn consume_business_commands_loop(root: PathBuf, database: Arc<
             // Keep the retry finite and paced instead of sleeping for the
             // 30-second idle safety poll or spinning at full CPU.
             consecutive_idle_rounds = 0;
-            tokio::time::sleep(Duration::from_millis(250)).await;
+            let retry_delay_ms = if accept_failures.values().all(|attempt| *attempt == 0) {
+                1_000
+            } else {
+                250
+            };
+            tokio::time::sleep(Duration::from_millis(retry_delay_ms)).await;
             continue;
         }
         match result {
@@ -375,18 +380,49 @@ pub(super) async fn consume_pending_business_commands(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let intake_result =
-            match accept_pending_business_command(root, database, document.clone()).await {
-                Ok(PendingBusinessCommandIntakeOutcome::Accepted)
-                | Ok(PendingBusinessCommandIntakeOutcome::Terminalized) => Ok(()),
-                Ok(PendingBusinessCommandIntakeOutcome::CanonicalReplayed) => Err(anyhow::anyhow!(
-                    "canonical command replay remained nonterminal"
-                )),
-                Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure { error }) => {
-                    Err(anyhow::anyhow!(error))
+        let intake_result = match accept_pending_business_command(root, database, document.clone())
+            .await
+        {
+            Ok(PendingBusinessCommandIntakeOutcome::Accepted)
+            | Ok(PendingBusinessCommandIntakeOutcome::Terminalized) => Ok(()),
+            Ok(PendingBusinessCommandIntakeOutcome::CanonicalReplayed) => Err(anyhow::anyhow!(
+                "canonical command replay remained nonterminal"
+            )),
+            Ok(PendingBusinessCommandIntakeOutcome::WaitingForReplication { error }) => {
+                if !command_id.is_empty() {
+                    accept_failures.insert(command_id.clone(), 0);
                 }
-                Err(error) => Err(error),
-            };
+                if document.get("last_retry_error").and_then(Value::as_str) != Some(error.as_str())
+                {
+                    if let Some(retry_document) = transient_business_command_retry_document(
+                        &document,
+                        error.as_str(),
+                        document
+                            .get("retry_attempt")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0) as u32,
+                    ) {
+                        let commands = database
+                            .collection("business_commands")
+                            .context("business_commands collection is not registered")?;
+                        incremental_upsert_document_with_envelope(
+                            &commands,
+                            retry_document,
+                            "desktop import awaiting replicated chunks",
+                        )
+                        .await?;
+                    }
+                }
+                COMMAND_PLANE_METRICS
+                    .retries_total
+                    .fetch_add(1, Ordering::Relaxed);
+                continue;
+            }
+            Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure { error }) => {
+                Err(anyhow::anyhow!(error))
+            }
+            Err(error) => Err(error),
+        };
         match intake_result {
             Ok(()) => {
                 COMMAND_PLANE_METRICS.record_processed(&document);
@@ -787,6 +823,21 @@ pub(super) async fn accept_pending_business_command(
 
     let mut accepted = match accepted_result {
         Ok(Ok(val)) => val,
+        Ok(Err(err))
+            if command_type == "ctox.business_os.app.create"
+                && command_payload
+                    .get("import_source")
+                    .and_then(|source| source.get("kind"))
+                    .and_then(Value::as_str)
+                    == Some("desktop-folder")
+                && is_pending_desktop_file_replication_error(&err) =>
+        {
+            return Ok(PendingBusinessCommandIntakeOutcome::WaitingForReplication {
+                error: format!(
+                    "waiting for replicated desktop import files before app creation: {err:#}"
+                ),
+            });
+        }
         Ok(Err(err)) if is_transient_business_command_store_error(&err) => {
             return Ok(PendingBusinessCommandIntakeOutcome::RetryableFailure {
                 error: format!("transient native business command store contention: {err:#}"),

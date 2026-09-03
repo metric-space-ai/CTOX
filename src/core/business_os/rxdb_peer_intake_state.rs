@@ -10,6 +10,7 @@ use std::path::Path;
 pub(super) enum PendingBusinessCommandIntakeOutcome {
     Accepted,
     CanonicalReplayed,
+    WaitingForReplication { error: String },
     RetryableFailure { error: String },
     Terminalized,
 }
@@ -55,6 +56,22 @@ pub(super) fn is_transient_business_command_store_error(error: &anyhow::Error) -
     .any(|needle| message.contains(needle))
 }
 
+pub(super) fn is_pending_desktop_file_replication_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    ["desktop file `", "business os attachment `"]
+        .iter()
+        .any(|prefix| message.contains(prefix))
+        && [
+            " is not indexed",
+            " content is not available",
+            " has no content generation",
+            " has no chunks for generation",
+            "no complete equivalent desktop file chunks found",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+}
+
 pub(super) fn transient_business_command_retry_document(
     document: &Value,
     error_message: &str,
@@ -88,4 +105,24 @@ pub(super) fn transient_business_command_retry_document(
     object.remove("error_code");
     object.insert("updated_at_ms".to_string(), Value::from(now_ms() as u64));
     Some(retry)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_pending_desktop_file_replication_error;
+
+    #[test]
+    fn classifies_only_incomplete_desktop_file_replication_as_pending() {
+        let missing_chunks = anyhow::anyhow!(
+            "no complete equivalent desktop file chunks found for `appimport_file`; primary decode failed: Business OS attachment `appimport_file` has no chunks for generation `gen_1`"
+        );
+        assert!(is_pending_desktop_file_replication_error(&missing_chunks));
+
+        let missing_file = anyhow::anyhow!("desktop file `appimport_file` is not indexed");
+        assert!(is_pending_desktop_file_replication_error(&missing_file));
+
+        let hash_mismatch =
+            anyhow::anyhow!("Business OS attachment `appimport_file` content hash mismatch");
+        assert!(!is_pending_desktop_file_replication_error(&hash_mismatch));
+    }
 }
