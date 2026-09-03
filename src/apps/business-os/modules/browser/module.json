@@ -49,7 +49,8 @@
     "center": "web page"
   },
   "category": "Workspace",
-  "version": "0.2.6",
+  "version": "0.2.7",
+
   "developer": "CTOX",
   "license": "AGPL-3.0-only",
   "tags": [
