@@ -815,9 +815,23 @@ export async function mount(ctx) {
       state.directLiveEnabled
         ? Promise.resolve([])
         : readCollection(browserCollection(ctx, 'business_commands'), { limit: 50 }),
+      // Owner-Entscheidung 04.09.2026: "der browser mit dem unblocking muss
+      // auch für alle funktionieren! nicht nur für einen User!" Eine
+      // Anmeldesitzung des Web Stack gehoert der FIRMA, nicht der Person, die
+      // sie zufaellig ausgeloest hat: sie existiert nur, damit irgendjemand die
+      // Recherche entsperrt. Gemessen an 276 Sitzungen lagen 152 bei einem
+      // einzigen Konto - kein anderer Nutzer konnte ein Unblocking abschliessen.
+      //
+      // Persoenliche Sitzungen bleiben persoenlich. Geteilt wird ausschliesslich
+      // `purpose = web_stack_auth`.
       directSessions || readCollection(browserCollection(ctx, 'browser_sessions'), {
         limit: 50,
-        selector: { owner_user_id: { $in: actorIds } },
+        selector: {
+          $or: [
+            { owner_user_id: { $in: actorIds } },
+            { 'payload.purpose': 'web_stack_auth' },
+          ],
+        },
       }),
       readDocument(
         browserCollection(ctx, 'browser_sessions'),
@@ -843,7 +857,8 @@ export async function mount(ctx) {
       mergeRequestedSession(sessions, directRequestedSession),
       state.latestSession,
     )
-      .filter((session) => actorIds.includes(String(session.owner_user_id || '')));
+      .filter((session) => actorIds.includes(String(session.owner_user_id || ''))
+        || String(session.payload?.purpose || '') === 'web_stack_auth');
     if (state.selectedSessionId
       && state.selectedSessionId !== state.requestedSessionId
       && !visibleSessions.some((session) => session.id === state.selectedSessionId)) {
@@ -3728,10 +3743,17 @@ function browserSurfaceCanControl(ctx, state, now = Date.now()) {
   const session = state?.latestSession;
   const actorIds = browserActorIds(ctx?.session);
   const expiresAt = Number(session?.controller_lease_expires_at_ms || 0);
+  // Eine Anmeldesitzung des Web Stack darf JEDER Nutzer des Mandanten bedienen
+  // (Owner-Entscheidung 04.09.2026). Die Pachtregeln bleiben unveraendert - wer
+  // die Pacht haelt, steuert; die Pacht ist nur nicht mehr an EIN Konto
+  // gebunden.
+  const gemeinsameAnmeldung = String(session?.payload?.purpose || '') === 'web_stack_auth';
+  const kontoPasst = gemeinsameAnmeldung
+    || actorIds.includes(String(session?.controller_user_id || ''));
   return Boolean(
     session?.id
       && actorIds.length
-      && actorIds.includes(String(session.controller_user_id || ''))
+      && kontoPasst
       && String(session.controller_lease_id || '').trim()
       && session.controller_lease_id === state.controllerLeaseId
       && Number.isFinite(expiresAt)
@@ -3812,9 +3834,16 @@ function shouldReacquireControllerLease(session, actorId, now = Date.now(), opti
     merkeReacquireGrund(session, session?.id ? 'kein angemeldeter Nutzer' : 'keine Sitzung');
     return false;
   }
-  // Fremd gesteuerte Sitzungen nicht an uns reissen.
+  // Fremd gesteuerte Sitzungen nicht an uns reissen - AUSSER es ist eine
+  // gemeinsame Anmeldesitzung des Web Stack UND ihre Pacht ist abgelaufen.
+  // Dann wartet die Recherche auf irgendeinen Menschen, nicht auf einen
+  // bestimmten (Owner-Entscheidung 04.09.2026). Eine LAUFENDE fremde Pacht
+  // bleibt unangetastet, sonst reissen sich zwei Nutzer die Steuerung weg.
   const controller = String(session.controller_user_id || '');
-  if (controller && !actorIds.includes(controller)) {
+  const gemeinsameAnmeldung = String(session.payload?.purpose || '') === 'web_stack_auth';
+  const fremdePachtLaeuft = Number(session.controller_lease_expires_at_ms || 0) > now;
+  if (controller && !actorIds.includes(controller)
+    && !(gemeinsameAnmeldung && !fremdePachtLaeuft)) {
     merkeReacquireGrund(session, `Sitzung gehoert ${controller}`);
     return false;
   }
