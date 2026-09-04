@@ -1103,11 +1103,24 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         }
       }
 
-      // Update textarea content or placeholder if needed
+      // Owner-Befund 04.09.2026: "wenn ich einen chat eintippe, wird der einfach
+      // weggeloescht, was ich getippt habe und random wieder eingesetzt."
+      //
+      // Der Neuaufbau schrieb `chat.draft` bedingungslos in das Feld zurueck.
+      // Laeuft dazwischen ein Sync-Takt, traegt das Chat-Objekt einen aelteren
+      // Entwurf - und der ueberschreibt, was der Mensch gerade tippt.
+      //
+      // Wer tippt, hat recht: ein fokussiertes Feld wird nie ueberschrieben,
+      // sein Inhalt wird stattdessen in den Zustand uebernommen.
       const textarea = win.querySelector('[name="message"]');
-      if (textarea && textarea.value !== (chat.draft || '')) {
-        textarea.value = chat.draft || '';
-        inPlaceDomChanged = true;
+      if (textarea) {
+        const wirdGetippt = (win.ownerDocument || document).activeElement === textarea;
+        if (wirdGetippt) {
+          chat.draft = textarea.value;
+        } else if (textarea.value !== (chat.draft || '')) {
+          textarea.value = chat.draft || '';
+          inPlaceDomChanged = true;
+        }
       }
     });
 
