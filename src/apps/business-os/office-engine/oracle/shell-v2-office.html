@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="de" data-theme="light">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" href="data:,">
+  <title>Office integration lab — isolated test data</title>
+  <link rel="stylesheet" href="../../app.css"><link rel="stylesheet" href="../../shared/base.css">
+  <style>
+    html,body { height:100%; margin:0; overflow:hidden; }
+    #desk { height:100%; position:relative; }
+    #office-window { position:absolute; inset:0; width:100%; height:100%; container:business-app-window / inline-size; }
+    #app { height:100%; min-height:0; padding:0; }
+    #notices { position:absolute; bottom:0; right:0; z-index:30; pointer-events:none; font-size:12px; }
+  </style>
+</head>
+<body><div id="desk">
+  <section id="office-window" class="shell-window is-focused" data-shell-contract="v2" data-shell-header-rows="2" data-shell-icon-rows="2" data-app-mode="window">
+    <div class="shell-window-v2-icon"><img id="app-icon" alt=""></div>
+    <header class="shell-window-header" data-window-header></header>
+    <div class="shell-window-controls"><button class="shell-window-control shell-window-control--close" aria-label="Schließen">×</button></div>
+    <div class="shell-window-content"><main id="app" class="module-content"></main></div>
+    <div id="notices" role="status"></div>
+  </section>
+</div>
+<script type="module">
+  import { getActionIcon } from '../../shared/icons.js';
+  const params = new URLSearchParams(location.search);
+  const kind = params.get('kind') === 'document' ? 'document' : 'spreadsheet';
+  const moduleId = kind === 'document' ? 'documents' : 'spreadsheets';
+  const locale = params.get('locale') === 'en' ? 'en' : 'de';
+  document.documentElement.lang = locale;
+  document.documentElement.dataset.theme = params.get('theme') === 'dark' ? 'dark' : 'light';
+  document.querySelector('#app-icon').src = `../../modules/${moduleId}/icon.svg`;
+  document.querySelector('#app').classList.add(moduleId);
+  const { mount } = await import(`../../modules/${moduleId}/index.js?v=20260904-office-shell-v2`);
+  const fixture = kind === 'document' ? 'document.open-render-zoom' : 'spreadsheet.open-render-sheets';
+  const extension = kind === 'document' ? 'docx' : 'xlsx';
+  const canonical = new Uint8Array(await (await fetch(`/tests/fixtures/office/${kind}/${fixture.split('.')[1]}.${extension}`)).arrayBuffer());
+  const base64 = (bytes) => { let text=''; for(const byte of bytes) text+=String.fromCharCode(byte); return btoa(text); };
+  const preparedFixture = await window.officeLabPrepare(kind, base64(canonical));
+  const storeKey = `office-integration-lab-${kind}`;
+  const rows = JSON.parse(localStorage.getItem(storeKey) || '{}');
+  const persist = () => localStorage.setItem(storeKey, JSON.stringify(rows));
+  const records = rows[moduleId] ||= [];
+  const versions = rows[`${kind}_versions`] ||= [];
+  const chunks = rows[`${kind}_blob_chunks`] ||= [];
+  if (!records.length && !params.has('empty')) {
+    for(let i=0;i<30;i++) {
+      const id=`${kind}-fixture-${i}`;
+      records.push({id,title:`Arbeitsdatei ${String(i+1).padStart(2,'0')}`,filename:`arbeitsdatei-${i+1}.${extension}`, document_type:'word_document',spreadsheet_type:'xlsx',mime_type:kind==='document'?'application/vnd.openxmlformats-officedocument.wordprocessingml.document':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', current_version_id:`${id}-v1`,status:'Draft', tags:[],linked_records:[],is_deleted:false,created_at_ms:1700000000000-i,updated_at_ms:1700000000000-i});
+      versions.push({id:`${id}-v1`,[`${kind}_id`]:id,version:1,blob_id:'canonical',editor_blob_id:'editor',conversion_state:'prepared',editor_protocol:`euro-office-${kind==='document'?'word':'cell'}-binary-v10`,editor_protocol_version:10,diagnostics:[],created_at_ms:1700000000000,updated_at_ms:1700000000000,model_json:{data:[],columns:[]}});
+    }
+    chunks.push({id:'canonical-0',blob_id:'canonical',idx:0,total:1,data:base64(canonical)}, {id:'editor-0',blob_id:'editor',idx:0,total:1,data:preparedFixture});
+    persist();
+  }
+  const matches = (record, selector={}) => Object.entries(selector).every(([key,value]) => key==='$or' ? value.some(part=>matches(record,part)) : value && typeof value==='object' ? ('$eq' in value ? record[key]===value.$eq : '$ne' in value ? record[key]!==value.$ne : '$in' in value ? value.$in.includes(record[key]) : true) : record[key]===value);
+  const doc = (value) => value ? {...value,toJSON:()=>({...value}),async incrementalPatch(patch){Object.assign(value,patch);persist();return doc(value);},async remove(){value.is_deleted=true;persist();}} : null;
+  const collection = (name) => {
+    const table=rows[name] ||= [];
+    return { $:{subscribe(){return {unsubscribe(){}};}}, findOne(id){return {async exec(){return doc(table.find(row=>row.id===id));}};},find(query={}){return {async exec(){return table.filter(row=>matches(row,query.selector)).map(doc);}};},async insert(value){table.push(value);persist();return doc(value);},async upsert(value){const row=table.find(row=>row.id===value.id);row?Object.assign(row,value):table.push(value);persist();return doc(value);},async bulkUpsert(values){for(const value of values){const row=table.find(row=>row.id===value.id);row?Object.assign(row,value):table.push(value);}persist();return values.map(doc);}};
+  };
+  const syncState={awaitInSync:async()=>{},awaitInitialReplication:async()=>{}};
+  const commands=[];
+  const ctx={host:document.querySelector('#app'),left:document.createElement('aside'),right:document.createElement('aside'),locale,module:{id:moduleId},args:{},db:{collection},permissions:{canWriteCollection:()=>true},getActionIcon,
+    sync:{async startCollection(){return {state:syncState};},async leaseCollection(){return {bridge:{state:syncState},release:async()=>{}};}},
+    notifications:{success(message){document.querySelector('#notices').textContent=message;},error(message){console.error(message);document.querySelector('#notices').textContent=message;}},
+    commandBus:{async dispatch(command){
+      commands.push(command);
+      const payload=command.payload;
+      const record=records.find(row=>row.id===payload[`${kind}_id`]);
+      const version=versions.find(row=>row.id===(payload.version_id || payload.base_version_id || record?.current_version_id));
+      if(!record || !version) throw new Error(`Unexpected lab command: ${command.type}`);
+      if(command.type.endsWith('.prepare')) {
+        const input=chunks.filter(row=>row.blob_id===version.blob_id).sort((a,b)=>a.idx-b.idx).map(row=>atob(row.data)).join('');
+        const prepared=await window.officeLabPrepare(kind,btoa(input));
+        version.editor_blob_id=`${version.id}-prepared`;version.editor_protocol=`euro-office-${kind==='document'?'word':'cell'}-binary-v10`;version.editor_protocol_version=10;version.conversion_state='prepared';
+        chunks.push({id:`${version.editor_blob_id}-0`,blob_id:version.editor_blob_id,idx:0,total:1,data:prepared});
+      } else if(command.type.endsWith('.commit')) {
+        const next={...version,id:`${record.id}-v${versions.length+1}`,editor_blob_id:payload.editor_blob_id,editor_protocol:payload.editor_protocol,editor_protocol_version:payload.editor_protocol_version};
+        versions.push(next);record.current_version_id=next.id;persist();
+        return {status:'completed',payload:{outcome:{ok:true,record_id:record.id,version_id:next.id,blob_id:next.blob_id}}};
+      } else throw new Error(`Unimplemented lab command: ${command.type}`);
+      persist();return {status:'completed',payload:{outcome:{ok:true,record_id:record.id,version_id:version.id,editor_blob_id:version.editor_blob_id,editor_protocol:version.editor_protocol,editor_protocol_version:10,conversion_state:'prepared'}}};
+    }},
+    closeDrawers(){document.querySelector('#lab-drawer')?.remove();},
+    openLeftDrawer(content){const drawer=document.createElement('aside');drawer.id='lab-drawer';drawer.append(content);ctx.host.append(drawer);},openRightDrawer(){},openBottomDrawer(){},
+  };
+  window.officeLab={rows,records,versions,chunks,commands,ctx};
+  window.officeLab.cleanup=await mount(ctx);
+</script></body></html>

@@ -3,7 +3,7 @@
 // V2-Fensterchrome (app.css/base.css), misst die Abnahmekriterien aus
 // docs/business-os-shell-v2-contract.md §7 und schreibt Screenshots + Bericht.
 // Kein Daemon, keine Anmeldung, keine Daten - reine Kopf-/Spaltengeometrie.
-// Aufruf: node scripts/shell-v2-geometry-lab.mjs [--apps a,b] [--width 1180]
+// Aufruf: node scripts/shell-v2-geometry-lab.mjs [--apps a,b] [--widths 1180,1000,720]
 import http from 'node:http';
 import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';

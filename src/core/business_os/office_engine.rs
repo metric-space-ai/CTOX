@@ -12561,8 +12561,26 @@ fn rewrite_document_paragraph_xml(
                 || run.tab
         })
         .collect::<Vec<_>>();
+    // An initially blank document has no original runs to rewrite. Allow its
+    // first plain text runs, but never discard unmodelled OOXML (bookmarks,
+    // fields, revisions, etc.) to make a run-count mismatch disappear.
+    let insert_into_empty = run_matches.is_empty()
+        && !decoded_runs.is_empty()
+        && Regex::new(r"(?s)^<w:p(?:\s[^>]*)?>\s*(?:<w:pPr(?:\s[^>]*)?(?:/>|>.*?</w:pPr>)\s*)?</w:p>\s*$")?
+            .is_match(paragraph_xml)
+        && paragraph.runs.iter().all(|run| {
+            run.drawing.is_none()
+                && run.field_char.is_none()
+                && run.comment_reference.is_none()
+                && !run.instruction_text
+                && !run.deleted_text
+        })
+        && paragraph
+            .content
+            .iter()
+            .all(|inline| matches!(inline, DecodedDocumentInline::Run(_)));
     ensure!(
-        run_matches.len() == decoded_runs.len(),
+        insert_into_empty || run_matches.len() == decoded_runs.len(),
         "DOCY run count {} does not match original DOCX run count {} for paragraph {:?}; original runs: {:?}",
         decoded_runs.len(),
         run_matches.len(),
@@ -12571,6 +12589,15 @@ fn rewrite_document_paragraph_xml(
     );
     let mut rewritten = String::with_capacity(paragraph_xml.len() + 128);
     let mut cursor = 0usize;
+    if insert_into_empty {
+        cursor = paragraph_xml
+            .rfind("</w:p>")
+            .context("OOXML paragraph end is missing")?;
+        rewritten.push_str(&paragraph_xml[..cursor]);
+        for run in &decoded_runs {
+            rewritten.push_str(&render_decoded_document_run(run));
+        }
+    }
     for (run, found) in decoded_runs.into_iter().zip(run_matches) {
         rewritten.push_str(&paragraph_xml[cursor..found.start()]);
         if let Some(drawing) = &run.drawing {
@@ -14130,6 +14157,57 @@ mod tests {
         assert!(rewritten.contains(r#"<w:sz w:val="36"/>"#));
         assert!(rewritten.contains(r#"<w:color w:val="953735"/>"#));
         assert!(rewritten.contains("<w:t>FORMAT_TARGET</w:t>"));
+    }
+
+    #[test]
+    fn document_first_text_in_empty_paragraph_preserves_properties() {
+        let paragraph = DecodedDocumentParagraph {
+            text: "First & second".into(),
+            runs: vec![
+                DecodedDocumentRun {
+                    text: "First & ".into(),
+                    bold: Some(true),
+                    ..Default::default()
+                },
+                DecodedDocumentRun {
+                    text: "second".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        for original in [
+            "<w:p/>",
+            "<w:p></w:p>",
+            r#"<w:p w:rsidR="123"><w:pPr><w:spacing w:before="240"/></w:pPr></w:p>"#,
+        ] {
+            let rewritten = rewrite_document_paragraph_xml(
+                original,
+                &paragraph,
+                &BTreeMap::new(),
+                &Default::default(),
+            )
+            .unwrap();
+            assert!(rewritten.contains(r#"<w:b/>"#));
+            assert!(rewritten.contains(r#"<w:t xml:space="preserve">First &amp; </w:t>"#));
+            assert!(rewritten.contains("<w:t>second</w:t>"));
+            if original.contains("w:pPr") {
+                assert!(rewritten.contains(r#"w:rsidR="123""#));
+                assert!(rewritten.contains(r#"<w:pPr><w:spacing w:before="240"/></w:pPr>"#));
+            }
+        }
+        for original in [
+            r#"<w:p><w:bookmarkStart w:id="1" w:name="keep"/></w:p>"#,
+            "<w:p><w:r><w:t>Existing</w:t></w:r></w:p>",
+        ] {
+            assert!(rewrite_document_paragraph_xml(
+                original,
+                &paragraph,
+                &BTreeMap::new(),
+                &Default::default(),
+            )
+            .is_err());
+        }
     }
 
     #[test]

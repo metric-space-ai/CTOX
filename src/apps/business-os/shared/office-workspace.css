@@ -1,0 +1,21 @@
+/* Shared Office file-management surface. Shell pane grammar owns its controls. */
+.ctox-office-library { display:flex; flex-direction:column; min-width:0; min-height:0; height:100%; background:var(--surface); }
+.ctox-office-library > .ctox-pane-header, .ctox-office-library > .ctox-pane-footer { background:var(--surface); color:var(--text); }
+.ctox-office-library :is(.documents-list,.spreadsheets-list) { display:flex; flex-direction:column; flex:1 1 0; min-height:0; overflow:auto; gap:2px; padding:6px; background:var(--bg); border-top:1px solid var(--line); }
+.ctox-office-library :is(.documents-card,.spreadsheets-card) { position:relative; flex:0 0 auto; display:grid; grid-template-columns:minmax(0,1fr) 30px; gap:0; border:0; border-radius:0; background:var(--surface); box-shadow:none; }
+.ctox-office-library :is(.documents-card,.spreadsheets-card)[aria-current="true"] { background:var(--accent-soft); box-shadow:none; }
+.ctox-office-library :is(.documents-card,.spreadsheets-card)[aria-current="true"]::before { content:''; position:absolute; inset:0 auto 0 0; width:2px; background:var(--accent); }
+.ctox-office-library :is(.documents-card-main,.spreadsheets-card-main) { display:block; min-width:0; min-height:52px; padding:8px 10px; border:0; border-radius:0; background:transparent; box-shadow:none; color:var(--text); text-align:start; }
+.ctox-office-library :is(.documents-card-main,.spreadsheets-card-main).is-selected { background:transparent; box-shadow:none; }
+.ctox-office-library :is(.documents-card-main,.spreadsheets-card-main) strong { display:block; font-size:13px; font-weight:600; line-height:18px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.ctox-office-library :is(.documents-card-main,.spreadsheets-card-main) small { display:block; margin-top:2px; font-size:11px; font-weight:400; line-height:16px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ctox-office-library[data-office-view="cards"] :is(.documents-card-main,.spreadsheets-card-main) { padding-block:12px; }
+.ctox-office-library[data-office-view="cards"] :is(.documents-card-main,.spreadsheets-card-main) strong { white-space:normal; overflow-wrap:anywhere; }
+.ctox-office-library :is(.documents-card-manage,.spreadsheets-card-manage) { position:static; width:28px; height:28px; margin:6px 2px 0 0; border:0; border-radius:3px; background:transparent; color:var(--muted); }
+.ctox-office-library :is(.documents-card-main,.spreadsheets-card-main,.documents-card-manage,.spreadsheets-card-manage):focus-visible { outline:2px solid var(--accent); outline-offset:-2px; }
+.ctox-office-library .ctox-pane-footer { flex:0 0 auto; }
+.ctox-office-library :is(.documents-filter-panel,.spreadsheets-filter-bar) { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; padding:8px; }
+.ctox-office-library :is(.documents-filter-panel,.spreadsheets-filter-bar)[hidden] { display:none; }
+.ctox-office-library .ctox-pane-filter { width:100%; min-width:0; }
+.ctox-office-library .ctox-empty { flex:1; }
+@media (pointer:coarse) { .ctox-office-library :is(.documents-card-main,.spreadsheets-card-main) { min-height:56px; } }

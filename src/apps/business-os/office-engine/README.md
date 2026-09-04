@@ -50,6 +50,35 @@ The capsule deliberately keeps the iframe boundary. The inherited editor core
 uses process-global namespaces and global CSS; the iframe prevents those
 implementation details from becoming part of the public CTOX module contract.
 
+## Shell V2 Office workspace
+
+Both apps use the same two-column workspace: a resizable file library with
+search, view switch and filter tray on the left, and the editor in the remaining
+space. The Shell owns the icon and window controls; both pane headers follow its
+two-row geometry. Small windows expose the library as a dismissible drawer.
+There is no permanent Runbook column. Creating a blank file is a direct action,
+independent of research prompts or automation.
+
+The capsule forwards a validated subset of the live Shell palette and theme to
+both isolated editor frames. The frames use locally generated HTML rather than
+navigating to a tenant HTML response that may deny framing. No document data
+path or HTTP fallback is introduced.
+
+`shell-integration.browser.mjs` mounts both actual apps and editor engines,
+checks library interactions and responsive/theme changes, creates blank files,
+types and saves through the UI, verifies native output, then reopens the saved
+version. Its database/command facades are isolated mocks; it does not verify
+tenant permissions, WebRTC replication, or deployment. Run from the repository
+root after building the native CLI and serving that root on port 8766:
+
+```sh
+cargo build --manifest-path src/core/office-engine/Cargo.toml --target-dir runtime/build/cargo-target
+node src/apps/business-os/office-engine/shell-integration.browser.mjs
+```
+
+The lab prepares its DOCX/XLSX fixtures using the native CLI. Screenshots and
+native roundtrip artifacts are written to `output/playwright/office-integration/`.
+
 To materialize the reviewed source closure from already checked-out pinned
 repositories:
 

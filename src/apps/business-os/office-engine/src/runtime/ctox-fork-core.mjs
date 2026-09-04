@@ -1,10 +1,19 @@
 const EDITOR_PROTOCOL = 'euro-office-cell-binary-v10';
 const EDITOR_PROTOCOL_VERSION = 10;
+const EMBEDDED_EDITOR_HTML_BASE64 = Object.freeze({
+  document: '__CTOX_EMBEDDED_DOCUMENT_HTML_BASE64__',
+  spreadsheet: '__CTOX_EMBEDDED_SPREADSHEET_HTML_BASE64__',
+});
 
-export async function createCtoxForkRuntime({ root, bridge, permissions, emit, locale = 'de', theme = 'system', kind = 'spreadsheet', launchArgs = {} }) {
+export async function createCtoxForkRuntime({ root, bridge, permissions, emit, locale = 'de', theme = 'system', appearance = {}, kind = 'spreadsheet', launchArgs = {} }) {
+  const appearanceUrl = new URL('../shell-appearance.mjs', import.meta.url);
+  const appearanceRevision = new URL(import.meta.url).searchParams.get('v');
+  if (appearanceRevision) appearanceUrl.searchParams.set('v', appearanceRevision);
+  const { applyShellAppearance } = await import(appearanceUrl.href);
   const isDocument = kind === 'document';
   const productId = isDocument ? 'ctox-documents' : 'ctox-spreadsheets';
   const productName = isDocument ? 'CTOX Documents' : 'CTOX Spreadsheets';
+  const runtimeOrigin = new URL(document.baseURI).origin;
   const editorProtocol = isDocument ? 'euro-office-word-binary-v10' : EDITOR_PROTOCOL;
   const editorProtocolVersion = EDITOR_PROTOCOL_VERSION;
   let access = { ...permissions };
@@ -28,10 +37,14 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   const entry = new URL(`../upstream/web-apps/apps/${isDocument ? 'documenteditor' : 'spreadsheeteditor'}/main/index.html`, import.meta.url);
   entry.searchParams.set('lang', locale === 'en' ? 'en' : 'de');
   entry.searchParams.set('frameEditorId', frameEditorId);
-  entry.searchParams.set('parentOrigin', location.origin);
+  entry.searchParams.set('parentOrigin', runtimeOrigin);
   const assetRevision = new URL(import.meta.url).searchParams.get('v');
   if (assetRevision) entry.searchParams.set('v', assetRevision);
-  frame.src = entry.href;
+  const embeddedHtml = embeddedEditorDocument(kind, entry);
+  const embeddedFrameUrl = embeddedHtml
+    ? URL.createObjectURL(new Blob([embeddedHtml], { type: 'text/html' }))
+    : '';
+  frame.src = embeddedFrameUrl || entry.href;
   root.replaceChildren(frame);
 
   let resolveAppReady;
@@ -40,7 +53,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   const appReadyTimeoutMs = normalizeAppReadyTimeout(launchArgs.appReadyTimeoutMs);
   const readyTimeout = setTimeout(() => rejectAppReady(new Error(`${productName} app-ready timed out`)), appReadyTimeoutMs);
   const onMessage = async (event) => {
-    if (destroyed || event.origin !== location.origin || event.source !== frame.contentWindow) return;
+    if (destroyed || event.origin !== runtimeOrigin || event.source !== frame.contentWindow) return;
     let message = event.data;
     if (typeof message === 'string') {
       try { message = JSON.parse(message); } catch { return; }
@@ -51,10 +64,12 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
         clearTimeout(readyTimeout);
         installCtoxSdkAdapter(frame.contentWindow, kind);
         forkUi = installCtoxForkUi(frame.contentWindow, { productId, productName, kind, theme: requestedTheme });
+        applyShellAppearance(frame.contentDocument, appearance);
         resolveAppReady();
         break;
       case 'onDocumentReady':
         documentReady = true;
+        applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId, true);
         forkUi?.setTitle(`${recordTitle || productName} · ${productName}`);
         emit?.('opened', inspection());
         break;
@@ -74,7 +89,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   };
   const onColorSchemeChange = () => {
     if (requestedTheme === 'system' && frame.contentWindow) {
-      applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId);
+      applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId, documentReady);
     }
   };
   colorScheme.addEventListener?.('change', onColorSchemeChange);
@@ -84,7 +99,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
 
   const send = (command, data, transfer = []) => {
     const payload = command === 'openDocumentFromBinary' ? { command, data } : JSON.stringify({ command, data });
-    frame.contentWindow.postMessage(payload, location.origin, transfer);
+    frame.contentWindow.postMessage(payload, runtimeOrigin, transfer);
   };
 
   async function acceptSavedBinary(value) {
@@ -204,8 +219,15 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
     setPermissions(next = {}) { access = { ...access, ...next }; return inspection(); },
     setTheme(nextTheme = 'system') {
       requestedTheme = normalizeTheme(nextTheme);
-      applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId);
+      applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId, documentReady);
       return { theme: requestedTheme, resolved_theme: resolveTheme(requestedTheme) };
+    },
+    setAppearance(next = {}) {
+      appearance = next;
+      requestedTheme = normalizeTheme(next.theme);
+      applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId, documentReady);
+      applyShellAppearance(frame.contentDocument, appearance);
+      return { theme: requestedTheme };
     },
     inspect: inspection,
     async destroy() {
@@ -220,8 +242,26 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       forkUi?.destroy?.();
       forkUi = null;
       frame.remove();
+      if (embeddedFrameUrl) URL.revokeObjectURL(embeddedFrameUrl);
     },
   };
+}
+
+function embeddedEditorDocument(kind, entry) {
+  const encoded = EMBEDDED_EDITOR_HTML_BASE64[kind];
+  if (!encoded || encoded.startsWith('__CTOX_EMBEDDED_')) return '';
+  const query = JSON.stringify(entry.search.slice(1));
+  const html = atob(encoded)
+    .replaceAll('window.location.search.substring(1)', query)
+    .replace('+function registerServiceWorker(){', '+function registerServiceWorker(){return;');
+  const base = `<base href="${escapeHtmlAttribute(entry.href)}">`;
+  return /<head(?:\s[^>]*)?>/i.test(html)
+    ? html.replace(/<head(?:\s[^>]*)?>/i, (head) => `${head}\n    ${base}`)
+    : `<!doctype html><html><head>${base}</head><body>${html}</body></html>`;
+}
+
+function escapeHtmlAttribute(value) {
+  return String(value).replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;');
 }
 
 async function installDocumentMediaResolver(upstream, canonicalBytes) {
@@ -428,7 +468,10 @@ function installCtoxForkUi(editorWindow, { productId, productName, kind, theme }
     const link = editorDocument.createElement('link');
     link.id = id;
     link.rel = 'stylesheet';
-    link.href = href;
+    const stylesheet = new URL(href);
+    const revision = new URL(import.meta.url).searchParams.get('v');
+    if (revision) stylesheet.searchParams.set('v', revision);
+    link.href = stylesheet.href;
     editorDocument.head.append(link);
   }
   applyCtoxForkTheme(editorWindow, theme, productId);
@@ -440,8 +483,11 @@ function installCtoxForkUi(editorWindow, { productId, productName, kind, theme }
   };
 }
 
-function applyCtoxForkTheme(editorWindow, theme, productId) {
+function applyCtoxForkTheme(editorWindow, theme, productId, updateSdk = false) {
   const resolved = resolveTheme(theme);
+  // The fork's theme service owns icon sprites and SDK palette updates.
+  // Body classes alone leave the light icons on a dark shell surface.
+  if (updateSdk) editorWindow.Common?.UI?.Themes?.setTheme?.(`theme-${resolved}`);
   const body = editorWindow.document.body;
   editorWindow.document.documentElement.dataset.ctoxProduct = productId;
   editorWindow.document.documentElement.dataset.ctoxTheme = resolved;
@@ -565,6 +611,7 @@ function editorConfig(locale, permissions, theme = 'system') {
       plugins: false,
       macros: false,
       compactHeader: true,
+      toolbarHideFileName: true,
       compactToolbar: false,
       hideRightMenu: true,
       uiTheme: resolveTheme(normalizeTheme(theme)) === 'dark' ? 'theme-dark' : 'theme-light',

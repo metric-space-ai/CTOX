@@ -107,7 +107,7 @@ for (const [kind, entry, filename] of entries) {
   outputs.push(await outputDescriptor(path.join(outputRoot, filename), kind));
 }
 
-for (const relative of ['frame.html', 'frame.css', 'frame-runtime.mjs', 'rpc.mjs']) {
+for (const relative of ['frame.html', 'frame.css', 'frame-runtime.mjs', 'rpc.mjs', 'shell-appearance.mjs']) {
   await cp(path.join(sourceRoot, relative), path.join(outputRoot, relative));
 }
 for (const relative of ['ctox-documents.mjs', 'ctox-spreadsheets.mjs', 'ctox-fork-core.mjs']) {
@@ -129,10 +129,33 @@ else if (reusedUpstreamRoot) {
 }
 if (upstreamBuildRoot || reusedUpstreamRoot) {
   await extendUpstreamStartupBudget();
+  await embedOfficeEntryDocuments();
   upstreamStaticInputs = await Promise.all(upstreamStaticInputs.map(async (input) => ({
     ...input,
     sha256: await fileSha256(path.join(outputRoot, input.staged_path)),
   })));
+}
+
+async function embedOfficeEntryDocuments() {
+  const runtimePath = path.join(outputRoot, 'runtime', 'ctox-fork-core.mjs');
+  let runtime = await readFile(runtimePath, 'utf8');
+  for (const [kind, editor] of [['document', 'documenteditor'], ['spreadsheet', 'spreadsheeteditor']]) {
+    const appPath = path.join(outputRoot, 'upstream', 'web-apps', 'apps', editor, 'main', 'app.js');
+    const languageLookup = 't||_getUrlParameterByName("lang")||defLang';
+    const embeddedLanguageLookup = 't||_getUrlParameterByName("lang")||window.lang||defLang';
+    let app = await readFile(appPath, 'utf8');
+    if (app.includes(languageLookup)) {
+      app = app.replaceAll(languageLookup, embeddedLanguageLookup);
+      await writeFile(appPath, app);
+    } else if (!app.includes(embeddedLanguageLookup)) {
+      throw new Error(`Euro-Office ${editor} locale bootstrap no longer matches the CTOX embedded-frame adapter`);
+    }
+    const token = `__CTOX_EMBEDDED_${kind.toUpperCase()}_HTML_BASE64__`;
+    if (!runtime.includes(token)) throw new Error(`CTOX Office runtime is missing ${token}`);
+    const html = await readFile(path.join(outputRoot, 'upstream', 'web-apps', 'apps', editor, 'main', 'index.html'));
+    runtime = runtime.replace(token, html.toString('base64'));
+  }
+  await writeFile(runtimePath, runtime);
 }
 
 for (const input of bundledInputs) {

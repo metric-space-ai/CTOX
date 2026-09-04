@@ -1,5 +1,6 @@
 import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { autoWirePaneGrammar } from '../../shared/pane-grammar.js';
 import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
 
 const CSV_MIME = 'text/csv';
@@ -9,10 +10,7 @@ const CHUNK_SIZE = 256000;
 const SPREADSHEET_RENDER_DEBOUNCE_MS = 80;
 const SPREADSHEETS_PRIMARY_COLLECTION = 'spreadsheets';
 const SUPPORTED_IMPORT_EXTENSIONS = ['.csv', '.tsv', '.xlsx'];
-// Layout preference for the right (runbook/AI) pane. The right pane is
-// situational — the spreadsheet workbench gets the full width until the
-// operator explicitly opens the AI planner from the center header toggle.
-const RIGHT_PANE_LAYOUT_KEY = 'ctox.spreadsheets.layout.actionsHidden';
+// Automation remains an explicit action, never a permanent workspace column.
 const USER_IMPORT_KIND = 'user_import';
 const RESEARCH_GENERATED_KIND = 'research_generated';
 const UNRESOLVED_SOURCE_KIND = 'unresolved_source';
@@ -33,6 +31,13 @@ const DEFAULT_GRID_COLUMNS = [
   { type: 'numeric', title: 'E', width: '100px', mask: '$ #.##0,00' },
   { type: 'numeric', title: 'F', width: '120px', mask: '$ #.##0,00' }
 ];
+
+const BLANK_GRID_DATA = [Array.from({ length: 10 }, () => '')];
+const BLANK_GRID_COLUMNS = Array.from({ length: 10 }, (_, index) => ({
+  type: 'text',
+  title: String.fromCharCode(65 + index),
+  width: '120px',
+}));
 
 const SYSTEMATIC_SPREADSHEET_RUNBOOKS = [
   {
@@ -82,8 +87,14 @@ export async function mount(ctx) {
     return val;
   };
 
-  const html = await fetch(new URL('./index.html', import.meta.url)).then((res) => res.text());
+  const markupUrl = new URL('./index.html', import.meta.url);
+  markupUrl.search = new URL(import.meta.url).search;
+  const html = await fetch(markupUrl).then((res) => res.text());
   ctx.host.innerHTML = html;
+  const shellLeftPane = ctx.left?.closest?.('[data-left-pane]') || null;
+  const shellLeftWasHidden = shellLeftPane?.hidden;
+  ctx.left?.replaceChildren?.();
+  if (shellLeftPane) shellLeftPane.hidden = true;
   applyStaticLabels(ctx.host, t);
 
   const state = {
@@ -104,6 +115,9 @@ export async function mount(ctx) {
     statusFilter: 'all',
     tagFilter: 'all',
     sortBy: 'updated_desc',
+    filtersOpen: false,
+    libraryOpen: false,
+    listView: 'list',
     localSubscriptionCleanup: null,
     readinessCleanup: null,
     spreadsheetsReadiness: null,
@@ -112,12 +126,11 @@ export async function mount(ctx) {
     contextMenu: null,
     contextMenuCleanup: null,
     rightPaneEl: stateRightPane(ctx),
-    rightPaneHidden: initialRightPaneHidden(ctx),
-    toggleActions: null,
     t,
     lang: ctx.locale === 'en' ? 'en' : 'de',
   };
 
+  const shellRightWasHidden = state.rightPaneEl?.hidden;
   applyRightPaneState(state);
 
   // Wire event handlers and load libs
@@ -167,9 +180,8 @@ export async function mount(ctx) {
       state.editorHandle.destroy?.();
     }
     state.editorHandle = null;
-    // Restore the right pane to the default visible state so the next module
-    // mounts into a clean shell. We only flip what we owned (the hidden attr).
-    if (state.rightPaneEl) state.rightPaneEl.hidden = false;
+    if (state.rightPaneEl) state.rightPaneEl.hidden = shellRightWasHidden;
+    if (shellLeftPane) shellLeftPane.hidden = shellLeftWasHidden;
   };
 }
 
@@ -180,15 +192,10 @@ function stateRightPane(ctx) {
   return ctx?.right?.closest?.('[data-right-pane]') || null;
 }
 
-function initialRightPaneHidden(ctx) {
-  const saved = ctx?.storageScope?.get?.(RIGHT_PANE_LAYOUT_KEY);
-  // Default = hidden (situation panel); explicit "false" restores it.
-  return saved !== 'false';
-}
-
 function applyRightPaneState(state) {
   if (!state.rightPaneEl) return;
-  state.rightPaneEl.hidden = state.rightPaneHidden;
+  state.rightPaneEl.hidden = true;
+  state.ctx.right?.replaceChildren();
 }
 
 function enqueueSpreadsheetOpenFile(state, input) {
@@ -245,7 +252,7 @@ async function ensureSpreadsheetRuntimeReady(ctx) {
 
 async function loadCtoxSpreadsheetsModule(state) {
   if (!state.ctoxSpreadsheetsModule) {
-    state.ctoxSpreadsheetsModule = await import('../../vendor/ctox-office/ctox-office-spreadsheet.mjs');
+    state.ctoxSpreadsheetsModule = await import('../../vendor/ctox-office/ctox-office-spreadsheet.mjs?v=20260904-office-shell-v2');
   }
   return state.ctoxSpreadsheetsModule;
 }
@@ -393,7 +400,7 @@ function selectedRecord(state) {
 
 async function createNewSpreadsheet(state, input = {}) {
   requireSpreadsheetPersistence(state.ctx);
-  const title = sanitizeTitle(input.title || `${state.t('newDocumentTitle', 'Neue Tabelle')} - ${new Date().toISOString().slice(0, 10)}`);
+  const title = sanitizeTitle(input.title || nextBlankSpreadsheetTitle(state));
   if (!title) throw new Error(state.t('validationTitleRequired', 'Titel fehlt.'));
   const filename = ensureExtension(slugFilename(title), '.csv');
   const documentId = `sheet_${crypto.randomUUID()}`;
@@ -402,8 +409,8 @@ async function createNewSpreadsheet(state, input = {}) {
   const now = Date.now();
 
   const modelJson = {
-    data: input.data || DEFAULT_GRID_DATA,
-    columns: input.columns || DEFAULT_GRID_COLUMNS,
+    data: input.data || BLANK_GRID_DATA,
+    columns: input.columns || BLANK_GRID_COLUMNS,
     nestedHeaders: input.nestedHeaders || null,
     mergeCells: input.mergeCells || null,
     style: input.style || null
@@ -443,8 +450,8 @@ async function createNewSpreadsheet(state, input = {}) {
     owner_id: '',
     current_version_id: versionId,
     source_sha256: await sha256Hex(bytes),
-    row_count: modelJson.data.length,
-    col_count: modelJson.data[0]?.length || 0,
+    row_count: input.data ? modelJson.data.length : 0,
+    col_count: input.data ? (modelJson.data[0]?.length || 0) : 0,
     diagnostics_count: 0,
     linked_records: [],
     tags: normalizeTags(input.tags),
@@ -462,6 +469,29 @@ async function createNewSpreadsheet(state, input = {}) {
   renderLeft(state);
   renderRight(state);
   renderCenter(state);
+}
+
+function nextBlankSpreadsheetTitle(state) {
+  const base = state.t('newDocumentTitle', 'Neue Tabelle');
+  const titles = new Set(state.spreadsheets.map((record) => String(record.title || '').trim().toLocaleLowerCase()));
+  if (!titles.has(base.toLocaleLowerCase())) return base;
+  let suffix = 2;
+  while (titles.has(`${base} ${suffix}`.toLocaleLowerCase())) suffix += 1;
+  return `${base} ${suffix}`;
+}
+
+async function requestBlankSpreadsheet(state) {
+  if (state.creatingBlankSpreadsheet) return;
+  state.creatingBlankSpreadsheet = true;
+  try {
+    await createNewSpreadsheet(state);
+    state.ctx.notifications?.success?.(state.t('blankSpreadsheetCreated', 'Leere Tabelle erstellt.'));
+  } catch (error) {
+    console.error('[spreadsheets] blank spreadsheet creation failed', error);
+    state.ctx.notifications?.error?.(`${state.t('spreadsheetCreateFailed', 'Tabelle konnte nicht erstellt werden:')} ${error?.message || error}`);
+  } finally {
+    state.creatingBlankSpreadsheet = false;
+  }
 }
 
 async function importSpreadsheetFile(state, file, tags = [], ingestionInput = {}) {
@@ -909,34 +939,46 @@ function paneHeadFragment(state, name) {
 }
 
 function renderLeft(state) {
-  const wrap = document.createElement('div');
-  wrap.className = 'spreadsheets-explorer';
+  const wrap = state.ctx.host.querySelector('[data-spreadsheets-explorer]');
+  if (!wrap) return;
   const visible = visibleSpreadsheets(state);
   const selected = selectedRecord(state);
-
-  wrap.append(paneHeadFragment(state, 'explorer'));
+  if (!wrap.dataset.officeBound) {
+    fillPaneHead(state, wrap);
+    bindLeftControls(state, wrap);
+    wrap.dataset.officeBound = 'true';
+  }
 
   const exportButton = wrap.querySelector('[data-spreadsheets-export]');
   if (exportButton) exportButton.disabled = !selected;
   const search = wrap.querySelector('[data-spreadsheets-search]');
-  if (search) search.value = state.searchQuery;
+  if (search && document.activeElement !== search) search.value = state.searchQuery;
   const sortSelect = wrap.querySelector('[data-spreadsheets-sort]');
   if (sortSelect) sortSelect.value = state.sortBy;
   const statusSelect = wrap.querySelector('[data-spreadsheets-status]');
   if (statusSelect) statusSelect.value = state.statusFilter;
   const tagSelect = wrap.querySelector('[data-spreadsheets-tag]');
-  if (tagSelect) tagSelect.innerHTML = tagFilterOptions(state);
-
-  const list = document.createElement('div');
-  list.className = 'ctox-list spreadsheets-list';
-  list.dataset.spreadsheetsList = 'true';
+  if (tagSelect) {
+    const options = tagFilterOptions(state);
+    if (tagSelect.dataset.optionSignature !== options) {
+      tagSelect.innerHTML = options;
+      tagSelect.dataset.optionSignature = options;
+    }
+  }
+  const list = wrap.querySelector('[data-spreadsheets-list]');
+  wrap.dataset.officeView = state.listView || 'list';
   populateSpreadsheetList(state, list, visible);
-  wrap.append(list);
-  bindLeftControls(state, wrap);
-  state.ctx.left.replaceChildren(wrap);
+  autoWirePaneGrammar(state.ctx.host);
+  wrap.__ctoxPaneGrammar?.refreshDot();
+  wrap.__ctoxPaneGrammar?.setFooter(`${visible.length} ${state.lang === 'en' ? 'files' : 'Dateien'} · ${hasActiveListFilters(state) ? (state.lang === 'en' ? 'Filtered' : 'Gefiltert') : (state.lang === 'en' ? 'All' : 'Alle')}`);
+  applySpreadsheetSelection(state);
 }
 
 function populateSpreadsheetList(state, list, records = visibleSpreadsheets(state)) {
+  const signature = JSON.stringify([records, shouldRenderSpreadsheetsSyncing(state)]);
+  if (list.dataset.officeSignature === signature) return;
+  const scrollTop = list.scrollTop;
+  list.dataset.officeSignature = signature;
   list.replaceChildren();
   if (records.length === 0) {
     const hasRecords = state.spreadsheets.length > 0;
@@ -959,8 +1001,11 @@ function populateSpreadsheetList(state, list, records = visibleSpreadsheets(stat
     empty.className = 'ctox-empty';
     empty.innerHTML = `
       <strong>${escapeHtml(hasRecords ? state.t('noMatches', 'Keine Treffer') : state.t('noDocuments', 'Keine Tabellen'))}</strong>
-      <span>${escapeHtml(hasRecords ? state.t('adjustSearchFilter', 'Suche oder Filter anpassen.') : state.t('importPrompt', 'Über das Import-Icon XLSX, CSV oder TSV hinzufügen.'))}</span>
+      <span>${escapeHtml(hasRecords ? state.t('adjustSearchFilter', 'Suche oder Filter anpassen.') : state.t('importPrompt', 'Eine leere Tabelle erstellen oder XLSX, CSV beziehungsweise TSV importieren.'))}</span>
+      ${hasRecords ? '' : `<div class="spreadsheets-empty-actions"><button class="ctox-button is-primary" type="button" data-spreadsheets-empty-new>${actionIcon(state, 'add')} ${escapeHtml(state.t('createBlankSpreadsheet', 'Leere Tabelle'))}</button><button class="ctox-button" type="button" data-spreadsheets-empty-import>${actionIcon(state, 'upload')} ${escapeHtml(state.t('importDocument', 'Tabelle importieren'))}</button></div>`}
     `;
+    empty.querySelector('[data-spreadsheets-empty-new]')?.addEventListener('click', () => { void requestBlankSpreadsheet(state); });
+    empty.querySelector('[data-spreadsheets-empty-import]')?.addEventListener('click', () => openImportModal(state));
     list.append(empty);
     return;
   }
@@ -979,18 +1024,11 @@ function populateSpreadsheetList(state, list, records = visibleSpreadsheets(stat
     button.className = `ctox-list-item spreadsheets-card-main${record.id === state.selectedId ? ' is-selected' : ''}`;
     button.dataset.sheetId = record.id;
 
-    const tagsHtml = (record.tags || []).map(t => `<span class="ctox-badge is-info">${escapeHtml(t)}</span>`).join('');
-
     button.innerHTML = `
       <strong>${escapeHtml(record.title)}</strong>
-      <span class="spreadsheets-card-filename">${escapeHtml(record.filename)}</span>
-      <div class="spreadsheets-card-badges">
-        <span class="ctox-badge ${statusBadgeClass(record.status)}">${escapeHtml(record.status)}</span>
-        ${tagsHtml}
-      </div>
-      <small class="spreadsheets-card-diagnostics">${escapeHtml(spreadsheetMetaLabel(state, record))}</small>
-      <small class="spreadsheets-card-updated">Updated: ${new Date(record.updated_at_ms).toLocaleString()}</small>
+      <small>${escapeHtml(record.spreadsheet_type?.toUpperCase() || 'XLSX')} · ${escapeHtml(new Date(record.updated_at_ms).toLocaleDateString(state.lang === 'en' ? 'en-GB' : 'de-DE'))}</small>
     `;
+    button.title = record.filename || record.title;
 
     const manageBtn = document.createElement('button');
     manageBtn.type = 'button';
@@ -1003,11 +1041,28 @@ function populateSpreadsheetList(state, list, records = visibleSpreadsheets(stat
     card.append(button, manageBtn);
     list.append(card);
   }
+  list.scrollTop = scrollTop;
+}
+
+function applySpreadsheetSelection(state) {
+  for (const card of state.ctx.host.querySelectorAll('.spreadsheets-card')) {
+    const selected = card.dataset.contextRecordId === state.selectedId;
+    card.setAttribute('aria-current', String(selected));
+    card.querySelector('.spreadsheets-card-main')?.classList.toggle('is-selected', selected);
+  }
+}
+
+function setSpreadsheetLibraryOpen(state, open) {
+  state.libraryOpen = open;
+  state.ctx.host.querySelector('[data-spreadsheets-module]')?.classList.toggle('is-library-open', open);
+  const backdrop = state.ctx.host.querySelector('[data-spreadsheets-library-backdrop]');
+  if (backdrop) backdrop.hidden = !open;
+  state.ctx.host.querySelector('[data-spreadsheets-library-toggle]')?.setAttribute('aria-expanded', String(open));
 }
 
 function bindLeftControls(state, wrap) {
   wrap.querySelector('[data-spreadsheets-new]').addEventListener('click', () => {
-    openNewSpreadsheetDrawer(state);
+    void requestBlankSpreadsheet(state);
   });
 
   wrap.querySelector('[data-spreadsheets-import-open]').addEventListener('click', () => {
@@ -1021,26 +1076,16 @@ function bindLeftControls(state, wrap) {
     });
   }
 
-  const searchInput = wrap.querySelector('[data-spreadsheets-search]');
-  searchInput.addEventListener('input', (e) => {
-    state.searchQuery = e.target.value;
+  wrap.addEventListener('ctox-pane-grammar-change', ({ detail }) => {
+    state.searchQuery = detail.search;
+    state.sortBy = detail.filters.sort;
+    state.statusFilter = detail.filters.status;
+    state.tagFilter = detail.filters.tag;
+    state.listView = detail.view;
+    wrap.querySelector('[data-spreadsheets-list]').scrollTop = 0;
     renderLeft(state);
   });
-
-  wrap.querySelector('[data-spreadsheets-sort]').addEventListener('change', (e) => {
-    state.sortBy = e.target.value;
-    renderLeft(state);
-  });
-
-  wrap.querySelector('[data-spreadsheets-status]').addEventListener('change', (e) => {
-    state.statusFilter = e.target.value;
-    renderLeft(state);
-  });
-
-  wrap.querySelector('[data-spreadsheets-tag]').addEventListener('change', (e) => {
-    state.tagFilter = e.target.value;
-    renderLeft(state);
-  });
+  state.ctx.host.querySelector('[data-spreadsheets-library-backdrop]')?.addEventListener('click', () => setSpreadsheetLibraryOpen(state, false));
 
   wrap.addEventListener('click', (e) => {
     const mainBtn = e.target.closest('.spreadsheets-card-main');
@@ -1048,6 +1093,7 @@ function bindLeftControls(state, wrap) {
       const sheetId = mainBtn.dataset.sheetId;
       if (sheetId && sheetId !== state.selectedId) {
         state.selectedId = sheetId;
+        setSpreadsheetLibraryOpen(state, false);
         renderLeft(state);
         loadSelectedVersion(state).then(() => {
           renderCenter(state);
@@ -1213,6 +1259,7 @@ async function renderCenter(state) {
       <span>${escapeHtml(hasFilters ? state.t('adjustSearchFilter', 'Suche oder Filter anpassen.') : state.t('noDocumentSelectedPrompt', 'Links eine Tabelle importieren oder auswählen.'))}</span>
     `;
     shell.replaceChildren(emptyHead, empty);
+    bindSpreadsheetLibraryToggle(state, shell);
     return;
   }
 
@@ -1233,8 +1280,6 @@ async function renderCenter(state) {
     badge.classList.toggle('is-saving', state.saving);
     badge.querySelector('[data-spreadsheets-dirty-label]').textContent = saveLabel;
   }
-  head.querySelector('[data-spreadsheets-toggle-actions]')
-    ?.setAttribute('aria-pressed', state.rightPaneHidden ? 'false' : 'true');
 
   const editorCanvas = document.createElement('div');
   editorCanvas.className = 'spreadsheets-editor-canvas';
@@ -1245,6 +1290,7 @@ async function renderCenter(state) {
       </div>
   `;
   shell.replaceChildren(head, editorCanvas);
+  bindSpreadsheetLibraryToggle(state, shell);
 
   // Bind center actions
   shell.querySelector('[data-spreadsheets-add-row]').addEventListener('click', () => {
@@ -1253,13 +1299,6 @@ async function renderCenter(state) {
   shell.querySelector('[data-spreadsheets-add-col]').addEventListener('click', () => {
     state.editorHandle?.insertColumn();
   });
-  const toggle = shell.querySelector('[data-spreadsheets-toggle-actions]');
-  if (toggle) {
-    state.toggleActions = toggle;
-    syncRightPaneToggleUi(state);
-    toggle.addEventListener('click', () => toggleRightPane(state));
-  }
-
   const canvas = shell.querySelector('[data-spreadsheets-canvas]');
   shell.querySelector('[data-spreadsheets-add-row]').hidden = true;
   shell.querySelector('[data-spreadsheets-add-col]').hidden = true;
@@ -1276,6 +1315,12 @@ async function renderCenter(state) {
   } catch (error) {
     canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('editorLoadFailed', 'Editor konnte nicht geladen werden:'))}</strong><span>${escapeHtml(error?.message || error)}</span></div>`;
   }
+}
+
+function bindSpreadsheetLibraryToggle(state, shell) {
+  const toggle = shell.querySelector('[data-spreadsheets-library-toggle]');
+  toggle?.setAttribute('aria-expanded', String(Boolean(state.libraryOpen)));
+  toggle?.addEventListener('click', () => setSpreadsheetLibraryOpen(state, !state.libraryOpen));
 }
 
 function isOfficeSpreadsheetRecord(record) {
@@ -1372,134 +1417,7 @@ function markSpreadsheetAsSaved(state) {
 }
 
 function renderRight(state) {
-  const wrap = document.createElement('div');
-  wrap.className = 'spreadsheets-runbooks';
-  const record = selectedRecord(state);
-
-  let listHtml = '';
-  for (const runbook of state.runbooks) {
-    listHtml += `
-      <div class="ctox-list-item spreadsheets-runbook-card" data-runbook-id="${escapeHtml(runbook.id)}">
-        <strong>${escapeHtml(runbook.title)}</strong>
-        <span>${escapeHtml(runbook.description || runbook.prompt_template)}</span>
-      </div>
-    `;
-  }
-
-  const body = document.createElement('div');
-  body.innerHTML = `
-    <div class="ctox-list spreadsheets-runbook-list" data-spreadsheets-runbooks-list>
-      ${listHtml}
-    </div>
-    <div class="spreadsheets-runbook-workbench">
-      <textarea class="ctox-textarea" placeholder="${escapeHtml(state.t('prompt', 'Prompt an CTOX senden...'))}" data-spreadsheets-prompt></textarea>
-      <button type="button" class="ctox-run-control" data-spreadsheets-send ${record ? '' : 'disabled'}>
-        ${actionIcon(state, 'play')} ${escapeHtml(state.t('send', 'Prompt senden'))}
-      </button>
-    </div>
-  `;
-  wrap.append(paneHeadFragment(state, 'runbooks'), ...body.childNodes);
-
-  // Bind right runbook controls
-  wrap.addEventListener('pointerdown', (event) => {
-    if (event.target.closest('[data-spreadsheets-prompt], .spreadsheets-runbook-card, [data-spreadsheets-send]')) {
-      relinquishSpreadsheetGridFocus(state);
-    }
-  }, { capture: true });
-  wrap.addEventListener('focusin', (event) => {
-    if (event.target.closest('[data-spreadsheets-prompt]')) {
-      relinquishSpreadsheetGridFocus(state);
-    }
-  });
-
-  const runbookCards = wrap.querySelectorAll('.spreadsheets-runbook-card');
-  let selectedRunbookId = SYSTEMATIC_SPREADSHEET_RUNBOOKS[0].id;
-
-  runbookCards.forEach(card => {
-    if (card.dataset.runbookId === selectedRunbookId) {
-      card.classList.add('is-selected');
-    }
-    card.addEventListener('click', () => {
-      runbookCards.forEach(c => c.classList.remove('is-selected'));
-      card.classList.add('is-selected');
-      selectedRunbookId = card.dataset.runbookId;
-
-      // Auto-populate textarea prompt with template
-      const rb = state.runbooks.find(r => r.id === selectedRunbookId);
-      if (rb) {
-        wrap.querySelector('[data-spreadsheets-prompt]').value = rb.prompt_template;
-      }
-    });
-  });
-
-  // Prepopulate prompt box
-  const initialRb = state.runbooks.find(r => r.id === selectedRunbookId);
-  if (initialRb) {
-    wrap.querySelector('[data-spreadsheets-prompt]').value = initialRb.prompt_template;
-  }
-
-  const sendBtn = wrap.querySelector('[data-spreadsheets-send]');
-  if (sendBtn) {
-    sendBtn.addEventListener('click', async () => {
-      const promptBox = wrap.querySelector('[data-spreadsheets-prompt]');
-      const promptText = promptBox.value.trim();
-      if (!promptText || !record) return;
-
-      sendBtn.disabled = true;
-      const initialLabel = sendBtn.innerHTML;
-      sendBtn.textContent = 'Executing...';
-
-      try {
-        await dispatchSpreadsheetRunbook(state, {
-          record,
-          versionId: record.current_version_id,
-          runbookId: selectedRunbookId,
-          prompt: promptText,
-          sourceAction: 'spreadsheet_runbook'
-        });
-
-        // Show success visual response
-        promptBox.value = '';
-        state.ctx.notifications?.success?.('Spreadsheet Runbook erfolgreich in CTOX Queue eingereiht.');
-      } catch (err) {
-        console.error(err);
-        state.ctx.notifications?.error?.(`Fehler beim Ausführen des Runbooks: ${err.message}`);
-      } finally {
-        sendBtn.disabled = false;
-        sendBtn.innerHTML = initialLabel;
-      }
-    });
-  }
-
-  state.ctx.right.replaceChildren(wrap);
-}
-
-function relinquishSpreadsheetGridFocus(state) {
-  try { state.editorHandle?.closeEditor?.(); } catch {}
-  try { state.editorHandle?.resetSelection?.(); } catch {}
-  const active = document.activeElement;
-  if (active && state.ctx.host.contains(active) && active.closest?.('[data-spreadsheets-canvas]')) {
-    active.blur?.();
-  }
-}
-
-function toggleRightPane(state) {
-  state.rightPaneHidden = !state.rightPaneHidden;
   applyRightPaneState(state);
-  syncRightPaneToggleUi(state);
-  try { state.ctx?.storageScope?.set?.(RIGHT_PANE_LAYOUT_KEY, String(state.rightPaneHidden)); } catch {}
-}
-
-function syncRightPaneToggleUi(state) {
-  const toggle = state.toggleActions;
-  if (!toggle) return;
-  const visible = !state.rightPaneHidden;
-  toggle.setAttribute('aria-pressed', String(visible));
-  const label = visible
-    ? state.t('toggleRunbooksHide', 'Runbooks & Prompt ausblenden')
-    : state.t('toggleRunbooks', 'Runbooks & Prompt einblenden');
-  toggle.setAttribute('aria-label', label);
-  toggle.title = label;
 }
 
 async function dispatchSpreadsheetRunbook(state, input) {
@@ -1751,7 +1669,7 @@ function openExportModal(state) {
       }
       const bytes = await state.editorHandle.export();
       const downloadName = ensureExtension(slugFilename(record.title || 'export'), '.xlsx');
-      downloadBlob(bytes, XLSX_MIME, downloadName, state.ctx?.host);
+      downloadBlob(bytes, XLSX_MIME, downloadName, state.ctx.host);
       state.ctx.notifications?.success?.(`Export abgeschlossen: ${downloadName}`);
     } catch (err) {
       console.error(err);
@@ -1762,16 +1680,13 @@ function openExportModal(state) {
   state.ctx.openLeftDrawer(wrapper);
 }
 
-// `host` ist der App-Host des Moduls und wird vom Aufrufer durchgereicht -
-// der Anker darf nie auf document.body und damit ausserhalb des Fensters landen.
 function downloadBlob(content, mime, downloadName, host) {
   const blob = new Blob([content], { type: mime });
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = downloadName;
-  link.style.display = 'none';
-  (host || document.documentElement).appendChild(link);
+  host.appendChild(link);
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
@@ -2078,7 +1993,9 @@ async function ensureStyles() {
 
   const linkModule = document.createElement('link');
   linkModule.rel = 'stylesheet';
-  linkModule.href = new URL('./index.css', import.meta.url).href;
+  const stylesUrl = new URL('./index.css', import.meta.url);
+  stylesUrl.search = new URL(import.meta.url).search;
+  linkModule.href = stylesUrl.href;
   linkModule.dataset.spreadsheetsStyle = 'true';
   document.head.append(linkModule);
 }
@@ -2217,6 +2134,7 @@ const SPREADSHEETS_LOCAL_ICON_PATHS = Object.freeze({
 // helper handed in through mount(ctx).
 const SPREADSHEETS_FALLBACK_ACTION_ICON_PATHS = Object.freeze({
   add: 'M12 5v14M5 12h14',
+  filter: 'M4 6h16M7 12h10M10 18h4',
   upload: 'M12 15V4M12 4 8 8M12 4l4 4M5 19h14',
   export: 'M12 3v11M12 3 8 7M12 3l4 4M5 12v7h14v-7',
   settings: 'M12 8.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7ZM12 3v2.2M12 18.8V21M21 12h-2.2M5.2 12H3M18.4 5.6l-1.6 1.6M7.2 16.8l-1.6 1.6M18.4 18.4l-1.6-1.6M7.2 7.2 5.6 5.6',

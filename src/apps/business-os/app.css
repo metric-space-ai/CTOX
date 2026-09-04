@@ -1236,6 +1236,22 @@ body[data-maintenance-status="stale"] .ctox-maintenance-banner {
   position: relative;
 }
 
+.workspace-pane[hidden] {
+  display: none !important;
+}
+
+.workspace-frame:has(> .workspace-pane-right[hidden]) {
+  grid-template-columns: minmax(210px, 0.72fr) minmax(420px, 2.8fr) !important;
+}
+
+.workspace-frame:has(> .workspace-pane-right[hidden]) .workspace-col-resizer-right {
+  display: none !important;
+}
+
+.workspace-frame:has(> .workspace-pane-left[hidden]):has(> .workspace-pane-right[hidden]) {
+  grid-template-columns: minmax(0, 1fr) !important;
+}
+
 .workspace-col-resizer {
   position: absolute;
   top: 0;

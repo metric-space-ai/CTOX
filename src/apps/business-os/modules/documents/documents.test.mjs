@@ -108,6 +108,18 @@ test('only transient Office startup and load-version failures are retryable', ()
   assert.equal(hooks.isTransientOfficeStartupError(new Error('Unsupported editor protocol')), false);
 });
 
+test('Office startup recovery works with the real default delay, not only an injected test clock', async () => {
+  let attempts = 0;
+  const result = await hooks.initializeOfficeEditorWithRecovery({
+    initialize: async () => { if (++attempts === 1) throw new Error('temporary startup failure'); },
+    shouldRetry: () => true,
+    retryDelayMs: 1,
+    maxRecoveryAttempts: 1,
+  });
+  assert.equal(attempts, 2);
+  assert.deepEqual(result, { recovered: true, recoveryAttempts: 1 });
+});
+
 test('transient loadVersion timeout reinitializes the Office editor once and continues', async () => {
   const instances = [];
   const destroyedInstances = [];
@@ -871,7 +883,7 @@ test('mail merge and series letter records use the DOCX render, save, and export
   assert.equal(hooks.isDocxDocumentRecord({ document_type: 'markdown_document', filename: 'notes.md' }), false);
 });
 
-test('Documents UI exposes resizable library and actions columns with a collapsed actions default', async () => {
+test('Documents UI is a two-pane file manager and Word editor without a right actions column', async () => {
   const [html, css, source, moduleJson, deMessages] = await Promise.all([
     readFile(new URL('./index.html', import.meta.url), 'utf8'),
     readFile(new URL('./index.css', import.meta.url), 'utf8'),
@@ -882,28 +894,25 @@ test('Documents UI exposes resizable library and actions columns with a collapse
 
   assert.match(html, /data-resize-frame/);
   assert.match(html, /class="ctox-column-resizer documents-library-resizer"/);
-  assert.match(html, /data-resizer-var="--documents-library-width"/);
-  assert.match(html, /class="ctox-column-resizer documents-actions-resizer"/);
-  assert.match(html, /data-resizer="right"/);
-  assert.match(html, /data-resizer-var="--documents-actions-width"/);
+  assert.match(html, /data-resizer-var="--shell-col-left"/);
+  assert.doesNotMatch(html, /documents-actions-resizer/);
+  assert.doesNotMatch(html, /data-documents-actions-drawer/);
   assert.match(css, /\.documents-library-resizer[\s\S]*cursor:\s*col-resize/);
-  assert.match(css, /\.documents-module\.is-actions-open\s*\{[\s\S]*grid-template-columns:[^;]*var\(--documents-actions-width\)/);
-  assert.match(css, /\.documents-actions-resizer[\s\S]*cursor:\s*col-resize/);
   assert.match(css, /\.documents-workbench\s*\{[\s\S]*container-type:\s*inline-size/);
-  assert.match(css, /@container documents-workbench \(max-width: 560px\)[\s\S]*\.documents-actions-toggle span[\s\S]*display:\s*none/);
   assert.match(css, /@container documents-workbench \(max-width: 560px\)[\s\S]*\.documents-recipient-navigator[\s\S]*minmax\(0, 1fr\)/);
   assert.match(css, /\.documents-strip-leading\s*\{[\s\S]*overflow:\s*hidden/);
   assert.match(source, /new ResizeObserver/);
-  assert.match(source, /root\.classList\.toggle\('is-compact', width <= 1048\)/);
-  assert.match(source, /root\.classList\.toggle\('is-actions-overlay', width < 1616\)/);
+  assert.match(source, /root\.classList\.toggle\('is-compact', width <= 768\)/);
+  assert.match(html, /data-pg-search/);
+  assert.match(html, /data-pg-view-cycle="list,cards"/);
+  assert.match(html, /data-pg-footer/);
+  assert.match(source, /autoWirePaneGrammar/);
+  assert.match(source, /shellRightPane\.hidden = true/);
   assert.match(css, /\.documents-module\.is-compact \.documents-library-resizer[\s\S]*display:\s*none/);
-  assert.match(css, /\.documents-module\.is-compact \.documents-actions-drawer[\s\S]*position:\s*absolute/);
   assert.match(css, /SuperDoc 1\.32\.0 ships 32px toolbar controls/);
   assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.documents-superdoc-toolbar \.superdoc-toolbar[\s\S]*--sd-ui-toolbar-height:\s*44px/);
   assert.match(css, /@media \(pointer: coarse\)[\s\S]*\.documents-superdoc-toolbar \.toolbar-item[\s\S]*min-width:\s*44px/);
-  assert.match(html, /data-documents-actions-drawer[\s\S]*aria-hidden="true"[\s\S]*hidden/);
-  assert.match(html, /data-documents-actions-resizer[\s\S]*hidden/);
-  assert.match(source, /actionsResizer\.hidden = !state\.actionsOpen/);
+  assert.doesNotMatch(source, /data-documents-actions-toggle/);
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.html'\)/);
   assert.match(source, /revisionedModuleAssetUrl\('\.\/index\.css'\)/);
   assert.equal(moduleJson.title, 'Dokumente');
@@ -926,6 +935,17 @@ test('new document validation requires title, runbook, and prompt', () => {
   assert.equal(hooks.validateNewDocumentInput({ title: 'Report', runbookId: 'research.report.auto', prompt: '' }).valid, false);
   assert.equal(hooks.validateNewDocumentInput({ title: 'Report', runbookId: '', prompt: 'Analyse' }).valid, false);
   assert.equal(hooks.validateNewDocumentInput({ title: 'Report', runbookId: 'research.report.auto', prompt: 'Analyse' }).valid, true);
+});
+
+test('visible new-document controls create a blank Word document directly', async () => {
+  const [source, html] = await Promise.all([
+    readFile(new URL('./index.js', import.meta.url), 'utf8'),
+    readFile(new URL('./index.html', import.meta.url), 'utf8'),
+  ]);
+  assert.match(source, /data-documents-empty-new[^\n]+createBlankWordDocument/);
+  assert.match(source, /data-documents-new-markdown[^\n]+[\s\S]{0,160}createBlankWordDocument/);
+  assert.match(source, /sourceKind:\s*'created_blank'/);
+  assert.match(html, /data-documents-new-markdown[^>]+Leeres Word-Dokument erstellen/);
 });
 
 test('knowledge selection supports explicit skills and automatic topic matching', () => {

@@ -1,6 +1,7 @@
 import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { preserveScrollDuring } from '../../shared/stable-dom.js';
+import { autoWirePaneGrammar } from '../../shared/pane-grammar.js';
 import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -16,7 +17,7 @@ const DOCUMENT_BLOB_CACHE_MAX_ENTRIES = 64;
 const DOCUMENT_BLOB_CACHE_MAX_BYTES = 16 * 1024 * 1024;
 const DOCX_TOOLBAR_VISIBILITY_KEY = 'ctox.businessOs.documents.docxToolbarVisible';
 const DOCUMENT_RENDER_DEBOUNCE_MS = 80;
-const DOCUMENTS_ASSET_REVISION = '20260723-documents-workspace-v1034';
+const DOCUMENTS_ASSET_REVISION = new URL(import.meta.url).searchParams.get('v') || '20260904-office-shell-v2';
 const MAIL_MERGE_SOURCE_NAMES = new Set([
   'campaign-mail-merge',
   'mail-merge',
@@ -147,7 +148,7 @@ function applyStaticLabels(host, t) {
     element.setAttribute('aria-label', text);
     element.setAttribute('title', text);
   };
-  label('[data-documents-new-markdown]', t('createWordDocument', 'Word-Dokument erstellen'));
+  label('[data-documents-new-markdown]', t('createBlankDocument', 'Leeres Word-Dokument erstellen'));
   label('[data-documents-import-open]', t('importDocument', 'Dokument importieren'));
   label('[data-documents-export]', t('exportSelected', 'Ausgewähltes Dokument exportieren'));
   label('[data-documents-filter-toggle]', t('filters', 'Filter'));
@@ -199,11 +200,17 @@ export async function mount(ctx) {
 
   const html = await fetch(revisionedModuleAssetUrl('./index.html')).then((res) => res.text());
   ctx.host.innerHTML = html;
-  // Windowed modules historically received fixed outer left/right panes. The
-  // document workbench owns its resizable list and optional actions drawer so
-  // the Word surface can use the full window width.
+  // Documents is a two-pane app: file management on the left and Word in the
+  // remaining workspace. The shell's generic right pane must not reserve any
+  // width for this module.
   ctx.left?.replaceChildren?.();
   ctx.right?.replaceChildren?.();
+  const shellRightPane = ctx.right?.closest?.('[data-right-pane]') || null;
+  const shellRightWasHidden = shellRightPane?.hidden;
+  const shellLeftPane = ctx.left?.closest?.('[data-left-pane]') || null;
+  const shellLeftWasHidden = shellLeftPane?.hidden;
+  if (shellLeftPane) shellLeftPane.hidden = true;
+  if (shellRightPane) shellRightPane.hidden = true;
   applyStaticLabels(ctx.host, t);
   const requestedDocumentId = documentIdFromLaunchArgs(ctx.args);
   const requestedVersionId = versionIdFromLaunchArgs(ctx.args);
@@ -244,6 +251,7 @@ export async function mount(ctx) {
     tagFilter: 'all',
     sortBy: 'updated_desc',
     filtersOpen: false,
+    listView: 'list',
     actionsOpen: false,
     libraryOpen: false,
     docxToolbarVisible: ctx?.storageScope?.get?.(DOCX_TOOLBAR_VISIBILITY_KEY) !== 'false',
@@ -301,6 +309,8 @@ export async function mount(ctx) {
     clearDocumentBlobByteCache(state);
     flushActiveEditorDraft(state).catch((error) => console.error('[documents] final editor draft save failed', error));
     state.editorHandle?.destroy?.();
+    if (shellRightPane) shellRightPane.hidden = shellRightWasHidden;
+    if (shellLeftPane) shellLeftPane.hidden = shellLeftWasHidden;
   };
 }
 
@@ -343,7 +353,7 @@ function documentBySourceSha(records = [], sourceSha = '') {
 }
 
 async function loadDocumentFormatModule() {
-  return import('../../vendor/document-format.mjs?v=20260816-browser-sync-guards-v141');
+  return import('../../vendor/document-format.mjs?v=20260904-office-shell-v2');
 }
 
 async function ensureDocumentFormatModule(state) {
@@ -366,7 +376,7 @@ async function loadSuperDocModule(state) {
 
 async function loadCtoxDocumentsModule(state) {
   if (!state.ctoxDocumentsModule) {
-    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260816-browser-sync-guards-v141');
+    state.ctoxDocumentsModule = await import('../../vendor/ctox-office/ctox-office-document.mjs?v=20260904-office-shell-v2');
   }
   return state.ctoxDocumentsModule;
 }
@@ -429,11 +439,11 @@ function wireDocumentPanes(state) {
   };
   const updateResponsiveMode = (width = root?.getBoundingClientRect?.().width || 0) => {
     if (!root) return;
-    root.classList.toggle('is-compact', width <= 1048);
+    root.classList.toggle('is-compact', width <= 768);
     root.classList.toggle('is-narrow', width <= 620);
     root.classList.toggle('is-phone', width <= 440);
     root.classList.toggle('is-actions-overlay', width < 1616);
-    if (width > 1048 && state.libraryOpen) {
+    if (width > 1024 && state.libraryOpen) {
       state.libraryOpen = false;
       renderPaneVisibility(state);
     }
@@ -796,6 +806,42 @@ async function createMarkdownDocument(state, input = {}) {
   });
 }
 
+function nextBlankDocumentTitle(state) {
+  const base = state.t('untitledDocument', 'Neues Dokument');
+  const titles = new Set(state.documents.map((record) => String(record.title || '').trim().toLocaleLowerCase()));
+  if (!titles.has(base.toLocaleLowerCase())) return base;
+  let suffix = 2;
+  while (titles.has(`${base} ${suffix}`.toLocaleLowerCase())) suffix += 1;
+  return `${base} ${suffix}`;
+}
+
+async function createBlankWordDocument(state) {
+  if (state.creatingBlankDocument) return null;
+  state.creatingBlankDocument = true;
+  try {
+    const title = nextBlankDocumentTitle(state);
+    const formatModule = await ensureDocumentFormatModule(state);
+    if (typeof formatModule.createBlankDocx !== 'function') {
+      throw new Error(state.t('blankDocumentUnavailable', 'Die Word-Dokumentvorlage ist nicht verfügbar.'));
+    }
+    const bytes = await formatModule.createBlankDocx();
+    const file = new File([bytes], ensureExtension(slugFilename(title), '.docx'), { type: DOCX_MIME });
+    const record = await importDocumentFile(state, file, {
+      sourceKind: 'created_blank',
+      status: 'Draft',
+      title,
+    });
+    state.ctx.notifications?.success?.(state.t('blankDocumentCreated', 'Leeres Word-Dokument erstellt.'));
+    return record;
+  } catch (error) {
+    console.error('[documents] blank Word document creation failed', error);
+    state.ctx.notifications?.error?.(`${state.t('documentCreateFailed', 'Dokument konnte nicht erstellt werden:')} ${error?.message || error}`);
+    return null;
+  } finally {
+    state.creatingBlankDocument = false;
+  }
+}
+
 async function importDocumentFile(state, file, workflow = {}) {
   requireDocumentPersistence(state.ctx);
   if (!isSupportedDocumentFile(file)) {
@@ -817,6 +863,10 @@ async function importDocumentFile(state, file, workflow = {}) {
   const mimeType = isMarkdown ? MARKDOWN_MIME : DOCX_MIME;
   const documentType = isMarkdown ? 'markdown_document' : 'word_document';
   const tags = normalizeTags(workflow.tags);
+  const sourceKind = String(workflow.sourceKind || '').trim()
+    || (isTextFile(file) ? 'imported_text' : isMarkdown ? 'imported_markdown' : 'imported_docx');
+  const status = String(workflow.status || '').trim() || 'Imported';
+  const title = sanitizeDocumentTitle(workflow.title || titleFromFilename(file.name));
 
   await saveBlobChunks(state.ctx, {
     blobId,
@@ -830,7 +880,7 @@ async function importDocumentFile(state, file, workflow = {}) {
     id: versionId,
     document_id: documentId,
     version: 1,
-    source_kind: isTextFile(file) ? 'imported_text' : isMarkdown ? 'imported_markdown' : 'imported_docx',
+    source_kind: sourceKind,
     blob_id: blobId,
     model_json: parsed.document,
     diagnostics: parsed.diagnostics,
@@ -840,11 +890,11 @@ async function importDocumentFile(state, file, workflow = {}) {
 
   await documentCollection(state.ctx, 'documents').insert({
     id: documentId,
-    title: titleFromFilename(file.name),
+    title,
     filename: file.name,
     description: '',
     mime_type: mimeType,
-    status: 'Imported',
+    status,
     document_type: documentType,
     owner_id: '',
     current_version_id: versionId,
@@ -863,11 +913,11 @@ async function importDocumentFile(state, file, workflow = {}) {
   state.selectedId = documentId;
   const record = {
     id: documentId,
-    title: titleFromFilename(file.name),
+    title,
     filename: file.name,
     description: '',
     mime_type: mimeType,
-    status: 'Imported',
+    status,
     document_type: documentType,
     owner_id: '',
     current_version_id: versionId,
@@ -1093,25 +1143,12 @@ function renderDocumentStrip(state) {
         </div>
       ` : `<div class="documents-current-document"><strong>${escapeHtml(record?.title || state.t('noDocumentSelected', 'Kein Dokument ausgewählt.'))}</strong>${record ? `<span>${escapeHtml(documentTypeLabel(state, record.document_type))}</span>` : ''}</div>`}
     </div>
-    <button class="ctox-button documents-actions-toggle" type="button" data-documents-actions-toggle aria-expanded="${String(state.actionsOpen)}" aria-controls="documents-actions-drawer">
-      ${actionIcon(state, 'settings')}
-      <span>${escapeHtml(state.t('actions', 'Aktionen'))}</span>
-    </button>
   `;
   host.querySelector('[data-documents-library-toggle]')?.addEventListener('click', () => {
     state.libraryOpen = !state.libraryOpen;
     if (state.libraryOpen) state.actionsOpen = false;
     renderPaneVisibility(state);
     renderDocumentStrip(state);
-  });
-  host.querySelector('[data-documents-actions-toggle]')?.addEventListener('click', () => {
-    state.actionsOpen = !state.actionsOpen;
-    if (state.actionsOpen) state.libraryOpen = false;
-    renderPaneVisibility(state);
-    renderDocumentStrip(state);
-    if (state.actionsOpen) {
-      state.ctx.host.querySelector('[data-documents-actions-close]')?.focus({ preventScroll: true });
-    }
   });
   const navigateRecipient = (requestedIndex, trigger) => {
     trigger?.setAttribute('aria-busy', 'true');
@@ -1289,15 +1326,12 @@ function renderLeft(state) {
   }
 
   const filterToggle = explorer.querySelector('[data-documents-filter-toggle]');
-  filterToggle?.setAttribute('aria-expanded', String(Boolean(state.filtersOpen)));
   filterToggle?.classList.toggle('is-active', activeFilterCount > 0);
   const filterCount = explorer.querySelector('[data-documents-filter-count]');
   if (filterCount) {
     filterCount.textContent = activeFilterCount ? String(activeFilterCount) : '';
     filterCount.hidden = !activeFilterCount;
   }
-  const filterPanel = explorer.querySelector('[data-documents-filter-panel]');
-  if (filterPanel) filterPanel.hidden = !state.filtersOpen;
   const filterReset = explorer.querySelector('.documents-filter-panel [data-documents-clear-filters]');
   if (filterReset) {
     filterReset.disabled = !activeFilterCount;
@@ -1323,9 +1357,13 @@ function renderLeft(state) {
 
   const list = explorer.querySelector('[data-documents-list]');
   if (list) {
+    explorer.dataset.officeView = state.listView || 'list';
     populateDocumentList(state, list, visible);
     applyDocumentListSelection(state);
   }
+  autoWirePaneGrammar(state.ctx.host);
+  explorer.__ctoxPaneGrammar?.refreshDot();
+  explorer.__ctoxPaneGrammar?.setFooter(`${visible.length} ${state.lang === 'en' ? 'files' : 'Dateien'} · ${activeFilterCount ? (state.lang === 'en' ? 'Filtered' : 'Gefiltert') : (state.lang === 'en' ? 'All' : 'Alle')}`);
   renderPaneVisibility(state);
 }
 
@@ -1372,16 +1410,11 @@ function populateDocumentList(state, list, records = visibleDocuments(state)) {
       button.type = 'button';
       button.className = 'documents-card-main';
       button.dataset.documentId = record.id;
-      const sourceLabel = record.source_labels[0] || '';
       button.innerHTML = `
       <strong>${escapeHtml(record.title)}</strong>
-      ${record.is_mail_merge
-        ? `<span class="documents-card-bundle">${actionIcon(state, 'copy')} ${escapeHtml(state.t('seriesLetter', 'Serienbrief'))} · ${escapeHtml(String(record.recipient_count))} ${escapeHtml(state.t('recipients', 'Empfänger'))}</span>`
-        : `<span class="documents-card-filename">${escapeHtml(record.filename)}</span>`}
-      ${documentDescription(record) ? `<span class="documents-card-description">${escapeHtml(documentDescription(record))}</span>` : ''}
-      <small>${escapeHtml(record.status)} · ${escapeHtml(documentTypeLabel(state, record.document_type))}${sourceLabel ? ` · ${escapeHtml(sourceLabel)}` : ''}</small>
-      ${renderTagPills(record)}
+      <small>${escapeHtml(documentTypeLabel(state, record.document_type))} · ${record.is_mail_merge ? `${escapeHtml(String(record.recipient_count))} ${escapeHtml(state.t('recipients', 'Empfänger'))}` : escapeHtml(new Date(record.updated_at_ms).toLocaleDateString(state.lang === 'en' ? 'en-GB' : 'de-DE'))}</small>
     `;
+      button.title = record.filename || record.title;
       button.addEventListener('click', () => {
         const documentId = record.record_ids.includes(state.selectedId) ? state.selectedId : record.id;
         switchSelectedDocument(state, documentId).catch((error) => {
@@ -1415,14 +1448,14 @@ function populateDocumentList(state, list, records = visibleDocuments(state)) {
       `
         : `
         <strong>${escapeHtml(state.t('noDocuments', 'Keine Dokumente'))}</strong>
-        <span>${escapeHtml(state.t('importPrompt', 'DOCX oder Markdown importieren oder ein neues Word-Dokument anlegen.'))}</span>
+        <span>${escapeHtml(state.t('importPrompt', 'Ein leeres Word-Dokument erstellen oder DOCX beziehungsweise Markdown importieren.'))}</span>
         <div class="documents-empty-actions">
-          <button class="ctox-button is-primary" type="button" data-documents-empty-new>${actionIcon(state, 'add')} ${escapeHtml(state.t('createWordDocument', 'Word-Dokument erstellen'))}</button>
+          <button class="ctox-button is-primary" type="button" data-documents-empty-new>${actionIcon(state, 'add')} ${escapeHtml(state.t('createWordDocument', 'Leeres Word-Dokument'))}</button>
           <button class="ctox-button" type="button" data-documents-empty-import>${actionIcon(state, 'upload')} ${escapeHtml(state.t('importDocument', 'Dokument importieren'))}</button>
         </div>
       `;
       empty.querySelector('[data-documents-empty-import]')?.addEventListener('click', () => openImportDrawer(state));
-      empty.querySelector('[data-documents-empty-new]')?.addEventListener('click', () => openNewDocumentDrawer(state));
+      empty.querySelector('[data-documents-empty-new]')?.addEventListener('click', () => { void createBlankWordDocument(state); });
       empty.querySelector('[data-documents-clear-filters]')?.addEventListener('click', () => {
         clearDocumentFilters(state, { resetSort: true });
       });
@@ -1584,44 +1617,17 @@ function bindLeftControls(state, wrap) {
     openImportDrawer(state);
   });
   wrap.querySelector('[data-documents-new-markdown]')?.addEventListener('click', () => {
-    openNewDocumentDrawer(state);
+    void createBlankWordDocument(state);
   });
   wrap.querySelector('[data-documents-export]')?.addEventListener('click', () => openExportDrawer(state));
-  wrap.querySelector('[data-documents-search]')?.addEventListener('input', (event) => {
-    state.searchQuery = event.currentTarget.value || '';
+  wrap.addEventListener('ctox-pane-grammar-change', ({ detail }) => {
+    state.searchQuery = detail.search;
+    state.sortBy = detail.filters.sort;
+    for (const name of ['type', 'status', 'app', 'source', 'tag']) state[`${name}Filter`] = detail.filters[name];
+    state.listView = detail.view;
     const list = wrap.querySelector('[data-documents-list]');
-    if (list) populateDocumentList(state, list);
-  });
-  wrap.querySelector('[data-documents-filter-toggle]')?.addEventListener('click', () => {
-    state.filtersOpen = !state.filtersOpen;
+    if (list) list.scrollTop = 0;
     renderLeft(state);
-  });
-  wrap.querySelector('[data-documents-sort]')?.addEventListener('change', (event) => {
-    state.sortBy = event.currentTarget.value || 'updated_desc';
-    renderLeft(state);
-  });
-  wrap.querySelector('[data-documents-type]')?.addEventListener('change', (event) => {
-    state.typeFilter = event.currentTarget.value || 'all';
-    renderLeft(state);
-  });
-  wrap.querySelector('[data-documents-status]')?.addEventListener('change', (event) => {
-    state.statusFilter = event.currentTarget.value || 'all';
-    renderLeft(state);
-  });
-  wrap.querySelector('[data-documents-app]')?.addEventListener('change', (event) => {
-    state.appFilter = event.currentTarget.value || 'all';
-    renderLeft(state);
-  });
-  wrap.querySelector('[data-documents-source]')?.addEventListener('change', (event) => {
-    state.sourceFilter = event.currentTarget.value || 'all';
-    renderLeft(state);
-  });
-  wrap.querySelector('[data-documents-tag]')?.addEventListener('change', (event) => {
-    state.tagFilter = event.currentTarget.value || 'all';
-    renderLeft(state);
-  });
-  wrap.querySelectorAll('.documents-filter-panel [data-documents-clear-filters]').forEach((button) => {
-    button.addEventListener('click', () => clearDocumentFilters(state));
   });
 }
 
@@ -3357,6 +3363,10 @@ async function mountWordEditor(state, host, record, version, renderSerial, rende
     console.error(`[documents] ${useCtoxDocuments ? 'CTOX Documents' : 'SuperDoc'} mount failed`, error);
     renderError(state, `${state.t('docxEditorLoadFailed', 'DOCX editor konnte nicht geladen werden:')} ${error?.message || error}`);
   }
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function initializeOfficeEditorWithRecovery(options = {}) {

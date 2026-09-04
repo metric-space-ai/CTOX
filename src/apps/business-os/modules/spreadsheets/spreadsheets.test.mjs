@@ -19,6 +19,20 @@ const { __spreadsheetsTestHooks: hooks } = await import(
   `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
 );
 
+test('spreadsheet chrome is a two-pane file manager without a right runbook column', async () => {
+  const [source, html, manifest] = await Promise.all([
+    fs.readFile(new URL('./index.js', import.meta.url), 'utf8'),
+    fs.readFile(new URL('./index.html', import.meta.url), 'utf8'),
+    fs.readFile(new URL('./module.json', import.meta.url), 'utf8').then(JSON.parse),
+  ]);
+  assert.match(source, /data-spreadsheets-new[^\n]+[\s\S]{0,140}requestBlankSpreadsheet/);
+  assert.match(source, /const BLANK_GRID_DATA/);
+  assert.match(source, /state\.rightPaneEl\.hidden = true/);
+  assert.doesNotMatch(html, /data-spreadsheets-head="runbooks"/);
+  assert.doesNotMatch(html, /data-spreadsheets-toggle-actions/);
+  assert.equal(manifest.layout.right, undefined);
+});
+
 test('spreadsheet runtime waits for initial replication before reading collections', async () => {
   const events = [];
   const ready = await hooks.ensureSpreadsheetRuntimeReady({

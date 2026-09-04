@@ -768,6 +768,17 @@ test('Office asset revision propagates through every iframe and runtime boundary
   assert.match(forkRuntime, /entry\.searchParams\.set\('v', assetRevision\)/);
 });
 
+test('Office frames do not navigate to tenant assets that can be blocked by X-Frame-Options', async () => {
+  const capsule = await readFile(new URL('./src/capsule.mjs', import.meta.url), 'utf8');
+  const forkRuntime = await readFile(new URL('./src/runtime/ctox-fork-core.mjs', import.meta.url), 'utf8');
+  const builder = await readFile(new URL('../../../scripts/vendor-builds/build-ctox-office.mjs', import.meta.url), 'utf8');
+  assert.match(capsule, /frame\.srcdoc = capsuleFrameDocument/);
+  assert.doesNotMatch(capsule, /frame\.src = frameUrl\.href/);
+  assert.match(forkRuntime, /EMBEDDED_EDITOR_HTML_BASE64/);
+  assert.match(forkRuntime, /URL\.createObjectURL\(new Blob/);
+  assert.match(builder, /embedOfficeEntryDocuments/);
+});
+
 test('Office fork startup budget is bounded and supports a cold production load', () => {
   assert.equal(__ctoxForkTestHooks.normalizeAppReadyTimeout(undefined), 115000);
   assert.equal(__ctoxForkTestHooks.normalizeAppReadyTimeout(55000), 55000);
@@ -1208,8 +1219,12 @@ test('CTOX Documents and Spreadsheets own distinct fork identities and Business 
   assert.match(chrome, /--ctox-fork-accent/);
   assert.match(chrome, /#left-btn-about/);
   assert.match(chrome, /prefers-reduced-motion/);
-  assert.match(capsule, /MutationObserver/);
-  assert.match(capsule, /editor\.setTheme/);
+  const appearance = await readFile(new URL('./src/shell-appearance.mjs', import.meta.url), 'utf8');
+  assert.match(appearance, /MutationObserver/);
+  assert.match(capsule, /observeShellAppearance/);
+  assert.match(capsule, /editor\.setAppearance/);
+  assert.match(chrome, /var\(--ctox-shell-accent,/);
+  assert.match(chrome, /var\(--ctox-shell-font,/);
 });
 
 test('CTOX Spreadsheets comparison config matches the pinned Oracle view contract', () => {
@@ -1223,6 +1238,7 @@ test('CTOX Spreadsheets comparison config matches the pinned Oracle view contrac
     plugins: false,
     macros: false,
     compactHeader: true,
+    toolbarHideFileName: true,
     compactToolbar: false,
     hideRightMenu: true,
     uiTheme: 'theme-light',
