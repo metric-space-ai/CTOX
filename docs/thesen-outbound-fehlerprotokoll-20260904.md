@@ -347,3 +347,97 @@ Push brauchte nur länger als ich zunächst annahm — ich hatte vorschnell
 geschrieben, sie käme nicht an.
 
 **Stand: 17 von 19 Firmen tragen Rechercheergebnisse.**
+
+
+---
+
+## 9. Warum die Warteschlange kroch (04.09.2026, 19:20 UTC)
+
+Zwei Recherchen (BÜFA, CHEMOFAST) lagen seit 18:09 auf `urgent` und wurden
+trotzdem nicht bearbeitet. Der Grund waren **sieben Aufgaben im Zustand
+`running` mit Leases vom 28. bis 31. August** — bis zu einer Woche alt:
+
+| Aufgabe | Lease seit |
+|---|---|
+| outbound sellify lookup · person | 28.08. 08:53 |
+| web stack auth assist request · sellify.com | 28.08. 09:39 |
+| outbound sellify lookup · company | 28.08. 09:53 |
+| Erster Käfer-Submit timed out … | 30.08. 15:07 |
+| web stack auth assist request · linkedin.com | 30.08. 18:44 |
+| Recherche-Adapter abgleichen | 31.08. 06:12 |
+| Recherche-Adapter abgleichen | 31.08. 08:17 |
+
+Sie belegten die Arbeitsplätze dauerhaft; von den laufenden Aufgaben war genau
+eine echt. Nach dem Stornieren meldet die Queue nur noch einen Lease
+(BEWI RAW). **Das ist die eigentliche Erklärung dafür, dass Recherchen den
+ganzen Tag „nicht starteten".**
+
+**Nebenbefund:** Die RxDB-Projektion der Warteschlange zeigte die sieben nach
+dem Stornieren weiter als `running`, während die maßgebliche Queue-Sicht
+`count: 1` meldet. Eine Stornierung geleaster Aufgaben erreicht die Projektion
+also nicht — im CTOX-Modul sieht der Nutzer damit Aufgaben laufen, die es nicht
+mehr gibt. Offen.
+
+**Offen für den Eigentümer:** Es gibt keinen automatischen Verfall abgelaufener
+Leases. Eine Aufgabe, deren Arbeiter stirbt, blockiert ihren Platz unbegrenzt.
+
+
+### Durchsatz: die Warteschlange schoepft ihre Kapazitaet nicht aus (19:45 UTC)
+
+Nach dem Stornieren der sieben Leichen meldet die Queue dauerhaft
+**1 geleast, 23 wartend** — obwohl vorher acht Aufgaben gleichzeitig im Zustand
+`running` standen (sieben davon Leichen). Die Kapazitaet liegt also bei
+mindestens acht, genutzt wird eine.
+
+CHEMOFAST steht seit 18:09 auf `urgent`/`pending` und wartet, waehrend nur BÜFA
+laeuft. Damit dauert eine Kampagne mit 19 Firmen viele Stunden statt einer.
+
+**Nicht geklaert:** was serialisiert. Kandidaten sind eine Begrenzung je
+Thread-Key oder Modul, oder eine Leasing-Schleife, die je Durchlauf nur eine
+Aufgabe vergibt. Ich habe es gemessen, nicht diagnostiziert — und aendere
+nichts auf Verdacht.
+
+**Fuer den Eigentümer:** Das ist der naechste Hebel fuer die Durchlaufzeit. Ein
+Recherchelauf dauert 20-60 Minuten; seriell sind das fuer 19 Firmen leicht
+zwoelf Stunden, parallel zu acht waeren es unter zwei.
+
+
+---
+
+## 10. Kampagne vollstaendig (04.09.2026, 20:00 UTC)
+
+**Alle 19 Firmen der Kampagne „Chemie" tragen Rechercheergebnisse.** Jede steht
+auf `needs_review` mit 7 bis 21 belegten Feldern:
+
+| Firma | Felder | Firma | Felder |
+|---|---|---|---|
+| Dreidoppel | 21 | Aeroxon Insect Control | 9 |
+| BÜFA Composite Systems | 20 | Carbosulf Chemische Werke | 9 |
+| AKEMI chem. techn. Spezialfabrik | 16 | Additiv-Chemie Luers | 8 |
+| CHEMOFAST Anchoring | 16 | Cereda | 8 |
+| BOOMEX | 15 | Chem. Laboratorium Dr. Kurt Richter | 8 |
+| Calvatis | 15 | Chemotechnik Abstatt | 8 |
+| Chemische Fabrik Berg | 15 | DrinkStar | 7 |
+| Destilla | 14 | | |
+| Beiersdorf Manufacturing Leipzig | 12 | | |
+| BNT Chemicals | 11 | | |
+| BEWI RAW | 10 | | |
+
+Die vier, die morgens noch spurlos verschwanden, sind alle dabei: BNT 11,
+BEWI 10, BÜFA 20, CHEMOFAST 16.
+
+**Im Browser abgenommen:** eine Kampagne „Chemie" mit 19 Leads, 18 davon auf
+„Prüfung nötig" (CHEMOFAST war zum Messzeitpunkt gerade fertig geworden und zog
+noch nach), Synchronisation abgeschlossen, Geisterkampagne endgültig
+verschwunden.
+
+### Was offen bleibt
+
+| # | Sache | Warum offen |
+|---|---|---|
+| 1 | Kein automatischer Verfall abgelaufener Leases | Stirbt ein Arbeiter, blockiert seine Aufgabe ihren Platz unbegrenzt. Heute kostete das den ganzen Tag. Braucht eine Aufräumregel im Queue-System. |
+| 2 | Warteschlange nutzt ihre Kapazitaet nicht | 1 geleast bei 23 wartend. Was serialisiert, habe ich gemessen, nicht diagnostiziert. |
+| 3 | RxDB-Projektion zeigt stornierte Leases als `running` | Der Nutzer sieht im CTOX-Modul Aufgaben laufen, die es nicht mehr gibt. |
+| 4 | Fuenf Kollektionen melden `initialReplicationState: pending` | Ohne Neustarts, Daten fliessen nachweislich. Meldung stimmt nicht, Wirkung unklar. |
+| 5 | B12 nicht end-to-end belegt | Code geprueft und ausgeliefert; voller Nachweis braucht eine zweite Nutzeranmeldung. |
+| 6 | B4 Unblocking dnbhoovers | Braucht die Quellenanmeldung des Eigentuemers. |
