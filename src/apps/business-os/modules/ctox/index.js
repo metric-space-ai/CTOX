@@ -1866,6 +1866,9 @@ function renderMain(state) {
     || (taskStepView
       ? taskStepView.node
       : model.timeline[timelineIndex] || model.nodes.find((node) => node.id === model.activeNodeId) || model.nodes[0]);
+  // Wo steht der ausgewaehlte Task GERADE im Loop? Dieser Knoten wird markiert,
+  // damit die Frage "wo steckt er" ohne Suchen beantwortet ist.
+  const standortNodeId = selectedTask ? (taskCrewNodeId(selectedTask, model) || '') : '';
   const visibleTrace = selectedNodeOverride
     ? buildVisibleTraceWindow([selectedNodeOverride])
     : taskStepView
@@ -2142,7 +2145,7 @@ function flowSvg(model, selectedNode, visibleTrace, selectedTask, state, taskSte
         const activeEdge = model.liveWork && edge.to === selectedNode?.id && strength > 0;
         return `<path class="ctox-flow-edge ${strength > 0 ? 'is-observed' : ''} ${activeEdge ? 'is-active-edge' : ''}" d="${edgePath(from, to, edge.route)}" style="--edge-strength:${strength}"></path>`;
       }).join('')}
-      ${communicationOnly ? '' : model.nodes.map((node) => flowNodeSvg(node, selectedNode, visibleTrace.nodeStrength.get(node.id) || 0, state.lang)).join('')}
+      ${communicationOnly ? '' : model.nodes.map((node) => flowNodeSvg(node, selectedNode, visibleTrace.nodeStrength.get(node.id) || 0, state.lang, standortNodeId)).join('')}
       ${communicationOnly ? '' : flowCrewSvg(model, selectedTask, state)}
       ${communicationOnly ? '' : '</g>'}
     </svg>
@@ -2413,7 +2416,7 @@ function outboundDetailForTask(task, state) {
   return task.channelLabel || inboundChannelLabel(task.channel || inferInboundChannel(task));
 }
 
-function flowNodeSvg(node, selectedNode, traceStrength, lang = 'de') {
+function flowNodeSvg(node, selectedNode, traceStrength, lang = 'de', standortNodeId = '') {
   const isVisibleTrace = traceStrength > 0;
   const isSelected = node.id === selectedNode?.id;
   const hasLiveRing = isSelected && node.status === 'active';
@@ -2424,7 +2427,7 @@ function flowNodeSvg(node, selectedNode, traceStrength, lang = 'de') {
     ? `<path class="ctox-flow-node-diamond" d="M 0 ${-NODE_HEIGHT / 2} L ${NODE_WIDTH / 2} 0 L 0 ${NODE_HEIGHT / 2} L ${-NODE_WIDTH / 2} 0 Z"></path>`
     : `<rect class="ctox-flow-node-box" x="${-NODE_WIDTH / 2}" y="${-NODE_HEIGHT / 2}" width="${NODE_WIDTH}" height="${NODE_HEIGHT}" rx="12"></rect>`;
   return `
-    <g class="ctox-flow-node-g is-${escapeAttr(node.status)} ${isVisibleTrace ? 'is-observed is-trace' : 'is-possible'} ${isSelected ? 'is-current is-selected' : ''}"
+    <g class="ctox-flow-node-g is-${escapeAttr(node.status)} ${isVisibleTrace ? 'is-observed is-trace' : 'is-possible'} ${isSelected ? 'is-current is-selected' : ''} ${standortNodeId && node.id === standortNodeId ? 'is-crew-hier' : ''}"
        data-node-id="${escapeAttr(node.id)}" data-context-record-id="${escapeAttr(node.id)}" data-context-record-type="ctox_flow_node" data-context-label="${escapeAttr(node.label)}" role="button" style="--trace-strength:${traceStrength}" tabindex="0" transform="translate(${node.x} ${node.y})">
       <title>${escapeHtml(`${node.phase}: ${node.label}\n${metricsLabel(node, lang)}\n${node.lines.join('\n')}`)}</title>
       ${ring}
@@ -2439,7 +2442,20 @@ function flowNodeSvg(node, selectedNode, traceStrength, lang = 'de') {
 }
 
 function flowCrewSvg(model, selectedTask, state) {
-  const tasks = taskCrewCandidates(model);
+  // Owner-Befund 04.09.2026: "ich sehe aber ganz viele wesen und visuell ist
+  // gar nicht klar, wo er gerade im harness loop steckt." Bis zu zwoelf Wesen
+  // standen gleichzeitig auf der Karte - auch fuer laengst gescheiterte Tasks -
+  // und stapelten sich auf denselben Knoten. Wer wissen will, wo SEIN Task
+  // steht, findet ihn darin nicht.
+  //
+  // Es zeigt jetzt: der ausgewaehlte Task IMMER, dazu nur die tatsaechlich
+  // laufenden. Alles andere ist Vergangenheit und gehoert nicht auf die Karte.
+  const alle = taskCrewCandidates(model);
+  const tasks = alle.filter((task) => {
+    if (selectedTask && task.id === selectedTask.id) return true;
+    return taskCrewStatus(task) === 'running';
+  });
+  if (!tasks.length && selectedTask) tasks.push(selectedTask);
   const occupied = new Map();
   return tasks.map((task) => {
     const nodeId = taskCrewNodeId(task, model);
@@ -2453,6 +2469,10 @@ function flowCrewSvg(model, selectedTask, state) {
     const y = node.y - NODE_HEIGHT / 2 - 52 - row * 40;
     const selected = task.id === selectedTask?.id;
     const status = taskCrewStatus(task);
+    // Der Knoten, auf dem das ausgewaehlte Wesen steht, ist der Schritt, an dem
+    // der Task GERADE arbeitet. Er wird markiert, damit die Karte die Frage
+    // "wo steckt er im Loop" ohne Suchen beantwortet.
+    if (selected) state.crewStandortNodeId = node.id;
     const title = `${taskDisplayTitle(task, state)} · ${task.id}`;
     const creature = crewCreatureHtml({
       ...task,
@@ -2701,6 +2721,22 @@ function resolveSelectedTaskId(model, focusTask, previousId) {
   if (!model?.tasks?.length) return null;
   const focused = model.tasks.find((task) => isFocusedTask(task, focusTask));
   if (focused) return focused.id;
+  // Owner-Befund 04.09.2026: "wenn ich auf die ID klicke, warum komm ich dann
+  // zu Käfer dialog?" - Wer aus dem Chat auf einen bestimmten Task klickt, hat
+  // GENAU DIESEN gemeint. Ist er noch nicht im Modell (der Task wird gerade
+  // erst angelegt, das Modell hinkt Sekunden bis Minuten hinterher), wurde hier
+  // stillschweigend ein FREMDER Task ausgewaehlt - der erste der Liste, in der
+  // Praxis ein alter Fehlerbericht. Der Nutzer landete bei etwas, das er nie
+  // angeklickt hat, und hielt die Verfolgung fuer kaputt.
+  //
+  // Ein angeforderter Task wird jetzt nicht mehr ersetzt: bis er auftaucht,
+  // bleibt die bisherige Auswahl stehen (oder gar keine), und der Aufrufer
+  // kann das als "wird noch geladen" anzeigen. Sobald das Modell ihn kennt,
+  // greift der Treffer oben.
+  const angefordert = Boolean(focusTask && (focusTask.taskId || focusTask.commandId));
+  if (angefordert) {
+    return previousId && model.tasks.some((task) => task.id === previousId) ? previousId : null;
+  }
   if (previousId && model.tasks.some((task) => task.id === previousId)) return previousId;
   const groups = taskGroups(model.tasks);
   return (groups.current[0] || groups.waiting[0] || groups.blocked[0] || groups.done[0] || model.tasks[0]).id;

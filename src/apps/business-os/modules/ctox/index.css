@@ -1812,3 +1812,14 @@
     animation: none;
   }
 }
+
+/* Wo der ausgewaehlte Task GERADE steht (Owner-Befund 04.09.2026: "visuell ist
+   gar nicht klar, wo er gerade im harness loop steckt"). Der Standort ist ein
+   anderer Zustand als "vom Nutzer angeklickt" und muss ohne Suchen auffallen. */
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-box,
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-diamond {
+  stroke: var(--accent, #7fd4b0);
+  stroke-width: 2.5;
+}
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-phase,
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-title { fill: var(--accent, #7fd4b0); }
