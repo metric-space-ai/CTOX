@@ -11008,6 +11008,7 @@ fn upsert_rxdb_collection_record_with_writer(
     // record is scrubbed too. The verified token lives only in the native
     // business_commands.client_context_json column, which peers never receive.
     redact_document_client_context_secrets(&mut payload);
+    clamp_projected_document_to_wire_budget(table, record_id, &mut payload);
     let mut columns = vec!["id".to_string(), "data".to_string()];
     let mut values = vec![
         SqlValue::Text(record_id.to_string()),
@@ -22559,6 +22560,105 @@ fn redact_client_context_secrets(client_context: &Value) -> Value {
 /// FINAL payload after any merge with the existing record, so a token that
 /// survived a deep-merge from an earlier (browser-authored) document is also
 /// stripped.
+/// Maximum serialized size of a single projected document.
+///
+/// A document larger than this stalls the browser's initial replication for the
+/// WHOLE collection: `initialReplicationAt` stays null, no error is raised, and
+/// every other record in that collection becomes invisible. Measured on the
+/// THESEN tenant on 2026-09-04: one completed `outbound.sellify.lookup` command
+/// carried a 2.5 MB `result`, and `business_commands`, `business_chats`,
+/// `desktop_icons` and `outbound_lead_generation_leads` never finished their
+/// initial replication as a result.
+///
+/// `retain_projectable_knowledge_item` in `rxdb_peer.rs` drops such documents,
+/// which is right for catalog entries. A command or a lead must NOT disappear —
+/// its status is load-bearing for the UI — so the oversized payload fields are
+/// replaced by a marker instead and the record itself keeps replicating. The
+/// untruncated value stays in the native store.
+pub(super) const MAX_PROJECTED_DOCUMENT_BYTES: usize = 262_144;
+
+/// Fields that carry identity, status or lifecycle. Never trimmed: without them
+/// the record would replicate but say nothing.
+const WIRE_BUDGET_PROTECTED_FIELDS: &[&str] = &[
+    "id",
+    "_rev",
+    "_deleted",
+    "is_deleted",
+    "_meta",
+    "_attachments",
+    "command_id",
+    "task_id",
+    "command_type",
+    "status",
+    "route_status",
+    "title",
+    "module",
+    "source_module",
+    "updated_at_ms",
+    "created_at_ms",
+    "campaign",
+    "name",
+    "research_status",
+    "validation_status",
+];
+
+pub(super) fn clamp_projected_document_to_wire_budget(
+    table: &str,
+    record_id: &str,
+    payload: &mut Value,
+) {
+    let total = serde_json::to_vec(&*payload)
+        .map(|raw| raw.len())
+        .unwrap_or(0);
+    if total <= MAX_PROJECTED_DOCUMENT_BYTES {
+        return;
+    }
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    // Largest field first: trimming one huge `result` usually suffices, and
+    // trimming the fewest fields keeps the most information on the wire.
+    let mut candidates: Vec<(String, usize)> = object
+        .iter()
+        .filter(|(key, _)| !WIRE_BUDGET_PROTECTED_FIELDS.contains(&key.as_str()))
+        .map(|(key, value)| {
+            (
+                key.clone(),
+                serde_json::to_vec(value).map(|raw| raw.len()).unwrap_or(0),
+            )
+        })
+        .collect();
+    candidates.sort_by(|left, right| right.1.cmp(&left.1));
+
+    let mut remaining = total;
+    let mut trimmed: Vec<String> = Vec::new();
+    for (key, bytes) in candidates {
+        if remaining <= MAX_PROJECTED_DOCUMENT_BYTES {
+            break;
+        }
+        if bytes < 1024 {
+            break;
+        }
+        object.insert(
+            key.clone(),
+            serde_json::json!({
+                "_omitted": true,
+                "_omitted_bytes": bytes,
+                "_omitted_reason": "exceeds peer wire budget",
+            }),
+        );
+        remaining = remaining.saturating_sub(bytes).saturating_add(96);
+        trimmed.push(key);
+    }
+    if trimmed.is_empty() {
+        return;
+    }
+    eprintln!(
+        "[business-os] trimmed oversized projected document {record_id} in {table}: {total} bytes exceeded the {MAX_PROJECTED_DOCUMENT_BYTES} byte wire budget; replaced fields [{}] with a marker so the collection keeps replicating",
+        trimmed.join(", ")
+    );
+}
+
 pub(super) fn redact_document_client_context_secrets(payload: &mut Value) {
     let Some(object) = payload.as_object_mut() else {
         return;
@@ -29092,6 +29192,7 @@ pub(super) mod tests {
             "test command must retain import_source"
         );
         drop(conn);
+
         let snapshot_root = root
             .join("runtime/business-os/app-imports")
             .join(command_id);
@@ -29570,7 +29671,10 @@ pub(super) mod tests {
         assert!(prompt.contains("visual/interaction inventory"));
         assert!(prompt.contains("partial parity must never be published as live"));
         assert!(prompt.contains("QML, Quickshell, mpv, Python, shell"));
-        assert!(prompt.contains("HTMLAudioElement with HTTPS streams"));
+        assert!(prompt.contains("behavior inventory"));
+        assert!(prompt.contains("static local relative browser-ESM imports"));
+        assert!(prompt.contains("Remote scripts, stylesheets, import maps"));
+        assert!(prompt.contains("real Shell-V2 visual/interaction proof"));
         assert!(prompt.contains("shell-provided database handles"));
         assert!(prompt.contains("pre-materializes the canonical App Starter V2"));
         assert!(prompt.contains("real tenant-actor browser smoke"));
