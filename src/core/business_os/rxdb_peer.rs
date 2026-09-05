@@ -11791,40 +11791,40 @@ pub(in crate::business_os) mod tests {
         )
         .expect("create stale v0 table");
         conn.execute(
-            "CREATE TABLE ctox_business_os__business_commands__v1 (
+            "CREATE TABLE ctox_business_os__business_commands__v2 (
                 id TEXT PRIMARY KEY,
                 data TEXT NOT NULL
             )",
             [],
         )
-        .expect("create active v1 table");
+        .expect("create active v2 table");
         conn.execute_batch(
-            "CREATE TRIGGER sync_commands_v1_to_v0_insert
-             AFTER INSERT ON ctox_business_os__business_commands__v1
+            "CREATE TRIGGER sync_commands_v2_to_v0_insert
+             AFTER INSERT ON ctox_business_os__business_commands__v2
              FOR EACH ROW
              BEGIN
                  INSERT OR REPLACE INTO ctox_business_os__business_commands__v0 (id, data)
                  VALUES (NEW.id, NEW.data);
              END;",
         )
-        .expect("create stale v1-to-v0 trigger");
+        .expect("create stale v2-to-v0 trigger");
         conn.execute(
             "INSERT INTO ctox_business_os___rxdb_internal__v0 (id, data, deleted)
-             VALUES ('collection|business_commands-1', ?1, 0)",
+             VALUES ('collection|business_commands-2', ?1, 0)",
             [json!({
-                "id": "collection|business_commands-1",
-                "key": "business_commands-1",
+                "id": "collection|business_commands-2",
+                "key": "business_commands-2",
                 "context": "collection",
                 "data": {
                     "name": "business_commands",
-                    "version": 1,
+                    "version": 2,
                     "schemaHash": "test"
                 },
                 "_deleted": false
             })
             .to_string()],
         )
-        .expect("insert active v1 collection meta");
+        .expect("insert active v2 collection meta");
         conn.execute(
             "INSERT INTO ctox_business_os__business_commands__v0 (id, data)
              VALUES ('cmd_stale', ?1)",
@@ -11832,7 +11832,7 @@ pub(in crate::business_os) mod tests {
         )
         .expect("insert stale row");
         conn.execute(
-            "INSERT INTO ctox_business_os__business_commands__v1 (id, data)
+            "INSERT INTO ctox_business_os__business_commands__v2 (id, data)
              VALUES ('cmd_active', ?1)",
             [json!({"id": "cmd_active", "updated_at_ms": 200, "status": "failed"}).to_string()],
         )
@@ -11851,7 +11851,7 @@ pub(in crate::business_os) mod tests {
         assert_eq!(dry_run["stale_triggers"].as_array().unwrap().len(), 1);
         let conn = Connection::open(&path).expect("reopen rxdb sqlite after dry-run");
         assert!(sqlite_table_exists(&conn, "ctox_business_os__business_commands__v0").unwrap());
-        assert!(sqlite_trigger_exists(&conn, "sync_commands_v1_to_v0_insert").unwrap());
+        assert!(sqlite_trigger_exists(&conn, "sync_commands_v2_to_v0_insert").unwrap());
         drop(conn);
 
         let refused = repair_optional_rxdb_collection_schema_drift(
@@ -11879,17 +11879,17 @@ pub(in crate::business_os) mod tests {
 
         let conn = Connection::open(&path).expect("reopen rxdb sqlite after apply");
         assert!(!sqlite_table_exists(&conn, "ctox_business_os__business_commands__v0").unwrap());
-        assert!(sqlite_table_exists(&conn, "ctox_business_os__business_commands__v1").unwrap());
-        assert!(!sqlite_trigger_exists(&conn, "sync_commands_v1_to_v0_insert").unwrap());
+        assert!(sqlite_table_exists(&conn, "ctox_business_os__business_commands__v2").unwrap());
+        assert!(!sqlite_trigger_exists(&conn, "sync_commands_v2_to_v0_insert").unwrap());
         conn.execute(
-            "INSERT INTO ctox_business_os__business_commands__v1 (id, data)
+            "INSERT INTO ctox_business_os__business_commands__v2 (id, data)
              VALUES ('cmd_after_repair', ?1)",
             [
                 json!({"id": "cmd_after_repair", "updated_at_ms": 300, "status": "failed"})
                     .to_string(),
             ],
         )
-        .expect("active v1 write must not reference removed stale v0 table");
+        .expect("active v2 write must not reference removed stale v0 table");
     }
 
     #[test]
