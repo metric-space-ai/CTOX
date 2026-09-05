@@ -36,5 +36,8 @@ export const migrationStrategies = Object.fromEntries(
     .map((name) => [name, conversationMigrationStrategies[name]]),
 );
 migrationStrategies.business_commands = appStoreCollections.business_commands.version > 0
-  ? { 1: (oldDoc) => ({ ...oldDoc, inbound_channel: oldDoc.inbound_channel || oldDoc.module || '' }) }
+  ? {
+      1: (oldDoc) => ({ ...oldDoc, inbound_channel: oldDoc.inbound_channel || oldDoc.module || '' }),
+      2: (oldDoc) => oldDoc,
+    }
   : {};

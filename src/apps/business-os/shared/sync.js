@@ -24,6 +24,7 @@ import {
   normalizeCollectionReadinessState,
 } from './sync-contract.js?v=20260903-shell-v2-crew-bar-v338';
 import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260903-shell-v2-crew-bar-v338';
+import { loadRxdbRuntime } from './rxdb-runtime.js';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
@@ -511,7 +512,7 @@ export function createSyncRuntime({
   emitDiagnostic({ phase: 'ready' });
   const ensureMultiTabCoordinator = async () => {
     if (multiTabCoordinator) return multiTabCoordinator;
-    const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260902-workjet-sessions-pkg1-v336');
+    const rxdb = db?.rxdb || await loadRxdbRuntime();
     if (typeof rxdb?.getMultiTabSyncCoordinator !== 'function') return null;
     multiTabCoordinator = rxdb.getMultiTabSyncCoordinator({
       databaseName: db?.name || db?.raw?.name || 'ctox_business_os_js_v1',
@@ -1562,7 +1563,7 @@ async function startWebRtcReplication({
     await repairDesktopIconsBeforeReplication(rxCollection);
   }
   const replicationCollection = collectionForReplication(collection, rxCollection);
-  const rxdb = db?.rxdb || await import('../rxdb/dist/ctox-rxdb-js.mjs?v=20260902-workjet-sessions-pkg1-v336');
+  const rxdb = db?.rxdb || await loadRxdbRuntime();
   if (typeof rxdb?.replicateWebRTC !== 'function' || typeof rxdb?.getConnectionHandlerSimplePeer !== 'function') {
     throw new Error('RxDB WebRTC bundle is missing replicateWebRTC/getConnectionHandlerSimplePeer');
   }

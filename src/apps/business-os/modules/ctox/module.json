@@ -10,6 +10,8 @@
     "business_workspace_branding",
     "ctox_queue_tasks",
     "ctox_runs",
+    "ctox_harness_events",
+    "ctox_harness_status",
     "ctox_bug_reports",
     "business_module_acl",
     "business_module_releases",

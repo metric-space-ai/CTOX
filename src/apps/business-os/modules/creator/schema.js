@@ -1,5 +1,5 @@
 const commandSchema = {
-  version: 1,
+  version: 2,
   primaryKey: 'id',
   type: 'object',
   properties: {
@@ -20,4 +20,14 @@ const commandSchema = {
 
 export const collections = {
   business_commands: commandSchema
+};
+
+export const migrationStrategies = {
+  business_commands: {
+    1: (oldDoc) => ({
+      ...oldDoc,
+      inbound_channel: oldDoc.inbound_channel || oldDoc.module || ''
+    }),
+    2: (oldDoc) => oldDoc
+  }
 };

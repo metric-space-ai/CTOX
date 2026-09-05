@@ -76,6 +76,13 @@ export const collections = {
 };
 
 export const migrationStrategies = {
+  business_commands: {
+    1: (oldDoc) => ({
+      ...oldDoc,
+      inbound_channel: oldDoc.inbound_channel || oldDoc.module || '',
+    }),
+    2: (oldDoc) => oldDoc,
+  },
   kundenpipeline_vorgaenge: { 1: (oldDoc) => oldDoc },
   kundenpipeline_entscheidungen: { 1: (oldDoc) => oldDoc },
   kundenpipeline_projekte: { 1: (oldDoc) => oldDoc },

@@ -47,7 +47,7 @@
         "updated_at_ms"
       ],
       "type": "object",
-      "version": 1
+      "version": 2
     }
   },
   "migration_strategies": {
@@ -64,6 +64,9 @@
             ]
           }
         ]
+      },
+      "2": {
+        "operations": []
       }
     }
   },

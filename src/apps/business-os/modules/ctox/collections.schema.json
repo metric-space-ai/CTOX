@@ -113,6 +113,10 @@
         "command_type": {
           "type": "string"
         },
+        "execution_progress": {
+          "additionalProperties": true,
+          "type": "object"
+        },
         "id": {
           "maxLength": 128,
           "type": "string"
@@ -156,7 +160,7 @@
         "updated_at_ms"
       ],
       "type": "object",
-      "version": 1
+      "version": 2
     },
     "business_module_acl": {
       "additionalProperties": true,
@@ -650,6 +654,184 @@
       "type": "object",
       "version": 0
     },
+    "ctox_harness_events": {
+      "additionalProperties": true,
+      "indexes": [
+        [
+          "task_id",
+          "created_at_ms"
+        ],
+        "created_at_ms"
+      ],
+      "primaryKey": "id",
+      "properties": {
+        "attempt": {
+          "type": "number"
+        },
+        "call_id": {
+          "type": "string"
+        },
+        "command_id": {
+          "type": "string"
+        },
+        "created_at_ms": {
+          "type": "number"
+        },
+        "id": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "runtime_seconds": {
+          "type": "number"
+        },
+        "step_position": {
+          "type": "number"
+        },
+        "success": {
+          "type": "boolean"
+        },
+        "task_id": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "tool_name": {
+          "type": "string"
+        },
+        "tool_type": {
+          "type": "string"
+        },
+        "updated_at_ms": {
+          "type": "number"
+        },
+        "usage": {
+          "additionalProperties": true,
+          "properties": {
+            "input": {
+              "type": "number"
+            },
+            "output": {
+              "type": "number"
+            },
+            "reasoning": {
+              "type": "number"
+            },
+            "total": {
+              "type": "number"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "id",
+        "task_id",
+        "kind",
+        "created_at_ms",
+        "updated_at_ms"
+      ],
+      "type": "object",
+      "version": 0
+    },
+    "ctox_harness_status": {
+      "additionalProperties": true,
+      "primaryKey": "id",
+      "properties": {
+        "active_crew_member_id": {
+          "type": "string"
+        },
+        "active_task_ids": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "blocked_count": {
+          "type": "number"
+        },
+        "boot_id": {
+          "type": "string"
+        },
+        "busy": {
+          "type": "boolean"
+        },
+        "failed_recent_count": {
+          "type": "number"
+        },
+        "id": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "last_error": {
+          "type": "string"
+        },
+        "leased_count": {
+          "type": "number"
+        },
+        "pause_reason": {
+          "type": "string"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "pending_count": {
+          "type": "number"
+        },
+        "pressure_active": {
+          "type": "boolean"
+        },
+        "pressure_threshold": {
+          "type": "number"
+        },
+        "review_count": {
+          "type": "number"
+        },
+        "service_running": {
+          "type": "boolean"
+        },
+        "updated_at_ms": {
+          "type": "number"
+        },
+        "work_hours": {
+          "additionalProperties": true,
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "end": {
+              "type": "string"
+            },
+            "inside_window": {
+              "type": "boolean"
+            },
+            "start": {
+              "type": "string"
+            }
+          },
+          "type": "object"
+        },
+        "worker_active_count": {
+          "type": "number"
+        },
+        "worker_capacity": {
+          "type": "number"
+        },
+        "worker_phase": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "updated_at_ms"
+      ],
+      "type": "object",
+      "version": 0
+    },
     "ctox_queue_tasks": {
       "additionalProperties": true,
       "indexes": [
@@ -667,10 +849,32 @@
       ],
       "primaryKey": "id",
       "properties": {
+        "attempt": {
+          "type": "number"
+        },
         "command_id": {
           "type": "string"
         },
         "command_type": {
+          "type": "string"
+        },
+        "crew_member_id": {
+          "type": "string"
+        },
+        "execution_progress": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "failure_attempt_count": {
+          "type": "number"
+        },
+        "failure_class": {
+          "type": "string"
+        },
+        "first_pending_at": {
+          "type": "string"
+        },
+        "hold_reason": {
           "type": "string"
         },
         "id": {
@@ -680,7 +884,19 @@
         "inbound_channel": {
           "type": "string"
         },
+        "lease_expires_at": {
+          "type": "string"
+        },
+        "lease_worker_id": {
+          "type": "string"
+        },
         "module": {
+          "type": "string"
+        },
+        "priority_time_credit_hours": {
+          "type": "number"
+        },
+        "retry_not_before": {
           "type": "string"
         },
         "source_module": {
@@ -694,6 +910,12 @@
         },
         "updated_at_ms": {
           "type": "number"
+        },
+        "wait_entity_id": {
+          "type": "string"
+        },
+        "wait_entity_type": {
+          "type": "string"
         }
       },
       "required": [
@@ -703,12 +925,37 @@
         "module"
       ],
       "type": "object",
-      "version": 1
+      "version": 2
     },
     "ctox_runs": {
       "additionalProperties": true,
+      "indexes": [
+        [
+          "task_id",
+          "finished_at_ms"
+        ],
+        "finished_at_ms",
+        "crew_member_id"
+      ],
       "primaryKey": "id",
       "properties": {
+        "agent_outcome": {
+          "type": "string"
+        },
+        "attempt_id": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "command_id": {
+          "type": "string"
+        },
+        "crew_member_id": {
+          "maxLength": 128,
+          "type": "string"
+        },
+        "error_text": {
+          "type": "string"
+        },
         "finished_at_ms": {
           "type": "number"
         },
@@ -718,10 +965,57 @@
         },
         "metrics": {
           "additionalProperties": true,
+          "properties": {
+            "cost_usd": {
+              "type": "number"
+            },
+            "elapsed_ms": {
+              "type": "number"
+            },
+            "input_tokens": {
+              "type": "number"
+            },
+            "model": {
+              "type": "string"
+            },
+            "output_tokens": {
+              "type": "number"
+            },
+            "provider": {
+              "type": "string"
+            },
+            "reasoning_tokens": {
+              "type": "number"
+            },
+            "thinking_turns": {
+              "type": "number"
+            },
+            "tool_calls": {
+              "type": "number"
+            }
+          },
           "type": "object"
         },
         "payload": {
           "additionalProperties": true,
+          "type": "object"
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "retrospective": {
+          "type": "string"
+        },
+        "review": {
+          "additionalProperties": true,
+          "properties": {
+            "disposition": {
+              "type": "string"
+            },
+            "hold_reason": {
+              "type": "string"
+            }
+          },
           "type": "object"
         },
         "source_kind": {
@@ -731,6 +1025,10 @@
           "type": "number"
         },
         "status": {
+          "type": "string"
+        },
+        "task_id": {
+          "maxLength": 128,
           "type": "string"
         },
         "title": {
@@ -749,7 +1047,7 @@
         "updated_at_ms"
       ],
       "type": "object",
-      "version": 0
+      "version": 1
     },
     "ctox_runtime_settings": {
       "additionalProperties": true,
@@ -1364,9 +1662,20 @@
             ]
           }
         ]
+      },
+      "2": {
+        "operations": []
       }
     },
     "ctox_queue_tasks": {
+      "1": {
+        "operations": []
+      },
+      "2": {
+        "operations": []
+      }
+    },
+    "ctox_runs": {
       "1": {
         "operations": []
       }
