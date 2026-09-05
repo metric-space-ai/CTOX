@@ -143,13 +143,15 @@ pub fn run_terminalize_worker_attempt(
     finalization_error: Option<&str>,
 ) -> Result<WorkerAttemptRecord> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
-    engine.terminalize_worker_attempt(
+    let result = engine.terminalize_worker_attempt(
         attempt_id,
         status,
         resumable,
         effects_completed,
         finalization_error,
-    )
+    )?;
+    crate::business_os::harness_cockpit::refresh_after_finalization(db_path);
+    Ok(result)
 }
 
 pub fn run_mark_worker_attempt_effects_completed(
@@ -157,7 +159,9 @@ pub fn run_mark_worker_attempt_effects_completed(
     attempt_id: &str,
 ) -> Result<WorkerAttemptRecord> {
     let engine = LcmEngine::open(db_path, LcmConfig::default())?;
-    engine.mark_worker_attempt_effects_completed(attempt_id)
+    let result = engine.mark_worker_attempt_effects_completed(attempt_id)?;
+    crate::business_os::harness_cockpit::refresh_after_finalization(db_path);
+    Ok(result)
 }
 
 pub fn run_mark_worker_attempt_recovery_effects_applied(

@@ -328,11 +328,21 @@ pub const ADMIN_ONLY_COLLECTIONS: &[&str] = &[
 /// may read every collection; Founder/User are denied the admin-only set above.
 /// Deny-by-exception (not deny-by-default) so it is safe to enable without
 /// breaking access to ordinary business data.
+pub fn is_cockpit_projection(collection: &str) -> bool {
+    matches!(
+        collection,
+        "ctox_harness_events" | "ctox_harness_status" | "ctox_runs"
+    )
+}
+
 pub fn role_may_read_collection(role: BusinessOsRole, collection: &str) -> bool {
     match role {
         BusinessOsRole::Chef | BusinessOsRole::Admin => true,
-        BusinessOsRole::Founder | BusinessOsRole::User => {
+        BusinessOsRole::Founder => !ADMIN_ONLY_COLLECTIONS.contains(&collection),
+        BusinessOsRole::User => {
             !ADMIN_ONLY_COLLECTIONS.contains(&collection)
+                && !["ctox_harness_events", "ctox_harness_status", "ctox_runs"]
+                    .contains(&collection)
         }
     }
 }
@@ -342,6 +352,24 @@ pub fn evaluate(
     permission: BusinessOsPermission,
     scope: &BusinessOsScope,
 ) -> PolicyDecision {
+    if scope.scope_id.as_deref().is_some_and(is_cockpit_projection)
+        && matches!(
+            permission,
+            BusinessOsPermission::DataRead | BusinessOsPermission::DataWrite
+        )
+    {
+        return if permission == BusinessOsPermission::DataRead && actor.role != BusinessOsRole::User
+        {
+            PolicyDecision::allow(permission, scope)
+        } else {
+            PolicyDecision::deny(
+                permission,
+                scope,
+                "cockpit_projection_policy",
+                "cockpit projections are server-authored and readable by Admin/Founder only",
+            )
+        };
+    }
     let allowed = match permission {
         BusinessOsPermission::WorkspaceManage => actor.role == BusinessOsRole::Chef,
         BusinessOsPermission::WorkspaceBrandingManage

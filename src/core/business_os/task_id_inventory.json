@@ -53,6 +53,20 @@
     },
     {
       "file": "src/core/business_os/store_projections.rs",
+      "function": "business_chat_payload",
+      "occurrence": 1,
+      "semantics": "execution_link",
+      "target_field": "execution_task_id; chat contract retains task_id"
+    },
+    {
+      "file": "src/core/business_os/store_projections.rs",
+      "function": "materialize_pending_business_chat",
+      "occurrence": 1,
+      "semantics": "execution_link",
+      "target_field": "execution_task_id; chat contract retains task_id"
+    },
+    {
+      "file": "src/core/business_os/store_projections.rs",
       "function": "persist_terminal_business_chat_command_projection",
       "occurrence": 1,
       "semantics": "execution_link",

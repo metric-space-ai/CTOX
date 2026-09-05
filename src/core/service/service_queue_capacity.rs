@@ -62,7 +62,10 @@ fn lease_business_queue_capacity(
     state: &Arc<Mutex<SharedState>>,
 ) -> Result<Vec<QueuedPrompt>> {
     let capacity = QueueWorkerCapacity::load(root)?;
-    if capacity.max_workers == 1 || !crate::service::working_hours::accepts_work(root) {
+    if capacity.max_workers == 1
+        || !crate::service::working_hours::accepts_work(root)
+        || crate::business_os::harness_cockpit::queue_is_paused(root)
+    {
         return Ok(Vec::new());
     }
     let tasks = channels::list_queue_tasks(root, &["pending".to_string()], 128)?;

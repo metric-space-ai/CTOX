@@ -260,7 +260,15 @@ pub fn record_harness_flow_event(
     ensure_event_schema(&conn)?;
     let created_at = Utc::now().to_rfc3339();
     let chain_key = chain_key(request.message_key, request.work_id, request.ticket_key);
-    let metadata_json = serde_json::to_string(&request.metadata)?;
+    let mut metadata = request.metadata;
+    if let Some(object) = metadata.as_object_mut() {
+        let eligible=request.message_key.and_then(|task|conn.query_row("SELECT route_status NOT IN ('handled','failed','cancelled') FROM communication_routing_state WHERE message_key=?1",[task],|row|row.get::<_,bool>(0)).ok()).unwrap_or(false);
+        object.insert(
+            "cockpit_eligible".to_string(),
+            serde_json::Value::Bool(eligible),
+        );
+    }
+    let metadata_json = serde_json::to_string(&metadata)?;
     let event_id = event_id(
         &chain_key,
         request.event_kind,
@@ -287,6 +295,7 @@ pub fn record_harness_flow_event(
             created_at,
         ],
     )?;
+    crate::business_os::harness_cockpit::schedule_flow_refresh(root, request.event_kind);
     Ok(HarnessFlowEvent {
         event_id,
         chain_key,

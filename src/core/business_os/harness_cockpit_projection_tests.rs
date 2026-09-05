@@ -1,0 +1,347 @@
+use super::*;
+use tempfile::TempDir;
+
+fn setup() -> Result<(TempDir, Connection)> {
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir_all(root.path().join("runtime"))?;
+    let conn = Connection::open(crate::paths::core_db(root.path()))?;
+    conn.execute_batch("CREATE TABLE communication_routing_state(message_key TEXT PRIMARY KEY,route_status TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE communication_messages(message_key TEXT PRIMARY KEY,channel TEXT,direction TEXT);
+        CREATE TRIGGER fixture_queue_identity AFTER INSERT ON communication_routing_state BEGIN INSERT INTO communication_messages VALUES(new.message_key,'queue','inbound'); END;
+        CREATE TABLE ctox_harness_flow_events(event_id TEXT PRIMARY KEY,event_kind TEXT,title TEXT,body_text TEXT,message_key TEXT,work_id TEXT,attempt_index INTEGER,metadata_json TEXT,created_at TEXT);
+        CREATE TABLE worker_attempt_finalizations(attempt_id TEXT PRIMARY KEY,work_key TEXT,status TEXT,agent_outcome TEXT,created_at TEXT,updated_at TEXT,terminal_at TEXT,error_text TEXT,resumable INTEGER);
+        CREATE TABLE api_model_cost_events(provider TEXT,model TEXT,turn_id TEXT,input_tokens INTEGER,cached_input_tokens INTEGER,output_tokens INTEGER,reasoning_output_tokens INTEGER,day TEXT);
+        CREATE TABLE api_model_price_rates(provider TEXT,model TEXT,input_usd_per_million REAL,cached_input_usd_per_million REAL,output_usd_per_million REAL,effective_from_day TEXT);")?;
+    let rxdb = Connection::open(store::rxdb_store_path(root.path()))?;
+    for (name, version) in [
+        ("ctox_queue_tasks", 2),
+        ("ctox_harness_events", 0),
+        ("ctox_harness_status", 0),
+        ("ctox_runs", 1),
+    ] {
+        rxdb.execute_batch(&format!("CREATE TABLE ctox_business_os__{name}__v{version}(id TEXT PRIMARY KEY,revision TEXT,deleted INTEGER DEFAULT 0,lastWriteTime REAL DEFAULT 0,data TEXT NOT NULL);"))?;
+    }
+    Ok((root, conn))
+}
+
+fn record(root: &Path, collection: &str, id: &str) -> Result<Value> {
+    let raw: String = store::open_store(root)?.query_row(
+        "SELECT payload_json FROM business_records WHERE collection=?1 AND record_id=?2",
+        params![collection, id],
+        |r| r.get(0),
+    )?;
+    Ok(serde_json::from_str(&raw)?)
+}
+
+#[test]
+fn retention_keeps_active_tasks_and_tombstones_all_three_projection_surfaces() -> Result<()> {
+    let (root, conn) = setup()?;
+    crate::inference::runtime_env::set_runtime_env_value(
+        root.path(),
+        super::super::QUEUE_RETENTION_KEY,
+        "3",
+    )?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    for index in 0..7 {
+        let id = format!("task-{index}");
+        let status = if index < 5 { "handled" } else { "pending" };
+        conn.execute(
+            "INSERT INTO communication_routing_state VALUES(?1,?2,?3)",
+            params![id, status, format!("2020-01-0{}T00:00:00Z", index + 1)],
+        )?;
+        writer.upsert_source_projection(
+            "ctox_queue_tasks",
+            &id,
+            index,
+            json!({"id":id,"route_status":status}),
+        )?;
+    }
+    conn.execute(
+        "INSERT INTO communication_routing_state VALUES('recent','handled',?1)",
+        [Utc::now().to_rfc3339()],
+    )?;
+    writer.upsert_source_projection(
+        "ctox_queue_tasks",
+        "recent",
+        0,
+        json!({"id":"recent","route_status":"handled"}),
+    )?;
+    for index in 0..210 {
+        let id = format!("event-{index:03}");
+        writer.upsert_source_projection(
+            "ctox_harness_events",
+            &id,
+            index,
+            json!({"id":id,"task_id":"task-5","created_at_ms":index}),
+        )?;
+    }
+    for (id, task) in [("expired", "task-0"), ("recent-event", "recent")] {
+        writer.upsert_source_projection(
+            "ctox_harness_events",
+            id,
+            0,
+            json!({"id":id,"task_id":task,"created_at_ms":0}),
+        )?;
+    }
+    for index in 0..503 {
+        let id = format!("run-{index:03}");
+        let task = if index == 0 { "task-5" } else { "task-0" };
+        writer.upsert_source_projection(
+            "ctox_runs",
+            &id,
+            index,
+            json!({"id":id,"task_id":task,"finished_at_ms":index}),
+        )?;
+    }
+    retain(
+        root.path(),
+        &conn,
+        &mut writer,
+        Utc::now().timestamp_millis(),
+    )?;
+    let business = store::open_store(root.path())?;
+    for (collection, expected) in [
+        ("ctox_queue_tasks", 5),
+        ("ctox_harness_events", 201),
+        ("ctox_runs", 501),
+    ] {
+        let actual: i64 = business.query_row(
+            "SELECT COUNT(*) FROM business_records WHERE collection=?1 AND deleted=0",
+            [collection],
+            |r| r.get(0),
+        )?;
+        assert_eq!(actual, expected, "{collection}");
+    }
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "expired")?["_deleted"],
+        true
+    );
+    assert_eq!(
+        record(root.path(), "ctox_runs", "run-000")?["_deleted"],
+        false
+    );
+    let rxdb = Connection::open(store::rxdb_store_path(root.path()))?;
+    let deleted: bool = rxdb.query_row(
+        "SELECT deleted FROM ctox_business_os__ctox_harness_events__v0 WHERE id='expired'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert!(deleted, "retention tombstones replicate");
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM communication_routing_state",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        8,
+        "durable history is untouched"
+    );
+    Ok(())
+}
+
+#[test]
+fn events_are_bounded_redacted_and_idempotent_and_terminal_tasks_do_not_grow() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute(
+        "INSERT INTO communication_routing_state VALUES('active','leased','2026-01-01T00:00:00Z')",
+        [],
+    )?;
+    for index in 0..210 {
+        conn.execute("INSERT INTO ctox_harness_flow_events VALUES(?1,'worker.tool_started','Terminal','private tool output','active',NULL,2,?2,?3)",params![format!("event-{index:03}"),json!({"attempt_id":"attempt","attempt":2,"command_id":"command","tool":{"name":"Terminal","type":"exec_command","call_id":format!("call-{index}"),"arguments":{"secret":"must not replicate"}},"step_position":1}).to_string(),format!("2026-01-01T00:{:02}:{:02}Z",index/60,index%60)])?;
+    }
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_events(root.path(), &conn, &mut writer)?;
+    let before = record(root.path(), "ctox_harness_events", "event-209")?;
+    assert_eq!(before["kind"], "tool_started");
+    assert_eq!(before["attempt"], 2);
+    assert_eq!(before["step_position"], 1);
+    assert!(!before.to_string().contains("must not replicate"));
+    assert!(!before.to_string().contains("private tool output"));
+    project_events(root.path(), &conn, &mut writer)?;
+    assert_eq!(
+        before,
+        record(root.path(), "ctox_harness_events", "event-209")?,
+        "unchanged replay creates no new revision"
+    );
+    assert_eq!(store::open_store(root.path())?.query_row("SELECT COUNT(*) FROM business_records WHERE collection='ctox_harness_events' AND deleted=0",[],|r|r.get::<_,i64>(0))?,200);
+    conn.execute(
+        "UPDATE communication_routing_state SET route_status='handled'",
+        [],
+    )?;
+    conn.execute("INSERT INTO ctox_harness_flow_events SELECT 'after-terminal',event_kind,title,body_text,message_key,work_id,attempt_index,json_set(metadata_json,'$.cockpit_eligible',json('false')),'2026-01-02T00:00:00Z' FROM ctox_harness_flow_events LIMIT 1",[])?;
+    project_events(root.path(), &conn, &mut writer)?;
+    assert!(record(root.path(), "ctox_harness_events", "after-terminal").is_err());
+    conn.execute(
+        "UPDATE communication_routing_state SET route_status='pending'",
+        [],
+    )?;
+    project_events(root.path(), &conn, &mut writer)?;
+    assert!(
+        record(root.path(), "ctox_harness_events", "after-terminal").is_err(),
+        "retry must not publish events emitted after terminalization"
+    );
+    Ok(())
+}
+
+#[test]
+fn short_completed_turn_replays_only_events_eligible_at_emission() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute(
+        "INSERT INTO communication_routing_state VALUES('quick','handled',?1)",
+        [Utc::now().to_rfc3339()],
+    )?;
+    for (id, eligible) in [("before-finish", true), ("after-finish", false)] {
+        conn.execute("INSERT INTO ctox_harness_flow_events VALUES(?1,'worker.turn_completed','Done','','quick',NULL,1,?2,?3)",params![id,json!({"cockpit_eligible":eligible}).to_string(),Utc::now().to_rfc3339()])?;
+    }
+    project_events(
+        root.path(),
+        &conn,
+        &mut BusinessProjectionWriter::open(root.path())?,
+    )?;
+    assert!(record(root.path(), "ctox_harness_events", "before-finish").is_ok());
+    assert!(record(root.path(), "ctox_harness_events", "after-finish").is_err());
+    Ok(())
+}
+
+#[test]
+fn runs_join_real_turn_ids_and_refresh_late_costs_without_double_counting() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute(
+        "INSERT INTO communication_routing_state VALUES('task','handled','2026-01-01T00:00:03Z')",
+        [],
+    )?;
+    conn.execute("INSERT INTO worker_attempt_finalizations VALUES('attempt','work','succeeded','success','1767225602000','1767225603000','1767225603000',NULL,0)",[])?;
+    conn.execute("INSERT INTO ctox_harness_flow_events VALUES('link','worker.tool_started','Terminal','','task',NULL,1,?1,'2026-01-01T00:00:00Z')",[json!({"attempt_id":"attempt","command_id":"command","turn_id":"actual-turn","tool":{"call_id":"call-1"}}).to_string()])?;
+    conn.execute("INSERT INTO api_model_cost_events VALUES('provider','model','actual-turn',100,20,10,4,'2026-01-01')",[])?;
+    conn.execute("INSERT INTO api_model_cost_events VALUES('provider','model','attempt',9999,0,9999,0,'2026-01-01')",[])?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_runs(root.path(), &conn, &mut writer)?;
+    let first = record(root.path(), "ctox_runs", "attempt")?;
+    assert_eq!(first["metrics"]["input_tokens"], 100);
+    assert_eq!(first["metrics"]["elapsed_ms"], 3000);
+    assert_eq!(first["metrics"]["tool_calls"], 1);
+    assert!(
+        first["metrics"]["cost_usd"].is_null(),
+        "unpriced usage is unknown, not free"
+    );
+    conn.execute(
+        "INSERT INTO api_model_price_rates VALUES('provider','model',2,1,4,'2025-01-01')",
+        [],
+    )?;
+    conn.execute("INSERT INTO api_model_cost_events VALUES('provider','model','actual-turn',50,0,5,2,'2026-01-01')",[])?;
+    project_runs(root.path(), &conn, &mut writer)?;
+    let late = record(root.path(), "ctox_runs", "attempt")?;
+    assert_eq!(late["metrics"]["input_tokens"], 150);
+    assert_eq!(late["metrics"]["reasoning_tokens"], 6);
+    assert!((late["metrics"]["cost_usd"].as_f64().unwrap() - 0.00034).abs() < 1e-10);
+    project_runs(root.path(), &conn, &mut writer)?;
+    assert_eq!(late, record(root.path(), "ctox_runs", "attempt")?);
+    Ok(())
+}
+
+#[test]
+fn projection_delivery_recovers_when_rxdb_collection_appears_after_writer_open() -> Result<()> {
+    let (root, _) = setup()?;
+    let rxdb = Connection::open(store::rxdb_store_path(root.path()))?;
+    rxdb.execute_batch("DROP TABLE ctox_business_os__ctox_harness_events__v0;")?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    let payload =
+        json!({"id":"late","kind":"phase","task_id":"task","created_at_ms":1,"updated_at_ms":1});
+    writer.upsert_source_projection("ctox_harness_events", "late", 1, payload.clone())?;
+    assert!(writer.payloads.is_empty());
+    rxdb.execute_batch("CREATE TABLE ctox_business_os__ctox_harness_events__v0(id TEXT PRIMARY KEY,revision TEXT,deleted INTEGER DEFAULT 0,lastWriteTime REAL DEFAULT 0,data TEXT NOT NULL);")?;
+    writer.upsert_source_projection("ctox_harness_events", "late", 1, payload)?;
+    assert_eq!(
+        rxdb.query_row(
+            "SELECT COUNT(*) FROM ctox_business_os__ctox_harness_events__v0 WHERE id='late'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
+fn worker_snapshot_hooks_publish_start_and_graceful_stop() -> Result<()> {
+    let (root, _) = setup()?;
+    publish_worker_snapshot(
+        root.path(),
+        WorkerSnapshot {
+            service_running: true,
+            busy: true,
+            worker_active_count: 1,
+            active_task_ids: vec!["hook-task".into()],
+            boot_id: "hook-boot".into(),
+            ..Default::default()
+        },
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if record(root.path(), "ctox_harness_status", "harness")
+            .ok()
+            .is_some_and(|r| r["busy"] == true && r["active_task_ids"] == json!(["hook-task"]))
+        {
+            break;
+        }
+        anyhow::ensure!(
+            Instant::now() < deadline,
+            "worker start snapshot was not projected"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    publish_service_stopped(root.path(), "hook-boot".into());
+    assert_eq!(
+        record(root.path(), "ctox_harness_status", "harness")?["service_running"],
+        false
+    );
+    Ok(())
+}
+
+#[test]
+fn status_tracks_start_stop_and_persistent_pause_with_no_change_churn() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute(
+        "INSERT INTO communication_routing_state VALUES('task','leased',?1)",
+        [Utc::now().to_rfc3339()],
+    )?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    let active = WorkerSnapshot {
+        service_running: true,
+        busy: true,
+        worker_active_count: 1,
+        worker_phase: Some("model".into()),
+        active_task_ids: vec!["task".into()],
+        boot_id: "boot".into(),
+        ..Default::default()
+    };
+    project_status(root.path(), &conn, &mut writer, &active)?;
+    let before = record(root.path(), "ctox_harness_status", "harness")?;
+    project_status(root.path(), &conn, &mut writer, &active)?;
+    assert_eq!(
+        before,
+        record(root.path(), "ctox_harness_status", "harness")?
+    );
+    crate::inference::runtime_env::set_runtime_env_value(
+        root.path(),
+        super::super::PAUSE_KEY,
+        r#"{"paused":true,"reason":"operator"}"#,
+    )?;
+    project_status(
+        root.path(),
+        &conn,
+        &mut writer,
+        &WorkerSnapshot {
+            boot_id: "boot".into(),
+            ..Default::default()
+        },
+    )?;
+    let stopped = record(root.path(), "ctox_harness_status", "harness")?;
+    assert_eq!(stopped["worker_active_count"], 0);
+    assert_eq!(stopped["service_running"], false);
+    assert_eq!(stopped["paused"], true);
+    assert_eq!(stopped["pause_reason"], "operator");
+    assert!(stopped["active_task_ids"].as_array().unwrap().is_empty());
+    assert!(stopped["active_crew_member_id"].is_null());
+    Ok(())
+}

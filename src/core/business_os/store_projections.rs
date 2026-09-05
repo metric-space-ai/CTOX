@@ -247,12 +247,21 @@ pub(super) fn materialize_pending_business_chat(
     {
         existing["commandId"] = Value::String(command_id.to_string());
         existing["taskId"] = Value::String(task_id.clone());
+        existing["kind"] = Value::String("status".into());
+        existing["command_id"] = Value::String(command_id.to_string());
+        existing["task_id"] = Value::String(task_id.clone());
+        existing
+            .as_object_mut()
+            .unwrap()
+            .entry("run_id")
+            .or_insert(Value::Null);
         existing["status"] = Value::String(status.clone());
     } else {
         messages.push(serde_json::json!({
             "id": status_message_id,
             "role": "ctox",
-            "text": "Task angelegt und in der CTOX Queue. Antwort erscheint hier, sobald CTOX ihn verarbeitet.",
+            "kind": "status", "task_id": task_id, "command_id": command_id, "run_id": null,
+            "text": super::harness_cockpit::queued_chat_text(command),
             "commandId": command_id,
             "taskId": task_id,
             "status": status,
@@ -260,8 +269,7 @@ pub(super) fn materialize_pending_business_chat(
         }));
     }
     if messages.len() > 40 {
-        let keep_from = messages.len() - 40;
-        messages.drain(0..keep_from);
+        super::harness_cockpit::trim_messages(messages);
     }
     update_business_chat_tracking_fields(obj);
     upsert_business_record(conn, "business_chats", &chat_id, updated_at_ms, chat)?;
@@ -357,8 +365,7 @@ pub(super) fn materialize_control_business_chat_state(
         }));
     }
     if messages.len() > 40 {
-        let keep_from = messages.len() - 40;
-        messages.drain(0..keep_from);
+        super::harness_cockpit::trim_messages(messages);
     }
     update_business_chat_tracking_fields(obj);
     upsert_business_record(
@@ -478,6 +485,7 @@ pub(super) fn business_chat_payload(
         messages.push(serde_json::json!({
             "id": format!("reply_{command_id}"),
             "role": "ctox",
+            "kind": "reply", "task_id": task_id, "command_id": command_id, "run_id": null,
             "text": reply_text,
             "replyFor": reply_for,
             "commandId": command_id,
@@ -488,8 +496,7 @@ pub(super) fn business_chat_payload(
     }
 
     if messages.len() > 40 {
-        let keep_from = messages.len() - 40;
-        messages.drain(0..keep_from);
+        super::harness_cockpit::trim_messages(messages);
     }
 
     update_business_chat_tracking_fields(obj);
@@ -849,6 +856,29 @@ pub(super) fn enrich_queue_projection_payload(
         "task_status".to_string(),
         Value::String(normalize_queue_status(route_status).to_string()),
     );
+    // Explicit nulls clear prior values in the merging RxDB writer.
+    for (key, value) in [
+        ("lease_expires_at", &task.lease_expires_at),
+        ("lease_worker_id", &task.lease_worker_id),
+        ("first_pending_at", &task.first_pending_at),
+        ("failure_class", &task.failure_class),
+        ("retry_not_before", &task.retry_not_before),
+        ("hold_reason", &task.hold_reason),
+        ("wait_entity_type", &task.wait_entity_type),
+        ("wait_entity_id", &task.wait_entity_id),
+        ("crew_member_id", &task.crew_member_id),
+    ] {
+        object.insert(key.to_string(), serde_json::json!(value));
+    }
+    object.insert(
+        "failure_attempt_count".into(),
+        Value::from(task.failure_attempt_count),
+    );
+    object.insert(
+        "priority_time_credit_hours".into(),
+        Value::from(task.priority_time_credit_hours),
+    );
+    object.insert("attempt".into(), Value::from(task.attempt));
     if let Some(note) = task
         .status_note
         .as_deref()
@@ -1020,15 +1050,41 @@ pub fn repair_queue_projections(
     let apply = options.apply;
     let conn = open_store(root)?;
     let now = now_ms() as i64;
+    let retention = super::harness_cockpit::queue_retention(root)?;
+    let core_path = crate::paths::core_db(root);
+    let has_routing = if core_path.is_file() {
+        let source = rusqlite::Connection::open_with_flags(
+            &core_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )?;
+        source.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='communication_routing_state')",[],|row|row.get::<_,bool>(0))?
+    } else {
+        false
+    };
+    if has_routing {
+        conn.execute(
+            "ATTACH DATABASE ?1 AS cockpit_repair_core",
+            [core_path.to_string_lossy().as_ref()],
+        )?;
+    } else {
+        conn.execute_batch("ATTACH DATABASE ':memory:' AS cockpit_repair_core; CREATE TABLE cockpit_repair_core.communication_routing_state(message_key TEXT PRIMARY KEY,route_status TEXT,updated_at TEXT);")?;
+    }
     let projection_rows = {
         let mut statement = conn.prepare(
-            "SELECT record_id, payload_json, updated_at_ms
+            "WITH eligible AS (
+                SELECT message_key FROM cockpit_repair_core.communication_routing_state WHERE route_status NOT IN ('handled','failed','cancelled')
+                UNION ALL
+                SELECT message_key FROM (SELECT message_key FROM cockpit_repair_core.communication_routing_state WHERE route_status IN ('handled','failed','cancelled') ORDER BY updated_at DESC,message_key DESC LIMIT ?1)
+                UNION ALL
+                SELECT record_id FROM (SELECT record_id FROM business_records p WHERE collection='ctox_queue_tasks' AND deleted=0 AND NOT EXISTS(SELECT 1 FROM cockpit_repair_core.communication_routing_state r WHERE r.message_key=p.record_id) ORDER BY updated_at_ms DESC,record_id DESC LIMIT ?1)
+             )
+             SELECT record_id, payload_json, updated_at_ms
              FROM business_records
-             WHERE collection = 'ctox_queue_tasks'
-               AND deleted = 0
-             ORDER BY updated_at_ms ASC, record_id ASC",
+             WHERE collection = 'ctox_queue_tasks' AND deleted = 0 AND record_id IN (SELECT message_key FROM eligible)
+             ORDER BY updated_at_ms ASC, record_id ASC
+             LIMIT (SELECT COUNT(*) FROM eligible)",
         )?;
-        let rows = statement.query_map([], |row| {
+        let rows = statement.query_map([retention], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -1043,6 +1099,7 @@ pub fn repair_queue_projections(
     let mut touched_commands = HashSet::new();
     let mut rxdb_writers = RxdbProjectionWriterCache::new(root);
 
+    let scanned_task_projections = projection_rows.len();
     for (task_id, payload_json, projection_updated_at_ms) in projection_rows {
         let mut payload = serde_json::from_str::<Value>(&payload_json).unwrap_or_else(|_| {
             serde_json::json!({
@@ -1271,6 +1328,8 @@ pub fn repair_queue_projections(
     Ok(serde_json::json!({
         "ok": true,
         "apply": apply,
+        "queue_tasks_retention": retention,
+        "scanned_task_projections": scanned_task_projections,
         "counts": counters,
         "actions": actions,
         "touched_commands": touched_commands.into_iter().collect::<Vec<_>>(),
@@ -1401,6 +1460,18 @@ pub(crate) mod tests {
             created_at: "2026-08-01T00:00:00Z".to_string(),
             sort_at: "2026-08-01T00:00:00Z".to_string(),
             updated_at: "2026-08-01T00:00:00Z".to_string(),
+            lease_expires_at: None,
+            lease_worker_id: None,
+            first_pending_at: None,
+            failure_class: None,
+            failure_attempt_count: 0,
+            retry_not_before: None,
+            hold_reason: None,
+            wait_entity_type: None,
+            wait_entity_id: None,
+            priority_time_credit_hours: 0,
+            attempt: 0,
+            crew_member_id: None,
         };
 
         let success_with_old_wording =
@@ -1427,6 +1498,57 @@ pub(crate) mod tests {
             "leased",
             "terminal-looking prose must not override a non-terminal structured status"
         );
+    }
+
+    #[test]
+    fn repair_dry_run_bounds_legacy_orphan_candidates_without_mutating_views() -> anyhow::Result<()>
+    {
+        let root = tempdir()?;
+        crate::inference::runtime_env::set_runtime_env_value(
+            root.path(),
+            super::super::harness_cockpit::QUEUE_RETENTION_KEY,
+            "3",
+        )?;
+        let conn = open_store(root.path())?;
+        for index in 0..20 {
+            let id = format!("legacy-{index:03}");
+            upsert_business_record(
+                &conn,
+                "ctox_queue_tasks",
+                &id,
+                index,
+                serde_json::json!({"id":id,"status":"failed","route_status":"failed","task_status":"failed","updated_at_ms":index}),
+            )?;
+        }
+        let report =
+            repair_queue_projections(root.path(), QueueProjectionRepairOptions { apply: false })?;
+        assert_eq!(report["scanned_task_projections"], 3);
+        assert_eq!(report["queue_tasks_retention"], 3);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM business_records WHERE collection='ctox_queue_tasks' AND deleted=0",[],|r|r.get::<_,i64>(0))?,20);
+        Ok(())
+    }
+
+    #[test]
+    fn repair_dry_run_accepts_initialized_core_without_queue_schema() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        let core_path = crate::paths::core_db(root.path());
+        std::fs::create_dir_all(core_path.parent().unwrap())?;
+        let core = rusqlite::Connection::open(&core_path)?;
+        core.execute_batch("CREATE TABLE startup_marker(id INTEGER PRIMARY KEY);")?;
+        let report =
+            repair_queue_projections(root.path(), QueueProjectionRepairOptions { apply: false })?;
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["scanned_task_projections"], 0);
+        assert_eq!(
+            core.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name='communication_routing_state'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )?,
+            0,
+            "dry-run must not initialize canonical queue state"
+        );
+        Ok(())
     }
 
     #[test]

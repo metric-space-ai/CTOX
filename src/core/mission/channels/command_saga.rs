@@ -1546,6 +1546,7 @@ pub(crate) fn persist_business_command_worker_result(
         now_ms,
     )?;
     tx.commit()?;
+    crate::business_os::harness_cockpit::schedule_refresh(root);
     Ok(true)
 }
 

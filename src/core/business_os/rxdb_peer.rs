@@ -8668,7 +8668,41 @@ fn migrate_additive_native_rxdb_collection_versions(root: &Path) -> anyhow::Resu
     let mut migrated_tables = 0usize;
     let mut migrated_rows = 0usize;
     let mut verified_rows = 0usize;
-    for entry in runtime_module_collection_entries_for_root(root) {
+    let mut entries = runtime_module_collection_entries_for_root(root);
+    entries.retain(|entry| {
+        !matches!(
+            entry.name.as_str(),
+            "business_commands" | "ctox_queue_tasks" | "ctox_runs"
+        )
+    });
+    // Packaged cockpit schema upgrades use the same copy/verify transaction as installed modules.
+    // Only these explicitly versioned collections are opted in; no blanket schema rewrite.
+    let packaged: Value = serde_json::from_str(include_str!(
+        "../../apps/business-os/modules/ctox/collections.schema.json"
+    ))?;
+    for name in ["business_commands", "ctox_queue_tasks", "ctox_runs"] {
+        let schema = schema_from_json(
+            business_os_schema_contract()
+                .get(name)
+                .context("missing packaged cockpit schema")?
+                .clone(),
+        );
+        let strategies = packaged
+            .pointer(&format!("/migration_strategies/{name}"))
+            .and_then(Value::as_object)
+            .context("missing packaged cockpit migration strategies")?;
+        let migration_strategies = strategies
+            .iter()
+            .map(|(version, spec)| Ok((version.parse::<i64>()?, spec.clone())))
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        entries.push(RuntimeModuleCollectionEntry {
+            name: name.to_string(),
+            schema,
+            sync_profile: RuntimeModuleSyncProfile::Eager,
+            migration_strategies,
+        });
+    }
+    for entry in entries {
         let target_version = i64::from(entry.schema.version);
         let target_table = rxdb_collection_version_table_name(&entry.name, target_version);
         let version_tables = rxdb_collection_version_tables(&conn, &entry.name)?;
@@ -8980,6 +9014,9 @@ fn business_record_projection_collections() -> Vec<String> {
                     // as generic business records — same rule as desktop_file_chunks.
                     | "business_module_source_blob_chunks"
                     | "ctox_runtime_settings"
+                    | "ctox_harness_events"
+                    | "ctox_harness_status"
+                    | "ctox_runs"
                     | "desktop_files"
                     | "desktop_file_chunks"
                     | "knowledge_tables"
@@ -8993,7 +9030,10 @@ fn business_record_projection_collections_for_root(root: &Path) -> Vec<String> {
     collections.extend(
         runtime_module_collection_entries_for_root(root)
             .into_iter()
-            .filter(|entry| matches!(entry.sync_profile, RuntimeModuleSyncProfile::Eager))
+            .filter(|entry| {
+                matches!(entry.sync_profile, RuntimeModuleSyncProfile::Eager)
+                    && !super::policy::is_cockpit_projection(&entry.name)
+            })
             .map(|entry| entry.name),
     );
     collections.sort();
@@ -9934,6 +9974,12 @@ pub(in crate::business_os) mod tests {
     #[test]
     fn business_record_projection_skips_transient_payload_collections() {
         let collections = business_record_projection_collections();
+        for name in ["ctox_harness_events", "ctox_harness_status", "ctox_runs"] {
+            assert!(
+                !collections.iter().any(|collection| collection == name),
+                "cockpit has a dedicated producer"
+            );
+        }
         assert!(!collections.iter().any(|name| name == "browser_frames"));
         assert!(!collections.iter().any(|name| name == "desktop_file_chunks"));
         assert!(!collections
@@ -11087,6 +11133,51 @@ pub(in crate::business_os) mod tests {
             &conn,
             &rxdb_collection_version_table_name(collection, 0)
         )?);
+        Ok(())
+    }
+
+    #[test]
+    fn packaged_cockpit_schema_migration_preserves_existing_documents() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("runtime"))?;
+        for (collection, old, new) in [
+            ("business_commands", 1, 2),
+            ("ctox_queue_tasks", 1, 2),
+            ("ctox_runs", 0, 1),
+        ] {
+            create_runtime_migration_source_table(root.path(), collection, old)?;
+            create_runtime_migration_source_table(root.path(), collection, new)?;
+            insert_runtime_migration_row(
+                root.path(),
+                collection,
+                old,
+                "kept",
+                100.0,
+                json!({"id":"kept","title":"Existing evidence","updated_at_ms":100}),
+            )?;
+        }
+        let migration = migrate_additive_native_rxdb_collection_versions(root.path())?;
+        assert_eq!(migration["verified_rows"], 3);
+        for (collection, version) in [
+            ("business_commands", 2),
+            ("ctox_queue_tasks", 2),
+            ("ctox_runs", 1),
+        ] {
+            let conn = Connection::open(store::rxdb_store_path(root.path()))?;
+            let table = rxdb_collection_version_table_name(collection, version);
+            let raw: String = conn.query_row(
+                &format!(
+                    "SELECT data FROM {} WHERE id='kept'",
+                    sqlite_quote_identifier(&table)
+                ),
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw)?["title"],
+                "Existing evidence"
+            );
+        }
         Ok(())
     }
 

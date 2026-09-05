@@ -232,6 +232,7 @@ pub fn record_api_model_usage_batch(root: &Path, records: &[ApiCostUsageRecord])
     }
     tx.commit()
         .context("failed to commit API model cost event batch")?;
+    crate::business_os::harness_cockpit::schedule_runs_refresh(root);
     Ok(records.len())
 }
 

@@ -266,7 +266,17 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 75] = [
+#[cfg(test)]
+#[path = "crew_cockpit_command_tests.rs"]
+mod crew_cockpit_tests;
+
+pub(super) const EXACT_CONTROL_TYPES: [&str; 81] = [
+    "ctox.queue.release",
+    "ctox.queue.block",
+    "ctox.queue.retry",
+    "ctox.queue.capacity",
+    "ctox.queue.pause",
+    "ctox.queue.abort_turn",
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -914,7 +924,30 @@ enum CentralCommandPolicyRequirement {
 impl CentralCommandPolicyRequirement {
     fn for_command(command: &BusinessCommand) -> Option<Self> {
         let command_type = command.command_type.as_str();
-        let fixed = if command_type == "web_stack.person_research" {
+        let fixed = if matches!(command_type, "ctox.queue.capacity" | "ctox.queue.pause") {
+            Some(CommandPolicyRequirement::workspace(
+                BusinessOsPermission::CtoxTaskManage,
+            ))
+        } else if matches!(
+            command_type,
+            "ctox.queue.release"
+                | "ctox.queue.block"
+                | "ctox.queue.retry"
+                | "ctox.queue.abort_turn"
+        ) {
+            Some(CommandPolicyRequirement::scoped(
+                BusinessOsPermission::CtoxTaskManage,
+                super::policy::BusinessOsScope::task(
+                    command
+                        .payload
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or(""),
+                    false,
+                    false,
+                ),
+            ))
+        } else if command_type == "web_stack.person_research" {
             Some(CommandPolicyRequirement::module(
                 BusinessOsPermission::DataRead,
                 &command.module,
@@ -1204,6 +1237,16 @@ fn dispatch_business_command(
     authorized_session: Option<&BusinessOsSession>,
 ) -> anyhow::Result<BusinessCommandDispatchOutcome> {
     match command.command_type.as_str() {
+        "ctox.queue.release"
+        | "ctox.queue.block"
+        | "ctox.queue.retry"
+        | "ctox.queue.capacity"
+        | "ctox.queue.pause"
+        | "ctox.queue.abort_turn" => {
+            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
+            super::harness_cockpit::control(root, command, session)
+                .map(BusinessCommandDispatchOutcome::Returned)
+        }
         "ctox.maintenance.client_ready"
         | "ctox.task.update"
         | "ctox.task.delete"
@@ -1631,15 +1674,6 @@ fn dispatch_business_command(
         | "ctox.source.diff" => {
             handle_source_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
-        "kundenpipeline.triage.write"
-        | "kundenpipeline.decision.request"
-        | "kundenpipeline.decision.resolve"
-        | "kundenpipeline.decision.answer"
-        | "kundenpipeline.mail.send"
-        | "kundenpipeline.delegate" => {
-            super::decision_hub::handle_command(root, command_id, command)
-                .map(BusinessCommandDispatchOutcome::Returned)
-        }
         "ctox.mailserver.get_config"
         | "ctox.mailserver.save_domain"
         | "ctox.mailserver.save_runtime"
@@ -1649,6 +1683,21 @@ fn dispatch_business_command(
             handle_mailserver_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         _ => {
+            // These existing native handlers are queued work, not immediate
+            // controls. Keep them in the queue fallback so the exact-control
+            // inventory and admission classifier describe the same contract.
+            if matches!(
+                command.command_type.as_str(),
+                "kundenpipeline.triage.write"
+                    | "kundenpipeline.decision.request"
+                    | "kundenpipeline.decision.resolve"
+                    | "kundenpipeline.decision.answer"
+                    | "kundenpipeline.mail.send"
+                    | "kundenpipeline.delegate"
+            ) {
+                return super::decision_hub::handle_command(root, command_id, command)
+                    .map(BusinessCommandDispatchOutcome::Returned);
+            }
             let accepted = record_command(root, command.clone())?;
             Ok(BusinessCommandDispatchOutcome::Returned(
                 serde_json::to_value(accepted)?,

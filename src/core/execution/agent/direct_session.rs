@@ -3122,6 +3122,7 @@ fn direct_session_progress_event(
     let elapsed_seconds = elapsed.as_secs();
     let cumulative_metadata = |extra: JsonValue| {
         serde_json::json!({
+            "turn_id": turn_id,
             "runtime": { "seconds": elapsed_seconds },
             "tool_call_count": *tool_call_count,
             "metrics_mode": "cumulative",
@@ -3136,6 +3137,7 @@ fn direct_session_progress_event(
                 "title": format!("Tool started: {tool_name}"),
                 "body_text": "",
                 "metadata": {
+                    "turn_id": turn_id,
                     "runtime": { "seconds": elapsed_seconds },
                     "tool_call_count": *tool_call_count,
                     "metrics_mode": "cumulative",
@@ -3154,6 +3156,7 @@ fn direct_session_progress_event(
                 "title": format!("Tool finished: {tool_name}"),
                 "body_text": "",
                 "metadata": {
+                    "turn_id": turn_id,
                     "runtime": { "seconds": elapsed_seconds },
                     "tool_call_count": *tool_call_count,
                     "metrics_mode": "cumulative",
@@ -3257,9 +3260,11 @@ fn direct_session_progress_event(
                 "title": "Model usage updated",
                 "body_text": "",
                 "metadata": {
+                    "turn_id": turn_id,
                     "usage": {
                         "input_tokens": info.total_token_usage.input_tokens,
                         "output_tokens": info.total_token_usage.output_tokens,
+                        "reasoning_output_tokens": info.total_token_usage.reasoning_output_tokens,
                         "last_input_tokens": info.last_token_usage.input_tokens,
                         "last_output_tokens": info.last_token_usage.output_tokens,
                         "total_tokens": info.total_token_usage.total_tokens,

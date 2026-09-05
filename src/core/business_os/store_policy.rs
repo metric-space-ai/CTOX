@@ -172,6 +172,17 @@ pub(super) fn evaluate_policy_with_explicit_grants(
     scope: &BusinessOsScope,
 ) -> anyhow::Result<PolicyDecision> {
     let decision = policy::evaluate(actor, permission, scope);
+    if scope
+        .scope_id
+        .as_deref()
+        .is_some_and(policy::is_cockpit_projection)
+        && matches!(
+            permission,
+            BusinessOsPermission::DataRead | BusinessOsPermission::DataWrite
+        )
+    {
+        return Ok(decision);
+    }
     if decision.allowed {
         return Ok(decision);
     }

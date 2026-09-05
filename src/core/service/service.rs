@@ -157,6 +157,9 @@ const BUSINESS_OS_APP_UNSTARTED_REQUEUE_COUNT_KEY: &str = "business_os_app_unsta
 const BUSINESS_OS_APP_UNSTARTED_REQUEUED_AT_KEY: &str = "business_os_app_unstarted_requeued_at";
 const CHANNEL_ROUTER_LEASE_OWNER: &str = "ctox-service";
 const QUEUE_PRESSURE_GUARD_THRESHOLD: usize = 20;
+pub(crate) fn queue_pressure_threshold() -> usize {
+    QUEUE_PRESSURE_GUARD_THRESHOLD
+}
 const QUEUE_GUARD_SOURCE_LABEL: &str = "queue-guard";
 const PLATFORM_EXPERTISE_KIND: &str = "platform-expertise-pass";
 const PLATFORM_IMPLEMENTATION_KIND: &str = "platform-implementation";
@@ -1360,10 +1363,18 @@ fn outbound_in_process_review_retry_allowed(job: &QueuedPrompt) -> bool {
 
 struct ServiceExitGuard {
     pid: u32,
+    root: PathBuf,
 }
 
 impl Drop for ServiceExitGuard {
     fn drop(&mut self) {
+        crate::business_os::harness_cockpit::publish_service_stopped(
+            &self.root,
+            SERVICE_PERFORMANCE_BOOT_ID
+                .get()
+                .cloned()
+                .unwrap_or_default(),
+        );
         eprintln!("ctox service exiting pid={}", self.pid);
     }
 }
@@ -1445,6 +1456,7 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     }
     let _exit_guard = ServiceExitGuard {
         pid: std::process::id(),
+        root: root.to_path_buf(),
     };
     eprintln!(
         "ctox service boot pid={} root={}",
@@ -1466,6 +1478,7 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     write_pid_file(root, std::process::id())?;
     let _ = write_service_performance_status_artifact(root);
     let state = Arc::new(Mutex::new(SharedState::default()));
+    publish_cockpit_worker_state(root, &lock_shared_state(&state));
     run_boot_state_invariant_check(root, &state);
     run_boot_auto_submitted_reclassifier(root, &state);
     release_stale_service_communication_leases_on_boot(root, &state);
@@ -2369,7 +2382,7 @@ fn run_appsec_pipeline_worker_tick(root: &Path, state: &Arc<Mutex<SharedState>>)
     if !lease_attempt.is_current() {
         return Ok(());
     }
-    let _activity = AppsecPipelineWorkerActivity::start(state, &task);
+    let _activity = AppsecPipelineWorkerActivity::start(root, state, &task);
     let output = crate::handle_appsec_pipeline_work(
         root,
         &[
@@ -2447,11 +2460,12 @@ fn appsec_pipeline_queue_task_state_dir(
 }
 
 struct AppsecPipelineWorkerActivity {
+    root: PathBuf,
     state: Arc<Mutex<SharedState>>,
 }
 
 impl AppsecPipelineWorkerActivity {
-    fn start(state: &Arc<Mutex<SharedState>>, task: &channels::QueueTaskView) -> Self {
+    fn start(root: &Path, state: &Arc<Mutex<SharedState>>, task: &channels::QueueTaskView) -> Self {
         {
             let mut shared = lock_shared_state(state);
             shared.worker_active_count = shared.worker_active_count.saturating_add(1);
@@ -2464,7 +2478,13 @@ impl AppsecPipelineWorkerActivity {
             }
             shared.last_progress_epoch_secs = current_epoch_secs();
         }
+        publish_cockpit_worker_state_with_task(
+            root,
+            &lock_shared_state(state),
+            Some(&task.message_key),
+        );
         Self {
+            root: root.to_path_buf(),
             state: state.clone(),
         }
     }
@@ -2482,6 +2502,7 @@ impl Drop for AppsecPipelineWorkerActivity {
             }
         }
         shared.last_progress_epoch_secs = current_epoch_secs();
+        publish_cockpit_worker_state(&self.root, &shared);
     }
 }
 
@@ -4644,6 +4665,10 @@ fn write_pid_file(root: &Path, pid: u32) -> Result<()> {
         .with_context(|| format!("failed to write service pid file {}", path.display()))
 }
 
+pub(crate) fn cockpit_service_running(root: &Path) -> Option<bool> {
+    read_pid_file(root).map(process_is_running)
+}
+
 fn read_pid_file(root: &Path) -> Option<u32> {
     let raw = std::fs::read_to_string(service_pid_path(root)).ok()?;
     raw.trim().parse::<u32>().ok()
@@ -5036,6 +5061,36 @@ impl BusinessOsAppQueueRecoverySummary {
     }
 }
 
+fn publish_cockpit_worker_state(root: &Path, shared: &SharedState) {
+    publish_cockpit_worker_state_with_task(root, shared, None);
+}
+fn publish_cockpit_worker_state_with_task(root: &Path, shared: &SharedState, extra: Option<&str>) {
+    let mut active_task_ids = shared
+        .active_worker_lease_keys
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    if let Some(task) = extra {
+        active_task_ids.push(task.to_string());
+    }
+    active_task_ids.sort();
+    active_task_ids.dedup();
+    crate::business_os::harness_cockpit::publish_worker_snapshot(
+        root,
+        crate::business_os::harness_cockpit::WorkerSnapshot {
+            service_running: true,
+            busy: shared.busy,
+            worker_active_count: shared.worker_active_count,
+            worker_phase: shared.worker_phase.clone(),
+            active_task_ids,
+            last_error: shared.last_error.clone(),
+            boot_id: SERVICE_PERFORMANCE_BOOT_ID
+                .get_or_init(|| uuid::Uuid::new_v4().to_string())
+                .clone(),
+        },
+    );
+}
+
 impl PromptWorkerActivity {
     fn start(root: &Path, state: &Arc<Mutex<SharedState>>, job: &QueuedPrompt) -> Self {
         {
@@ -5061,6 +5116,7 @@ impl PromptWorkerActivity {
             }
             shared.last_progress_epoch_secs = current_epoch_secs();
         }
+        publish_cockpit_worker_state(root, &lock_shared_state(state));
         let lease_heartbeat_stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let heartbeat_root = root.to_path_buf();
         let heartbeat_keys = job.leased_message_keys.clone();
@@ -5123,6 +5179,7 @@ impl PromptWorkerActivity {
         let mut shared = lock_shared_state(&self.state);
         shared.worker_phase = Some(format!("{source_label}: {phase}"));
         shared.last_progress_epoch_secs = current_epoch_secs();
+        publish_cockpit_worker_state(&self.root, &shared);
     }
 
     fn release_leased_keys_locked(&mut self, shared: &mut SharedState) {
@@ -5187,6 +5244,7 @@ impl Drop for PromptWorkerActivity {
             (leaked_message_keys, leaked_ticket_event_keys)
         };
 
+        publish_cockpit_worker_state(&self.root, &lock_shared_state(&self.state));
         let app_validation_candidate_keys = self.leased_message_keys.clone();
         let leaked_message_key_set: HashSet<String> = leaked_message_keys.iter().cloned().collect();
         let mut leaked_message_keys = leaked_message_keys;
@@ -5651,6 +5709,17 @@ fn record_prompt_worker_progress(
             })?;
     }
     if let Some(object) = metadata.as_object_mut() {
+        object.insert("attempt_id".into(), serde_json::json!(attempt_id));
+        object.insert("command_id".into(), serde_json::json!(command_id));
+        if let Ok(Some(task)) = channels::load_queue_task(root, task_id) {
+            object.insert("attempt".into(), serde_json::json!(task.attempt));
+        }
+        if let Ok(Some(progress)) = lcm::run_task_execution_progress_for_task(&db_path, task_id) {
+            object.insert(
+                "step_position".into(),
+                progress.get("current_step").cloned().unwrap_or(Value::Null),
+            );
+        }
         object.insert(
             "source_label".to_string(),
             Value::String(job.source_label.clone()),
@@ -6601,6 +6670,31 @@ fn start_prompt_worker(
                 }
                 _ => review_disposition,
             };
+            let review_reason = match &review_disposition {
+                CompletionReviewDisposition::Hold { summary, .. }
+                | CompletionReviewDisposition::NoSend { summary }
+                | CompletionReviewDisposition::RequeueInternalWork { summary, .. }
+                | CompletionReviewDisposition::TerminalQueueFailure { summary } => {
+                    Some(summary.as_str())
+                }
+                CompletionReviewDisposition::FeedbackRetry { review_summary, .. } => {
+                    Some(review_summary.as_str())
+                }
+                _ => None,
+            };
+            harness_flow::record_harness_flow_event_lossy(
+                &root,
+                harness_flow::RecordHarnessFlowEventRequest {
+                    event_kind: "cockpit.review",
+                    title: "Completion review",
+                    body_text: "",
+                    message_key: job.leased_message_keys.first().map(String::as_str),
+                    work_id: job.ticket_self_work_id.as_deref(),
+                    ticket_key: None,
+                    attempt_index: None,
+                    metadata: serde_json::json!({"attempt_id":attempt_id,"review":{"disposition":completion_review_disposition_label(&review_disposition),"hold_reason":review_reason}}),
+                },
+            );
             let mut review_requeue: Option<(String, String)> = None;
             let mut outcome_recovery_prompt: Option<QueuedPrompt> = None;
             let mut platform_pipeline_event: Option<String> = None;
@@ -16417,6 +16511,9 @@ fn begin_durable_queue_lease_attempt(
     state: &Arc<Mutex<SharedState>>,
     guard: DurableQueueDispatchGuard,
 ) -> Option<DurableQueueLeaseAttemptGuard> {
+    if crate::business_os::harness_cockpit::queue_is_paused(root) {
+        return None;
+    }
     let root = root.to_path_buf();
     let gate = DURABLE_QUEUE_LEASE_ATTEMPT_GATE.get_or_init(|| Mutex::new(BTreeMap::new()));
     let mut gate = gate.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -43249,6 +43346,18 @@ The previous controller turn is incomplete. Update these files now:\n\
             created_at: "2026-06-22T00:00:00Z".to_string(),
             sort_at: "2026-06-22T00:00:00Z".to_string(),
             updated_at: "2026-06-22T00:00:00Z".to_string(),
+            lease_expires_at: None,
+            lease_worker_id: None,
+            first_pending_at: None,
+            failure_class: None,
+            failure_attempt_count: 0,
+            retry_not_before: None,
+            hold_reason: None,
+            wait_entity_type: None,
+            wait_entity_id: None,
+            priority_time_credit_hours: 0,
+            attempt: 0,
+            crew_member_id: None,
         };
         assert!(queue_task_is_synthetic_e2e_bench_leftover(&synthetic));
 
@@ -43271,6 +43380,18 @@ The previous controller turn is incomplete. Update these files now:\n\
             created_at: "2026-06-22T00:00:00Z".to_string(),
             sort_at: "2026-06-22T00:00:00Z".to_string(),
             updated_at: "2026-06-22T00:00:00Z".to_string(),
+            lease_expires_at: None,
+            lease_worker_id: None,
+            first_pending_at: None,
+            failure_class: None,
+            failure_attempt_count: 0,
+            retry_not_before: None,
+            hold_reason: None,
+            wait_entity_type: None,
+            wait_entity_id: None,
+            priority_time_credit_hours: 0,
+            attempt: 0,
+            crew_member_id: None,
         };
         assert!(!queue_task_is_synthetic_e2e_bench_leftover(&normal));
     }
