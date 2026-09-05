@@ -162,6 +162,72 @@ fn all_cockpit_controls_deny_user_before_effects_and_audit_admin() -> anyhow::Re
 }
 
 #[test]
+fn cockpit_requested_audit_excludes_large_unknown_fields_and_caps_text() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let (token, _) = super::super::store::issue_business_os_capability_token_for_managed_user(
+        root.path(),
+        "audit-admin",
+        "Audit Admin",
+        "admin",
+        now_ms() as i64,
+    )?;
+    for (id, reason, succeeds) in [
+        ("bounded-ok", "pause".to_string(), true),
+        ("bounded-invalid", "ä".repeat(1500), false),
+    ] {
+        let request = json!({
+            "id":id,"command_id":id,"module":"ctox","command_type":"ctox.queue.pause",
+            "payload":{
+                "paused":true,"reason":reason,"note":"界".repeat(1500),
+                "priority":{"sensitive":"not text"},"workers":{"sensitive":"not an integer"},
+                "foreign_secret":"x".repeat(1024 * 1024)
+            },
+            "client_context":{"capability_token":token,"actor":{"id":"audit-admin","role":"admin"}}
+        });
+        let result = accept_rxdb_business_command_with_origin(
+            root.path(),
+            request,
+            CommandOrigin::ReplicatedPeer,
+        );
+        if succeeds {
+            assert_eq!(result?["ok"], true);
+        } else {
+            assert!(result
+                .expect_err("invalid reason must fail validation")
+                .to_string()
+                .contains("reason exceeds 1000 characters"));
+        }
+    }
+    let core = rusqlite::Connection::open(crate::paths::core_db(root.path()))?;
+    let mut statement = core.prepare(
+        "SELECT metadata_json FROM ctox_harness_flow_events
+         WHERE event_kind = 'cockpit.control' AND json_extract(metadata_json, '$.stage') = 'requested'",
+    )?;
+    let audits = statement
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert_eq!(
+        audits.len(),
+        2,
+        "both valid and invalid intents are audited"
+    );
+    for raw in audits {
+        assert!(raw.len() < 8192, "audit grew to {} bytes", raw.len());
+        let audit: Value = serde_json::from_str(&raw)?;
+        assert_eq!(audit["actor"], "audit-admin");
+        let payload = audit["payload"].as_object().unwrap();
+        assert_eq!(payload.len(), 3);
+        assert!(!payload.contains_key("foreign_secret"));
+        assert!(!payload.contains_key("priority"));
+        assert!(!payload.contains_key("workers"));
+        assert_eq!(payload["paused"], true);
+        assert!(payload["reason"].as_str().unwrap().chars().count() <= 1000);
+        assert_eq!(payload["note"].as_str().unwrap().chars().count(), 1000);
+    }
+    Ok(())
+}
+
+#[test]
 fn ordinary_queue_block_preserves_the_harness_hold_reason() -> anyhow::Result<()> {
     let root = tempfile::tempdir()?;
     let task = task(root.path())?;

@@ -1266,25 +1266,42 @@ Runs carry `task_id`, `command_id`, `work_id`, `crew_member_id`,
 records; missing prices/cost events remain null and later billing refreshes the
 same run. Indexes are `[task_id,finished_at_ms]`, `finished_at_ms`, `crew_member_id`.
 These indexes and both event indexes also exist on the native projection store.
-Invalid source timestamps and the resulting unknown `elapsed_ms` remain null.
+Invalid optional start timestamps and the resulting unknown `elapsed_ms` remain null.
+Invalid required/index timestamps cause the event/run document to be skipped, with
+one diagnostic per root and collection. Source rows remain intact for replay after
+repair; `created_at_ms`, `updated_at_ms` and run `finished_at_ms` are never emitted
+as null.
 Event-task and run queries use fixed-size keyset pages, including active runs.
 There is no separate `attempt_id` alias in the run contract; `id` is the attempt ID.
 
 Admin/Chef and Founder may read events, status and runs; User may not. These three
 collections are server-authored: direct writes are denied for every role, even
 with an explicit data grant. This decision is enforced centrally and by the
-native peer write hook. Queue controls go through `ctox.task.manage`: exact
+native peer write hook. Default and peer-start legacy grant migrations exclude
+these cockpit collections entirely; they do not mint otherwise inert sync grants.
+Queue controls go through `ctox.task.manage`: exact
 commands `ctox.queue.release {task_id,priority?,note?}`, `.block {task_id,reason}`,
 `.retry {task_id}`, `.capacity {workers}` (1–8), `.pause {paused,reason?}`, and
 `.abort_turn {task_id}`. Release/block/retry/abort use task scope, capacity/pause
 workspace scope. Controls preserve existing review/validation guards and record
-the authenticated actor. Each control persists its own terminal command receipt,
+the authenticated actor. Requested-audit payloads contain only typed `task_id`,
+`priority`, `workers`, `paused`, `reason`, and `note`; audit text is capped at
+1024 characters for task IDs, 16 for priority, and 1000 each for reason/note.
+Unknown fields and wrongly typed values are excluded even when validation fails.
+Each control persists its own terminal command receipt,
 so duplicate command IDs replay the outcome without repeating the action. The
 target task is not the control's `execution_task_id`.
 Release/block/retry reject leased tasks. Release without `note` preserves the
 existing status note; blocking a currently running slice is not supported.
-A terminal Business OS aggregate cannot be reopened by
-release/retry; retrying such work requires a new command. Abort currently returns
+Every linked Business OS aggregate must allow release: a single validating or
+terminal aggregate blocks release/retry regardless of link order; retrying terminal
+work requires a new command. Task IDs are trimmed consistently before policy and
+execution. PR-3 must not infer queue-control authority from the browser helper's
+`owned` fallback: these commands use native `BusinessOsScope::task(id, false, false)`
+and do not infer ownership. A browser `owned=true` hint alone does not authorize them.
+The current core schema additionally enforces one link per task; the release guard
+also handles multiple links defensively without changing that unique constraint.
+Abort currently returns
 a failed command receipt with `result.status = "unsupported"` and `result.reason`.
 The read/write restriction also applies to MCP:
 module and record grants cannot bypass a cockpit collection denial.

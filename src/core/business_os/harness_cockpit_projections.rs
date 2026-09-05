@@ -280,6 +280,25 @@ pub(crate) fn refresh_after_finalization(db_path: &Path) {
     }
 }
 
+/// Required/index timestamps must remain numbers. Keep malformed documents in
+/// the source ledger for replay after repair; log once per root and collection,
+/// rather than retaining an unbounded set of individual bad record IDs.
+fn required_projection_millis(root: &Path, collection: &'static str, value: &str) -> Option<i64> {
+    let parsed = millis(value);
+    if parsed.is_none() {
+        static REPORTED: OnceLock<Mutex<BTreeSet<(PathBuf, &'static str)>>> = OnceLock::new();
+        if REPORTED
+            .get_or_init(|| Mutex::new(BTreeSet::new()))
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .insert((root.to_path_buf(), collection))
+        {
+            eprintln!("[ctox cockpit] {}: skipping {collection} documents with invalid required timestamps; source evidence remains replayable", root.display());
+        }
+    }
+    parsed
+}
+
 fn millis(value: &str) -> Option<i64> {
     // LCM finalizations use epoch-millisecond strings; flow/routing use RFC3339.
     if let Ok(value) = value.parse::<i64>() {
@@ -476,7 +495,7 @@ fn event_kind(kind: &str) -> Option<&'static str> {
 const PROJECTION_PAGE_SIZE: i64 = 128;
 
 fn project_events(
-    _root: &Path,
+    root: &Path,
     conn: &Connection,
     writer: &mut BusinessProjectionWriter,
 ) -> Result<()> {
@@ -530,7 +549,11 @@ fn project_events(
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             for (id, kind, title, attempt, metadata, created_at) in events {
                 let metadata: Value = serde_json::from_str(&metadata)?;
-                let created_at_ms = millis(&created_at);
+                let Some(created_at_ms) =
+                    required_projection_millis(root, "ctox_harness_events", &created_at)
+                else {
+                    continue;
+                };
                 let usage = metadata.get("usage").unwrap_or(&Value::Null);
                 let attempt_id = metadata.get("attempt_id").and_then(Value::as_str);
                 let attempt = attempt.or_else(|| metadata.get("attempt").and_then(Value::as_i64));
@@ -553,7 +576,7 @@ fn project_events(
                 // Tool payloads and raw reasoning stay in the authoritative ledger.
                 writer.upsert_source_projection(
                     "ctox_harness_events", &id,
-                    created_at_ms.unwrap_or_else(|| Utc::now().timestamp_millis()),
+                    created_at_ms,
                     json!({
                         "id":id,"task_id":task,"command_id":metadata.get("command_id"),"attempt":attempt,
                         "kind":event_kind(&kind),"title":title,"tool_type":metadata.pointer("/tool/type"),
@@ -614,7 +637,7 @@ fn event_step_position(
 }
 
 fn project_runs(
-    _root: &Path,
+    root: &Path,
     conn: &Connection,
     writer: &mut BusinessProjectionWriter,
 ) -> Result<()> {
@@ -677,11 +700,12 @@ fn project_runs(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
             let started_ms = millis(started.as_deref().unwrap_or(&created));
-            let finished_ms = millis(&finished);
+            let Some(finished_ms) = required_projection_millis(root, "ctox_runs", &finished) else {
+                continue;
+            };
             let mut metrics = run_metrics(conn, &id)?;
-            metrics["elapsed_ms"] = json!(finished_ms
-                .zip(started_ms)
-                .map(|(finished, started)| finished.saturating_sub(started).max(0)));
+            metrics["elapsed_ms"] =
+                json!(started_ms.map(|started| finished_ms.saturating_sub(started).max(0)));
             let review: Option<String> = conn
                 .query_row(
                     "SELECT json_extract(metadata_json,'$.review') FROM ctox_harness_flow_events
@@ -696,7 +720,7 @@ fn project_runs(
                 .and_then(|r| serde_json::from_str::<Value>(&r).ok())
                 .unwrap_or(json!({"disposition":null,"hold_reason":null}));
             writer.upsert_source_projection(
-                "ctox_runs", &id, finished_ms.unwrap_or_else(|| Utc::now().timestamp_millis()),
+                "ctox_runs", &id, finished_ms,
                 json!({
                     "id":id,"task_id":task,"command_id":command_id,"work_id":work,"crew_member_id":null,
                     "status":status,"agent_outcome":outcome,"started_at_ms":started_ms,"finished_at_ms":finished_ms,

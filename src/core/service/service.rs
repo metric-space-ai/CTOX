@@ -5715,6 +5715,8 @@ fn record_prompt_worker_progress(
             object.insert("attempt".into(), attempt.clone());
         }
         if !task_id.is_empty() {
+            // A held queue lease is eligible here; the pump applies routing,
+            // queue-identity and retention filters without another turn-path read.
             object.insert("cockpit_eligible".into(), Value::Bool(true));
         }
         object.insert(

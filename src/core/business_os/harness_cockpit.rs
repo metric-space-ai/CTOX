@@ -104,7 +104,7 @@ pub(super) fn control(
             work_id: None,
             ticket_key: None,
             attempt_index: None,
-            metadata: json!({"actor":session_user_id(session),"command_type":command.command_type,"stage":"requested","payload":command.payload}),
+            metadata: json!({"actor":session_user_id(session),"command_type":command.command_type,"stage":"requested","payload":control_audit_payload(&command.payload)}),
         },
     )?;
     let result = (|| -> Result<Value> {
@@ -209,6 +209,32 @@ pub(super) fn control(
     );
     schedule_refresh(root);
     result
+}
+
+/// Intent is recorded before validation, so never copy arbitrary payload values.
+/// Bound even recognized text and only accept scalar values of the expected type.
+fn control_audit_payload(payload: &Value) -> Value {
+    let mut audit = serde_json::Map::new();
+    for (field, max_chars) in [
+        ("task_id", 1024),
+        ("priority", 16),
+        ("reason", 1000),
+        ("note", 1000),
+    ] {
+        if let Some(value) = payload.get(field).and_then(Value::as_str) {
+            audit.insert(
+                field.into(),
+                Value::String(value.trim().chars().take(max_chars).collect()),
+            );
+        }
+    }
+    if let Some(workers) = payload.get("workers").and_then(Value::as_u64) {
+        audit.insert("workers".into(), json!(workers));
+    }
+    if let Some(paused) = payload.get("paused").and_then(Value::as_bool) {
+        audit.insert("paused".into(), json!(paused));
+    }
+    Value::Object(audit)
 }
 
 fn optional_text(payload: &Value, field: &str, max: usize) -> Result<Option<String>> {

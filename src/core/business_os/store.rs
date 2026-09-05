@@ -15599,6 +15599,7 @@ pub(super) fn ensure_legacy_collection_grants(
         if collection.is_empty()
             || policy::ADMIN_ONLY_COLLECTIONS.contains(&collection)
             || collection == "ctox_queue_tasks"
+            || policy::is_cockpit_projection(collection)
         {
             continue;
         }

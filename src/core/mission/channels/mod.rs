@@ -3345,6 +3345,31 @@ pub(crate) fn control_queue_task(
     update_queue_task_with_optional_terminal_policy_grant(root, request, None, reset_failure, true)
 }
 
+/// Every linked command must permit release, regardless of link insertion order.
+fn ensure_linked_commands_allow_queue_release(conn: &Connection, task_id: &str) -> Result<()> {
+    let (validating, terminal_status): (bool, Option<String>) = conn.query_row(
+        "SELECT COALESCE(MAX(aggregate.execution_phase = 'validating'), 0),
+                MAX(CASE WHEN aggregate.execution_phase = 'terminal'
+                         THEN aggregate.terminal_status END)
+         FROM business_command_task_links link
+         JOIN business_command_aggregates aggregate
+           ON aggregate.command_id = link.command_id
+         WHERE link.task_id = ?1",
+        [task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    anyhow::ensure!(
+        !validating,
+        "cannot release queue task `{task_id}` while a linked Business OS command is validating; terminalization or an atomic completion hold must resolve it"
+    );
+    anyhow::ensure!(
+        terminal_status.is_none(),
+        "cannot release queue task `{task_id}` for terminal Business OS command status `{}`; submit a new command to retry",
+        terminal_status.as_deref().unwrap_or_default()
+    );
+    Ok(())
+}
+
 fn update_queue_task_with_optional_terminal_policy_grant(
     root: &Path,
     request: QueueTaskUpdateRequest,
@@ -3363,29 +3388,7 @@ fn update_queue_task_with_optional_terminal_policy_grant(
         .map(canonical_queue_route_status)
         .transpose()?;
     if requested_route_status.is_some_and(QueueRouteStatus::is_pending) {
-        let command_state = conn
-            .query_row(
-                "SELECT aggregate.execution_phase, aggregate.terminal_status
-                 FROM business_command_task_links link
-                 JOIN business_command_aggregates aggregate
-                   ON aggregate.command_id = link.command_id
-                 WHERE link.task_id = ?1",
-                params![request.message_key],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        if let Some((phase, terminal_status)) = command_state {
-            anyhow::ensure!(
-                phase != "validating",
-                "cannot release queue task `{}` while its Business OS command is validating; terminalization or an atomic completion hold must resolve it",
-                request.message_key
-            );
-            anyhow::ensure!(
-                phase != "terminal",
-                "cannot release queue task `{}` for terminal Business OS command status `{terminal_status}`; submit a new command to retry",
-                request.message_key
-            );
-        }
+        ensure_linked_commands_allow_queue_release(&conn, &request.message_key)?;
     }
     let current_metadata = queue_metadata_object(&current.metadata);
     let title = request
@@ -3483,11 +3486,7 @@ fn update_queue_task_with_optional_terminal_policy_grant(
             );
         }
         if releases_deferred_work {
-            let phase:Option<String>=tx.query_row("SELECT a.execution_phase FROM business_command_task_links l JOIN business_command_aggregates a ON a.command_id=l.command_id WHERE l.task_id=?1",[&current.message_key],|row|row.get(0)).optional()?;
-            anyhow::ensure!(
-                !matches!(phase.as_deref(), Some("validating" | "terminal")),
-                "cockpit release cannot reopen a validating or terminal Business OS command"
-            );
+            ensure_linked_commands_allow_queue_release(&tx, &current.message_key)?;
         }
     }
     upsert_communication_message_tx(

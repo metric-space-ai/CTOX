@@ -108,6 +108,64 @@ fn event_step_uses_the_plan_at_emission_and_unknown_eligibility_replays() -> Res
 }
 
 #[test]
+fn invalid_required_projection_times_skip_documents_and_replay_after_repair() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute(
+        "INSERT INTO communication_routing_state VALUES('task','leased','2026-01-01T00:00:00Z')",
+        [],
+    )?;
+    conn.execute("INSERT INTO ctox_harness_flow_events VALUES('bad-event','worker.phase','Phase','','task',NULL,NULL,'{}','bad')", [])?;
+    conn.execute("INSERT INTO worker_attempt_finalizations VALUES('bad-run','work','failed','failed','bad','bad','bad',NULL,0)", [])?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    for _ in 0..2 {
+        project_events(root.path(), &conn, &mut writer)?;
+        project_runs(root.path(), &conn, &mut writer)?;
+        let count: i64 = store::open_store(root.path())?.query_row(
+            "SELECT COUNT(*) FROM business_records WHERE collection IN ('ctox_harness_events','ctox_runs') AND deleted=0", [], |row| row.get(0))?;
+        assert_eq!(
+            count, 0,
+            "invalid required/index timestamps must not reach replication"
+        );
+    }
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM ctox_harness_flow_events", [], |row| {
+            row.get::<_, i64>(0)
+        })?,
+        1
+    );
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM worker_attempt_finalizations",
+            [],
+            |row| row.get::<_, i64>(0)
+        )?,
+        1
+    );
+    conn.execute(
+        "UPDATE ctox_harness_flow_events SET created_at='2026-01-01T00:00:00Z'",
+        [],
+    )?;
+    conn.execute("UPDATE worker_attempt_finalizations SET terminal_at='1767225603000', updated_at='1767225603000'", [])?;
+    let before_replay = Utc::now().timestamp_millis();
+    project_events(root.path(), &conn, &mut writer)?;
+    project_runs(root.path(), &conn, &mut writer)?;
+    let event = record(root.path(), "ctox_harness_events", "bad-event")?;
+    assert_eq!(event["created_at_ms"], 1767225600000_i64);
+    // The writer stamps observation time, independently of source creation time.
+    assert!(event["updated_at_ms"]
+        .as_i64()
+        .is_some_and(|stamp| (before_replay..=Utc::now().timestamp_millis()).contains(&stamp)));
+    let run = record(root.path(), "ctox_runs", "bad-run")?;
+    assert_eq!(run["finished_at_ms"], 1767225603000_i64);
+    assert!(run["updated_at_ms"]
+        .as_i64()
+        .is_some_and(|stamp| (before_replay..=Utc::now().timestamp_millis()).contains(&stamp)));
+    assert!(run["started_at_ms"].is_null());
+    assert!(run["metrics"]["elapsed_ms"].is_null());
+    Ok(())
+}
+
+#[test]
 fn invalid_run_times_remain_unknown_instead_of_epoch_sized_elapsed() -> Result<()> {
     let (root, conn) = setup()?;
     conn.execute("INSERT INTO worker_attempt_finalizations VALUES('invalid','work','failed','failed','bad','1767225603000','1767225603000',NULL,0)", [])?;

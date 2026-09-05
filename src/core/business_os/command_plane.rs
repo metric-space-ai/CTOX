@@ -942,7 +942,8 @@ impl CentralCommandPolicyRequirement {
                         .payload
                         .get("task_id")
                         .and_then(Value::as_str)
-                        .unwrap_or(""),
+                        .unwrap_or("")
+                        .trim(),
                     false,
                     false,
                 ),

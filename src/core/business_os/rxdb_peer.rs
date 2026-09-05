@@ -13221,6 +13221,56 @@ pub(in crate::business_os) mod tests {
         .map_err(|err| anyhow::anyhow!("open test Business OS RxDB database: {err}"))
     }
 
+    #[tokio::test]
+    async fn cockpit_bring_up_materializes_no_legacy_grants() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        // Capability issuance invokes the default-schema grant migration first.
+        store::issue_business_os_capability_token_for_managed_user(
+            root.path(),
+            "cockpit-founder",
+            "Cockpit Founder",
+            "founder",
+            1,
+        )?;
+        let database = open_test_database(store::rxdb_store_path(root.path())).await?;
+        // Keep the full grant input from peer bring-up, but open only the relevant
+        // collections: unrelated per-collection SQLite pollers are not under test.
+        let mut creators = collection_creators_for_root(root.path());
+        let names = creators.keys().cloned().collect::<Vec<_>>();
+        creators.retain(|name, _| {
+            super::super::policy::is_cockpit_projection(name) || name == "business_module_catalog"
+        });
+        let (collections, failures) = database.add_collections_tolerant(creators).await?;
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(collections.len(), 4);
+        for name in ["ctox_harness_events", "ctox_harness_status", "ctox_runs"] {
+            assert!(names.iter().any(|entry| entry == name), "missing {name}");
+        }
+        let conn = store::open_store(root.path())?;
+        for _ in 0..2 {
+            store::ensure_legacy_collection_grants(root.path(), &names)?;
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM business_permission_grants
+                 WHERE scope_id LIKE 'ctox_harness_%' OR scope_id = 'ctox_runs'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                count, 0,
+                "default grants and repeated peer bring-up must exclude cockpit"
+            );
+        }
+        let ordinary: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_permission_grants
+             WHERE scope_id = 'business_module_catalog' AND active = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(ordinary > 0, "ordinary-data migration must still run");
+        database.close().await?;
+        Ok(())
+    }
+
     #[test]
     fn open_database_does_not_close_existing_business_os_instance() {
         let root = tempfile::tempdir().expect("temp root");
