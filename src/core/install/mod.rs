@@ -3608,7 +3608,7 @@ fn backup_state_root(state_root: &Path) -> Result<PathBuf> {
     // SQLite files locked for as long as a session runs. Backing them up buys
     // nothing and made every upgrade abort on a live guest (welsch,
     // 2026-08-20: "state backup aborted ... first_party_sets.db").
-    // 03.09.2026 auf THESEN: derselbe Abbruch noch einmal, nur einen Ordner
+    // 03.09.2026 auf einem Kundenmandanten: derselbe Abbruch noch einmal, nur einen Ordner
     // weiter. Die AUFNAHME-Profile liegen unter `browser/captures/<id>/
     // chrome-profile` und waren nicht ausgenommen; ein laufender Scrape hielt
     // `PowerBookmarks.db` gesperrt und das Upgrade brach ab, bevor irgendetwas

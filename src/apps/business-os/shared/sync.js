@@ -112,7 +112,7 @@ const UNREGISTERED_SWEEP_RETRY_MS = 15000;
 const STALLED_RECONNECT_MIN_AGE_MS = 30000;
 const COLLECTION_START_QUEUE_STEP_TIMEOUT_MS = 3_000;
 const COLLECTION_RESTART_GAP_MS = 500;
-// Feldmessung 04.09.2026 (THESEN): sieben Kollektionen standen dauerhaft auf
+// Feldmessung 04.09.2026 (Kundenmandant): sieben Kollektionen standen dauerhaft auf
 // initialReplicationState 'pending' und durchliefen wiederholt 'restarting'.
 // Ohne Herkunftsvermerk am Datensatz laesst sich nicht belegen, WELCHER Pfad
 // den raumweiten Neustart ausloest. Der Zaehler ist reine Diagnose.

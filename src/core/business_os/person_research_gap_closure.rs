@@ -653,7 +653,7 @@ fn validate_task_correlation(
 /// Rettet die Arbeit einer Recherche, deren Rueckschreiben in Details gegen den
 /// Vertrag verstoesst.
 ///
-/// Gemessen am 03.09.2026 auf THESEN: von 19 Chemie-Firmen endeten 14 als
+/// Gemessen am 03.09.2026 auf einem Kundenmandanten: von 19 Chemie-Firmen endeten 14 als
 /// "failed", obwohl die Recherche gelaufen war - eine Firma hatte 19 Felder und
 /// 32 Feldstatus und verlor trotzdem alles, weil EIN Beleg keine http-URL trug.
 /// Die haeufigsten Gruende (12 x person_key ungleich, 7 x person_key fehlt,
@@ -816,7 +816,7 @@ fn sanitize_research_writeback(
                     continue;
                 }
             }
-            // Am 03.09.2026 auf THESEN nachgezaehlt: von 265 als "verified"
+            // Am 03.09.2026 auf einem Kundenmandanten nachgezaehlt: von 265 als "verified"
             // gemeldeten Feldern trugen 56 nur EINE Quelle und 100 weniger als
             // zwei verschiedene Quell-Hosts. Der Vertrag verlangt zwei
             // unabhaengige Hosts - geprueft wurde das aber nur auf dem

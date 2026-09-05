@@ -7978,7 +7978,7 @@ fn repair_legacy_business_command_revisions(database_path: &Path) -> anyhow::Res
 /// `clamp_projected_document_to_wire_budget` in `store.rs` guards every NEW
 /// write, but a store that already carries an oversized document keeps stalling
 /// the browser's initial replication for that whole collection — the write path
-/// never touches those rows again. Measured on the THESEN tenant on
+/// never touches those rows again. Measured on a customer tenant on
 /// 2026-09-04: five completed commands (one with a 2.5 MB `result`) held six
 /// collections at `initialReplicationState: pending` indefinitely.
 ///
