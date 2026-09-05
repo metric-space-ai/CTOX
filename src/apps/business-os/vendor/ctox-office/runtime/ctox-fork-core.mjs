@@ -493,7 +493,10 @@ function applyCtoxForkTheme(editorWindow, theme, productId, updateSdk = false) {
   editorWindow.document.documentElement.dataset.ctoxTheme = resolved;
   body.dataset.ctoxProduct = productId;
   body.dataset.ctoxTheme = resolved;
-  body.classList.toggle('theme-white', resolved === 'light');
+  // theme-white has different ribbon metrics (84px controls rather than 66px).
+  // Mixing it with the theme-light service makes the ribbon cover the formula
+  // input because the editor layout still reserves the theme-light height.
+  body.classList.remove('theme-white');
   body.classList.toggle('theme-light', resolved === 'light');
   body.classList.toggle('theme-type-light', resolved === 'light');
   body.classList.toggle('theme-dark', resolved === 'dark');

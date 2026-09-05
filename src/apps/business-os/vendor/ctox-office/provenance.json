@@ -71,7 +71,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/forks/ctox-spreadsheets/business-os.css",
-      "sha256": "4b45a3e37b4974b1763080a9b908f3d1f9654d3e72666114363954195d6dea5e"
+      "sha256": "b689f43170a06c82c1062e104b0538f4b9136ddcd5a91d6d1541b416d36e94dc"
     },
     {
       "path": "src/apps/business-os/office-engine/src/forks/ctox-spreadsheets/manifest.json",
@@ -79,7 +79,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/forks/shared/business-os.css",
-      "sha256": "deeeb47ef47859220b630ee7a9933ffc53e812558f481a26a259e776efdf6715"
+      "sha256": "a620dced2677c1e410de772992753949fd53c8c34da7a40dd5ab9f09d8cfa222"
     },
     {
       "path": "src/apps/business-os/office-engine/src/frame-runtime.mjs",
@@ -111,7 +111,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/runtime/ctox-fork-core.mjs",
-      "sha256": "168c91a4fb9858785625ec7c1babd939fd3f1d2590cfaaac7cf8803c04c8b619"
+      "sha256": "22dd33018509f523b6ab192bba41d3b77618d5a0b6a6fe43a79c91020a6e45f5"
     },
     {
       "path": "src/apps/business-os/office-engine/src/runtime/ctox-spreadsheets.mjs",
@@ -3967,8 +3967,8 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/forks/ctox-spreadsheets/business-os.css",
-      "bytes": 433,
-      "sha256": "4b45a3e37b4974b1763080a9b908f3d1f9654d3e72666114363954195d6dea5e"
+      "bytes": 1060,
+      "sha256": "b689f43170a06c82c1062e104b0538f4b9136ddcd5a91d6d1541b416d36e94dc"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/forks/ctox-spreadsheets/manifest.json",
@@ -3977,8 +3977,8 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/forks/shared/business-os.css",
-      "bytes": 7501,
-      "sha256": "deeeb47ef47859220b630ee7a9933ffc53e812558f481a26a259e776efdf6715"
+      "bytes": 7848,
+      "sha256": "a620dced2677c1e410de772992753949fd53c8c34da7a40dd5ab9f09d8cfa222"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/frame-runtime.mjs",
@@ -4007,8 +4007,8 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/runtime/ctox-fork-core.mjs",
-      "bytes": 809586,
-      "sha256": "3a431ad8bcb530a35c6a0ac5e8a3fa3fe3870d3599d617e42ecf53b6bd0b1e0b"
+      "bytes": 809799,
+      "sha256": "6c1dbe1969203c02660f02b5f6b3428750f8885d5280da74554ddb0e39943a81"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/runtime/ctox-spreadsheets.mjs",

@@ -74,6 +74,7 @@ try {
     activeErrors = errors;
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', event => { if(event.type()==='error') errors.push(event.text()); });
+    page.on('response', response => { if(response.status()>=400) console.log(JSON.stringify({kind,failedAsset:response.url(),status:response.status()})); });
     await page.goto(`http://127.0.0.1:8766/src/apps/business-os/office-engine/oracle/shell-v2-office.html?kind=${kind}`);
     const prefix = kind === 'document' ? 'documents' : 'spreadsheets';
     await page.locator(`.${prefix}-card-main`).first().click({timeout:20000});
@@ -113,6 +114,10 @@ try {
     await page.evaluate(()=>document.querySelector('#app').style.setProperty('--accent','#a855f7'));
     const innerFrame=page.frames().find(frame=>frame.parentFrame()===runtimeFrame);
     await innerFrame.waitForFunction(()=>getComputedStyle(document.documentElement).getPropertyValue('--ctox-shell-accent').trim()==='#a855f7');
+    assert.equal(await editor.locator('body').evaluate((body, kind) => {
+      const style=getComputedStyle(body),surface=style.getPropertyValue('--ctox-fork-surface-2').trim();
+      return style.getPropertyValue('--background-toolbar').trim()===surface && style.getPropertyValue(`--toolbar-header-${kind}`).trim()===surface;
+    },kind),true,'Native ribbon colors must inherit the Shell surface, not override it with a product theme');
     for(const width of [960,640,390]) {
       console.log(`${kind}: checking width ${width}`);
       await page.setViewportSize({width,height:800});
@@ -181,6 +186,23 @@ try {
     if(kind==='spreadsheet') {
       await editor.locator('#ce-cell-name').fill('A1');await editor.locator('#ce-cell-name').press('Enter');
       assert.equal(await editor.locator('#ce-cell-content').inputValue(),replacement);
+      const chrome = await editor.locator('#ce-cell-content').evaluate(input => {
+        const box = node => node ? {id:node.id,classes:node.className,rect:node.getBoundingClientRect().toJSON(),overflow:getComputedStyle(node).overflow,color:getComputedStyle(node).color,fontSize:getComputedStyle(node).fontSize,lineHeight:getComputedStyle(node).lineHeight} : null;
+        const textBox = label => {
+          const text=[...label.childNodes].find(node=>node.nodeType===Node.TEXT_NODE && node.textContent.trim());
+          if(!text) return null;
+          const range=document.createRange();range.selectNodeContents(text);
+          return range.getBoundingClientRect().toJSON();
+        };
+        return {input:box(input),parent:box(input.parentElement),grandparent:box(input.parentElement.parentElement),toolbar:box(document.querySelector('#toolbar')),panels:[...document.querySelectorAll('#toolbar .panel,#toolbar .box-controls,.toolbar-fullview-panel')].map(box).filter(node=>node.rect.width && node.rect.height),statusbar:box(document.querySelector('#statusbar')),statusTabs:[...document.querySelectorAll('#statusbar li.list-item')].map(node=>({text:node.textContent,item:box(node),label:box(node.querySelector('span')),textRect:textBox(node.querySelector('span'))}))};
+      });
+      console.log(JSON.stringify({kind,chrome}));
+      assert.ok(chrome.input.rect.top >= chrome.toolbar.rect.bottom - 1, 'Formula bar must not be covered by the ribbon');
+      assert.ok(chrome.panels.every(panel=>panel.rect.bottom <= chrome.input.rect.top + 1), 'Visible ribbon panels must not overlap the formula input');
+      assert.ok(chrome.statusTabs.length > 0, 'Workbook must expose a named sheet tab');
+      // The label has an intentional offscreen ::after width-measuring copy.
+      // Assert the real text glyphs, not that hidden measurement box.
+      assert.ok(chrome.statusTabs.every(tab=>tab.textRect?.width > 0 && tab.textRect.top >= chrome.statusbar.rect.top && tab.textRect.bottom <= chrome.statusbar.rect.bottom), 'Sheet label text must fit inside the status bar, not below the viewport');
     }
     await page.screenshot({path:path.join(output,`${kind}-reopened.png`)});
     console.log(JSON.stringify({kind,flows:'open, search, filter, view, theme, custom accent, responsive, create blank, keyboard edit, save, native export/inspection, reopen'}));

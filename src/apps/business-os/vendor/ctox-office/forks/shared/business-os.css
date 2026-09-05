@@ -23,7 +23,12 @@
   color-scheme: dark;
 }
 
-body[data-ctox-product] {
+:root body[data-ctox-product] {
+  /* Outrank upstream :root .theme-light/.theme-dark variable declarations. */
+  --toolbar-header-document: var(--ctox-fork-surface-2);
+  --toolbar-header-spreadsheet: var(--ctox-fork-surface-2);
+  --text-toolbar-header-on-background-document: var(--ctox-fork-text);
+  --text-toolbar-header-on-background-spreadsheet: var(--ctox-fork-text);
   --background-normal: var(--ctox-fork-surface);
   --background-toolbar: var(--ctox-fork-surface-2);
   --background-pane: var(--ctox-fork-surface);

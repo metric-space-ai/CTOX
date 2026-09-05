@@ -787,6 +787,12 @@ test('Office fork startup budget is bounded and supports a cold production load'
   assert.equal(__ctoxForkTestHooks.normalizeAppReadyTimeout(5000), 115000);
 });
 
+test('Office theme service does not mix incompatible white and light ribbon metrics', async () => {
+  const forkRuntime = await readFile(new URL('./src/runtime/ctox-fork-core.mjs', import.meta.url), 'utf8');
+  assert.match(forkRuntime, /body\.classList\.remove\('theme-white'\)/);
+  assert.doesNotMatch(forkRuntime, /classList\.(?:add|toggle)\('theme-white'/);
+});
+
 test('vendored Office entrypoints do not reload a cold editor after 30 seconds', async () => {
   const entry = await readFile(new URL('../vendor/ctox-office/upstream/web-apps/apps/documenteditor/main/index.html', import.meta.url), 'utf8');
   assert.match(entry, /\}, 120000\);/);
