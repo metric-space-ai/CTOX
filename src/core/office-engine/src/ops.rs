@@ -290,7 +290,7 @@ fn scrub_core_props(xml: &[u8]) -> anyhow::Result<(Vec<u8>, Vec<String>)> {
             }
             Event::Text(text) => {
                 if let Some(field) = &inside {
-                    if !text.as_ref().is_empty() && !scrubbed.contains(field) {
+                    if !text.is_empty() && !scrubbed.contains(field) {
                         scrubbed.push(field.clone());
                     }
                     continue;
