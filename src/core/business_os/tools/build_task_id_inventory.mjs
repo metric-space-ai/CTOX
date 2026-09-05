@@ -19,6 +19,8 @@ const classifications = new Map(Object.entries({
   delete_ctox_task: ['target_task', 'target_task_id'],
   dispatch_business_command: ['compatibility_mixed', 'return explicit execution_task_id/target fields'],
   fail_business_command_from_queue_error: ['execution_link', 'execution_task_id'],
+  materialize_pending_business_chat: ['execution_link', 'execution_task_id; chat contract retains task_id'],
+  business_chat_payload: ['execution_link', 'execution_task_id; chat contract retains task_id'],
   outbound_queue_research_scraper_generation: ['domain_queue_reference', 'target_task_id or a domain-specific queue reference'],
   persist_systematic_research_failure: ['execution_link', 'execution_task_id'],
   persist_terminal_business_chat_command_projection: ['execution_link', 'execution_task_id'],

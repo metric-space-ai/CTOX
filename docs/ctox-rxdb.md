@@ -981,22 +981,23 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
   "--banner:js=// CTOX Sync Engine app-local bundle. Generated from src/apps/business-os/rxdb/src/index.mjs."
 ```
 
-**Cache-buster discipline.** The bundle is imported with a `?v=` query in
-exactly three places, which must always carry the **identical** value:
-
-- `src/apps/business-os/shared/db.js` (`RXDB_BUNDLE_URL`)
-- `src/apps/business-os/shared/sync.js` (two fallback dynamic imports)
+**Cache-buster discipline.** The only bundle URL lives in
+`src/apps/business-os/shared/rxdb-runtime.js`. Both `shared/db.js` and
+`shared/sync.js` import that loader with the **same literal APP_BUILD query
+buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The data-plane guard checks both
+values against each other and the shell build.
 
 App modules do **not** import the bundle directly — they receive the database
 handle from the shell facade (`setBusinessOsDatabaseContext`). The matching
 module's `businessOsDataSource.js` used to be a third importer; it moved to the
 facade, so it carries no buster and is no longer checked by the guard.
 
-A mismatch makes the browser load a **second copy of the bundle** — two
-module graphs, two shared-room-peer registries, duplicate peers in the room.
-After any `src/` change: rebuild dist with the command above **and** bump all
-three occurrences (current value at the time of writing:
-`20260827-device-proof-v185`).
+A different loader URL can create a second module instance; an unversioned
+loader can keep an old bundle cached after a deployment. After any runtime
+`src/` change, rebuild dist with the command above and bump the single bundle
+buster in `rxdb-runtime.js`. Keep both loader import busters aligned with
+APP_BUILD. The shared promise resets after import rejection, so a later call
+can retry the same URL without creating a second bundle identity.
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build
 anything: it verifies the manifest identity (name/public name,
@@ -1210,6 +1211,116 @@ Each has shipped (or would ship) real production breakage.
    ↔ `CTOX_BUSINESS_OS_SCHEMA_HASHES`, `schema-hash-registry-smoke`.)
 
 ---
+
+
+### Cockpit projections (PR-1)
+
+The cockpit uses only the existing native-store → CTOX DB → WebRTC path. There
+are no browser HTTP data endpoints. Source ledgers remain durable; retention
+removes their Business OS/RxDB projections with tombstones, never core evidence.
+
+| Collection | Source and stable identity | Retention |
+| --- | --- | --- |
+| `ctox_queue_tasks` | `communication_routing_state`; `id = message_key` | All nonterminal tasks plus newest 300 terminal tasks; typed runtime key `business_os.projection.queue_tasks_retention` accepts 1–100000. |
+| `ctox_harness_events` | `ctox_harness_flow_events`; `id = event_id`, `task_id = message_key` | At most 200 events per task; terminal-task events expire after 24 h using the canonical terminal routing timestamp. |
+| `ctox_harness_status` | Worker snapshots plus routing, persisted pause/capacity and working hours; `id = "harness"` | One singleton. |
+| `ctox_runs` | `worker_attempt_finalizations`; `id = attempt_id` | Newest 500 completed attempts plus all attempts of nonterminal tasks. |
+
+Queue schemas declare `execution_progress` (also on `business_commands`),
+`lease_owner`, `lease_expires_at`, `lease_worker_id`, `first_pending_at`, `failure_class`,
+`failure_attempt_count`, `retry_not_before`, `hold_reason`, `wait_entity_type`,
+`wait_entity_id`, `priority_time_credit_hours`, `attempt`, and `crew_member_id`.
+Cleared optional fields are written as explicit nulls. Routing timestamps retain
+the source RFC3339 representation; projected event/run/status timestamps are
+milliseconds. PR-1 always emits null crew identity and retrospective fields.
+
+Events carry `task_id`, `command_id`, `attempt`, `kind`, `title`, `tool_type`,
+`tool_name`, `call_id`, `success`, `usage {input,output,reasoning,total}`,
+`runtime_seconds`, `step_position`, `created_at_ms`, `updated_at_ms`. Kinds are
+`tool_started|tool_completed|thinking|plan_updated|token_usage|turn_completed|phase|crew_selected`.
+Held-lease progress records carry eligibility without an extra routing read.
+Unknown eligibility is omitted, so a missing routing row or unavailable state
+cannot become a permanent denial; explicit false stays excluded after retry.
+The pump resolves missing plan steps from the flow revision at emission time.
+Raw tool arguments/results and
+raw reasoning bodies are not copied. Indexes are `[task_id,created_at_ms]` and
+`created_at_ms`.
+
+The status singleton exposes `service_running`, `busy`, `paused`, `pause_reason`,
+`worker_active_count`, `worker_phase`, `worker_capacity`, `pending_count`,
+`leased_count`, `blocked_count`, `review_count`, `failed_recent_count` (24 h),
+`pressure_active`, `pressure_threshold`, `work_hours {enabled,start,end,inside_window}`,
+`active_task_ids`, `active_crew_member_id`, `last_error`, `boot_id`, `updated_at_ms`.
+Queue counters count inbound queue work, matching the existing pressure guard.
+Worker/queue hooks wake a bounded lossy writer independently of the stamp-gated
+runtime-settings loop; a 60-second replay repairs missed delivery. These
+collections have one dedicated producer, excluded from generic record replay.
+Malformed `queue.pause` is treated as not paused, logged once until recovery and
+reported in `last_error`; repairing the configuration clears that diagnostic.
+
+Runs carry `task_id`, `command_id`, `work_id`, `crew_member_id`,
+`status` (`succeeded|failed|timed_out|aborted`), `agent_outcome`, `started_at_ms`,
+`finished_at_ms`, `metrics {model,provider,input_tokens,output_tokens,reasoning_tokens,cost_usd,tool_calls,thinking_turns,elapsed_ms}`,
+`review {disposition,hold_reason}`, `error_text`, `resumable`, `retrospective`,
+`updated_at_ms`. Billing joins actual `turn_id` links from attempt-tagged flow
+records; missing prices/cost events remain null and later billing refreshes the
+same run. Indexes are `[task_id,finished_at_ms]`, `finished_at_ms`, `crew_member_id`.
+These indexes and both event indexes also exist on the native projection store.
+Invalid optional start timestamps and the resulting unknown `elapsed_ms` remain null.
+Invalid required/index timestamps cause the event/run document to be skipped, with
+one diagnostic per root and collection. Source rows remain intact for replay after
+repair; `created_at_ms`, `updated_at_ms` and run `finished_at_ms` are never emitted
+as null.
+Event-task and run queries use fixed-size keyset pages, including active runs.
+There is no separate `attempt_id` alias in the run contract; `id` is the attempt ID.
+
+Admin/Chef and Founder may read events, status and runs; User may not. These three
+collections are server-authored: direct writes are denied for every role, even
+with an explicit data grant. This decision is enforced centrally and by the
+native peer write hook. Default and peer-start legacy grant migrations exclude
+these cockpit collections entirely; they do not mint otherwise inert sync grants.
+Queue controls go through `ctox.task.manage`: exact
+commands `ctox.queue.release {task_id,priority?,note?}`, `.block {task_id,reason}`,
+`.retry {task_id}`, `.capacity {workers}` (1–8), `.pause {paused,reason?}`, and
+`.abort_turn {task_id}`. Release/block/retry/abort use task scope, capacity/pause
+workspace scope. Controls preserve existing review/validation guards and record
+the authenticated actor. Requested-audit payloads contain only typed `task_id`,
+`priority`, `workers`, `paused`, `reason`, and `note`; audit text is capped at
+1024 characters for task IDs, 16 for priority, and 1000 each for reason/note.
+Unknown fields and wrongly typed values are excluded even when validation fails.
+Each control persists its own terminal command receipt,
+so duplicate command IDs replay the outcome without repeating the action. The
+target task is not the control's `execution_task_id`.
+Release/block/retry reject leased tasks. Release without `note` preserves the
+existing status note; blocking a currently running slice is not supported.
+Every linked Business OS aggregate must allow release: a single validating or
+terminal aggregate blocks release/retry regardless of link order; retrying terminal
+work requires a new command. Task IDs are trimmed consistently before policy and
+execution. PR-3 must not infer queue-control authority from the browser helper's
+`owned` fallback: these commands use native `BusinessOsScope::task(id, false, false)`
+and do not infer ownership. A browser `owned=true` hint alone does not authorize them.
+The current core schema additionally enforces one link per task; the release guard
+also handles multiple links defensively without changing that unique constraint.
+Abort currently returns
+a failed command receipt with `result.status = "unsupported"` and `result.reason`.
+The read/write restriction also applies to MCP:
+module and record grants cannot bypass a cockpit collection denial.
+
+`business_commands` (across all modules) and `ctox_queue_tasks` migrate 1→2;
+`ctox_runs` migrates 0→1; events/status start at 0. Every existing browser DB
+runs the corresponding no-op migration when next loaded. Packaged native upgrades use the existing
+copy-and-verify declarative migration before stale-table cleanup. The module
+schema, native contract/hash fixtures and browser schema are regenerated by the
+standard generators. The browser DB and sync code share the sole bundle URL in
+`shared/rxdb-runtime.js`; both import that loader with identical literal `APP_BUILD`
+cache busters, guarded by the data-plane smoke test. A rejected import clears the
+shared promise so it can retry the same canonical URL; there are no retry URL variants.
+
+Consumers in PR-3/4/5 must query with selectors and indexed sort/limit, treat null
+as unknown/cleared rather than zero, and use commands rather than editing a
+projection. Chat messages additionally carry `kind`, `task_id`, `command_id` and
+nullable `run_id`; `interim` is not proof of terminal success. Retention can remove
+older views, so absence is not a claim that durable execution never occurred.
 
 ## 13. History pointers
 

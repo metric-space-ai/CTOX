@@ -101,7 +101,8 @@ for (const file of readdirSync(rustPluginDir).filter((name) => name.endsWith('.r
 }
 
 // ---------------------------------------------------------------------------
-// Cache-buster parity: both direct bundle importers must carry an IDENTICAL
+// Canonical loader: a single module owns the only bundle URL and its promise.
+// Previously, direct bundle importers had to carry an IDENTICAL
 // `?v=` string. The browser module cache keys on the full URL — a mismatch
 // loads a SECOND copy of the bundle with its own SHARED_ROOM_PEERS map, i.e.
 // a duplicate signaling socket + RTCPeerConnection per room (peer storm).
@@ -114,15 +115,26 @@ for (const file of readdirSync(rustPluginDir).filter((name) => name.endsWith('.r
     resolve(repoRoot, 'src/apps/business-os/shared/db.js'),
     resolve(repoRoot, 'src/apps/business-os/shared/sync.js'),
   ];
-  const busters = importers.map((path) => {
-    const match = readFileSync(path, 'utf8').match(/ctox-rxdb-js\.mjs\?v=([^'"`]+)/);
-    return { path: relative(repoRoot, path), buster: match?.[1] || null };
-  });
-  const distinct = new Set(busters.map((entry) => entry.buster));
-  if (distinct.size !== 1 || distinct.has(null)) {
-    offenders.push(
-      `cache-buster mismatch across bundle importers: ${busters.map((e) => `${e.path}=?v=${e.buster}`).join(', ')}`,
-    );
+  const loader = readFileSync(resolve(repoRoot, 'src/apps/business-os/shared/rxdb-runtime.js'), 'utf8');
+  const appBuild = readFileSync(resolve(repoRoot, 'src/apps/business-os/app.js'), 'utf8')
+    .match(/const APP_BUILD = ['"]([^'"]+)['"]/)?.[1];
+  const loaderBusters = [];
+  if ((loader.match(/ctox-rxdb-js\.mjs\?v=/g) || []).length !== 1) {
+    offenders.push('canonical RxDB loader must own exactly one versioned bundle URL');
+  }
+  for (const path of importers) {
+    const source = readFileSync(path, 'utf8');
+    if (source.includes('ctox-rxdb-js.mjs?v=') || source.includes('&retry=')) {
+      offenders.push(`${relative(repoRoot, path)} bypasses the canonical RxDB loader`);
+    }
+    const buster = source.match(/from ['"]\.\/rxdb-runtime\.js\?v=([^'"]+)['"]/)?.[1];
+    loaderBusters.push(buster);
+    if (!buster || !source.includes('loadRxdbRuntime()')) {
+      offenders.push(`${relative(repoRoot, path)} must use the canonical RxDB loader`);
+    }
+  }
+  if (!appBuild || loaderBusters.some((buster) => buster !== appBuild)) {
+    offenders.push('db.js and sync.js must use identical RxDB loader busters matching APP_BUILD');
   }
 }
 

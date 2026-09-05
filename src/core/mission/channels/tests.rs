@@ -17,6 +17,53 @@ fn unique_test_db_path(prefix: &str) -> PathBuf {
 }
 
 #[test]
+fn cockpit_release_guard_checks_all_links_in_either_order() -> Result<()> {
+    // Production currently enforces task_id UNIQUE. Model a legacy/multi-link
+    // store here to test the shared guard without weakening that invariant.
+    let conn = Connection::open_in_memory()?;
+    conn.execute_batch("CREATE TABLE business_command_aggregates(command_id TEXT PRIMARY KEY, execution_phase TEXT NOT NULL, terminal_status TEXT NOT NULL);
+        CREATE TABLE business_command_task_links(command_id TEXT PRIMARY KEY, task_id TEXT NOT NULL);")?;
+    assert!(ensure_linked_commands_allow_queue_release(&conn, "task").is_ok());
+    for phase in ["terminal", "validating"] {
+        for restricted_first in [false, true] {
+            conn.execute_batch(
+                "DELETE FROM business_command_task_links; DELETE FROM business_command_aggregates;",
+            )?;
+            let phases = if restricted_first {
+                [phase, "accepted"]
+            } else {
+                ["accepted", phase]
+            };
+            for (index, phase) in phases.into_iter().enumerate() {
+                let id = format!("command-{index}");
+                conn.execute(
+                    "INSERT INTO business_command_aggregates VALUES(?1, ?2, ?3)",
+                    params![
+                        id,
+                        phase,
+                        if phase == "terminal" {
+                            "failed"
+                        } else {
+                            "none"
+                        }
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO business_command_task_links VALUES(?1, 'task')",
+                    [&id],
+                )?;
+            }
+            let error = ensure_linked_commands_allow_queue_release(&conn, "task")
+                .expect_err("one restricted link must veto release");
+            assert!(error.to_string().contains(phase), "{error:#}");
+            conn.execute("UPDATE business_command_aggregates SET execution_phase='accepted', terminal_status='none'", [])?;
+            assert!(ensure_linked_commands_allow_queue_release(&conn, "task").is_ok());
+        }
+    }
+    Ok(())
+}
+
+#[test]
 fn communication_sync_run_recorder_skips_successful_noop_heartbeats() -> Result<()> {
     let db_path = unique_test_db_path("ctox-comm-sync-noop");
     let mut conn = open_channel_db(&db_path)?;

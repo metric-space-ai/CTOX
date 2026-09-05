@@ -173,21 +173,7 @@ fn maybe_lease_next_durable_queue_prompt(
         let leased =
             channels::lease_queue_task(root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)?;
         clear_idle_durable_queue_empty_gate(root);
-        return Ok(Some(QueuedPrompt {
-            queue_task_metadata: leased.metadata.clone(),
-            preview: preview_text(&leased.prompt),
-            source_label: "queue".to_string(),
-            goal: leased.title.clone(),
-            prompt: leased.prompt.clone(),
-            suggested_skill: leased.suggested_skill.clone(),
-            leased_message_keys: vec![leased.message_key],
-            leased_ticket_event_keys: Vec::new(),
-            thread_key: Some(leased.thread_key.clone()),
-            workspace_root: leased.workspace_root.clone(),
-            ticket_self_work_id: leased.ticket_self_work_id.clone(),
-            outbound_email: None,
-            outbound_anchor: None,
-        }));
+        return Ok(Some(queued_prompt_from_queue_task(leased)));
     }
     Ok(None)
 }

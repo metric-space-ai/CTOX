@@ -260,6 +260,9 @@ pub fn record_harness_flow_event(
     ensure_event_schema(&conn)?;
     let created_at = Utc::now().to_rfc3339();
     let chain_key = chain_key(request.message_key, request.work_id, request.ticket_key);
+    // Cockpit metadata comes from the caller's held lease or is resolved on
+    // the projection pump. No routing read belongs in this turn-path writer.
+    // An absent eligibility key means unknown, never a durable denial.
     let metadata_json = serde_json::to_string(&request.metadata)?;
     let event_id = event_id(
         &chain_key,
@@ -287,6 +290,7 @@ pub fn record_harness_flow_event(
             created_at,
         ],
     )?;
+    crate::business_os::harness_cockpit::schedule_flow_refresh(root, request.event_kind);
     Ok(HarnessFlowEvent {
         event_id,
         chain_key,
@@ -310,6 +314,31 @@ pub fn record_harness_flow_event(
 /// `record_harness_flow_event_lossy`, makes a lost forensic write detectable
 /// instead of silently swallowed (x-flow-event-lossy-nontxn).
 static DROPPED_HARNESS_FLOW_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+#[test]
+fn cockpit_eligibility_remains_unknown_without_a_routing_row() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let event = record_harness_flow_event(
+        root.path(),
+        RecordHarnessFlowEventRequest {
+            event_kind: "worker.phase",
+            title: "Starting",
+            body_text: "",
+            message_key: Some("not-materialized-yet"),
+            work_id: None,
+            ticket_key: None,
+            attempt_index: None,
+            metadata: serde_json::json!({}),
+        },
+    )?;
+    let metadata: serde_json::Value = serde_json::from_str(&event.metadata_json)?;
+    assert!(
+        metadata.get("cockpit_eligible").is_none(),
+        "unknown must not become a permanent denial"
+    );
+    Ok(())
+}
 
 /// Number of forensic flow events dropped (write failed) since process start.
 pub fn dropped_harness_flow_event_count() -> u64 {

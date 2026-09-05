@@ -67,6 +67,67 @@ steps, review state, deduplicated thinking/tool totals, and update time. The
 older harness-flow stream remains an audit and observability projection, not
 the persistence authority.
 
+
+## Cockpit-Projektionen und Steuerbefehle
+
+The cockpit is an observer of the durable execution state. It does not close work,
+change review/validation gates, or introduce another executor. The existing queue
+capacity and per-thread serialization remain authoritative.
+
+`business_os::harness_cockpit` projects routing/lease state from
+`communication_routing_state`, live activity from `ctox_harness_flow_events`, and
+completed attempts from `worker_attempt_finalizations`. Actual harness `turn_id`
+links join attempts to `api_model_cost_events`; late billing updates refresh an
+existing run. Unknown token/cost values remain null. `ctox_runs.id` is the
+`attempt_id`, not the billing turn id. PR-1 leaves crew identity and retrospective
+fields explicitly null.
+
+Worker start/phase/stop and queue/result/finalization hooks notify a bounded,
+lossy projection worker. It writes the existing synchronous native RxDB projection
+path outside admission and finalization, independently of the runtime-settings
+stamp loop. A 60-second maintenance pass replays durable sources and applies
+retention after lost wakes or temporary store failures. Graceful shutdown also
+writes the stopped singleton before exit; a known dead service PID clears stale
+worker activity. No-op payloads do not create revision churn, and missing RxDB
+collections are retried when they appear.
+
+Progress hooks take the attempt counter from the held lease. They add no
+cockpit routing/progress reads: missing plan-step metadata is resolved from the
+flow ledger on the pump. Unknown eligibility stays absent and remains replayable;
+only an explicit false excludes an event. Events and runs use bounded keyset pages.
+
+The exact commands `ctox.queue.release`, `.block`, `.retry`, `.capacity`, `.pause`
+and `.abort_turn` enter through `enforce_command_policy` under `ctox.task.manage`.
+Task controls use task scope; capacity/pause use workspace scope. Accepted controls
+record `cockpit.control` with the authenticated actor and outcome. Their own
+`business_commands` receipt is completed or failed durably; replaying the same
+command ID does not repeat the action or attach the target as its execution task.
+Retry clears
+failure/retry/hold state only for failed/blocked tasks and preserves terminal and
+validation guards. An already terminal Business OS command must be retried as a
+new command; the cockpit does not reopen an immutable terminal aggregate. The
+persisted `queue.pause` switch stops new admission while an already running slice
+completes normally. `abort_turn` finishes its receipt as `failed`, with
+`result.status = "unsupported"` and a reason:
+a safe session-specific interrupt acknowledgement plus atomic attempt/queue
+finalization is not yet available; killing the service is not a substitute.
+
+Release/block/retry reject leased tasks; the owner cannot block an active slice
+through these controls. Release without a note preserves the existing note, and
+ordinary queue updates preserve harness-owned hold reasons. Malformed `queue.pause`
+does not pause admission: it logs once until repaired and appears in
+`ctox_harness_status.last_error`.
+
+Server-authored chat messages expose lease, plan revision, retry/block/review
+rework, and typed `result.user_message` before terminal completion. Message kinds
+are `status`, `interim`, `reply`, and `question`, with `task_id`, `command_id`,
+and nullable `run_id`. Explicit persisted chat language/locale selects English or
+German (German fallback). The 40-message cap removes old status messages first;
+delivery receipts prevent maintenance from resurrecting trimmed messages.
+
+See [CTOX DB contracts](docs/ctox-rxdb.md#cockpit-projections-pr-1) for schemas,
+read policy, retention, migration and downstream consumer rules.
+
 ## Business OS Command Architecture
 
 Lifecycle-v2 command work is gated by three accepted decisions:

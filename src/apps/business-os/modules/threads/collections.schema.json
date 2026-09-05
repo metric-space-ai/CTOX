@@ -28,6 +28,10 @@
         "command_type": {
           "type": "string"
         },
+        "execution_progress": {
+          "additionalProperties": true,
+          "type": "object"
+        },
         "id": {
           "maxLength": 128,
           "type": "string"
@@ -71,7 +75,7 @@
         "updated_at_ms"
       ],
       "type": "object",
-      "version": 1
+      "version": 2
     },
     "ctox_queue_tasks": {
       "additionalProperties": true,
@@ -90,10 +94,32 @@
       ],
       "primaryKey": "id",
       "properties": {
+        "attempt": {
+          "type": "number"
+        },
         "command_id": {
           "type": "string"
         },
         "command_type": {
+          "type": "string"
+        },
+        "crew_member_id": {
+          "type": "string"
+        },
+        "execution_progress": {
+          "additionalProperties": true,
+          "type": "object"
+        },
+        "failure_attempt_count": {
+          "type": "number"
+        },
+        "failure_class": {
+          "type": "string"
+        },
+        "first_pending_at": {
+          "type": "string"
+        },
+        "hold_reason": {
           "type": "string"
         },
         "id": {
@@ -103,7 +129,22 @@
         "inbound_channel": {
           "type": "string"
         },
+        "lease_expires_at": {
+          "type": "string"
+        },
+        "lease_owner": {
+          "type": "string"
+        },
+        "lease_worker_id": {
+          "type": "string"
+        },
         "module": {
+          "type": "string"
+        },
+        "priority_time_credit_hours": {
+          "type": "number"
+        },
+        "retry_not_before": {
           "type": "string"
         },
         "source_module": {
@@ -117,6 +158,12 @@
         },
         "updated_at_ms": {
           "type": "number"
+        },
+        "wait_entity_id": {
+          "type": "string"
+        },
+        "wait_entity_type": {
+          "type": "string"
         }
       },
       "required": [
@@ -126,7 +173,7 @@
         "module"
       ],
       "type": "object",
-      "version": 1
+      "version": 2
     },
     "ctox_task_approval_requests": {
       "additionalProperties": true,
@@ -760,10 +807,16 @@
             ]
           }
         ]
+      },
+      "2": {
+        "operations": []
       }
     },
     "ctox_queue_tasks": {
       "1": {
+        "operations": []
+      },
+      "2": {
         "operations": []
       }
     },

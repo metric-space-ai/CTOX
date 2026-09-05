@@ -5,7 +5,7 @@
 // src/core/business_os/business_os_schema_hashes.json); a drifted hash silently
 // quiesces the collection for this peer.
 const commandSchema = {
-  version: 1,
+  version: 2,
   primaryKey: 'id',
   type: 'object',
   properties: {
@@ -33,6 +33,7 @@ export const migrationStrategies = {
     1: (oldDoc) => ({
       ...oldDoc,
       inbound_channel: oldDoc.inbound_channel || oldDoc.module || ''
-    })
+    }),
+    2: (oldDoc) => oldDoc
   }
 };

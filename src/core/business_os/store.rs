@@ -10735,12 +10735,16 @@ impl RxdbProjectionWriterCache {
         updated_at_ms: i64,
         payload: Value,
     ) -> anyhow::Result<()> {
-        if !self.writers.contains_key(collection) {
+        if !matches!(self.writers.get(collection), Some(Some(_))) {
             let writer = RxdbCollectionWriter::open(&self.root, collection)?;
             self.writers.insert(collection.to_string(), writer);
         }
         if let Some(Some(writer)) = self.writers.get_mut(collection) {
-            writer.upsert(record_id, updated_at_ms, payload)?;
+            let result = writer.upsert(record_id, updated_at_ms, payload);
+            if result.is_err() {
+                self.writers.remove(collection);
+            }
+            result?;
         }
         Ok(())
     }
@@ -10752,12 +10756,16 @@ impl RxdbProjectionWriterCache {
         source_updated_at_ms: i64,
         payload: Value,
     ) -> anyhow::Result<()> {
-        if !self.writers.contains_key(collection) {
+        if !matches!(self.writers.get(collection), Some(Some(_))) {
             let writer = RxdbCollectionWriter::open(&self.root, collection)?;
             self.writers.insert(collection.to_string(), writer);
         }
         if let Some(Some(writer)) = self.writers.get_mut(collection) {
-            writer.upsert_source_projection(record_id, source_updated_at_ms, payload)?;
+            let result = writer.upsert_source_projection(record_id, source_updated_at_ms, payload);
+            if result.is_err() {
+                self.writers.remove(collection);
+            }
+            result?;
         }
         Ok(())
     }
@@ -10768,12 +10776,16 @@ impl RxdbProjectionWriterCache {
         record_id: &str,
         source_updated_at_ms: i64,
     ) -> anyhow::Result<()> {
-        if !self.writers.contains_key(collection) {
+        if !matches!(self.writers.get(collection), Some(Some(_))) {
             let writer = RxdbCollectionWriter::open(&self.root, collection)?;
             self.writers.insert(collection.to_string(), writer);
         }
         if let Some(Some(writer)) = self.writers.get_mut(collection) {
-            writer.tombstone_source_projection(record_id, source_updated_at_ms)?;
+            let result = writer.tombstone_source_projection(record_id, source_updated_at_ms);
+            if result.is_err() {
+                self.writers.remove(collection);
+            }
+            result?;
         }
         Ok(())
     }
@@ -10785,6 +10797,11 @@ pub(crate) struct BusinessProjectionWriter {
 }
 
 impl BusinessProjectionWriter {
+    /// A missing collection is deferred delivery, not an acknowledgement.
+    pub(crate) fn delivered_to_rxdb(&self, collection: &str) -> bool {
+        matches!(self.rxdb_writers.writers.get(collection), Some(Some(_)))
+    }
+
     pub(crate) fn open(root: &Path) -> anyhow::Result<Self> {
         Ok(Self {
             conn: open_store(root)?,
@@ -10872,7 +10889,16 @@ impl RxdbCollectionWriter {
         }
         let conn = Connection::open(&path)?;
         conn.busy_timeout(Duration::from_secs(10))?;
-        let Some(table) = rxdb_collection_table_name(&path, &conn, collection) else {
+        // A writer is opened once per collection, or retried after failed delivery.
+        // Read the schema here: a table created in WAL need not change the file
+        // stamp used by the general read cache during its 60-second lifetime.
+        let tables = rxdb_table_names_uncached(&conn)?;
+        let expected = format!(
+            "ctox_business_os__{collection}__v{}",
+            rxdb_schema_version(collection)
+        );
+        let Some(table) = rxdb_collection_table_name_from_tables(&tables, &expected, collection)
+        else {
             return Ok(None);
         };
         let columns = rxdb_table_columns_for_path(&conn, &path, &table)?;
@@ -15573,6 +15599,7 @@ pub(super) fn ensure_legacy_collection_grants(
         if collection.is_empty()
             || policy::ADMIN_ONLY_COLLECTIONS.contains(&collection)
             || collection == "ctox_queue_tasks"
+            || policy::is_cockpit_projection(collection)
         {
             continue;
         }
@@ -17453,7 +17480,10 @@ pub fn delete_ctox_task(
     }))
 }
 
-fn load_business_command(conn: &Connection, command_id: &str) -> anyhow::Result<BusinessCommand> {
+pub(super) fn load_business_command(
+    conn: &Connection,
+    command_id: &str,
+) -> anyhow::Result<BusinessCommand> {
     conn.query_row(
         "SELECT module, command_type, record_id, payload_json, client_context_json
          FROM business_commands

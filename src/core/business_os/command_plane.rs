@@ -266,7 +266,17 @@ fn with_business_command_replay_receipt(
     Ok(response)
 }
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 75] = [
+#[cfg(test)]
+#[path = "crew_cockpit_command_tests.rs"]
+mod crew_cockpit_tests;
+
+pub(super) const EXACT_CONTROL_TYPES: [&str; 81] = [
+    "ctox.queue.release",
+    "ctox.queue.block",
+    "ctox.queue.retry",
+    "ctox.queue.capacity",
+    "ctox.queue.pause",
+    "ctox.queue.abort_turn",
     "ctox.app.access.grant",
     "ctox.app.access.revoke",
     "ctox.app.action.run",
@@ -914,7 +924,31 @@ enum CentralCommandPolicyRequirement {
 impl CentralCommandPolicyRequirement {
     fn for_command(command: &BusinessCommand) -> Option<Self> {
         let command_type = command.command_type.as_str();
-        let fixed = if command_type == "web_stack.person_research" {
+        let fixed = if matches!(command_type, "ctox.queue.capacity" | "ctox.queue.pause") {
+            Some(CommandPolicyRequirement::workspace(
+                BusinessOsPermission::CtoxTaskManage,
+            ))
+        } else if matches!(
+            command_type,
+            "ctox.queue.release"
+                | "ctox.queue.block"
+                | "ctox.queue.retry"
+                | "ctox.queue.abort_turn"
+        ) {
+            Some(CommandPolicyRequirement::scoped(
+                BusinessOsPermission::CtoxTaskManage,
+                super::policy::BusinessOsScope::task(
+                    command
+                        .payload
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim(),
+                    false,
+                    false,
+                ),
+            ))
+        } else if command_type == "web_stack.person_research" {
             Some(CommandPolicyRequirement::module(
                 BusinessOsPermission::DataRead,
                 &command.module,
@@ -1204,6 +1238,36 @@ fn dispatch_business_command(
     authorized_session: Option<&BusinessOsSession>,
 ) -> anyhow::Result<BusinessCommandDispatchOutcome> {
     match command.command_type.as_str() {
+        "ctox.queue.release"
+        | "ctox.queue.block"
+        | "ctox.queue.retry"
+        | "ctox.queue.capacity"
+        | "ctox.queue.pause"
+        | "ctox.queue.abort_turn" => {
+            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
+            // Finish the durable control claim and replicate its outcome. The
+            // target queue task is not an execution task of this control command.
+            Ok(
+                match super::harness_cockpit::control(root, command, session) {
+                    Ok(result)
+                        if result.get("status").and_then(Value::as_str) == Some("unsupported") =>
+                    {
+                        BusinessCommandDispatchOutcome::Control {
+                            status: "failed".into(),
+                            task_id: None,
+                            task_status: Some("failed".into()),
+                            result,
+                        }
+                    }
+                    Ok(result) => BusinessCommandDispatchOutcome::completed(result, None),
+                    Err(error) => BusinessCommandDispatchOutcome::failed(
+                        None,
+                        serde_json::json!({"ok":false,"error":error.to_string()}),
+                        error,
+                    ),
+                },
+            )
+        }
         "ctox.maintenance.client_ready"
         | "ctox.task.update"
         | "ctox.task.delete"
@@ -1631,15 +1695,6 @@ fn dispatch_business_command(
         | "ctox.source.diff" => {
             handle_source_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
-        "kundenpipeline.triage.write"
-        | "kundenpipeline.decision.request"
-        | "kundenpipeline.decision.resolve"
-        | "kundenpipeline.decision.answer"
-        | "kundenpipeline.mail.send"
-        | "kundenpipeline.delegate" => {
-            super::decision_hub::handle_command(root, command_id, command)
-                .map(BusinessCommandDispatchOutcome::Returned)
-        }
         "ctox.mailserver.get_config"
         | "ctox.mailserver.save_domain"
         | "ctox.mailserver.save_runtime"
@@ -1649,6 +1704,21 @@ fn dispatch_business_command(
             handle_mailserver_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         _ => {
+            // Legacy native dispatch: these types are outside EXACT_CONTROL_TYPES
+            // but still execute immediately and return before record_command.
+            // Their inventory classification does not imply durable queue admission.
+            if matches!(
+                command.command_type.as_str(),
+                "kundenpipeline.triage.write"
+                    | "kundenpipeline.decision.request"
+                    | "kundenpipeline.decision.resolve"
+                    | "kundenpipeline.decision.answer"
+                    | "kundenpipeline.mail.send"
+                    | "kundenpipeline.delegate"
+            ) {
+                return super::decision_hub::handle_command(root, command_id, command)
+                    .map(BusinessCommandDispatchOutcome::Returned);
+            }
             let accepted = record_command(root, command.clone())?;
             Ok(BusinessCommandDispatchOutcome::Returned(
                 serde_json::to_value(accepted)?,

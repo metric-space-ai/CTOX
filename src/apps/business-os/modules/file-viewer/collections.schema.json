@@ -47,7 +47,7 @@
         "updated_at_ms"
       ],
       "type": "object",
-      "version": 1
+      "version": 2
     },
     "desktop_files": {
       "additionalProperties": true,
@@ -155,6 +155,9 @@
             ]
           }
         ]
+      },
+      "2": {
+        "operations": []
       }
     }
   },

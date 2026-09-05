@@ -47,7 +47,7 @@
         "updated_at_ms"
       ],
       "type": "object",
-      "version": 1
+      "version": 2
     },
     "business_module_catalog": {
       "additionalProperties": true,
@@ -879,6 +879,9 @@
             ]
           }
         ]
+      },
+      "2": {
+        "operations": []
       }
     }
   },

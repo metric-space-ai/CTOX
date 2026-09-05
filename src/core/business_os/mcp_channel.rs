@@ -5813,6 +5813,15 @@ fn business_os_mcp_collection_read_decision(
     context: &McpChannelRequestContext,
     collection: &str,
 ) -> anyhow::Result<PolicyDecision> {
+    if super::policy::is_cockpit_projection(collection) {
+        return trusted_mcp_actor_policy_decision(
+            root,
+            context,
+            BusinessOsPermission::DataRead,
+            BusinessOsScopeType::Collection,
+            Some(collection),
+        );
+    }
     let collection_decision = trusted_mcp_actor_policy_decision(
         root,
         context,
@@ -5846,6 +5855,9 @@ fn business_os_mcp_record_read_decision(
     collection: &str,
     record_id: &str,
 ) -> anyhow::Result<PolicyDecision> {
+    if super::policy::is_cockpit_projection(collection) {
+        return business_os_mcp_collection_read_decision(root, context, collection);
+    }
     let scope_id = record_scope_id(collection, record_id);
     let record_decision = trusted_mcp_actor_policy_decision(
         root,
@@ -5871,6 +5883,15 @@ fn business_os_mcp_collection_write_decision(
     context: &McpChannelRequestContext,
     collection: &str,
 ) -> anyhow::Result<PolicyDecision> {
+    if super::policy::is_cockpit_projection(collection) {
+        return trusted_mcp_actor_policy_decision(
+            root,
+            context,
+            BusinessOsPermission::DataWrite,
+            BusinessOsScopeType::Collection,
+            Some(collection),
+        );
+    }
     let collection_decision = trusted_mcp_actor_policy_decision(
         root,
         context,
@@ -11324,6 +11345,60 @@ mod tests {
 
         assert_eq!(typed.code, BusinessOsMcpErrorCode::PermissionDenied);
         assert_eq!(typed.field.as_deref(), Some("business_os_policy"));
+        Ok(())
+    }
+
+    #[test]
+    fn cockpit_mcp_policy_cannot_be_bypassed_by_module_or_record_grants() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        write_module(
+            root.path(),
+            "ctox",
+            "CTOX",
+            &["ctox_harness_events", "ctox_harness_status", "ctox_runs"],
+        )?;
+        for role in ["admin", "founder", "user"] {
+            let actor = format!("cockpit-{role}");
+            seed_business_user(root.path(), &actor, role)?;
+            let mut context = test_context("business_os.query_records");
+            context.actor = actor.clone();
+            for collection in ["ctox_harness_events", "ctox_harness_status", "ctox_runs"] {
+                for (scope, id) in [
+                    ("module", "ctox".to_string()),
+                    ("collection", collection.to_string()),
+                    ("record", record_scope_id(collection, "fixture")),
+                ] {
+                    seed_business_permission_grant(
+                        root.path(),
+                        &format!("{actor}-{collection}-{scope}"),
+                        "user",
+                        &actor,
+                        BusinessOsPermission::DataRead,
+                        scope,
+                        &id,
+                    )?;
+                }
+                assert_eq!(
+                    business_os_mcp_collection_read_decision(root.path(), &context, collection)?
+                        .allowed,
+                    role != "user"
+                );
+                assert_eq!(
+                    business_os_mcp_record_read_decision(
+                        root.path(),
+                        &context,
+                        collection,
+                        "fixture"
+                    )?
+                    .allowed,
+                    role != "user"
+                );
+                assert!(
+                    !business_os_mcp_collection_write_decision(root.path(), &context, collection)?
+                        .allowed
+                );
+            }
+        }
         Ok(())
     }
 

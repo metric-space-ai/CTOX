@@ -13,6 +13,7 @@ mod customer_apps;
 pub mod decision_hub;
 mod desktop_files;
 mod external_sql_sync;
+pub(crate) mod harness_cockpit;
 mod hashing;
 mod importer;
 mod inventory_drift_tests;

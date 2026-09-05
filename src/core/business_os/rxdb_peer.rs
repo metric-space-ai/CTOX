@@ -8668,7 +8668,41 @@ fn migrate_additive_native_rxdb_collection_versions(root: &Path) -> anyhow::Resu
     let mut migrated_tables = 0usize;
     let mut migrated_rows = 0usize;
     let mut verified_rows = 0usize;
-    for entry in runtime_module_collection_entries_for_root(root) {
+    let mut entries = runtime_module_collection_entries_for_root(root);
+    entries.retain(|entry| {
+        !matches!(
+            entry.name.as_str(),
+            "business_commands" | "ctox_queue_tasks" | "ctox_runs"
+        )
+    });
+    // Packaged cockpit schema upgrades use the same copy/verify transaction as installed modules.
+    // Only these explicitly versioned collections are opted in; no blanket schema rewrite.
+    let packaged: Value = serde_json::from_str(include_str!(
+        "../../apps/business-os/modules/ctox/collections.schema.json"
+    ))?;
+    for name in ["business_commands", "ctox_queue_tasks", "ctox_runs"] {
+        let schema = schema_from_json(
+            business_os_schema_contract()
+                .get(name)
+                .context("missing packaged cockpit schema")?
+                .clone(),
+        );
+        let strategies = packaged
+            .pointer(&format!("/migration_strategies/{name}"))
+            .and_then(Value::as_object)
+            .context("missing packaged cockpit migration strategies")?;
+        let migration_strategies = strategies
+            .iter()
+            .map(|(version, spec)| Ok((version.parse::<i64>()?, spec.clone())))
+            .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+        entries.push(RuntimeModuleCollectionEntry {
+            name: name.to_string(),
+            schema,
+            sync_profile: RuntimeModuleSyncProfile::Eager,
+            migration_strategies,
+        });
+    }
+    for entry in entries {
         let target_version = i64::from(entry.schema.version);
         let target_table = rxdb_collection_version_table_name(&entry.name, target_version);
         let version_tables = rxdb_collection_version_tables(&conn, &entry.name)?;
@@ -8980,6 +9014,9 @@ fn business_record_projection_collections() -> Vec<String> {
                     // as generic business records — same rule as desktop_file_chunks.
                     | "business_module_source_blob_chunks"
                     | "ctox_runtime_settings"
+                    | "ctox_harness_events"
+                    | "ctox_harness_status"
+                    | "ctox_runs"
                     | "desktop_files"
                     | "desktop_file_chunks"
                     | "knowledge_tables"
@@ -8993,7 +9030,10 @@ fn business_record_projection_collections_for_root(root: &Path) -> Vec<String> {
     collections.extend(
         runtime_module_collection_entries_for_root(root)
             .into_iter()
-            .filter(|entry| matches!(entry.sync_profile, RuntimeModuleSyncProfile::Eager))
+            .filter(|entry| {
+                matches!(entry.sync_profile, RuntimeModuleSyncProfile::Eager)
+                    && !super::policy::is_cockpit_projection(&entry.name)
+            })
             .map(|entry| entry.name),
     );
     collections.sort();
@@ -9934,6 +9974,12 @@ pub(in crate::business_os) mod tests {
     #[test]
     fn business_record_projection_skips_transient_payload_collections() {
         let collections = business_record_projection_collections();
+        for name in ["ctox_harness_events", "ctox_harness_status", "ctox_runs"] {
+            assert!(
+                !collections.iter().any(|collection| collection == name),
+                "cockpit has a dedicated producer"
+            );
+        }
         assert!(!collections.iter().any(|name| name == "browser_frames"));
         assert!(!collections.iter().any(|name| name == "desktop_file_chunks"));
         assert!(!collections
@@ -11091,6 +11137,51 @@ pub(in crate::business_os) mod tests {
     }
 
     #[test]
+    fn packaged_cockpit_schema_migration_preserves_existing_documents() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("runtime"))?;
+        for (collection, old, new) in [
+            ("business_commands", 1, 2),
+            ("ctox_queue_tasks", 1, 2),
+            ("ctox_runs", 0, 1),
+        ] {
+            create_runtime_migration_source_table(root.path(), collection, old)?;
+            create_runtime_migration_source_table(root.path(), collection, new)?;
+            insert_runtime_migration_row(
+                root.path(),
+                collection,
+                old,
+                "kept",
+                100.0,
+                json!({"id":"kept","title":"Existing evidence","updated_at_ms":100}),
+            )?;
+        }
+        let migration = migrate_additive_native_rxdb_collection_versions(root.path())?;
+        assert_eq!(migration["verified_rows"], 3);
+        for (collection, version) in [
+            ("business_commands", 2),
+            ("ctox_queue_tasks", 2),
+            ("ctox_runs", 1),
+        ] {
+            let conn = Connection::open(store::rxdb_store_path(root.path()))?;
+            let table = rxdb_collection_version_table_name(collection, version);
+            let raw: String = conn.query_row(
+                &format!(
+                    "SELECT data FROM {} WHERE id='kept'",
+                    sqlite_quote_identifier(&table)
+                ),
+                [],
+                |r| r.get(0),
+            )?;
+            assert_eq!(
+                serde_json::from_str::<Value>(&raw)?["title"],
+                "Existing evidence"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn additive_thread_schema_migration_copies_and_verifies_before_cleanup() -> anyhow::Result<()> {
         let root = tempfile::tempdir()?;
         let collection = "runtime_thread_records";
@@ -11700,40 +11791,40 @@ pub(in crate::business_os) mod tests {
         )
         .expect("create stale v0 table");
         conn.execute(
-            "CREATE TABLE ctox_business_os__business_commands__v1 (
+            "CREATE TABLE ctox_business_os__business_commands__v2 (
                 id TEXT PRIMARY KEY,
                 data TEXT NOT NULL
             )",
             [],
         )
-        .expect("create active v1 table");
+        .expect("create active v2 table");
         conn.execute_batch(
-            "CREATE TRIGGER sync_commands_v1_to_v0_insert
-             AFTER INSERT ON ctox_business_os__business_commands__v1
+            "CREATE TRIGGER sync_commands_v2_to_v0_insert
+             AFTER INSERT ON ctox_business_os__business_commands__v2
              FOR EACH ROW
              BEGIN
                  INSERT OR REPLACE INTO ctox_business_os__business_commands__v0 (id, data)
                  VALUES (NEW.id, NEW.data);
              END;",
         )
-        .expect("create stale v1-to-v0 trigger");
+        .expect("create stale v2-to-v0 trigger");
         conn.execute(
             "INSERT INTO ctox_business_os___rxdb_internal__v0 (id, data, deleted)
-             VALUES ('collection|business_commands-1', ?1, 0)",
+             VALUES ('collection|business_commands-2', ?1, 0)",
             [json!({
-                "id": "collection|business_commands-1",
-                "key": "business_commands-1",
+                "id": "collection|business_commands-2",
+                "key": "business_commands-2",
                 "context": "collection",
                 "data": {
                     "name": "business_commands",
-                    "version": 1,
+                    "version": 2,
                     "schemaHash": "test"
                 },
                 "_deleted": false
             })
             .to_string()],
         )
-        .expect("insert active v1 collection meta");
+        .expect("insert active v2 collection meta");
         conn.execute(
             "INSERT INTO ctox_business_os__business_commands__v0 (id, data)
              VALUES ('cmd_stale', ?1)",
@@ -11741,7 +11832,7 @@ pub(in crate::business_os) mod tests {
         )
         .expect("insert stale row");
         conn.execute(
-            "INSERT INTO ctox_business_os__business_commands__v1 (id, data)
+            "INSERT INTO ctox_business_os__business_commands__v2 (id, data)
              VALUES ('cmd_active', ?1)",
             [json!({"id": "cmd_active", "updated_at_ms": 200, "status": "failed"}).to_string()],
         )
@@ -11760,7 +11851,7 @@ pub(in crate::business_os) mod tests {
         assert_eq!(dry_run["stale_triggers"].as_array().unwrap().len(), 1);
         let conn = Connection::open(&path).expect("reopen rxdb sqlite after dry-run");
         assert!(sqlite_table_exists(&conn, "ctox_business_os__business_commands__v0").unwrap());
-        assert!(sqlite_trigger_exists(&conn, "sync_commands_v1_to_v0_insert").unwrap());
+        assert!(sqlite_trigger_exists(&conn, "sync_commands_v2_to_v0_insert").unwrap());
         drop(conn);
 
         let refused = repair_optional_rxdb_collection_schema_drift(
@@ -11788,17 +11879,17 @@ pub(in crate::business_os) mod tests {
 
         let conn = Connection::open(&path).expect("reopen rxdb sqlite after apply");
         assert!(!sqlite_table_exists(&conn, "ctox_business_os__business_commands__v0").unwrap());
-        assert!(sqlite_table_exists(&conn, "ctox_business_os__business_commands__v1").unwrap());
-        assert!(!sqlite_trigger_exists(&conn, "sync_commands_v1_to_v0_insert").unwrap());
+        assert!(sqlite_table_exists(&conn, "ctox_business_os__business_commands__v2").unwrap());
+        assert!(!sqlite_trigger_exists(&conn, "sync_commands_v2_to_v0_insert").unwrap());
         conn.execute(
-            "INSERT INTO ctox_business_os__business_commands__v1 (id, data)
+            "INSERT INTO ctox_business_os__business_commands__v2 (id, data)
              VALUES ('cmd_after_repair', ?1)",
             [
                 json!({"id": "cmd_after_repair", "updated_at_ms": 300, "status": "failed"})
                     .to_string(),
             ],
         )
-        .expect("active v1 write must not reference removed stale v0 table");
+        .expect("active v2 write must not reference removed stale v0 table");
     }
 
     #[test]
@@ -13128,6 +13219,56 @@ pub(in crate::business_os) mod tests {
         })
         .await
         .map_err(|err| anyhow::anyhow!("open test Business OS RxDB database: {err}"))
+    }
+
+    #[tokio::test]
+    async fn cockpit_bring_up_materializes_no_legacy_grants() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        // Capability issuance invokes the default-schema grant migration first.
+        store::issue_business_os_capability_token_for_managed_user(
+            root.path(),
+            "cockpit-founder",
+            "Cockpit Founder",
+            "founder",
+            1,
+        )?;
+        let database = open_test_database(store::rxdb_store_path(root.path())).await?;
+        // Keep the full grant input from peer bring-up, but open only the relevant
+        // collections: unrelated per-collection SQLite pollers are not under test.
+        let mut creators = collection_creators_for_root(root.path());
+        let names = creators.keys().cloned().collect::<Vec<_>>();
+        creators.retain(|name, _| {
+            super::super::policy::is_cockpit_projection(name) || name == "business_module_catalog"
+        });
+        let (collections, failures) = database.add_collections_tolerant(creators).await?;
+        assert!(failures.is_empty(), "{failures:?}");
+        assert_eq!(collections.len(), 4);
+        for name in ["ctox_harness_events", "ctox_harness_status", "ctox_runs"] {
+            assert!(names.iter().any(|entry| entry == name), "missing {name}");
+        }
+        let conn = store::open_store(root.path())?;
+        for _ in 0..2 {
+            store::ensure_legacy_collection_grants(root.path(), &names)?;
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM business_permission_grants
+                 WHERE scope_id LIKE 'ctox_harness_%' OR scope_id = 'ctox_runs'",
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(
+                count, 0,
+                "default grants and repeated peer bring-up must exclude cockpit"
+            );
+        }
+        let ordinary: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM business_permission_grants
+             WHERE scope_id = 'business_module_catalog' AND active = 1",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(ordinary > 0, "ordinary-data migration must still run");
+        database.close().await?;
+        Ok(())
     }
 
     #[test]

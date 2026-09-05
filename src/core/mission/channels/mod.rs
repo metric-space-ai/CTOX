@@ -310,6 +310,18 @@ pub struct QueueTaskView {
     pub created_at: String,
     pub sort_at: String,
     pub updated_at: String,
+    pub lease_expires_at: Option<String>,
+    pub lease_worker_id: Option<String>,
+    pub first_pending_at: Option<String>,
+    pub failure_class: Option<String>,
+    pub failure_attempt_count: i64,
+    pub retry_not_before: Option<String>,
+    pub hold_reason: Option<String>,
+    pub wait_entity_type: Option<String>,
+    pub wait_entity_id: Option<String>,
+    pub priority_time_credit_hours: i64,
+    pub attempt: i64,
+    pub crew_member_id: Option<String>,
 }
 
 pub(crate) fn register_queue_projection_hooks(
@@ -338,6 +350,7 @@ fn refresh_queue_projection_tasks(
     if let Some(hooks) = QUEUE_PROJECTION_HOOKS.get().copied() {
         (hooks.refresh)(root, conn, tasks)?;
     }
+    crate::business_os::harness_cockpit::schedule_refresh(root);
     Ok(())
 }
 
@@ -2104,6 +2117,9 @@ pub fn lease_pending_inbound_messages(
     limit: usize,
     lease_owner: &str,
 ) -> Result<Vec<RoutedInboundMessage>> {
+    if crate::business_os::harness_cockpit::queue_is_paused(root) {
+        return Ok(Vec::new());
+    }
     refresh_inbound_priority_credits(root)?;
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
@@ -2149,6 +2165,9 @@ pub fn peek_leasable_inbound_messages(
     limit: usize,
     lease_owner: &str,
 ) -> Result<Vec<RoutedInboundMessage>> {
+    if crate::business_os::harness_cockpit::queue_is_paused(root) {
+        return Ok(Vec::new());
+    }
     refresh_inbound_priority_credits(root)?;
     let db_path = resolve_db_path(root, None);
     let conn = open_channel_db(&db_path)?;
@@ -3301,7 +3320,7 @@ pub fn load_queue_task_last_error(root: &Path, message_key: &str) -> Result<Opti
 }
 
 pub fn update_queue_task(root: &Path, request: QueueTaskUpdateRequest) -> Result<QueueTaskView> {
-    update_queue_task_with_optional_terminal_policy_grant(root, request, None)
+    update_queue_task_with_optional_terminal_policy_grant(root, request, None, false, false)
 }
 
 pub(crate) fn update_queue_task_with_terminal_policy_grant(
@@ -3313,13 +3332,50 @@ pub(crate) fn update_queue_task_with_terminal_policy_grant(
         root,
         request,
         Some(terminal_policy_grant),
+        false,
+        false,
     )
+}
+
+pub(crate) fn control_queue_task(
+    root: &Path,
+    request: QueueTaskUpdateRequest,
+    reset_failure: bool,
+) -> Result<QueueTaskView> {
+    update_queue_task_with_optional_terminal_policy_grant(root, request, None, reset_failure, true)
+}
+
+/// Every linked command must permit release, regardless of link insertion order.
+fn ensure_linked_commands_allow_queue_release(conn: &Connection, task_id: &str) -> Result<()> {
+    let (validating, terminal_status): (bool, Option<String>) = conn.query_row(
+        "SELECT COALESCE(MAX(aggregate.execution_phase = 'validating'), 0),
+                MAX(CASE WHEN aggregate.execution_phase = 'terminal'
+                         THEN aggregate.terminal_status END)
+         FROM business_command_task_links link
+         JOIN business_command_aggregates aggregate
+           ON aggregate.command_id = link.command_id
+         WHERE link.task_id = ?1",
+        [task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    anyhow::ensure!(
+        !validating,
+        "cannot release queue task `{task_id}` while a linked Business OS command is validating; terminalization or an atomic completion hold must resolve it"
+    );
+    anyhow::ensure!(
+        terminal_status.is_none(),
+        "cannot release queue task `{task_id}` for terminal Business OS command status `{}`; submit a new command to retry",
+        terminal_status.as_deref().unwrap_or_default()
+    );
+    Ok(())
 }
 
 fn update_queue_task_with_optional_terminal_policy_grant(
     root: &Path,
     request: QueueTaskUpdateRequest,
     terminal_policy_grant: Option<TerminalPolicyGrant>,
+    reset_failure: bool,
+    cockpit_control: bool,
 ) -> Result<QueueTaskView> {
     let db_path = resolve_db_path(root, None);
     let mut conn = open_channel_db(&db_path)?;
@@ -3332,29 +3388,7 @@ fn update_queue_task_with_optional_terminal_policy_grant(
         .map(canonical_queue_route_status)
         .transpose()?;
     if requested_route_status.is_some_and(QueueRouteStatus::is_pending) {
-        let command_state = conn
-            .query_row(
-                "SELECT aggregate.execution_phase, aggregate.terminal_status
-                 FROM business_command_task_links link
-                 JOIN business_command_aggregates aggregate
-                   ON aggregate.command_id = link.command_id
-                 WHERE link.task_id = ?1",
-                params![request.message_key],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        if let Some((phase, terminal_status)) = command_state {
-            anyhow::ensure!(
-                phase != "validating",
-                "cannot release queue task `{}` while its Business OS command is validating; terminalization or an atomic completion hold must resolve it",
-                request.message_key
-            );
-            anyhow::ensure!(
-                phase != "terminal",
-                "cannot release queue task `{}` for terminal Business OS command status `{terminal_status}`; submit a new command to retry",
-                request.message_key
-            );
-        }
+        ensure_linked_commands_allow_queue_release(&conn, &request.message_key)?;
     }
     let current_metadata = queue_metadata_object(&current.metadata);
     let title = request
@@ -3439,6 +3473,22 @@ fn update_queue_task_with_optional_terminal_policy_grant(
     }
     attach_queue_projection_store(root, &conn)?;
     let tx = conn.transaction()?;
+    if cockpit_control {
+        let status = current_queue_route_status(&tx, &current.message_key)?;
+        anyhow::ensure!(
+            status != "leased",
+            "active leases must finish before a cockpit queue control"
+        );
+        if reset_failure {
+            anyhow::ensure!(
+                matches!(status.as_str(), "failed" | "blocked"),
+                "retry requires a failed or blocked task"
+            );
+        }
+        if releases_deferred_work {
+            ensure_linked_commands_allow_queue_release(&tx, &current.message_key)?;
+        }
+    }
     upsert_communication_message_tx(
         &tx,
         UpsertMessage {
@@ -3497,6 +3547,19 @@ fn update_queue_task_with_optional_terminal_policy_grant(
                 terminal_policy_grant,
             )?;
         }
+    }
+    if reset_failure {
+        anyhow::ensure!(
+            requested_route_status.is_some_and(QueueRouteStatus::is_pending),
+            "retry must release to pending"
+        );
+        tx.execute("UPDATE communication_routing_state SET failure_class=NULL,failure_attempt_count=0,retry_not_before=NULL,hold_reason=NULL,wait_entity_type=NULL,wait_entity_id=NULL WHERE message_key=?1", [&current.message_key])?;
+    }
+    if cockpit_control && requested_route_status == Some(QueueRouteStatus::Blocked) {
+        tx.execute(
+            "UPDATE communication_routing_state SET hold_reason=?2 WHERE message_key=?1",
+            params![current.message_key, request.status_note],
+        )?;
     }
     refresh_thread_tx(&tx, &thread_key)?;
     let updated = load_queue_task_from_conn(&tx, &current.message_key)?
@@ -3559,6 +3622,10 @@ pub fn lease_queue_task(
     message_key: &str,
     lease_owner: &str,
 ) -> Result<QueueTaskView> {
+    anyhow::ensure!(
+        !crate::business_os::harness_cockpit::queue_is_paused(root),
+        "queue admission is paused"
+    );
     let normalized_owner = lease_owner.trim();
     anyhow::ensure!(
         !normalized_owner.is_empty(),
@@ -3592,9 +3659,9 @@ pub fn lease_queue_task(
         // Record the core-transition proof only after the CAS actually flips
         // the row, so a losing racer never writes a phantom proof.
         let updated = tx.execute(
-            r#"INSERT INTO communication_routing_state (message_key, route_status, lease_owner, leased_at, first_pending_at, lease_expires_at, lease_worker_id, acked_at, last_error, updated_at)
-               VALUES (?1, ?5, ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3)
-               ON CONFLICT(message_key) DO UPDATE SET route_status=excluded.route_status, lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, updated_at=excluded.updated_at
+            r#"INSERT INTO communication_routing_state (message_key, route_status, lease_owner, leased_at, first_pending_at, lease_expires_at, lease_worker_id, acked_at, last_error, updated_at, attempt)
+               VALUES (?1, ?5, ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3, 1)
+               ON CONFLICT(message_key) DO UPDATE SET route_status=excluded.route_status, lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, attempt=communication_routing_state.attempt+1, updated_at=excluded.updated_at
                WHERE communication_routing_state.route_status = 'pending'"#,
             params![
                 message_key,
@@ -4875,6 +4942,7 @@ fn ensure_routing_state_hardening_columns(conn: &Connection) -> Result<()> {
         ("lease_worker_id", "TEXT"),
         ("failure_class", "TEXT"),
         ("failure_attempt_count", "INTEGER NOT NULL DEFAULT 0"),
+        ("attempt", "INTEGER NOT NULL DEFAULT 0"),
         ("retry_not_before", "TEXT"),
         ("priority_time_credit_hours", "INTEGER NOT NULL DEFAULT 0"),
         ("hold_reason", "TEXT"),
@@ -4918,6 +4986,8 @@ fn ensure_routing_state_hardening_columns(conn: &Connection) -> Result<()> {
         "#,
         [],
     )?;
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_cockpit_queue_status_time ON communication_routing_state(route_status,updated_at DESC,message_key DESC);
+        CREATE INDEX IF NOT EXISTS idx_cockpit_queue_terminal_time ON communication_routing_state(updated_at DESC,message_key DESC) WHERE route_status IN ('handled','failed','cancelled');")?;
     Ok(())
 }
 
@@ -5492,9 +5562,9 @@ fn take_messages_with_projection(
     let mut taken = Vec::new();
     for mut item in rows {
         let updated = tx.execute(
-            r#"INSERT INTO communication_routing_state (message_key, route_status, lease_owner, leased_at, first_pending_at, lease_expires_at, lease_worker_id, acked_at, last_error, updated_at)
-               VALUES (?1, ?5, ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3)
-               ON CONFLICT(message_key) DO UPDATE SET route_status=excluded.route_status, lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, updated_at=excluded.updated_at
+            r#"INSERT INTO communication_routing_state (message_key, route_status, lease_owner, leased_at, first_pending_at, lease_expires_at, lease_worker_id, acked_at, last_error, updated_at, attempt)
+               VALUES (?1, ?5, ?2, ?3, ?3, ?4, NULL, NULL, NULL, ?3, 1)
+               ON CONFLICT(message_key) DO UPDATE SET route_status=excluded.route_status, lease_owner=excluded.lease_owner, leased_at=excluded.leased_at, first_pending_at=COALESCE(communication_routing_state.first_pending_at, excluded.first_pending_at), lease_expires_at=excluded.lease_expires_at, lease_worker_id=NULL, retry_not_before=NULL, hold_reason=NULL, acked_at=NULL, attempt=communication_routing_state.attempt+1, updated_at=excluded.updated_at
                WHERE communication_routing_state.route_status = 'pending'"#,
             params![
                 item.message_key,
@@ -6111,7 +6181,11 @@ fn list_queue_tasks_from_conn(conn: &Connection, limit: usize) -> Result<Vec<Que
             r.leased_at,
             r.acked_at,
             r.last_error,
-            COALESCE(r.updated_at, m.observed_at)
+            COALESCE(r.updated_at, m.observed_at),
+            r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
+            r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
+            r.hold_reason, r.wait_entity_type, r.wait_entity_id,
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6133,13 +6207,10 @@ fn list_queue_tasks_from_conn(conn: &Connection, limit: usize) -> Result<Vec<Que
     )?;
     let rows = statement.query_map(
         params![QUEUE_CHANNEL_NAME, limit as i64],
-        map_channel_message_row,
+        map_queue_task_row,
     )?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(anyhow::Error::from)?
-        .into_iter()
-        .map(queue_task_from_message)
-        .collect()
+        .map_err(anyhow::Error::from)
 }
 
 fn list_queue_tasks_from_conn_with_statuses(
@@ -6176,7 +6247,11 @@ fn list_queue_tasks_from_conn_with_statuses(
             r.leased_at,
             r.acked_at,
             r.last_error,
-            COALESCE(r.updated_at, m.observed_at)
+            COALESCE(r.updated_at, m.observed_at),
+            r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
+            r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
+            r.hold_reason, r.wait_entity_type, r.wait_entity_id,
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6202,12 +6277,9 @@ fn list_queue_tasks_from_conn_with_statuses(
     values.push(SqlValue::Integer(limit as i64));
     values.extend(statuses.iter().cloned().map(SqlValue::Text));
     let mut statement = conn.prepare(&sql)?;
-    let rows = statement.query_map(params_from_iter(values), map_channel_message_row)?;
+    let rows = statement.query_map(params_from_iter(values), map_queue_task_row)?;
     rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(anyhow::Error::from)?
-        .into_iter()
-        .map(queue_task_from_message)
-        .collect()
+        .map_err(anyhow::Error::from)
 }
 
 fn count_queue_tasks_from_conn_with_statuses(
@@ -6283,9 +6355,10 @@ fn load_queue_task_from_conn(
     conn: &Connection,
     message_key: &str,
 ) -> Result<Option<QueueTaskView>> {
-    load_queue_message_from_conn(conn, message_key)?
-        .map(queue_task_from_message)
-        .transpose()
+    Ok(
+        load_queue_tasks_by_message_key_from_conn(conn, &[message_key.to_string()])?
+            .remove(message_key),
+    )
 }
 
 pub(crate) fn load_queue_tasks_by_message_key_from_conn(
@@ -6326,7 +6399,11 @@ pub(crate) fn load_queue_tasks_by_message_key_from_conn(
                 r.leased_at,
                 r.acked_at,
                 r.last_error,
-                COALESCE(r.updated_at, m.observed_at)
+                COALESCE(r.updated_at, m.observed_at),
+            r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
+            r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
+            r.hold_reason, r.wait_entity_type, r.wait_entity_id,
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
             FROM communication_messages m
             LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
             WHERE m.channel = ?1
@@ -6338,9 +6415,9 @@ pub(crate) fn load_queue_tasks_by_message_key_from_conn(
         values.push(SqlValue::Text(QUEUE_CHANNEL_NAME.to_string()));
         values.extend(chunk.iter().cloned().map(SqlValue::Text));
         let mut statement = conn.prepare(&sql)?;
-        let rows = statement.query_map(params_from_iter(values), map_channel_message_row)?;
+        let rows = statement.query_map(params_from_iter(values), map_queue_task_row)?;
         for row in rows {
-            let task = queue_task_from_message(row?)?;
+            let task = row?;
             tasks.insert(task.message_key.clone(), task);
         }
     }
@@ -6376,7 +6453,11 @@ fn load_queue_task_for_business_os_command_from_conn(
             r.leased_at,
             r.acked_at,
             r.last_error,
-            COALESCE(r.updated_at, m.observed_at)
+            COALESCE(r.updated_at, m.observed_at),
+            r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
+            r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
+            r.hold_reason, r.wait_entity_type, r.wait_entity_id,
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6398,11 +6479,27 @@ fn load_queue_task_for_business_os_command_from_conn(
         LIMIT 1
         "#,
         params![QUEUE_CHANNEL_NAME, command_id],
-        map_channel_message_row,
+        map_queue_task_row,
     )
-    .optional()?
-    .map(queue_task_from_message)
-    .transpose()
+    .optional()
+    .map_err(anyhow::Error::from)
+}
+
+fn map_queue_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueTaskView> {
+    let mut task = queue_task_from_message(map_channel_message_row(row)?)
+        .map_err(|err| rusqlite::Error::ToSqlConversionFailure(err.into()))?;
+    task.lease_expires_at = row.get(23)?;
+    task.lease_worker_id = row.get(24)?;
+    task.first_pending_at = row.get(25)?;
+    task.failure_class = row.get(26)?;
+    task.failure_attempt_count = row.get(27)?;
+    task.retry_not_before = row.get(28)?;
+    task.hold_reason = row.get(29)?;
+    task.wait_entity_type = row.get(30)?;
+    task.wait_entity_id = row.get(31)?;
+    task.priority_time_credit_hours = row.get(32)?;
+    task.attempt = row.get(33)?;
+    Ok(task)
 }
 
 fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView> {
@@ -6472,6 +6569,18 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
         created_at,
         sort_at,
         updated_at: message.routing.updated_at,
+        lease_expires_at: None,
+        lease_worker_id: None,
+        first_pending_at: None,
+        failure_class: None,
+        failure_attempt_count: 0,
+        retry_not_before: None,
+        hold_reason: None,
+        wait_entity_type: None,
+        wait_entity_id: None,
+        priority_time_credit_hours: 0,
+        attempt: 0,
+        crew_member_id: None,
     })
 }
 
