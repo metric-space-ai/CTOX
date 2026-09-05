@@ -335,10 +335,62 @@ Its verified_writeback_completes_lead_and_retains_gap_audit_id regression checks
 completed lead persistence. These are inspected existing implementations; no
 handler is reconstructed from documentation and neither file is changed here.
 
-The harness enabled signed Business OS MCP sessions only for nonempty
-allowed_actions. The app's mechanism=business_command contract has command_type,
-collection and record_ids instead, and was therefore ignored. The semantic-only
-review shortcut also treated that contract as requiring no action.
+The harness originally enabled signed Business OS MCP sessions only for nonempty
+allowed_actions. A persisted mechanism=business_command contract with command_type,
+collection and record_ids was therefore ignored. The semantic-only review shortcut
+also treated that contract as requiring no action. Later field evidence corrects
+the assumption that App 1.0.99 actually persisted this complete native contract:
+its command.payload.writeback_contract contained only collection,
+allowed_collections, record_ids and min_independent_sources. The mechanism and
+command_type were present only on the app's outer task envelope. The previous
+incomplete-contract guard consequently did not activate for that stored payload.
+
+### Befund 5 follow-up — persisted App 1.0.99 legacy contract
+
+Validation: on 446d6d919 plus this follow-up, all three targeted
+command_writeback_tests and root cargo check passed. After rebasing onto the
+Crew-Cockpit changes in b4294678f, the JS suite passed 115/115 with the real
+wire daemon, zero failures or skips, including the customer identifier guard.
+The three targeted Rust tests also passed on that base (0 failed or ignored,
+2.63 seconds), followed by a successful root cargo check (485 warnings).
+Native RxDB tests passed: 399 tests (366 unit, 31 conformance,
+one error-contract and one idle-budget test), zero failures or skips. The native
+crate and Cargo manifests/lockfile are unchanged between those bases; its tree is
+48e812c36d61976c6bf45e4ac01e5bb8a5496edb. Native RxDB and changed writeback-file
+formatting pass. Root cargo fmt --check reports only pre-existing differences in
+src/core/context/lcm/mod.rs and src/core/context/lcm/tests.rs; those unrelated
+files are unchanged by this slice.
+
+Outbound business_os.chat.task commands in mode=data that identify
+outbound_lead_generation_leads in writeback_contract.collection or
+writeback_contract.allowed_collections now require the full native command
+contract. Missing mechanism/command_type raises `writeback contract incomplete`
+before model invocation and fails completion review for resumed work. These tasks
+cannot use the semantic-answer-only shortcut. Other modules, modes and collections,
+and ordinary data chats without a lead writeback contract, retain their existing
+behavior. A completely absent contract carries no collection identity and remains
+outside this scoped guard; the harness does not infer mutation from arbitrary chat
+instructions.
+
+The regression persists the exact four-field App 1.0.99 shape through the real
+business-command acceptance path and verifies that it survives unchanged into
+the queue context. It then checks rejection before MCP session creation and a
+terminal completion failure. Scope tests cover other modules/modes/collections,
+plain data chat, and a missing collection still named by allowed_collections.
+The existing valid command contract test verifies activation and correlated receipts.
+
+App 1.0.100 must persist mechanism=business_command,
+command_type=outbound.lead.research_writeback, the exact collection
+outbound_lead_generation_leads and nonempty record_ids inside
+command.payload.writeback_contract. supports_command_writeback checks collection
+equality in src/core/business_os/mcp_writeback.rs:10. allowed_actions is unnecessary
+for business_os.execute_writeback; allowed_collections and min_independent_sources
+alone do not activate it. This fix does not rewrite previously accepted commands:
+legacy tasks fail visibly and must be resubmitted with the complete persisted
+contract. The command-only MCP path was already published in e9a346e38;
+App 1.0.100 does not depend on this additional legacy-contract rejection to
+activate it. This follow-up changes failure behavior for incomplete contracts,
+not the valid App 1.0.100 contract.
 
 The harness now recognizes the native research writeback contract and exposes
 business_os.execute_writeback. It requires a signed internal command session,
