@@ -129,6 +129,12 @@ export async function handleTurnRequest(
         : "provider_error";
       return { id: request.id, ok: false, error: `pi coding turn failed: ${category}` };
     }
+    const terminalAssistant = [...result.messages].reverse().find((message) => message.role === "assistant");
+    if (terminalAssistant?.role !== "assistant" || terminalAssistant.stopReason !== "stop") {
+      // A bounded turn can stop immediately after a tool edit. That is an
+      // unfinished in-memory workspace, not an atomic app-source release.
+      return { id: request.id, ok: false, error: "pi coding turn failed: incomplete_turn" };
+    }
     return {
       id: request.id,
       ok: true,

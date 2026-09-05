@@ -5,6 +5,28 @@ const EMBEDDED_EDITOR_HTML_BASE64 = Object.freeze({
   spreadsheet: '__CTOX_EMBEDDED_SPREADSHEET_HTML_BASE64__',
 });
 
+// A save acknowledges the revision serialized at its start, never edits that
+// happened while the native commit was in flight. Independent of SDK history.
+export function createOfficeSaveTracker() {
+  let generation = 0;
+  let revision = 0;
+  let savedRevision = 0;
+  let failed = false;
+  return {
+    edit() { revision += 1; },
+    reset() { generation += 1; savedRevision = revision; failed = false; },
+    snapshot() { return { generation, revision }; },
+    acknowledge(snapshot) {
+      if (snapshot.generation !== generation) return false;
+      savedRevision = Math.max(savedRevision, snapshot.revision);
+      failed = false;
+      return savedRevision === revision;
+    },
+    fail() { failed = true; },
+    get dirty() { return failed || revision !== savedRevision; },
+  };
+}
+
 export async function createCtoxForkRuntime({ root, bridge, permissions, emit, locale = 'de', theme = 'system', appearance = {}, kind = 'spreadsheet', launchArgs = {} }) {
   const appearanceUrl = new URL('../shell-appearance.mjs', import.meta.url);
   const appearanceRevision = new URL(import.meta.url).searchParams.get('v');
@@ -21,12 +43,18 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   let versionId = null;
   let recordTitle = '';
   let editorBytes = null;
-  let dirty = false;
+  const saveTracker = createOfficeSaveTracker();
   let documentReady = false;
   let destroyed = false;
   let pendingSave = null;
   let documentMediaResolver = null;
   let forkUi = null;
+  let mutationApi = null;
+  const onUserActionEnd = () => {
+    if (destroyed || !documentReady || access.write === false) return;
+    saveTracker.edit();
+    emit?.('dirty', { recordId, versionId, dirty: true });
+  };
   let requestedTheme = normalizeTheme(theme);
   const colorScheme = matchMedia('(prefers-color-scheme: dark)');
   const frameEditorId = `ctox-office-${crypto.randomUUID()}`;
@@ -63,26 +91,31 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
     switch (message.event) {
       case 'onAppReady':
         clearTimeout(readyTimeout);
-        installCtoxSdkAdapter(frame.contentWindow, kind);
+        installCtoxSdkAdapter(frame.contentWindow, kind, beginSdkSave);
         forkUi = installCtoxForkUi(frame.contentWindow, { productId, productName, kind, theme: requestedTheme });
         applyShellAppearance(frame.contentDocument, appearance);
         resolveAppReady();
         break;
       case 'onDocumentReady':
         documentReady = true;
+        mutationApi = frame.contentWindow.Asc?.editor;
+        mutationApi?.asc_unregisterCallback?.('asc_onUserActionEnd', onUserActionEnd);
+        mutationApi?.asc_registerCallback?.('asc_onUserActionEnd', onUserActionEnd);
         applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId, true);
         forkUi?.setTitle(`${recordTitle || productName} · ${productName}`);
         emit?.('opened', inspection());
         break;
       case 'onDocumentStateChange':
-        dirty = message.data === true;
-        emit?.(dirty ? 'dirty' : 'clean', { recordId, versionId, dirty });
+        // SDK "clean" notifications describe its local serialization, not a
+        // durable native commit. Only that commit may acknowledge our edits.
+        if (message.data === true) onUserActionEnd();
         break;
       case 'onSaveDocument':
         await acceptSavedBinary(message.data);
         break;
       case 'onError':
         emit?.('error', { code: message.data?.errorCode, message: message.data?.errorDescription || `${productName} error` });
+        if (pendingSave) saveTracker.fail();
         pendingSave?.reject?.(Object.assign(new Error(message.data?.errorDescription || `${productName} save failed`), { code: message.data?.errorCode }));
         pendingSave = null;
         break;
@@ -103,36 +136,58 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
     frame.contentWindow.postMessage(payload, runtimeOrigin, transfer);
   };
 
+  function createPendingSave(reason) {
+    let resolve;
+    let reject;
+    const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
+    // Toolbar saves have no RPC caller, but are still observable through events.
+    promise.catch(() => {});
+    return { promise, resolve, reject, reason, serialized: false };
+  }
+
+  function beginSdkSave() {
+    if (destroyed || pendingSave?.serialized) return false;
+    pendingSave ||= createPendingSave('toolbar');
+    pendingSave.serialized = true;
+    pendingSave.snapshot = saveTracker.snapshot();
+    pendingSave.recordId = recordId;
+    pendingSave.versionId = versionId;
+    emit?.('saving', { recordId, versionId });
+    return true;
+  }
+
   async function acceptSavedBinary(value) {
-    if (!pendingSave) {
-      pendingSave = {
-        promise: null,
-        resolve: () => {},
-        reject: (error) => emit?.('error', { code: error?.code || 'save_failed', message: error?.message || String(error) }),
-        reason: 'toolbar',
-      };
+    if (!pendingSave?.serialized) {
+      if (!beginSdkSave()) return;
     }
+    const activeSave = pendingSave;
+    if (activeSave.committing) return;
+    activeSave.committing = true;
     try {
       const bytes = normalizeBytes(value);
       const result = await bridge.commit({
-        recordId,
-        baseVersionId: versionId,
+        recordId: activeSave.recordId,
+        baseVersionId: activeSave.versionId,
         editorProtocol,
         editorProtocolVersion,
         implementedFeatures: [],
-        reason: pendingSave.reason,
+        reason: activeSave.reason,
         bytes,
       }, [bytes.buffer]);
+      if (destroyed) return;
       versionId = result.version_id || result.versionId || versionId;
       editorBytes = bytes;
-      dirty = false;
-      markUpstreamDocumentSaved();
-      emit?.('saved', { recordId, versionId });
-      pendingSave.resolve(result);
+      const clean = saveTracker.acknowledge(activeSave.snapshot);
+      if (clean) markUpstreamDocumentSaved();
+      const saved = { ...result, dirty: saveTracker.dirty };
+      emit?.('saved', { recordId, versionId, dirty: saveTracker.dirty });
+      activeSave.resolve(saved);
     } catch (error) {
-      pendingSave.reject(error);
+      saveTracker.fail();
+      emit?.('error', { code: error?.code || 'save_failed', message: error?.message || String(error) });
+      activeSave.reject(error);
     } finally {
-      pendingSave = null;
+      if (pendingSave === activeSave) pendingSave = null;
     }
   }
 
@@ -141,17 +196,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
     upstream.AscCommon?.History?.Reset_SavedIndex?.(true);
     upstream.Asc?.editor?.SetUnchangedDocument?.();
     if (!isDocument) upstream.Asc?.editor?.SetDocumentModified?.(false);
-    // asc_nativeGetFile2 completes before sdkjs' deferred history update. Reconcile
-    // once that update has run, just as the native local-save callback does.
-    setTimeout(() => {
-      upstream.AscCommon?.History?.Reset_SavedIndex?.(true);
-      upstream.Asc?.editor?.SetUnchangedDocument?.();
-      if (!isDocument) upstream.Asc?.editor?.SetDocumentModified?.(false);
-      if (dirty) {
-        dirty = false;
-        emit?.('clean', { recordId, versionId, dirty: false });
-      }
-    }, 1800);
+    emit?.('clean', { recordId, versionId, dirty: false });
   }
 
   function inspection() {
@@ -165,7 +210,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       record_id: recordId,
       version_id: versionId,
       document_ready: documentReady,
-      dirty,
+      dirty: saveTracker.dirty,
       read_only: access.write === false,
       source: { fork: productId, upstream_ancestry: 'euro-office-v9.3.1', web_apps: true, sdkjs: true },
     };
@@ -173,6 +218,9 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
 
   return {
     async open(request = {}) {
+      if (pendingSave || saveTracker.dirty) {
+        throw Object.assign(new Error('Save pending changes before opening another version'), { code: 'unsaved_changes' });
+      }
       let loaded = await bridge.loadVersion(request);
       if (!hasEditorBinarySignature(loaded.editorBytes, kind)) {
         await bridge.prepare({ recordId: request.recordId, versionId: loaded.version?.id || request.versionId });
@@ -188,7 +236,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       versionId = request.versionId || loaded.version?.id || null;
       recordTitle = loaded.record?.filename || loaded.record?.title || '';
       documentReady = false;
-      dirty = false;
+      saveTracker.reset();
       const upstream = frame.contentWindow;
       upstream.__ctoxEditorBinary = editorBytes;
       documentMediaResolver?.destroy?.();
@@ -203,12 +251,15 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       if (!documentReady) throw new Error(`${productName} is not ready`);
       if (access.write === false) throw permissionError(`${isDocument ? 'Document' : 'Spreadsheet'} is read-only`);
       if (pendingSave) return pendingSave.promise;
-      let resolve;
-      let reject;
-      const promise = new Promise((onResolve, onReject) => { resolve = onResolve; reject = onReject; });
-      pendingSave = { promise, resolve, reject, reason: String(reason || 'manual') };
-      frame.contentWindow.Asc.editor.asc_Save();
-      return promise;
+      pendingSave = createPendingSave(String(reason || 'manual'));
+      const activeSave = pendingSave;
+      try { frame.contentWindow.Asc.editor.asc_Save(); }
+      catch (error) {
+        saveTracker.fail();
+        activeSave.reject(error);
+        if (pendingSave === activeSave) pendingSave = null;
+      }
+      return activeSave.promise;
     },
     export({ format = 'xlsx' } = {}) {
       const expectedFormat = isDocument ? 'docx' : 'xlsx';
@@ -236,6 +287,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       clearTimeout(readyTimeout);
       window.removeEventListener('message', onMessage);
       colorScheme.removeEventListener?.('change', onColorSchemeChange);
+      mutationApi?.asc_unregisterCallback?.('asc_onUserActionEnd', onUserActionEnd);
       pendingSave?.reject?.(new Error(`${productName} runtime destroyed`));
       pendingSave = null;
       documentMediaResolver?.destroy?.();
@@ -387,7 +439,7 @@ function readU32(bytes, offset) {
   return (bytes[offset] | (bytes[offset + 1] << 8) | (bytes[offset + 2] << 16) | (bytes[offset + 3] << 24)) >>> 0;
 }
 
-function installCtoxSdkAdapter(upstream, kind) {
+function installCtoxSdkAdapter(upstream, kind, beginSave = () => true) {
   const prototype = kind === 'document'
     ? upstream.Asc?.asc_docs_api?.prototype
     : upstream.Asc?.spreadsheet_api?.prototype;
@@ -403,9 +455,9 @@ function installCtoxSdkAdapter(upstream, kind) {
   if (kind === 'document') {
     const upstreamSave = prototype.asc_Save;
     prototype.asc_Save = function (isAutoSave, isIdle) {
-      if (isAutoSave || typeof this.asc_nativeGetFile2 !== 'function') {
-        return upstreamSave.call(this, isAutoSave, isIdle);
-      }
+      if (isAutoSave) return upstreamSave.call(this, isAutoSave, isIdle);
+      if (!beginSave()) return false;
+      if (typeof this.asc_nativeGetFile2 !== 'function') return upstreamSave.call(this, isAutoSave, isIdle);
       const encoded = this.asc_nativeGetFile2();
       if (typeof encoded !== 'string') return upstreamSave.call(this, isAutoSave, isIdle);
       const binary = upstream.atob(encoded);
@@ -417,9 +469,9 @@ function installCtoxSdkAdapter(upstream, kind) {
   } else {
     const upstreamSave = prototype.asc_Save;
     prototype.asc_Save = function (isAutoSave, isIdle) {
-      if (isAutoSave || typeof this.asc_nativeGetFile !== 'function') {
-        return upstreamSave.call(this, isAutoSave, isIdle);
-      }
+      if (isAutoSave) return upstreamSave.call(this, isAutoSave, isIdle);
+      if (!beginSave()) return false;
+      if (typeof this.asc_nativeGetFile !== 'function') return upstreamSave.call(this, isAutoSave, isIdle);
       const encoded = this.asc_nativeGetFile();
       const bytes = decodeSpreadsheetNativeFile(upstream, encoded);
       if (!bytes) return upstreamSave.call(this, isAutoSave, isIdle);

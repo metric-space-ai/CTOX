@@ -39,7 +39,12 @@
   const preparedFixture = await window.officeLabPrepare(kind, base64(canonical));
   const storeKey = `office-integration-lab-${kind}`;
   const rows = JSON.parse(localStorage.getItem(storeKey) || '{}');
-  const persist = () => localStorage.setItem(storeKey, JSON.stringify(rows));
+  const realtime = params.get('realtime') === '1';
+  const observers = new Set();
+  const persist = () => {
+    localStorage.setItem(storeKey, JSON.stringify(rows));
+    if (realtime) queueMicrotask(() => { for (const observer of observers) observer(); });
+  };
   const records = rows[moduleId] ||= [];
   const versions = rows[`${kind}_versions`] ||= [];
   const chunks = rows[`${kind}_blob_chunks`] ||= [];
@@ -56,10 +61,12 @@
   const doc = (value) => value ? {...value,toJSON:()=>({...value}),async incrementalPatch(patch){Object.assign(value,patch);persist();return doc(value);},async remove(){value.is_deleted=true;persist();}} : null;
   const collection = (name) => {
     const table=rows[name] ||= [];
-    return { $:{subscribe(){return {unsubscribe(){}};}}, findOne(id){return {async exec(){return doc(table.find(row=>row.id===id));}};},find(query={}){return {async exec(){return table.filter(row=>matches(row,query.selector)).map(doc);}};},async insert(value){table.push(value);persist();return doc(value);},async upsert(value){const row=table.find(row=>row.id===value.id);row?Object.assign(row,value):table.push(value);persist();return doc(value);},async bulkUpsert(values){for(const value of values){const row=table.find(row=>row.id===value.id);row?Object.assign(row,value):table.push(value);}persist();return values.map(doc);}};
+    return { $:{subscribe(observer){observers.add(observer);return {unsubscribe(){observers.delete(observer);}};}}, findOne(id){return {async exec(){return doc(table.find(row=>row.id===id));}};},find(query={}){return {async exec(){return table.filter(row=>matches(row,query.selector)).map(doc);}};},async insert(value){table.push(value);persist();return doc(value);},async upsert(value){const row=table.find(row=>row.id===value.id);row?Object.assign(row,value):table.push(value);persist();return doc(value);},async bulkUpsert(values){for(const value of values){const row=table.find(row=>row.id===value.id);row?Object.assign(row,value):table.push(value);}persist();return values.map(doc);}};
   };
   const syncState={awaitInSync:async()=>{},awaitInitialReplication:async()=>{}};
   const commands=[];
+  const completedCommits=[];
+  let firstCommitReleased=false;
   const ctx={host:document.querySelector('#app'),left:document.createElement('aside'),right:document.createElement('aside'),locale,module:{id:moduleId},args:{},db:{collection},permissions:{canWriteCollection:()=>true},getActionIcon,
     sync:{async startCollection(){return {state:syncState};},async leaseCollection(){return {bridge:{state:syncState},release:async()=>{}};}},
     notifications:{success(message){document.querySelector('#notices').textContent=message;},error(message){console.error(message);document.querySelector('#notices').textContent=message;}},
@@ -77,6 +84,16 @@
       } else if(command.type.endsWith('.commit')) {
         const next={...version,id:`${record.id}-v${versions.length+1}`,editor_blob_id:payload.editor_blob_id,editor_protocol:payload.editor_protocol,editor_protocol_version:payload.editor_protocol_version};
         versions.push(next);record.current_version_id=next.id;persist();
+        // Native RxDB can publish the new head before the command result gets
+        // back to the editor. Exercise that ordering, not just a happy-path RPC.
+        if (params.has('holdFirstCommit') && !firstCommitReleased) {
+          await new Promise((resolve,reject)=>{
+            const watchdog=setTimeout(()=>reject(new Error('Test did not release first commit')),20000);
+            window.officeLab.releaseFirstCommit=()=>{firstCommitReleased=true;clearTimeout(watchdog);resolve();};
+          });
+        }
+        if (realtime) await new Promise(resolve=>setTimeout(resolve,1500));
+        completedCommits.push(command);
         return {status:'completed',payload:{outcome:{ok:true,record_id:record.id,version_id:next.id,blob_id:next.blob_id}}};
       } else throw new Error(`Unimplemented lab command: ${command.type}`);
       persist();return {status:'completed',payload:{outcome:{ok:true,record_id:record.id,version_id:version.id,editor_blob_id:version.editor_blob_id,editor_protocol:version.editor_protocol,editor_protocol_version:10,conversion_state:'prepared'}}};
@@ -84,6 +101,6 @@
     closeDrawers(){document.querySelector('#lab-drawer')?.remove();},
     openLeftDrawer(content){const drawer=document.createElement('aside');drawer.id='lab-drawer';drawer.append(content);ctx.host.append(drawer);},openRightDrawer(){},openBottomDrawer(){},
   };
-  window.officeLab={rows,records,versions,chunks,commands,ctx};
+  window.officeLab={rows,records,versions,chunks,commands,completedCommits,ctx};
   window.officeLab.cleanup=await mount(ctx);
 </script></body></html>

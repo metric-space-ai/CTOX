@@ -4,6 +4,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { tmpdir } from 'node:os';
 import { crc32 } from 'node:zlib';
 import { chromium } from '../node_modules/playwright/index.mjs';
 
@@ -14,10 +15,15 @@ import { chromium } from '../node_modules/playwright/index.mjs';
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
 const engineBin = process.argv.find(value => value.startsWith('--engine-bin='))?.slice('--engine-bin='.length)
   || path.join(root, 'runtime/build/cargo-target/debug/ctox-office-engine');
-const output = path.join(root, 'output/playwright/office-integration');
+const output = process.argv.find(value => value.startsWith('--output-dir='))?.slice('--output-dir='.length)
+  || path.join(root, 'output/playwright/office-integration');
 await mkdir(output, { recursive: true });
-const temporary = await mkdtemp(path.join(output, 'native-'));
+const temporary = await mkdtemp(path.join(tmpdir(), 'ctox-office-native-'));
 const run = promisify(execFile);
+const realtime = process.argv.includes('--realtime');
+const duringSave = process.argv.includes('--during-save');
+const selectedKind = process.argv.find(value=>value.startsWith('--kind='))?.slice('--kind='.length);
+assert.ok(!selectedKind || ['document','spreadsheet'].includes(selectedKind), 'Unknown test kind');
 
 // Isolated equivalent of the server's empty CSV -> OOXML conversion. The real
 // native DOCY/XLSY converter still prepares every newly created editor payload.
@@ -47,7 +53,7 @@ const failures = [];
 let activePage;
 let activeErrors;
 try {
-  for (const kind of ['spreadsheet', 'document']) {
+  for (const kind of selectedKind ? [selectedKind] : ['spreadsheet', 'document']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
     await context.exposeBinding('officeLabPrepare', async (_, requestedKind, encoded) => {
       assert.equal(requestedKind, kind);
@@ -75,7 +81,7 @@ try {
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', event => { if(event.type()==='error') errors.push(event.text()); });
     page.on('response', response => { if(response.status()>=400) console.log(JSON.stringify({kind,failedAsset:response.url(),status:response.status()})); });
-    await page.goto(`http://127.0.0.1:8766/src/apps/business-os/office-engine/oracle/shell-v2-office.html?kind=${kind}`);
+    await page.goto(`http://127.0.0.1:8766/src/apps/business-os/office-engine/oracle/shell-v2-office.html?kind=${kind}${realtime?'&realtime=1':''}${duringSave?'&holdFirstCommit=1':''}`);
     const prefix = kind === 'document' ? 'documents' : 'spreadsheets';
     await page.locator(`.${prefix}-card-main`).first().click({timeout:20000});
     const outer = page.frameLocator(`iframe[data-ctox-office-kind="${kind}"]`);
@@ -143,17 +149,49 @@ try {
     const blankRuntime=page.frames().find(frame=>frame.parentFrame()===page.mainFrame());
     await blankRuntime.waitForFunction(()=>window.__officeLabReady===true,null,{timeout:30000});
     assert.equal(await page.locator('#lab-drawer').count(),0,'Blank creation must not require a prompt dialog');
-    const replacement=`CTOX_OFFICE_${kind.toUpperCase()}_SAVED`;
+    let replacement=`CTOX_OFFICE_${kind.toUpperCase()}_SAVED`;
     if(kind==='spreadsheet') {
       await editor.locator('#ce-cell-name').fill('A1'); await editor.locator('#ce-cell-name').press('Enter');
       assert.equal(await editor.locator('#ce-cell-content').inputValue(),'');
       await editor.locator('#ce-cell-content').fill(replacement);await editor.locator('#ce-cell-content').press('Enter');
+      if (duringSave) {
+        assert.ok(realtime, '--during-save requires the realtime fixture');
+        const activeEditorFrame = await page.locator('iframe[data-ctox-office-kind="spreadsheet"]').elementHandle();
+        await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
+        await page.waitForFunction(()=>window.officeLab.commands.some(command=>command.type.endsWith('.commit')));
+        await editor.locator('#ce-cell-name').fill('B1'); await editor.locator('#ce-cell-name').press('Enter');
+        await editor.locator('#ce-cell-content').pressSequentially('DURING_SAVE', {delay:50});
+        await editor.locator('#ce-cell-content').press('Enter');
+        assert.equal(await activeEditorFrame.evaluate(frame=>frame.isConnected), true,
+          'A realtime save acknowledgement must not replace the spreadsheet while the user is editing');
+      }
     } else {
       const canvas=editor.locator('#id_viewer_overlay');const box=await canvas.boundingBox();
-      await canvas.click({position:{x:box.width*0.35,y:120}});await page.keyboard.type(replacement);
+      await canvas.click({position:{x:box.width*0.35,y:120}});await page.keyboard.type(replacement,{delay:realtime?80:0});
+      if (duringSave) {
+        assert.ok(realtime, '--during-save requires the realtime fixture');
+        const activeEditorFrame = await page.locator('iframe[data-ctox-office-kind="document"]').elementHandle();
+        await page.keyboard.press('Meta+s');
+        await page.waitForFunction(()=>window.officeLab.commands.some(command=>command.type.endsWith('.commit')));
+        const continuation = '_DURING_SAVE';
+        await page.keyboard.type(continuation, { delay: 50 });
+        replacement += continuation;
+        assert.equal(await activeEditorFrame.evaluate(frame=>frame.isConnected), true,
+          'A realtime save acknowledgement must not replace the editor while the user is typing');
+      }
     }
     await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
+    if(duringSave) {
+      assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0,'Continued editing must occur before the first save is acknowledged');
+      await page.evaluate(()=>window.officeLab.releaseFirstCommit());
+    }
     await page.waitForFunction(()=>window.officeLab.commands.some(command=>command.type.endsWith('.commit')),null,{timeout:15000});
+    await page.waitForFunction(expected=>window.officeLab.completedCommits.length>=expected,duringSave?2:1,{timeout:20000});
+    const settledCommitCount=await page.evaluate(()=>window.officeLab.commands.filter(command=>command.type.endsWith('.commit')).length);
+    // SDK serialization has deferred callbacks. A successful acknowledgement
+    // must not manufacture another dirty revision and an endless autosave loop.
+    await page.waitForTimeout(3500);
+    assert.equal(await page.evaluate(()=>window.officeLab.commands.filter(command=>command.type.endsWith('.commit')).length),settledCommitCount,'An idle saved editor must not repeatedly commit itself');
     const saved=await page.evaluate(()=>{
       const command=window.officeLab.commands.findLast(command=>command.type.endsWith('.commit'));
       return window.officeLab.chunks.filter(row=>row.blob_id===command.payload.editor_blob_id).sort((a,b)=>a.idx-b.idx).map(row=>row.data);
@@ -169,12 +207,14 @@ try {
       assert.ok(xml.stdout.replace(/<[^>]+>/g,'').includes(replacement),'Native DOCX export must preserve the typed text');
     } else {
       assert.ok(inspection.stdout.includes(replacement),'Native inspection must find the cell entered through the UI');
+      if(duringSave) assert.ok(inspection.stdout.includes('DURING_SAVE'),'Native inspection must preserve the cell edited during the earlier save');
       const exported=path.join(temporary,'spreadsheet-saved.xlsx');
       await run(engineBin,['export',kind,savedFile,path.join(temporary,'spreadsheet.input'),exported]);
       const reopenedBinary=path.join(temporary,'spreadsheet-export-reopened.bin');
       await run(engineBin,['prepare-editor',kind,exported,reopenedBinary]);
       const reopenedInspection=await run(engineBin,['inspect-editor',kind,reopenedBinary]);
       assert.ok(reopenedInspection.stdout.includes(replacement),'Native XLSX export and re-import must preserve the typed cell');
+      if(duringSave) assert.ok(reopenedInspection.stdout.includes('DURING_SAVE'),'Native XLSX export/re-import must preserve edits made during save');
     }
     await page.screenshot({path:path.join(output,`${kind}-blank-edited.png`)});
     const savedIdentity=await page.evaluate(()=>{
@@ -194,6 +234,10 @@ try {
     if(kind==='spreadsheet') {
       await editor.locator('#ce-cell-name').fill('A1');await editor.locator('#ce-cell-name').press('Enter');
       assert.equal(await editor.locator('#ce-cell-content').inputValue(),replacement);
+      if(duringSave) {
+        await editor.locator('#ce-cell-name').fill('B1');await editor.locator('#ce-cell-name').press('Enter');
+        assert.equal(await editor.locator('#ce-cell-content').inputValue(),'DURING_SAVE');
+      }
       const chrome = await editor.locator('#ce-cell-content').evaluate(input => {
         const box = node => node ? {id:node.id,classes:node.className,rect:node.getBoundingClientRect().toJSON(),overflow:getComputedStyle(node).overflow,color:getComputedStyle(node).color,fontSize:getComputedStyle(node).fontSize,lineHeight:getComputedStyle(node).lineHeight} : null;
         const textBox = label => {
@@ -218,10 +262,14 @@ try {
     await context.close();
   }
 } catch(error) {
+  failures.push(error.stack || String(error));
   console.log(JSON.stringify({errors:activeErrors,frames:activePage?.frames().map(frame=>frame.url())}));
-  for(const frame of activePage?.frames() || []) console.log(JSON.stringify(await frame.evaluate(()=>({url:location.href,theme:window.uitheme?.id,bodyClass:document.body.className,accent:getComputedStyle(document.querySelector('[data-ctox-office-kind]') || document.documentElement).getPropertyValue('--accent'),shellAccent:getComputedStyle(document.documentElement).getPropertyValue('--ctox-shell-accent'),styles:document.documentElement.getAttribute('style')}))));
-  if(activePage) { console.log((await activePage.locator('body').innerText()).slice(-6000)); await activePage.screenshot({path:path.join(output,'failure.png')}); }
-  failures.push(error.stack);
+  try {
+    for(const frame of activePage?.frames() || []) console.log(JSON.stringify(await frame.evaluate(()=>({url:location.href,theme:window.uitheme?.id,bodyClass:document.body.className,accent:getComputedStyle(document.querySelector('[data-ctox-office-kind]') || document.documentElement).getPropertyValue('--accent'),shellAccent:getComputedStyle(document.documentElement).getPropertyValue('--ctox-shell-accent'),styles:document.documentElement.getAttribute('style')}))));
+    if(activePage) { console.log((await activePage.locator('body').innerText()).slice(-6000)); await activePage.screenshot({path:path.join(output,'failure.png')}); }
+  } catch(diagnosticError) {
+    console.warn('Failure evidence capture was incomplete:', diagnosticError.message);
+  }
 }
 finally { await browser.close(); }
 if(failures.length) throw new Error(failures.join('\n'));

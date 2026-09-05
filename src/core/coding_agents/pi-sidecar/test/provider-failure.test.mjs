@@ -8,6 +8,38 @@ const bundle = process.env.CTOX_PI_TEST_DIST
   : new URL('../dist/ctox-pi-sidecar.mjs', import.meta.url).href;
 const { handleTurnRequest, createVercelPiCodingTextMessage, createVercelPiCodingToolCallMessage } = await import(bundle);
 
+test('streaming partial messages do not inflate the bounded source response', async () => {
+  const text = 'x'.repeat(16384);
+  const response = await handleTurnRequest({ id: 'streamed', prompt: 'Explain', files: {} }, () => {
+    const stream = createAssistantMessageEventStream();
+    const message = createVercelPiCodingTextMessage(text);
+    stream.push({ type: 'start', partial: message });
+    for(let i=0;i<128;i++) stream.push({type:'text_delta',contentIndex:0,delta:text.slice(0,128),partial:message});
+    stream.push({type:'done',reason:'stop',message});
+    return stream;
+  });
+  assert.equal(response.ok, true);
+  assert.equal(response.events.some(event=>event.type==='message_update'),false);
+  assert.ok(response.messages.some(message=>message.role==='assistant' && message.content.some(part=>part.type==='text' && part.text===text)));
+  assert.ok(JSON.stringify(response).length<300000,'Response must retain final text, not every repeated partial');
+});
+
+test('turn limit after an edit never publishes a partially changed app', async () => {
+  const response = await handleTurnRequest({
+    id: 'bounded-partial', prompt: 'Make two coordinated edits', maxAssistantTurns: 1,
+    files: { 'index.js': 'export const v = 1;' },
+  }, () => {
+    const stream = createAssistantMessageEventStream();
+    stream.push({ type: 'done', reason: 'toolUse', message:
+      createVercelPiCodingToolCallMessage('write', { path: 'index.js', content: 'export const v = missingHelper();' }, 'partial-write'),
+    });
+    return stream;
+  });
+  assert.equal(response.ok, false);
+  assert.equal(response.error, 'pi coding turn failed: incomplete_turn');
+  assert.equal(response.snapshot, undefined);
+});
+
 test('successful tool-driven edit still returns its source snapshot', async () => {
   const response = await handleTurnRequest({
     id: 'success', prompt: 'Edit index.js', files: { 'index.js': 'export const v = 1;' },

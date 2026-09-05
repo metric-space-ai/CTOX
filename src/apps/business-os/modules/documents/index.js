@@ -718,7 +718,6 @@ function documentCollection(ctx, collectionName) {
 }
 
 async function refreshDocumentsFromLocal(state) {
-  const previousSelectedVersionId = state.selectedVersion?.id || '';
   await Promise.all([
     refreshRunbooks(state),
     refreshKnowledge(state),
@@ -728,7 +727,8 @@ async function refreshDocumentsFromLocal(state) {
   const expectedSelectedVersionId = state.requestedVersionDocumentId === state.selectedId
     ? state.requestedVersionId
     : selectedRecord(state)?.current_version_id;
-  if (state.selectedId && previousSelectedVersionId !== expectedSelectedVersionId) {
+  if (state.selectedId && !ctoxDocumentsDraftProtected(state)
+      && state.selectedVersion?.id !== expectedSelectedVersionId) {
     selectedVersionLoaded = Boolean(await loadSelectedVersion(state).catch(() => null));
   }
   renderLeft(state);
@@ -955,6 +955,13 @@ async function loadSelectedVersion(state) {
     state.selectedVersion = null;
     return null;
   }
+  const handle = state.editorHandle;
+  const activity = handle?.activity;
+  const previousVersion = state.selectedVersion;
+  const canApply = () => state.selectedId === record.id
+    && state.editorHandle === handle && handle?.activity === activity
+    && state.selectedVersion === previousVersion && !ctoxDocumentsDraftProtected(state);
+  if (!canApply()) return null;
   const replication = await startDocumentVersionReplication(state.ctx);
   const requestedVersionId = state.requestedVersionId && state.requestedVersionDocumentId === record.id
     ? state.requestedVersionId
@@ -984,12 +991,15 @@ async function loadSelectedVersion(state) {
     readLocalVersion,
     () => awaitDocumentVersionReplication(replication),
   );
+  if (!canApply()) return null;
   if (doc && !requestedVersionId && doc.toJSON().id !== targetVersionId) {
     const versionJson = doc.toJSON();
     const recordDoc = await documentCollection(state.ctx, 'documents').findOne(record.id).exec();
+    if (!canApply()) return null;
     await recordDoc?.incrementalPatch({ current_version_id: versionJson.id });
     record.current_version_id = versionJson.id;
   }
+  if (!canApply()) return null;
   state.selectedVersion = doc?.toJSON() || null;
   state.dirty = false;
   await refreshMailMergeNavigation(state);
@@ -3257,6 +3267,7 @@ async function renderCenter(state) {
   const host = state.ctx.host.querySelector('[data-documents-editor]');
   const record = selectedRecord(state);
   renderDocumentStrip(state);
+  if (ctoxDocumentsDraftProtected(state)) return state.editorHandle;
   const version = state.selectedVersion;
   const renderKey = editorRenderKey(record, version, state.officeEngine);
   const reusableTarget = currentEditorTarget(state, renderKey);
@@ -3625,6 +3636,13 @@ function renderInlineMarkdown(value) {
     .replace(/\*([^*]+)\*/g, '<em>$1</em>');
 }
 
+function ctoxDocumentsDraftProtected(state) {
+  const handle = state.editorHandle;
+  return Boolean(handle?.kind === 'ctox-documents'
+    && handle.recordId === state.selectedId
+    && (state.dirty || handle.saving || state.superdocSavePromise));
+}
+
 async function mountCtoxDocuments(state, host, record, version, renderSerial, renderKey) {
   const { createCtoxDocumentsEditor } = await loadCtoxDocumentsModule(state);
   if (!isCurrentEditorRender(state, renderSerial)) return;
@@ -3646,35 +3664,66 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial, re
     await editor.destroy();
     return;
   }
+  let handle;
+  const isActive = () => handle && state.editorHandle === handle
+    && state.selectedId === record.id && isCurrentEditorRender(state, renderSerial);
   const removeDirtyListener = editor.on('dirty', async () => {
+    if (!isActive()) return;
+    handle.activity += 1;
     state.dirty = true;
     state.needsFinalSave = true;
     await markRecordDraft(state, record);
-    scheduleCtoxDocumentsDraftSave(state, record);
+    if (isActive()) scheduleCtoxDocumentsDraftSave(state, record);
   });
-  const removeSavedListener = editor.on('saved', ({ versionId } = {}) => {
-    if (!versionId) return;
+  const removeSavingListener = editor.on('saving', () => {
+    if (!isActive()) return;
+    handle.saving = true;
+    handle.activity += 1;
+    handle.savingActivity = handle.activity;
+  });
+  const removeSavedListener = editor.on('saved', ({ versionId, dirty } = {}) => {
+    if (!isActive() || !versionId) return;
+    handle.saving = false;
+    handle.activity += 1;
     record.current_version_id = versionId;
-    state.dirty = false;
+    const currentRecord = state.documents.find((item) => item.id === record.id);
+    if (currentRecord) currentRecord.current_version_id = versionId;
+    state.selectedVersion = { ...state.selectedVersion, id: versionId, version_id: versionId };
+    handle.renderKey = editorRenderKey(record, state.selectedVersion, state.officeEngine);
+    state.dirty = Boolean(dirty);
+    state.needsFinalSave = state.dirty;
+    if (state.dirty) scheduleCtoxDocumentsDraftSave(state, record);
   });
+  const removeErrorListener = editor.on('error', (payload) => {
+    if (!isActive()) return;
+    handle.saving = false;
+    state.dirty = true;
+    state.needsFinalSave = true;
+    if (state.superdocSaveTimer) clearTimeout(state.superdocSaveTimer);
+    state.superdocSaveTimer = null;
+    const error = payload?.error || payload;
+    state.ctx.notifications?.error?.(error?.message || String(error));
+  });
+  const cleanupCallbacks = [removeDirtyListener, removeSavingListener, removeSavedListener, removeErrorListener];
   await openOfficeEditorInstance(
     editor,
     { recordId: record.id, versionId: version.id },
-    [removeDirtyListener, removeSavedListener],
+    cleanupCallbacks,
   );
   if (!isCurrentEditorRender(state, renderSerial)) {
-    removeDirtyListener();
-    removeSavedListener();
+    for (const cleanup of cleanupCallbacks) cleanup();
     await editor.destroy();
     return;
   }
-  state.editorHandle = {
+  state.editorHandle = handle = {
     kind: 'ctox-documents',
+    recordId: record.id,
+    activity: 0,
+    saving: false,
     renderKey,
     editor,
     async destroy() {
-      removeDirtyListener();
-      removeSavedListener();
+      for (const cleanup of cleanupCallbacks) cleanup();
       await editor.destroy();
       host.replaceChildren();
     },
@@ -3725,25 +3774,36 @@ function scheduleCtoxDocumentsDraftSave(state, record) {
 }
 
 async function flushActiveCtoxDocumentsDraft(state, record = selectedRecord(state), options = {}) {
-  if (state.editorHandle?.kind !== 'ctox-documents' || !record || (!state.dirty && !options.force)) return null;
+  const handle = state.editorHandle;
+  const selectedId = state.selectedId;
+  if (handle?.kind !== 'ctox-documents' || !record || handle.recordId !== record.id
+    || (!state.dirty && !options.force)) return null;
   if (state.superdocSavePromise) return state.superdocSavePromise;
-  state.superdocSavePromise = state.editorHandle.save({ reason: options.final === false ? 'autosave' : 'final' });
+  const isActive = () => state.editorHandle === handle && state.selectedId === selectedId
+    && selectedId === handle.recordId;
+  const savePromise = Promise.resolve().then(() => handle.save({ reason: options.final === false ? 'autosave' : 'final' }));
+  state.superdocSavePromise = savePromise;
+  let saved = false;
   try {
-    const result = await state.superdocSavePromise;
-    const versionId = result?.version_id || result?.versionId;
-    if (versionId) {
-      record.current_version_id = versionId;
-      state.selectedVersion = { ...state.selectedVersion, id: versionId, version_id: versionId, blob_id: result.blob_id };
-    }
-    state.dirty = false;
-    if (options.final !== false) state.needsFinalSave = false;
+    const result = await savePromise;
+    saved = true;
     return result;
   } catch (error) {
+    if (isActive()) {
+      handle.saving = false;
+      state.dirty = true;
+      state.needsFinalSave = true;
+      if (state.superdocSaveTimer) clearTimeout(state.superdocSaveTimer);
+      state.superdocSaveTimer = null;
+    }
     if (!options.allowFailure) throw error;
     console.warn('[documents] ignored CTOX Documents draft save failure', error);
     return null;
   } finally {
-    state.superdocSavePromise = null;
+    if (state.superdocSavePromise === savePromise) {
+      state.superdocSavePromise = null;
+      if (saved && isActive() && state.dirty) scheduleCtoxDocumentsDraftSave(state, record);
+    }
   }
 }
 

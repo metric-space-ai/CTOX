@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile as execFileCallback } from 'node:child_process';
-import { cp, mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
@@ -49,9 +50,7 @@ if (reuseVerifiedUpstream) {
       throw new Error(`Existing Euro-Office closure failed provenance verification: ${input.staged_path || input.path}`);
     }
   }
-  reusedUpstreamRoot = path.join(repoRoot, 'runtime', 'build', `ctox-office-upstream-reuse-${process.pid}`);
-  await rm(reusedUpstreamRoot, { recursive: true, force: true });
-  await mkdir(reusedUpstreamRoot, { recursive: true });
+  reusedUpstreamRoot = await mkdtemp(path.join(tmpdir(), 'ctox-office-upstream-reuse-'));
   await cp(path.join(outputRoot, 'upstream'), reusedUpstreamRoot, { recursive: true });
 }
 if (upstreamSourceRoot) {
