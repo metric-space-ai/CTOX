@@ -116,6 +116,9 @@ for (const file of readdirSync(rustPluginDir).filter((name) => name.endsWith('.r
     resolve(repoRoot, 'src/apps/business-os/shared/sync.js'),
   ];
   const loader = readFileSync(resolve(repoRoot, 'src/apps/business-os/shared/rxdb-runtime.js'), 'utf8');
+  const appBuild = readFileSync(resolve(repoRoot, 'src/apps/business-os/app.js'), 'utf8')
+    .match(/const APP_BUILD = ['"]([^'"]+)['"]/)?.[1];
+  const loaderBusters = [];
   if ((loader.match(/ctox-rxdb-js\.mjs\?v=/g) || []).length !== 1) {
     offenders.push('canonical RxDB loader must own exactly one versioned bundle URL');
   }
@@ -124,9 +127,14 @@ for (const file of readdirSync(rustPluginDir).filter((name) => name.endsWith('.r
     if (source.includes('ctox-rxdb-js.mjs?v=') || source.includes('&retry=')) {
       offenders.push(`${relative(repoRoot, path)} bypasses the canonical RxDB loader`);
     }
-    if (!source.includes("from './rxdb-runtime.js'") || !source.includes('loadRxdbRuntime()')) {
+    const buster = source.match(/from ['"]\.\/rxdb-runtime\.js\?v=([^'"]+)['"]/)?.[1];
+    loaderBusters.push(buster);
+    if (!buster || !source.includes('loadRxdbRuntime()')) {
       offenders.push(`${relative(repoRoot, path)} must use the canonical RxDB loader`);
     }
+  }
+  if (!appBuild || loaderBusters.some((buster) => buster !== appBuild)) {
+    offenders.push('db.js and sync.js must use identical RxDB loader busters matching APP_BUILD');
   }
 }
 

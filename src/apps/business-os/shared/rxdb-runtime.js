@@ -2,5 +2,9 @@
 export const RXDB_BUNDLE_URL = "../rxdb/dist/ctox-rxdb-js.mjs?v=20260905-crew-cockpit-pr1";
 let runtimePromise;
 export function loadRxdbRuntime() {
-  return runtimePromise ??= import(RXDB_BUNDLE_URL);
+  return runtimePromise ??= import(RXDB_BUNDLE_URL).catch((error) => {
+    // Retry a transient import failure using the same canonical bundle URL.
+    runtimePromise = undefined;
+    throw error;
+  });
 }
