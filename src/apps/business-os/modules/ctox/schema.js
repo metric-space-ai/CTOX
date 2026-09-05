@@ -41,6 +41,7 @@ export const collections = {
       module: { type: 'string' },
       source_module: { type: 'string' },
       inbound_channel: { type: 'string' },
+      lease_owner: { type: 'string' },
       lease_expires_at: { type: 'string' },
       lease_worker_id: { type: 'string' },
       first_pending_at: { type: 'string' },
@@ -112,7 +113,6 @@ export const collections = {
     type: 'object',
     properties: {
       id: { type: 'string', maxLength: 128 },
-      attempt_id: { type: 'string', maxLength: 128 },
       task_id: { type: 'string', maxLength: 128 },
       command_id: { type: 'string' },
       work_id: { type: 'string' },

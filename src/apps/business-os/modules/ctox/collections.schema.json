@@ -887,6 +887,9 @@
         "lease_expires_at": {
           "type": "string"
         },
+        "lease_owner": {
+          "type": "string"
+        },
         "lease_worker_id": {
           "type": "string"
         },
@@ -940,10 +943,6 @@
       "primaryKey": "id",
       "properties": {
         "agent_outcome": {
-          "type": "string"
-        },
-        "attempt_id": {
-          "maxLength": 128,
           "type": "string"
         },
         "command_id": {

@@ -4152,6 +4152,9 @@
       "inbound_channel": {
         "type": "string"
       },
+      "lease_owner": {
+        "type": "string"
+      },
       "lease_expires_at": {
         "type": "string"
       },
@@ -4223,10 +4226,6 @@
     "type": "object",
     "properties": {
       "id": {
-        "type": "string",
-        "maxLength": 128
-      },
-      "attempt_id": {
         "type": "string",
         "maxLength": 128
       },
