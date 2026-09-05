@@ -167,7 +167,15 @@ try {
       await run(engineBin,['export',kind,savedFile,path.join(temporary,'document.input'),exported]);
       const xml=await run('unzip',['-p',exported,'word/document.xml']);
       assert.ok(xml.stdout.replace(/<[^>]+>/g,'').includes(replacement),'Native DOCX export must preserve the typed text');
-    } else assert.ok(inspection.stdout.includes(replacement),'Native inspection must find the cell entered through the UI');
+    } else {
+      assert.ok(inspection.stdout.includes(replacement),'Native inspection must find the cell entered through the UI');
+      const exported=path.join(temporary,'spreadsheet-saved.xlsx');
+      await run(engineBin,['export',kind,savedFile,path.join(temporary,'spreadsheet.input'),exported]);
+      const reopenedBinary=path.join(temporary,'spreadsheet-export-reopened.bin');
+      await run(engineBin,['prepare-editor',kind,exported,reopenedBinary]);
+      const reopenedInspection=await run(engineBin,['inspect-editor',kind,reopenedBinary]);
+      assert.ok(reopenedInspection.stdout.includes(replacement),'Native XLSX export and re-import must preserve the typed cell');
+    }
     await page.screenshot({path:path.join(output,`${kind}-blank-edited.png`)});
     const savedIdentity=await page.evaluate(()=>{
       const record=window.officeLab.records.find(row=>row.title.startsWith('Neu'));

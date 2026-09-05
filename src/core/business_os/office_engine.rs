@@ -13,6 +13,10 @@ use zip::write::SimpleFileOptions;
 #[path = "office_engine_spreadsheet_layout.rs"]
 mod spreadsheet_layout;
 use spreadsheet_layout::*;
+#[path = "office_engine_spreadsheet_cells.rs"]
+mod spreadsheet_cells;
+use spreadsheet_cells::*;
+pub use spreadsheet_cells::{patch_spreadsheet_cells, SpreadsheetCellPatch};
 use zip::{ZipArchive, ZipWriter};
 
 pub const EDITOR_PROTOCOL: &str = "ctox-ooxml-escrow-v1";
@@ -7772,11 +7776,30 @@ fn parse_ooxml_worksheet(
                 Some("b") => SpreadsheetSourceValue::Boolean(raw == "1"),
                 Some("e") => SpreadsheetSourceValue::Error(raw.to_string()),
                 Some("str") => SpreadsheetSourceValue::String(raw.to_string()),
-                Some(value) => anyhow::bail!("unsupported OOXML cell type in XLSY writer: {value}"),
-                None if raw.is_empty() => SpreadsheetSourceValue::Blank,
-                None => SpreadsheetSourceValue::Number(
+                Some("inlineStr") => {
+                    let inline = cell
+                        .children()
+                        .find(|node| node.is_element() && node.tag_name().name() == "is")
+                        .context("inline string cell has no is element")?;
+                    ensure!(
+                        !inline
+                            .children()
+                            .any(|node| node.is_element() && node.tag_name().name() != "t"),
+                        "rich inline string formatting is not implemented"
+                    );
+                    SpreadsheetSourceValue::String(
+                        inline
+                            .children()
+                            .filter(|node| node.is_element() && node.tag_name().name() == "t")
+                            .filter_map(|node| node.text())
+                            .collect(),
+                    )
+                }
+                None | Some("n") if raw.is_empty() => SpreadsheetSourceValue::Blank,
+                None | Some("n") => SpreadsheetSourceValue::Number(
                     raw.parse::<f64>().context("numeric cell is invalid")?,
                 ),
+                Some(value) => anyhow::bail!("unsupported OOXML cell type in XLSY writer: {value}"),
             };
             cells.push(SpreadsheetSourceCell {
                 column,
@@ -9487,16 +9510,19 @@ fn export_spreadsheet_binary(
     let changed_print_pivot = decode_spreadsheet_print_pivot(editor_payload)?;
     let original_pivot_caches = decode_spreadsheet_pivot_caches(&original_editor)?;
     let changed_pivot_caches = decode_spreadsheet_pivot_caches(editor_payload)?;
-    ensure!(
-        changed.worksheets.len() == original.worksheets.len(),
-        "XLSY worksheet add/remove export is not implemented"
-    );
+    if let Some(reconciled) = reconcile_worksheet_structure(original_package, &original, &changed)?
+    {
+        // Rebase by stable sheetId before comparing cells. Positional zip
+        // comparisons must never merge one worksheet into a different sheet.
+        return export_spreadsheet_binary(editor_payload, &reconciled);
+    }
 
     let mut archive =
         ZipArchive::new(Cursor::new(original_package)).context("open original XLSX escrow")?;
     let worksheet_paths = spreadsheet_worksheet_paths(&mut archive)?;
     let table_paths = spreadsheet_table_paths(&mut archive, &worksheet_paths)?;
-    let shared_xml = read_zip_part(&mut archive, "xl/sharedStrings.xml")?;
+    let shared_xml = read_optional_zip_part(&mut archive, "xl/sharedStrings.xml")?
+        .unwrap_or_else(|| empty_shared_strings().as_bytes().to_vec());
     let mut replacements = BTreeMap::new();
     let source_cells_changed =
         original
@@ -9586,13 +9612,25 @@ fn export_spreadsheet_binary(
         replacements.insert("xl/styles.xml".to_string(), materialized_styles);
     }
     let materialized_shared_strings = materialize_spreadsheet_shared_strings(&original, &changed)?;
-    let updated_shared = replace_changed_shared_strings(
+    let mut updated_shared = replace_changed_shared_strings(
         &shared_xml,
         &original.shared_strings,
         &materialized_shared_strings,
     )?;
+    let shared_count = |manifest: &EditorPayloadManifest| {
+        manifest
+            .worksheets
+            .iter()
+            .flat_map(|sheet| &sheet.cells)
+            .filter(|cell| cell.value_type == "shared_string")
+            .count()
+    };
+    if shared_count(&original) != shared_count(&changed) {
+        updated_shared = update_shared_string_count(&updated_shared, shared_count(&changed))?;
+    }
     if updated_shared != shared_xml {
         replacements.insert("xl/sharedStrings.xml".to_string(), updated_shared);
+        ensure_shared_string_relationship(&mut archive, &mut replacements)?;
     }
 
     for (sheet_index, (before, after)) in original
@@ -9856,12 +9894,12 @@ fn materialize_spreadsheet_shared_strings(
             {
                 continue;
             }
-            let before_cell = before_cells
-                .get(after_cell.reference.as_str())
-                .with_context(|| format!("original cell is missing: {}", after_cell.reference))?;
-            let reusable = before_cell.value_type == "shared_string"
-                && !used_after.contains(&before_cell.display);
+            let before_cell = before_cells.get(after_cell.reference.as_str());
+            let reusable = before_cell.is_some_and(|cell| {
+                cell.value_type == "shared_string" && !used_after.contains(&cell.display)
+            });
             if reusable {
+                let before_cell = before_cell.expect("reusable source cell");
                 let index = output
                     .iter()
                     .position(|value| value == &before_cell.display)
@@ -9936,22 +9974,30 @@ fn replace_changed_shared_strings(
         ranges.len() == before.len(),
         "sharedStrings.xml item count does not match XLSY"
     );
-    let first = ranges
-        .first()
-        .context("sharedStrings.xml has no si elements")?;
-    let last = ranges.last().expect("non-empty shared string ranges");
+    if before == after {
+        return Ok(xml.to_vec());
+    }
     let mut items = String::new();
     for value in after {
         if let Some(index) = before.iter().position(|candidate| candidate == value) {
             items.push_str(&source[ranges[index].clone()]);
         } else {
-            items.push_str(&format!("<si><t>{}</t></si>", escape_xml_text(value)));
+            items.push_str(&format!(
+                "<si><t xml:space=\"preserve\">{}</t></si>",
+                escape_xml_text(value)
+            ));
         }
     }
-    let mut output = String::with_capacity(source.len() + items.len());
-    output.push_str(&source[..first.start]);
-    output.push_str(&items);
-    output.push_str(&source[last.end..]);
+    let mut output = if let (Some(first), Some(last)) = (ranges.first(), ranges.last()) {
+        let mut output = String::with_capacity(source.len() + items.len());
+        output.push_str(&source[..first.start]);
+        output.push_str(&items);
+        output.push_str(&source[last.end..]);
+        output
+    } else {
+        let tree = roxmltree::Document::parse(&source)?;
+        insert_xml_child(&source, tree.root_element(), &items)?
+    };
     let unique_count = Regex::new(r#"uniqueCount="\d+""#).expect("uniqueCount regex");
     output = unique_count
         .replace(&output, format!("uniqueCount=\"{}\"", after.len()))
@@ -10009,12 +10055,6 @@ fn replace_changed_worksheet_cells(
                 continue;
             }
         }
-        let pattern = format!(
-            r#"(?s)<c\b[^>]*\br="{}"[^>]*>.*?</c>"#,
-            regex::escape(reference)
-        );
-        let cell_regex = Regex::new(&pattern).context("compile worksheet cell regex")?;
-        let found = cell_regex.find(&output);
         let materialized_style = if style_changed {
             *style_map
                 .get(&changed_cell.style_id)
@@ -10072,25 +10112,7 @@ fn replace_changed_worksheet_cells(
             "blank" => format!("<c r=\"{reference}\"{style}/>"),
             value => anyhow::bail!("unsupported XLSY cell value type for export: {value}"),
         };
-        if let Some(found) = found {
-            output.replace_range(found.range(), &replacement);
-        } else {
-            let row_number =
-                reference.trim_start_matches(|character: char| character.is_ascii_alphabetic());
-            ensure!(
-                !row_number.is_empty(),
-                "invalid worksheet cell reference: {reference}"
-            );
-            let row_regex = Regex::new(&format!(
-                r#"(?s)<row\b[^>]*\br=\"{}\"[^>]*>.*?</row>"#,
-                regex::escape(row_number)
-            ))?;
-            let row = row_regex.find(&output).with_context(|| {
-                format!("worksheet row is missing for inserted cell: {reference}")
-            })?;
-            let insert_at = row.end() - "</row>".len();
-            output.insert_str(insert_at, &replacement);
-        }
+        output = upsert_worksheet_cell(&output, reference, &replacement)?;
     }
     for (reference, _) in before_cells {
         if after_cells.contains_key(reference) {
@@ -10110,6 +10132,19 @@ fn replace_changed_worksheet_cells(
     output = replace_spreadsheet_column_layout(output, before, after)?;
     output = replace_spreadsheet_merges(output, before, after)?;
     output = replace_spreadsheet_frozen_pane(output, before, after)?;
+    let before_references = before
+        .cells
+        .iter()
+        .map(|cell| cell.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    let after_references = after
+        .cells
+        .iter()
+        .map(|cell| cell.reference.as_str())
+        .collect::<BTreeSet<_>>();
+    if before_references != after_references {
+        output = update_worksheet_dimension(&output, after)?;
+    }
     Ok(output.into_bytes())
 }
 
@@ -12566,8 +12601,10 @@ fn rewrite_document_paragraph_xml(
     // fields, revisions, etc.) to make a run-count mismatch disappear.
     let insert_into_empty = run_matches.is_empty()
         && !decoded_runs.is_empty()
-        && Regex::new(r"(?s)^<w:p(?:\s[^>]*)?>\s*(?:<w:pPr(?:\s[^>]*)?(?:/>|>.*?</w:pPr>)\s*)?</w:p>\s*$")?
-            .is_match(paragraph_xml)
+        && Regex::new(
+            r"(?s)^<w:p(?:\s[^>]*)?>\s*(?:<w:pPr(?:\s[^>]*)?(?:/>|>.*?</w:pPr>)\s*)?</w:p>\s*$",
+        )?
+        .is_match(paragraph_xml)
         && paragraph.runs.iter().all(|run| {
             run.drawing.is_none()
                 && run.field_char.is_none()
@@ -13277,7 +13314,15 @@ fn document_section_break_type_name(value: u8) -> Option<&'static str> {
 
 fn replace_package_parts(
     package: &[u8],
+    replacements: BTreeMap<String, Vec<u8>>,
+) -> anyhow::Result<Vec<u8>> {
+    replace_package_parts_removing(package, replacements, &BTreeSet::new())
+}
+
+fn replace_package_parts_removing(
+    package: &[u8],
     mut replacements: BTreeMap<String, Vec<u8>>,
+    removals: &BTreeSet<String>,
 ) -> anyhow::Result<Vec<u8>> {
     for (path, bytes) in &replacements {
         validate_xml(path, bytes)?;
@@ -13288,6 +13333,9 @@ fn replace_package_parts(
     for index in 0..archive.len() {
         let mut entry = archive.by_index(index).context("read OOXML escrow entry")?;
         let path = entry.name().replace('\\', "/");
+        if removals.contains(&path) {
+            continue;
+        }
         ensure!(
             !path.starts_with('/') && !path.split('/').any(|segment| segment == ".."),
             "unsafe OOXML package path: {path}"

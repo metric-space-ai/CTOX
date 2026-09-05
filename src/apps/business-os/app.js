@@ -1709,7 +1709,10 @@ async function registerCoreCollections() {
   setStartupProgress(61, shellText('bootSchemasDone'));
   const t1 = performance.now();
   console.log(`[business-os] registerCoreCollections took ${(t1 - t0).toFixed(2)}ms`);
-  await primeWindowGeometryCache();
+  // Window placement is optional cached UI state. An IndexedDB read blocked
+  // by another tab must not prevent WebRTC and the app catalog from starting.
+  // The read may finish later; do not close/reopen the registered database.
+  await withStartupTimeout(primeWindowGeometryCache(), 1500, null, 'window geometry cache');
 }
 
 async function primeWindowGeometryCache() {
