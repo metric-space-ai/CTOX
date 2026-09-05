@@ -27,6 +27,7 @@ const emptyLibrary = process.argv.includes('--empty-library');
 const formulas = process.argv.includes('--formulas');
 const importRoundtrip = process.argv.includes('--import-roundtrip');
 const formatting = process.argv.includes('--formatting');
+const worksheets = process.argv.includes('--worksheets');
 const selectedKind = process.argv.find(value=>value.startsWith('--kind='))?.slice('--kind='.length);
 assert.ok(!selectedKind || ['document','spreadsheet'].includes(selectedKind), 'Unknown test kind');
 
@@ -172,6 +173,7 @@ try {
       }
     });
     let replacement=`CTOX_OFFICE_${kind.toUpperCase()}_SAVED`;
+    let originalSheetName, addedSheetName;
     if(kind==='spreadsheet') {
       await editor.locator('#ce-cell-name').fill('A1'); await editor.locator('#ce-cell-name').press('Enter');
       assert.equal(await editor.locator('#ce-cell-content').inputValue(),'');
@@ -218,6 +220,16 @@ try {
       await editor.locator('#id-toolbar-btn-undo').click();
       await editor.locator('#id-toolbar-btn-redo').click();
     }
+    if(worksheets && kind==='spreadsheet') {
+      originalSheetName=(await editor.locator('#statusbar li.list-item.active').innerText()).trim();
+      await editor.locator('#status-btn-addtab').click();
+      addedSheetName=(await editor.locator('#statusbar li.list-item.active').innerText()).trim();
+      assert.notEqual(addedSheetName,originalSheetName,'Add sheet must select a distinct named worksheet');
+      assert.equal(await editor.locator('#statusbar li.list-item').count(),2);
+      await editor.locator('#ce-cell-name').fill('D4');await editor.locator('#ce-cell-name').press('Enter');
+      await editor.locator('#ce-cell-content').fill('CTOX_SECOND_SHEET_SAVED');await editor.locator('#ce-cell-content').press('Enter');
+      await editor.locator('#statusbar li.list-item').filter({hasText:originalSheetName}).click();
+    }
     await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
     if(duringSave) {
       assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0,'Continued editing must occur before the first save is acknowledged');
@@ -253,6 +265,7 @@ try {
     } else {
       assert.ok(inspection.stdout.includes(replacement),'Native inspection must find the cell entered through the UI');
       if(duringSave) assert.ok(inspection.stdout.includes('DURING_SAVE'),'Native inspection must preserve the cell edited during the earlier save');
+      if(worksheets) assert.ok(inspection.stdout.includes('CTOX_SECOND_SHEET_SAVED'),'Native save must retain content on the added worksheet');
       const exported=path.join(temporary,'spreadsheet-saved.xlsx');
       await run(engineBin,['export',kind,savedFile,path.join(temporary,'spreadsheet.input'),exported]);
       if(formatting) {
@@ -270,6 +283,7 @@ try {
       const reopenedInspection=await run(engineBin,['inspect-editor',kind,reopenedBinary]);
       assert.ok(reopenedInspection.stdout.includes(replacement),'Native XLSX export and re-import must preserve the typed cell');
       if(duringSave) assert.ok(reopenedInspection.stdout.includes('DURING_SAVE'),'Native XLSX export/re-import must preserve edits made during save');
+      if(worksheets) assert.ok(reopenedInspection.stdout.includes('CTOX_SECOND_SHEET_SAVED'),'XLSX export/re-import must retain the added worksheet content');
     }
     await page.screenshot({path:path.join(output,`${kind}-blank-edited.png`)});
     const savedIdentity=await page.evaluate(()=>{
@@ -298,6 +312,13 @@ try {
       if(duringSave) {
         await editor.locator('#ce-cell-name').fill('B1');await editor.locator('#ce-cell-name').press('Enter');
         assert.equal(await editor.locator('#ce-cell-content').inputValue(),'DURING_SAVE');
+      }
+      if(worksheets) {
+        assert.equal(await editor.locator('#statusbar li.list-item').count(),2);
+        await editor.locator('#statusbar li.list-item').filter({hasText:addedSheetName}).click();
+        await editor.locator('#ce-cell-name').fill('D4');await editor.locator('#ce-cell-name').press('Enter');
+        assert.equal(await editor.locator('#ce-cell-content').inputValue(),'CTOX_SECOND_SHEET_SAVED');
+        await editor.locator('#statusbar li.list-item').filter({hasText:originalSheetName}).click();
       }
       const chrome = await editor.locator('#ce-cell-content').evaluate(input => {
         const box = node => node ? {id:node.id,classes:node.className,rect:node.getBoundingClientRect().toJSON(),overflow:getComputedStyle(node).overflow,color:getComputedStyle(node).color,fontSize:getComputedStyle(node).fontSize,lineHeight:getComputedStyle(node).lineHeight} : null;
