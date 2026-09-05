@@ -142,6 +142,29 @@ export async function mount(ctx) {
   state.localSubscriptionCleanup = wireLocalRealtime(state);
   state.readinessCleanup = wireSpreadsheetsReadiness(state);
   let disposed = false;
+  const unregisterCloseGuard = ctx.windowManager?.registerCloseGuard?.(ctx.host, async () => {
+    try {
+      const handle = state.editorHandle;
+      const selectedId = state.selectedId;
+      if (!await saveSpreadsheetBeforeLeaving(state)
+        || state.editorHandle !== handle || state.selectedId !== selectedId) {
+        throw new Error(state.t('spreadsheetSaveBeforeLeavingFailed', 'Die Tabelle konnte vor dem Wechsel nicht gespeichert werden.'));
+      }
+      return true;
+    } catch (error) {
+      state.ctx.notifications?.error?.(String(error?.message || error));
+      return false;
+    }
+  });
+  const onBeforeUnload = (event) => {
+    const handle = state.editorHandle;
+    if (handle?.kind !== 'ctox-spreadsheets'
+      || !(state.dirty || state.saving || handle.saving || handle.saveTimer != null)) return;
+    // Unload can only warn; saving must finish through the close guard.
+    event.preventDefault();
+    event.returnValue = '';
+  };
+  window.addEventListener('beforeunload', onBeforeUnload);
   renderLeft(state);
   renderRight(state);
   renderCenter(state);
@@ -170,6 +193,8 @@ export async function mount(ctx) {
 
   return () => {
     disposed = true;
+    window.removeEventListener('beforeunload', onBeforeUnload);
+    unregisterCloseGuard?.();
     state.contextMenuCleanup?.();
     if (state.openFileToken) ctx.eventBus?.off?.('desktop-app:open-file', state.openFileToken);
     state.contextMenu?.remove();

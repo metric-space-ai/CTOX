@@ -23,6 +23,7 @@
 </div>
 <script type="module">
   import { getActionIcon } from '../../shared/icons.js';
+  import { createWindowManager } from '../../shared/window-manager.js';
   const params = new URLSearchParams(location.search);
   const kind = params.get('kind') === 'document' ? 'document' : 'spreadsheet';
   const moduleId = kind === 'document' ? 'documents' : 'spreadsheets';
@@ -67,7 +68,24 @@
   const commands=[];
   const completedCommits=[];
   let firstCommitReleased=false;
+  let managedWindow = null;
+  let windowManager = null;
+  if (params.has('realWindow')) {
+    const host = document.querySelector('#app');
+    const notices = document.querySelector('#notices');
+    document.querySelector('#office-window').remove();
+    const desk = document.querySelector('#desk');
+    windowManager = createWindowManager({windowLayer:desk,surfaceEl:desk,rootEl:desk,eventBus:{
+      emit(name) { if(name==='window:closed') window.officeLab.cleanup?.(); },
+      on(){},off(){},
+    }});
+    managedWindow = windowManager.create({title:moduleId,ownerId:`desktop-app:${moduleId}`,width:1440,height:960,shellContract:'v2',shellHeaderRows:2,shellIconRows:2,iconAsset:`../../modules/${moduleId}/icon.svg`});
+    managedWindow.element.id='office-window';
+    managedWindow.container.append(host,notices);
+    windowManager.setAppMode(managedWindow.id,'maximized');
+  }
   const ctx={host:document.querySelector('#app'),left:document.createElement('aside'),right:document.createElement('aside'),locale,module:{id:moduleId},args:{},db:{collection},permissions:{canWriteCollection:()=>true},getActionIcon,
+    windowManager,
     sync:{async startCollection(){return {state:syncState};},async leaseCollection(){return {bridge:{state:syncState},release:async()=>{}};}},
     notifications:{success(message){document.querySelector('#notices').textContent=message;},error(message){console.error(message);document.querySelector('#notices').textContent=message;}},
     commandBus:{async dispatch(command){
@@ -82,6 +100,7 @@
         version.editor_blob_id=`${version.id}-prepared`;version.editor_protocol=`euro-office-${kind==='document'?'word':'cell'}-binary-v10`;version.editor_protocol_version=10;version.conversion_state='prepared';
         chunks.push({id:`${version.editor_blob_id}-0`,blob_id:version.editor_blob_id,idx:0,total:1,data:prepared});
       } else if(command.type.endsWith('.commit')) {
+        if(window.officeLab.failCommits) throw new Error('OFFICE_LAB_EXPECTED_SAVE_FAILURE');
         const next={...version,id:`${record.id}-v${versions.length+1}`,editor_blob_id:payload.editor_blob_id,editor_protocol:payload.editor_protocol,editor_protocol_version:payload.editor_protocol_version};
         versions.push(next);record.current_version_id=next.id;persist();
         // Native RxDB can publish the new head before the command result gets
@@ -101,6 +120,6 @@
     closeDrawers(){document.querySelector('#lab-drawer')?.remove();},
     openLeftDrawer(content){const drawer=document.createElement('aside');drawer.id='lab-drawer';drawer.append(content);ctx.host.append(drawer);},openRightDrawer(){},openBottomDrawer(){},
   };
-  window.officeLab={rows,records,versions,chunks,commands,completedCommits,ctx};
+  window.officeLab={rows,records,versions,chunks,commands,completedCommits,ctx,managedWindow};
   window.officeLab.cleanup=await mount(ctx);
 </script></body></html>

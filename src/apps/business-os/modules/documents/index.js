@@ -269,6 +269,33 @@ export async function mount(ctx) {
     lang: ctx.locale === 'en' ? 'en' : 'de',
   };
 
+  const hasPendingEditorChanges = () => Boolean(
+    state.dirty || state.needsFinalSave || state.editorHandle?.saving || state.superdocSavePromise,
+  );
+  const unregisterCloseGuard = ctx.windowManager?.registerCloseGuard?.(ctx.host, async () => {
+    try {
+      await withTimeout(
+        flushActiveEditorDraft(state, undefined, { allowFailure: false, timeoutMs: 90000 }),
+        90000,
+        state.t('draftSaveTimeout', 'Automatische Draft-Speicherung beim Dokumentwechsel hat zu lange gedauert.'),
+      );
+      if (hasPendingEditorChanges()) {
+        ctx.notifications?.error?.(state.t('draftSavePending', 'Weitere Änderungen sind noch nicht gespeichert. Bitte nach dem Speichern erneut versuchen, das Dokument zu wechseln.'));
+        return false;
+      }
+      return true;
+    } catch (error) {
+      ctx.notifications?.error?.(error?.message || String(error));
+      return false;
+    }
+  });
+  const preventUnsavedUnload = (event) => {
+    if (!hasPendingEditorChanges()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  };
+  window.addEventListener('beforeunload', preventUnsavedUnload);
+
   state.launchCleanup = wireModule(state);
   state.paneCleanup = wireDocumentPanes(state);
   state.openFileToken = ctx.eventBus?.on?.('desktop-app:open-file', (payload = {}) => {
@@ -298,6 +325,8 @@ export async function mount(ctx) {
     });
   return () => {
     state.disposed = true;
+    unregisterCloseGuard?.();
+    window.removeEventListener('beforeunload', preventUnsavedUnload);
     if (state.superdocSaveTimer) clearTimeout(state.superdocSaveTimer);
     state.contextMenuCleanup?.();
     if (state.openFileToken) ctx.eventBus?.off?.('desktop-app:open-file', state.openFileToken);
@@ -307,7 +336,6 @@ export async function mount(ctx) {
     state.launchCleanup?.();
     state.paneCleanup?.();
     clearDocumentBlobByteCache(state);
-    flushActiveEditorDraft(state).catch((error) => console.error('[documents] final editor draft save failed', error));
     state.editorHandle?.destroy?.();
     if (shellRightPane) shellRightPane.hidden = shellRightWasHidden;
     if (shellLeftPane) shellLeftPane.hidden = shellLeftWasHidden;

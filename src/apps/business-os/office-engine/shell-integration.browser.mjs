@@ -22,6 +22,8 @@ const temporary = await mkdtemp(path.join(tmpdir(), 'ctox-office-native-'));
 const run = promisify(execFile);
 const realtime = process.argv.includes('--realtime');
 const duringSave = process.argv.includes('--during-save');
+const closeSafety = process.argv.includes('--close-safety');
+const emptyLibrary = process.argv.includes('--empty-library');
 const selectedKind = process.argv.find(value=>value.startsWith('--kind='))?.slice('--kind='.length);
 assert.ok(!selectedKind || ['document','spreadsheet'].includes(selectedKind), 'Unknown test kind');
 
@@ -81,9 +83,12 @@ try {
     page.on('pageerror', error => errors.push(error.message));
     page.on('console', event => { if(event.type()==='error') errors.push(event.text()); });
     page.on('response', response => { if(response.status()>=400) console.log(JSON.stringify({kind,failedAsset:response.url(),status:response.status()})); });
-    await page.goto(`http://127.0.0.1:8766/src/apps/business-os/office-engine/oracle/shell-v2-office.html?kind=${kind}${realtime?'&realtime=1':''}${duringSave?'&holdFirstCommit=1':''}`);
+    await page.goto(`http://127.0.0.1:8766/src/apps/business-os/office-engine/oracle/shell-v2-office.html?kind=${kind}${realtime?'&realtime=1':''}${duringSave?'&holdFirstCommit=1':''}${closeSafety?'&realWindow=1':''}${emptyLibrary?'&empty=1':''}`);
     const prefix = kind === 'document' ? 'documents' : 'spreadsheets';
-    await page.locator(`.${prefix}-card-main`).first().click({timeout:20000});
+    if(emptyLibrary) {
+      await page.locator(kind==='document'?'[data-documents-new-markdown]':'[data-spreadsheets-new]').click();
+      await page.waitForFunction(()=>window.officeLab.records.length===1);
+    } else await page.locator(`.${prefix}-card-main`).first().click({timeout:20000});
     const outer = page.frameLocator(`iframe[data-ctox-office-kind="${kind}"]`);
     const editor = outer.frameLocator('iframe.ctox-office-fork-frame');
     await editor.locator('#viewport').waitFor({state:'visible',timeout:60000});
@@ -101,6 +106,7 @@ try {
     await page.screenshot({path:path.join(output,`${kind}-light.png`)});
     assert.equal(await page.locator('.ctox-office-library').evaluate(library=>getComputedStyle(library.querySelector('.ctox-pane-header')).backgroundColor===getComputedStyle(library).backgroundColor),true,'Library header must use the same light-theme surface');
     const search=page.locator('.ctox-office-library [data-pg-search]');
+    if(!emptyLibrary) {
     await search.fill('Arbeitsdatei 2');
     assert.equal(await page.locator(`.${prefix}-card-main`).count(),10);
     assert.equal(await search.evaluate(node=>node===document.activeElement),true);
@@ -112,6 +118,7 @@ try {
     await page.locator('[data-pg-view-cycle]').click();
     assert.equal(await page.locator('.ctox-office-library').getAttribute('data-office-view'),'cards');
     await page.locator('[data-pg-view-cycle]').click();
+    }
     await page.evaluate(()=>document.documentElement.dataset.theme='dark');
     await editor.locator('html[data-ctox-theme="dark"]').waitFor({state:'attached',timeout:5000});
     await page.locator('.ctox-office-library').evaluate(async library=>{await Promise.all(library.getAnimations({subtree:true}).map(animation=>animation.finished.catch(()=>{})));});
@@ -141,11 +148,13 @@ try {
     }
     await page.setViewportSize({width:1440,height:960});
     console.log(`${kind}: creating blank file`);
+    if(!emptyLibrary) {
     const previousFrame=await page.locator(`iframe[data-ctox-office-kind="${kind}"]`).elementHandle();
     await page.locator(kind==='document'?'[data-documents-new-markdown]':'[data-spreadsheets-new]').click();
     await page.waitForFunction(()=>window.officeLab.records.length===31);
     await page.waitForFunction(()=>window.officeLab.commands.some(command=>command.type.endsWith('.prepare')));
     await previousFrame.waitForElementState('hidden');
+    }
     await editor.locator('#viewport').waitFor({state:'visible',timeout:30000});
     const blankRuntime=page.frames().find(frame=>frame.parentFrame()===page.mainFrame());
     await blankRuntime.waitForFunction(()=>window.__officeLabReady===true,null,{timeout:30000});
@@ -258,8 +267,48 @@ try {
       assert.ok(chrome.statusTabs.every(tab=>tab.textRect?.width > 0 && tab.textRect.top >= chrome.statusbar.rect.top && tab.textRect.bottom <= chrome.statusbar.rect.bottom), 'Sheet label text must fit inside the status bar, not below the viewport');
     }
     await page.screenshot({path:path.join(output,`${kind}-reopened.png`)});
+    if(closeSafety) {
+      assert.ok(!duringSave, 'Close safety uses its own save failure/retry scenario');
+      const originalFrame = await page.locator(`iframe[data-ctox-office-kind="${kind}"]`).elementHandle();
+      const closeMarker = 'CTOX_CLOSE_GUARD_PRESERVED';
+      await page.evaluate(()=>window.officeLab.failCommits=true);
+      if(kind==='spreadsheet') {
+        await editor.locator('#ce-cell-name').fill('C1');await editor.locator('#ce-cell-name').press('Enter');
+        await editor.locator('#ce-cell-content').fill(closeMarker);await editor.locator('#ce-cell-content').press('Enter');
+      } else {
+        const canvas=editor.locator('#id_viewer_overlay');const box=await canvas.boundingBox();
+        await canvas.click({position:{x:box.width*0.35,y:120}});
+        await page.keyboard.press('Meta+End');await page.keyboard.type(closeMarker);
+      }
+      await page.waitForTimeout(200);
+      await page.locator('[data-window-control="close"]').click();
+      await page.waitForFunction(()=>document.querySelector('#notices')?.textContent.includes('OFFICE_LAB_EXPECTED_SAVE_FAILURE'));
+      assert.equal(await originalFrame.evaluate(frame=>frame.isConnected),true,'A failed final save must leave the original editor open');
+      assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0,'A failed final save must not claim a committed version');
+      await page.screenshot({path:path.join(output,`${kind}-close-refused.png`)});
+      await page.evaluate(()=>window.officeLab.failCommits=false);
+      await page.locator('[data-window-control="close"]').click();
+      await page.locator('#office-window').waitFor({state:'detached',timeout:30000});
+      assert.ok(await page.evaluate(()=>window.officeLab.completedCommits.length)>0,'Retry must acknowledge the final save before closing');
+      const encoded=await page.evaluate(()=>{
+        const command=window.officeLab.completedCommits.at(-1);
+        return window.officeLab.chunks.filter(row=>row.blob_id===command.payload.editor_blob_id).sort((a,b)=>a.idx-b.idx).map(row=>row.data);
+      });
+      const finalFile=path.join(temporary,`${kind}-closed.bin`);
+      await writeFile(finalFile,Buffer.concat(encoded.map(value=>Buffer.from(value,'base64'))));
+      if(kind==='document') {
+        const exported=path.join(temporary,'document-closed.docx');
+        await run(engineBin,['export',kind,finalFile,path.join(temporary,'document.input'),exported]);
+        const xml=await run('unzip',['-p',exported,'word/document.xml']);
+        assert.ok(xml.stdout.replace(/<[^>]+>/g,'').includes(closeMarker),'Final DOCX must preserve text typed before the refused close');
+      } else {
+        const inspection=await run(engineBin,['inspect-editor',kind,finalFile]);
+        assert.ok(inspection.stdout.includes(closeMarker),'Final workbook must preserve cells typed before the refused close');
+      }
+      console.log(`${kind}: actual Shell close refused after failed save; retry persisted final edits before teardown`);
+    }
     console.log(JSON.stringify({kind,flows:'open, search, filter, view, theme, custom accent, responsive, create blank, keyboard edit, save, native export/inspection, reopen'}));
-    assert.deepEqual(errors, []);
+    assert.deepEqual(errors.filter(error=>!closeSafety || !error.includes('OFFICE_LAB_EXPECTED_SAVE_FAILURE')), []);
     await context.close();
   }
 } catch(error) {
