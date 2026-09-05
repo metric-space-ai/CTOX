@@ -363,14 +363,22 @@ pub fn handle_business_os_command(root: &Path, args: &[String]) -> anyhow::Resul
 
 fn handle_business_os_shell_update(root: &Path, args: &[String]) -> anyhow::Result<()> {
     let action = args.first().map(String::as_str).unwrap_or("status");
+    let version = match args.get(1..).unwrap_or_default() {
+        [] => None,
+        [flag, version] if action == "stage" && flag == "--version" => Some(version.as_str()),
+        _ => anyhow::bail!("shell-update accepts only stage --version <signed-release-version> as additional arguments"),
+    };
     let result = match action {
         "status" => crate::business_os::shell_update::status(root, true),
         "check" => crate::business_os::shell_update::check(root),
-        "stage" => crate::business_os::shell_update::stage(root),
+        "stage" => match version {
+            Some(version) => crate::business_os::shell_update::stage_version(root, version),
+            None => crate::business_os::shell_update::stage(root),
+        },
         "activate" => crate::business_os::shell_update::activate(root),
         "rollback" => crate::business_os::shell_update::rollback(root),
         "--help" | "-h" => {
-            println!("usage: ctox business-os shell-update [status|check|stage|activate|rollback]");
+            println!("usage: ctox business-os shell-update [status|check|stage [--version <signed-release-version>]|activate|rollback]");
             return Ok(());
         }
         other => anyhow::bail!("unknown business-os shell-update command `{other}`"),

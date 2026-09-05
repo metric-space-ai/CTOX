@@ -326,6 +326,44 @@ fn resolve_release() -> Result<ReleaseManifest> {
     Ok(manifest)
 }
 
+fn pinned_release_url(version: &str) -> Result<String> {
+    // Only an immutable release in our repository can be selected. Never accept
+    // arbitrary URLs, paths or a channel override from the operator.
+    let valid = regex::Regex::new(
+        r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$",
+    )?;
+    anyhow::ensure!(
+        version.len() <= 128 && valid.is_match(version),
+        "invalid pinned shell version"
+    );
+    Ok(format!("https://github.com/metric-space-ai/ctox/releases/download/business-os-shell-v{version}/ctox-business-os-shell-{version}.release.v2.json"))
+}
+
+fn verify_pinned_manifest(bytes: &[u8], version: &str) -> Result<ReleaseManifest> {
+    pinned_release_url(version)?;
+    let manifest: ReleaseManifest = serde_json::from_slice(bytes)?;
+    anyhow::ensure!(manifest.payload.r#type == "ctox.business-os-shell.release.v2");
+    anyhow::ensure!(
+        manifest.payload.version == version,
+        "pinned shell version mismatch"
+    );
+    anyhow::ensure!(matches!(
+        manifest.payload.channel.as_str(),
+        "stable" | "beta" | "nightly"
+    ));
+    verify_signature(
+        &manifest.payload,
+        &manifest.signature,
+        &manifest.payload.signing_key_id,
+    )?;
+    Ok(manifest)
+}
+
+fn resolve_pinned_release(version: &str) -> Result<ReleaseManifest> {
+    let bytes = fetch(&pinned_release_url(version)?, MAX_MANIFEST_BYTES)?;
+    verify_pinned_manifest(&bytes, version)
+}
+
 fn safe_relative(path: &str) -> Result<PathBuf> {
     anyhow::ensure!(!path.is_empty() && !path.contains('\\') && !path.starts_with('/'));
     let candidate = Path::new(path);
@@ -730,11 +768,22 @@ pub fn check(root: &Path) -> Result<serde_json::Value> {
 }
 
 pub fn stage(root: &Path) -> Result<serde_json::Value> {
+    stage_selected(root, None)
+}
+
+/// Stage one signed release for tenant-scoped acceptance, without publishing or
+/// changing the subscribed Stable channel. Activation remains a separate step.
+pub fn stage_version(root: &Path, version: &str) -> Result<serde_json::Value> {
+    pinned_release_url(version)?;
+    stage_selected(root, Some(version))
+}
+
+fn stage_selected(root: &Path, version: Option<&str>) -> Result<serde_json::Value> {
     let mut state = read_state(root)?;
     state.phase = "download".to_owned();
     state.error_code = None;
     write_state(root, &state)?;
-    match stage_inner(root) {
+    match stage_inner(root, version) {
         Ok(state) => Ok(public_status(&state, true)),
         Err(error) => {
             let mut state = read_state(root)?;
@@ -746,8 +795,11 @@ pub fn stage(root: &Path) -> Result<serde_json::Value> {
     }
 }
 
-fn stage_inner(root: &Path) -> Result<ShellUpdateState> {
-    let manifest = resolve_release()?;
+fn stage_inner(root: &Path, version: Option<&str>) -> Result<ShellUpdateState> {
+    let manifest = match version {
+        Some(version) => resolve_pinned_release(version)?,
+        None => resolve_release()?,
+    };
     anyhow::ensure!(compatible(&manifest)?, "shell release is incompatible");
     let bytes = fetch(&manifest.payload.artifact.url, MAX_ARCHIVE_BYTES)?;
     anyhow::ensure!(bytes.len() as u64 == manifest.payload.artifact.size);
@@ -776,13 +828,19 @@ fn stage_inner(root: &Path) -> Result<ShellUpdateState> {
         fs::rename(&staging, &slot)?;
     }
     let mut state = read_state(root)?;
-    state.desired_version = Some(manifest.payload.version.clone());
-    state.latest_compatible_version = Some(manifest.payload.version);
+    apply_staging(&mut state, manifest.payload.version, version.is_some());
+    write_state(root, &state)?;
+    Ok(state)
+}
+
+fn apply_staging(state: &mut ShellUpdateState, version: String, pinned: bool) {
+    state.desired_version = Some(version.clone());
+    if !pinned {
+        state.latest_compatible_version = Some(version);
+    }
     state.last_checked_at = Some(Utc::now().to_rfc3339());
     state.phase = "ready".to_owned();
     state.error_code = None;
-    write_state(root, &state)?;
-    Ok(state)
 }
 
 pub fn activate(root: &Path) -> Result<serde_json::Value> {
@@ -961,6 +1019,59 @@ mod tests {
         )
         .expect_err("invalid signature must fail");
         assert!(format!("{error:#}").contains("shell-release-invalid-signature"));
+    }
+
+    #[test]
+    fn pinned_release_accepts_only_repository_versions() {
+        for version in ["0.1.46", "0.1.46-beta.1", "0.1.46-nightly.20260905"] {
+            assert!(pinned_release_url(version)
+                .unwrap()
+                .ends_with(&format!("ctox-business-os-shell-{version}.release.v2.json")));
+        }
+        for version in [
+            "",
+            "../0.1.46",
+            "https://example.com/0.1.46",
+            "v0.1.46",
+            "01.1.46",
+            "0.1.46/other",
+            "0.1.46?x",
+            "0.1.46-beta..1",
+            "0.1.46\n",
+        ] {
+            assert!(pinned_release_url(version).is_err(), "accepted {version:?}");
+        }
+    }
+
+    #[test]
+    fn pinned_release_keeps_signature_and_identity_gates() -> Result<()> {
+        let manifest = sample_manifest("0.0.0", None, "shell-current-2026-08");
+        let bytes = serde_json::to_vec(&manifest)?;
+        let mismatch = verify_pinned_manifest(&bytes, "1.2.4").unwrap_err();
+        assert!(mismatch.to_string().contains("version mismatch"));
+        let invalid = verify_pinned_manifest(&bytes, "1.2.3").unwrap_err();
+        assert!(invalid.to_string().contains("invalid-signature"));
+        Ok(())
+    }
+
+    #[test]
+    fn pinned_staging_does_not_activate_or_change_the_stable_offer() {
+        let mut state = ShellUpdateState {
+            active_version: Some("0.1.44".to_owned()),
+            current_slot: Some("0.1.44".to_owned()),
+            previous_slot: Some("0.1.43".to_owned()),
+            latest_compatible_version: Some("0.1.44".to_owned()),
+            ..ShellUpdateState::default()
+        };
+        apply_staging(&mut state, "0.1.46-beta.1".to_owned(), true);
+        assert_eq!(state.desired_version.as_deref(), Some("0.1.46-beta.1"));
+        assert_eq!(state.active_version.as_deref(), Some("0.1.44"));
+        assert_eq!(state.current_slot.as_deref(), Some("0.1.44"));
+        assert_eq!(state.previous_slot.as_deref(), Some("0.1.43"));
+        assert_eq!(state.latest_compatible_version.as_deref(), Some("0.1.44"));
+        assert_eq!(state.channel, "stable");
+        apply_staging(&mut state, "0.1.46".to_owned(), false);
+        assert_eq!(state.latest_compatible_version.as_deref(), Some("0.1.46"));
     }
 
     #[test]
