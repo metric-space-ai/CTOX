@@ -1718,6 +1718,20 @@ pub fn list_entities(
     })
 }
 
+fn crew_read_is_public(
+    root: &Path,
+    context: &McpChannelRequestContext,
+    collection: &str,
+) -> anyhow::Result<bool> {
+    if !matches!(collection, "ctox_crew_members" | "ctox_crew_learnings") {
+        return Ok(false);
+    }
+    let decision = business_os_mcp_collection_read_decision(root, context, collection)?;
+    anyhow::ensure!(decision.allowed, "crew collection read denied");
+    Ok(collection == "ctox_crew_members"
+        && !business_os_mcp_collection_read_decision(root, context, "ctox_crew_learnings")?.allowed)
+}
+
 pub fn query_records(
     root: &Path,
     context: &McpChannelRequestContext,
@@ -1727,6 +1741,7 @@ pub fn query_records(
     context.validate()?;
     ensure_non_empty("collection", collection)?;
     enforce_collection_policy(root, collection)?;
+    let public_crew = crew_read_is_public(root, context, collection)?;
     let limit = bounded_limit(limit);
     let payload = store::pull_latest_collection_records(root, collection, Some(limit))?;
     let documents = payload
@@ -1736,7 +1751,12 @@ pub fn query_records(
         .unwrap_or_default();
     let records = documents
         .into_iter()
-        .map(|record| record_summary_from_value(collection, record))
+        .map(|mut record| {
+            if public_crew {
+                crate::crew::public_member_document(&mut record);
+            }
+            record_summary_from_value(collection, record)
+        })
         .collect::<Vec<_>>();
     Ok(BusinessOsMcpList {
         ok: true,
@@ -3976,12 +3996,17 @@ pub fn get_record(
     ensure_non_empty("record_id", record_id)?;
     ensure_non_empty("collection", collection)?;
     enforce_collection_policy(root, collection)?;
+    let public_crew = crew_read_is_public(root, context, collection)?;
     let payload = store::pull_collection_record(root, collection, record_id)?.ok_or_else(|| {
         BusinessOsMcpError::not_found(
             BusinessOsMcpErrorCode::RecordNotFound,
             format!("Business OS record `{record_id}` was not found in `{collection}`"),
         )
     })?;
+    let mut payload = payload;
+    if public_crew {
+        crate::crew::public_member_document(&mut payload);
+    }
     let record = record_summary_from_value(collection, payload);
     Ok(BusinessOsMcpRecordResponse { ok: true, record })
 }
@@ -11396,6 +11421,71 @@ mod tests {
                 assert!(
                     !business_os_mcp_collection_write_decision(root.path(), &context, collection)?
                         .allowed
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn crew_mcp_redacts_private_fields_and_grants_cannot_open_learnings() -> anyhow::Result<()> {
+        let root = tempdir()?;
+        write_module(
+            root.path(),
+            "ctox",
+            "CTOX",
+            &["ctox_crew_members", "ctox_crew_learnings"],
+        )?;
+        let fixture: Value =
+            serde_json::from_str(include_str!("../rxdb/tests/fixtures/crew-identity.json"))?;
+        store::push_collection_records(
+            root.path(),
+            serde_json::json!({
+                "collection":"ctox_crew_members", "documents":[fixture["member"].clone()]
+            }),
+        )?;
+        for role in ["admin", "founder", "user"] {
+            let actor = format!("crew-{role}");
+            seed_business_user(root.path(), &actor, role)?;
+            let mut context = test_context("business_os.get_record");
+            context.actor = actor.clone();
+            seed_business_permission_grant(
+                root.path(),
+                &format!("crew-grant-{role}"),
+                "user",
+                &actor,
+                BusinessOsPermission::DataRead,
+                "collection",
+                "ctox_crew_learnings",
+            )?;
+            assert_eq!(
+                business_os_mcp_collection_read_decision(
+                    root.path(),
+                    &context,
+                    "ctox_crew_learnings"
+                )?
+                .allowed,
+                role != "user"
+            );
+            assert!(
+                !business_os_mcp_collection_write_decision(
+                    root.path(),
+                    &context,
+                    "ctox_crew_members"
+                )?
+                .allowed
+            );
+            let record = serde_json::to_value(get_record(
+                root.path(),
+                &context,
+                "ctox_crew_members",
+                fixture["member"]["id"].as_str().unwrap(),
+            )?)?;
+            for private in ["soul", "specialties", "stats"] {
+                assert_eq!(
+                    record.to_string().contains(&format!("\"{private}\"")),
+                    role != "user",
+                    "{role}: {record}"
                 );
             }
         }

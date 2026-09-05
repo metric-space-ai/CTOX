@@ -111,7 +111,15 @@ pub type CollectionAuthzHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 pub type CollectionEagerPullHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 pub type CollectionLiveChangeHook = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 pub type DocumentReadFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
-pub type DocumentReadAuthzHook = Arc<dyn Fn(&str, &str) -> DocumentReadFilter + Send + Sync>;
+/// Per-peer read policy. Field restrictions apply to query inputs and every
+/// outgoing document path, not merely to the browser's display.
+#[derive(Clone)]
+pub struct DocumentReadPolicy {
+    pub filter: DocumentReadFilter,
+    pub fields: Option<Vec<String>>,
+}
+pub type DocumentReadAuthzHook = Arc<dyn Fn(&str, &str) -> DocumentReadPolicy + Send + Sync>;
+
 pub type DocumentWriteAuthzHook = Arc<dyn Fn(&str, &str, &Value) -> bool + Send + Sync>;
 
 /// One peer's last presence report (ctox-presence-v1). Entries are opaque JSON
@@ -1642,7 +1650,18 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
             .get(peer)
             .cloned()
             .unwrap_or_default();
-        Some(hook(&token, collection))
+        Some(hook(&token, collection).filter)
+    }
+
+    fn document_fields_for_peer(&self, peer: &Self::Peer, collection: &str) -> Option<Vec<String>> {
+        let hook = self.document_read_authz.lock().clone()?;
+        let token = self
+            .peer_capability_tokens
+            .lock()
+            .get(peer)
+            .cloned()
+            .unwrap_or_default();
+        hook(&token, collection).fields
     }
 
     fn are_documents_write_authorized_for_peer(
@@ -1691,6 +1710,11 @@ impl WebRTCConnectionHandler for WebRTCRsConnectionHandler {
             }
             crate::types::RxReplicationMasterChange::Documents(mut documents) => {
                 documents.documents.retain(|document| filter(document));
+                if let Some(fields) = self.document_fields_for_peer(peer, collection) {
+                    for document in &mut documents.documents {
+                        super::webrtc_types::retain_readable_fields(document, &fields);
+                    }
+                }
                 if documents.documents.is_empty() {
                     None
                 } else {
@@ -3746,6 +3770,49 @@ mod tests {
     }
 
     #[test]
+    fn crew_live_changes_apply_the_authenticated_field_policy() {
+        let handler = WebRTCRsConnectionHandler::new();
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/crew-identity.json"))
+                .unwrap();
+        let public: Vec<String> = serde_json::from_value(fixture["public_fields"].clone()).unwrap();
+        handler.set_document_read_authz(Some(Arc::new(move |token, _collection| {
+            let readable = matches!(token, "admin" | "founder" | "user");
+            DocumentReadPolicy {
+                filter: Arc::new(move |_| readable),
+                fields: if matches!(token, "admin" | "founder") {
+                    None
+                } else {
+                    Some(public.clone())
+                },
+            }
+        })));
+        for role in ["admin", "founder", "user", "invalid"] {
+            let peer = role.to_string();
+            handler.set_peer_capability_token(&peer, role.to_string());
+            let result = handler.filter_master_change_for_peer(
+                &peer,
+                "ctox_crew_members",
+                crate::types::RxReplicationMasterChange::Documents(
+                    crate::types::DocumentsWithCheckpoint {
+                        documents: vec![fixture["member"].clone()],
+                        checkpoint: serde_json::json!({"id":"crew-milo","lwt":1}),
+                    },
+                ),
+            );
+            if role == "invalid" {
+                assert!(result.is_none());
+                continue;
+            }
+            let Some(crate::types::RxReplicationMasterChange::Documents(result)) = result else {
+                panic!("missing change")
+            };
+            assert_eq!(result.documents[0].get("soul").is_some(), role != "user");
+            assert_eq!(result.documents[0]["name"], "Milo");
+        }
+    }
+
+    #[test]
     fn write_and_document_authz_hooks_are_fail_open_then_enforced() {
         let handler = WebRTCRsConnectionHandler::new();
         let peer = "peer-1".to_string();
@@ -3767,9 +3834,12 @@ mod tests {
         handler.set_document_read_authz(Some(Arc::new(move |token: &str, _collection: &str| {
             document_filter_preparations_for_hook.fetch_add(1, Ordering::Relaxed);
             let authorized = token == "tok-abc";
-            Arc::new(move |document: &Value| {
-                authorized && document.get("user_id").and_then(Value::as_str) == Some("alice")
-            })
+            DocumentReadPolicy {
+                filter: Arc::new(move |document: &Value| {
+                    authorized && document.get("user_id").and_then(Value::as_str) == Some("alice")
+                }),
+                fields: None,
+            }
         })));
         handler.set_document_write_authz(Some(Arc::new(
             |token: &str, collection: &str, document: &Value| {

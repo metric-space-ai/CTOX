@@ -241,7 +241,18 @@ pub trait WebRTCConnectionHandler: Send + Sync {
         Some(change)
     }
 
+    /// Optional field allowlist. Query selectors/sorts must not observe hidden
+    /// fields, and outgoing documents must be projected before serialization.
+    fn document_fields_for_peer(
+        &self,
+        _peer: &Self::Peer,
+        _collection: &str,
+    ) -> Option<Vec<String>> {
+        None
+    }
+
     /// Optional predicate used by `masterChangesSince` responses.
+
     fn document_filter_for_peer(
         &self,
         _peer: &Self::Peer,
@@ -276,7 +287,83 @@ pub type WebRTCPeerSessionValidator =
 /// Per-peer document visibility predicate shared by replication and query fetch.
 pub type WebRTCDocumentFilter = Arc<dyn Fn(&Value) -> bool + Send + Sync>;
 
+pub(crate) fn retain_readable_fields(document: &mut Value, fields: &[String]) {
+    if let Some(object) = document.as_object_mut() {
+        object.retain(|key, _| {
+            fields.contains(key)
+                || matches!(key.as_str(), "_rev" | "_meta" | "_deleted" | "_attachments")
+        });
+    }
+}
+
+pub(crate) fn readable_query_fields(query: &Value, fields: &[String]) -> bool {
+    fn selector(value: &Value, fields: &[String]) -> bool {
+        match value {
+            Value::Object(object) => object.iter().all(|(key, value)| {
+                if key.starts_with('$') {
+                    matches!(key.as_str(), "$and" | "$or" | "$nor" | "$not")
+                        && selector(value, fields)
+                } else {
+                    fields
+                        .iter()
+                        .any(|field| key == field || key.starts_with(&format!("{field}.")))
+                        || matches!(key.as_str(), "_deleted" | "_meta.lwt" | "_rev")
+                }
+            }),
+            Value::Array(values) => values.iter().all(|value| selector(value, fields)),
+            Value::String(field) => fields.contains(field),
+            _ => false,
+        }
+    }
+    query
+        .get("selector")
+        .is_none_or(|value| selector(value, fields))
+        && query
+            .get("sort")
+            .is_none_or(|value| selector(value, fields))
+        && query.get("index").is_none_or(|value| match value {
+            Value::String(field) => fields.contains(field),
+            Value::Array(values) => values.iter().all(|v| {
+                v.as_str()
+                    .is_some_and(|field| fields.iter().any(|f| f == field))
+            }),
+            _ => false,
+        })
+}
+
+#[cfg(test)]
+mod field_policy_tests {
+    use super::*;
+    #[test]
+    fn crew_fixture_masks_private_fields_and_rejects_query_oracles() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/crew-identity.json"))
+                .unwrap();
+        let fields: Vec<String> = serde_json::from_value(fixture["public_fields"].clone()).unwrap();
+        let mut member = fixture["member"].clone();
+        retain_readable_fields(&mut member, &fields);
+        for private in ["soul", "stats", "specialties"] {
+            assert!(member.get(private).is_none());
+        }
+        assert_eq!(member["name"], "Milo");
+        assert!(readable_query_fields(
+            &serde_json::json!({"selector":{"archived":false},"sort":[{"name":"asc"}]}),
+            &fields
+        ));
+        for query in [
+            serde_json::json!({"selector":{"soul.sketch":{"$regex":"secret"}}}),
+            serde_json::json!({"selector":{"$or":[{"name":"Milo"},{"stats.tasks_total":1}]}}),
+            serde_json::json!({"sort":["soul.sketch"]}),
+            serde_json::json!({"index":["stats.tasks_total"]}),
+            serde_json::json!({"selector":{"$expr":{"$eq":["$soul.sketch","secret"]}}}),
+        ] {
+            assert!(!readable_query_fields(&query, &fields), "{query}");
+        }
+    }
+}
+
 /// Soft threshold above which the V1.5 dispatcher yields and waits before
+
 /// sending the next chunk. Matches typical WebRTC SCTP send-queue depth.
 pub const WEBRTC_BUFFERED_HIGH_WATER: usize = 1024 * 1024; // 1 MiB
 

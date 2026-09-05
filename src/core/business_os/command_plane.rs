@@ -269,8 +269,17 @@ fn with_business_command_replay_receipt(
 #[cfg(test)]
 #[path = "crew_cockpit_command_tests.rs"]
 mod crew_cockpit_tests;
+#[cfg(test)]
+#[path = "crew_identity_command_tests.rs"]
+mod crew_identity_tests;
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 81] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 87] = [
+    "ctox.crew.member.create",
+    "ctox.crew.member.update",
+    "ctox.crew.learning.confirm",
+    "ctox.crew.learning.update",
+    "ctox.crew.learning.delete",
+    "ctox.crew.assign",
     "ctox.queue.release",
     "ctox.queue.block",
     "ctox.queue.retry",
@@ -924,7 +933,12 @@ enum CentralCommandPolicyRequirement {
 impl CentralCommandPolicyRequirement {
     fn for_command(command: &BusinessCommand) -> Option<Self> {
         let command_type = command.command_type.as_str();
-        let fixed = if matches!(command_type, "ctox.queue.capacity" | "ctox.queue.pause") {
+        let fixed = if command_type.starts_with("ctox.crew.") {
+            Some(CommandPolicyRequirement::scoped(
+                BusinessOsPermission::CrewManage,
+                super::policy::BusinessOsScope::record(command_type),
+            ))
+        } else if matches!(command_type, "ctox.queue.capacity" | "ctox.queue.pause") {
             Some(CommandPolicyRequirement::workspace(
                 BusinessOsPermission::CtoxTaskManage,
             ))
@@ -1238,6 +1252,24 @@ fn dispatch_business_command(
     authorized_session: Option<&BusinessOsSession>,
 ) -> anyhow::Result<BusinessCommandDispatchOutcome> {
     match command.command_type.as_str() {
+        "ctox.crew.member.create"
+        | "ctox.crew.member.update"
+        | "ctox.crew.learning.confirm"
+        | "ctox.crew.learning.update"
+        | "ctox.crew.learning.delete"
+        | "ctox.crew.assign" => {
+            let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
+            Ok(
+                match super::crew_commands::control(root, command, session) {
+                    Ok(result) => BusinessCommandDispatchOutcome::completed(result, None),
+                    Err(error) => BusinessCommandDispatchOutcome::failed(
+                        None,
+                        serde_json::json!({"ok":false,"error":error.to_string()}),
+                        error,
+                    ),
+                },
+            )
+        }
         "ctox.queue.release"
         | "ctox.queue.block"
         | "ctox.queue.retry"

@@ -648,7 +648,31 @@ pub async fn run_query_fetch<H: WebRTCConnectionHandler + 'static>(
         }
     };
 
+    let mut request = request;
+    if let Some(mut fields) = handler.document_fields_for_peer(&peer, &request.collection_name) {
+        if !super::webrtc_types::readable_query_fields(&request.query, &fields) {
+            registry.release(&peer_identity, &request.request_id);
+            send_error(
+                handler.as_ref(),
+                &peer,
+                &message.id,
+                &request.request_id,
+                QUERY_FETCH_ERROR_UNAUTHORIZED,
+                "query references a field outside the read policy",
+                false,
+            )
+            .await;
+            return Ok(());
+        }
+        // A caller-supplied empty/private-only projection must never restore the
+        // unprojected document. Server field policy overrides this optimization.
+        // Keep the replication envelope just as master/live masking does.
+        fields.extend(["_rev", "_meta", "_deleted", "_attachments"].map(String::from));
+        request.projection = Some(fields);
+    }
+
     // Immediate ack for the original request id so the JS-side request map
+
     // resolves. The browser then awaits chunk frames via its own router.
     send_fetch_accepted(handler.as_ref(), &peer, &message.id, &request.request_id).await;
 
@@ -1619,6 +1643,7 @@ mod tests {
         buffered: Arc<std::sync::atomic::AtomicUsize>,
         document_filter: Arc<TokioMutex<Option<Arc<DocumentFilterFn>>>>,
         collection_authorized: Arc<AtomicBool>,
+        document_fields: Arc<TokioMutex<Option<Vec<String>>>>,
     }
 
     impl MockHandler {
@@ -1628,6 +1653,7 @@ mod tests {
                 buffered: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
                 document_filter: Arc::new(TokioMutex::new(None)),
                 collection_authorized: Arc::new(AtomicBool::new(true)),
+                document_fields: Arc::new(TokioMutex::new(None)),
             }
         }
 
@@ -1674,6 +1700,13 @@ mod tests {
         }
         fn is_collection_authorized_for_peer(&self, _peer: &Self::Peer, _collection: &str) -> bool {
             self.collection_authorized.load(Ordering::SeqCst)
+        }
+        fn document_fields_for_peer(
+            &self,
+            _peer: &Self::Peer,
+            _collection: &str,
+        ) -> Option<Vec<String>> {
+            self.document_fields.lock().clone()
         }
         fn document_filter_for_peer(
             &self,
@@ -2340,6 +2373,60 @@ mod tests {
             documents[0].get("id").and_then(Value::as_str),
             Some("doc-0002")
         );
+    }
+
+    #[tokio::test]
+    async fn field_policy_overrides_private_projection_and_blocks_hidden_selectors() {
+        for private_selector in [false, true] {
+            let collection = seeded_collection(2).await;
+            let registry = authorized_query_registry(2);
+            registry.register(Arc::clone(&collection));
+            let handler = Arc::new(MockHandler::new());
+            *handler.document_fields.lock() = Some(vec!["id".into()]);
+            let mut message = make_request("crew-fields", "business_records", 0);
+            message.params[0]["query"] = json!({"selector":{},"sort":[{"id":"asc"}]});
+            message.params[0]["projection"] = json!(["private_profile"]);
+            if private_selector {
+                message.params[0]["query"] = json!({"selector":{"private_profile":"secret"}});
+            }
+            run_query_fetch(
+                registry,
+                Arc::clone(&handler),
+                MockPeer("p1"),
+                "p1".into(),
+                message,
+            )
+            .await
+            .unwrap();
+            let frames = handler.sent.lock();
+            if private_selector {
+                assert!(error_code_emitted(&frames, QUERY_FETCH_ERROR_UNAUTHORIZED));
+            } else {
+                let documents = frames
+                    .iter()
+                    .filter_map(|frame| match frame {
+                        WebRTCWireFrame::Message(message)
+                            if message.method == CTOX_QUERY_RPC_CHUNK =>
+                        {
+                            serde_json::from_value::<QueryFetchChunk>(message.params[0].clone())
+                                .ok()
+                        }
+                        _ => None,
+                    })
+                    .flat_map(|chunk| decode_chunk_documents(&chunk).unwrap_or_default())
+                    .collect::<Vec<_>>();
+                assert_eq!(documents.len(), 2);
+                assert!(documents.iter().all(|doc| doc["_rev"] == "1-x"
+                    && doc["_meta"].is_object()
+                    && doc["_deleted"] == false));
+                assert!(documents
+                    .iter()
+                    .all(|doc| doc.as_object().unwrap().keys().all(|key| matches!(
+                        key.as_str(),
+                        "id" | "_rev" | "_meta" | "_deleted" | "_attachments"
+                    ))));
+            }
+        }
     }
 
     #[tokio::test]

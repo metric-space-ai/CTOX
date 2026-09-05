@@ -4080,6 +4080,7 @@ pub(super) fn ensure_schema(conn: &Connection) -> Result<()> {
     .context("failed to ensure channel schema")?;
     ensure_terminal_no_send_column(conn)?;
     ensure_routing_state_hardening_columns(conn)?;
+    crate::crew::ensure_schema(conn)?;
     Ok(())
 }
 
