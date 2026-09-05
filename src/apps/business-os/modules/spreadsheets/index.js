@@ -1346,6 +1346,7 @@ function visibleSpreadsheets(state) {
 }
 
 async function renderCenter(state) {
+  if (!state.ctx.host.isConnected) return;
   const record = selectedRecord(state);
   const shell = state.ctx.host.querySelector('[data-spreadsheets-editor]');
   if (!shell) return;
@@ -1423,8 +1424,8 @@ async function renderCenter(state) {
   try {
     await mountCtoxSpreadsheets(state, canvas, record, state.selectedVersion);
   } catch (error) {
-    console.error('[spreadsheets] editor open failed', error);
     if (canvas.isConnected && state.selectedId === record.id) {
+      console.error('[spreadsheets] editor open failed', error);
       canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('editorLoadFailed', 'Editor konnte nicht geladen werden:'))}</strong><span>${escapeHtml(error?.message || error)}</span></div>`;
     }
   }
