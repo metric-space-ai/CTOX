@@ -11,7 +11,9 @@ import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const OUT = path.join(ROOT, '../../..', 'output/playwright/shell-v2-geometry-lab');
+const OUT = process.argv.includes('--output-dir')
+  ? path.resolve(process.argv[process.argv.indexOf('--output-dir') + 1])
+  : path.join(ROOT, '../../..', 'output/playwright/shell-v2-geometry-lab');
 mkdirSync(OUT, { recursive: true });
 
 const argApps = process.argv.includes('--apps')

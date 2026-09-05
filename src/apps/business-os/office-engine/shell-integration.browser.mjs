@@ -90,6 +90,7 @@ try {
     await editor.getByRole('tab', {name:'Startseite',exact:true}).waitFor({state:'visible',timeout:30000});
     const runtimeFrame=page.frames().find(frame=>frame.parentFrame()===page.mainFrame());
     await runtimeFrame.waitForFunction(()=>window.__officeLabReady===true,null,{timeout:30000});
+    if(kind==='spreadsheet') assert.equal(await page.locator('[data-spreadsheets-add-row],[data-spreadsheets-add-col]').count(),0,'The wrapper must not expose unsupported row/column actions beside the native ribbon');
     const geometry = await page.locator('[data-shell-columns="2"]').evaluate(root => {
       const library=root.querySelector('.ctox-office-library'), editor=root.querySelector('.documents-workbench,.spreadsheets-editor');
       return {root:root.getBoundingClientRect().toJSON(),library:library.getBoundingClientRect().toJSON(),editor:editor.getBoundingClientRect().toJSON(),display:getComputedStyle(root).display,columns:getComputedStyle(root).gridTemplateColumns};

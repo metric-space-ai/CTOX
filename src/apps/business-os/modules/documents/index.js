@@ -1512,15 +1512,22 @@ async function switchSelectedDocument(state, documentId, options = {}, lifecycle
   state.switchSerial = switchSerial;
   const previousRecord = selectedRecord(state);
   const canReplaceEditorVersion = sameDocument && canReplaceActiveEditorVersion(state);
-  if (!canReplaceEditorVersion || state.dirty || state.superdocSavePromise) {
+  if (!canReplaceEditorVersion || state.dirty || state.superdocSavePromise || state.editorHandle?.saving) {
     try {
       await withTimeout(
-        flushDraft(state, previousRecord, { allowFailure: true }),
-        2500,
+        flushDraft(state, previousRecord, { allowFailure: false }),
+        90000,
         state.t('draftSaveTimeout', 'Automatische Draft-Speicherung beim Dokumentwechsel hat zu lange gedauert.'),
       );
     } catch (error) {
-      console.warn('[documents] continuing document switch after draft save failed', error);
+      if (state.switchSerial !== switchSerial) return;
+      state.ctx.notifications?.error?.(error.message);
+      return;
+    }
+    if (state.switchSerial !== switchSerial) return;
+    if (state.dirty || state.editorHandle?.saving) {
+      state.ctx.notifications?.error?.(state.t('draftSavePending', 'Weitere Änderungen sind noch nicht gespeichert. Bitte nach dem Speichern erneut versuchen, das Dokument zu wechseln.'));
+      return;
     }
   }
   if (state.switchSerial !== switchSerial) return;
