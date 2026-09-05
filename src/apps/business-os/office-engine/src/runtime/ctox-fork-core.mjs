@@ -50,6 +50,17 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   let documentMediaResolver = null;
   let forkUi = null;
   let mutationApi = null;
+  const onEditorSaveShortcut = (event) => {
+    if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey || event.key.toLowerCase() !== 's') return;
+    // The compiled SDK's internal shortcut calls its private server-save
+    // method, bypassing the public asc_Save adapter. Route the real keyboard
+    // command through the same native commit path as the toolbar.
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    if (!destroyed && documentReady && access.write !== false) {
+      frame.contentWindow.Asc.editor.asc_Save();
+    }
+  };
   const onUserActionEnd = () => {
     if (destroyed || !documentReady || access.write === false) return;
     saveTracker.edit();
@@ -92,6 +103,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       case 'onAppReady':
         clearTimeout(readyTimeout);
         installCtoxSdkAdapter(frame.contentWindow, kind, beginSdkSave);
+        frame.contentWindow.addEventListener('keydown', onEditorSaveShortcut, true);
         forkUi = installCtoxForkUi(frame.contentWindow, { productId, productName, kind, theme: requestedTheme });
         applyShellAppearance(frame.contentDocument, appearance);
         resolveAppReady();
@@ -99,6 +111,9 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       case 'onDocumentReady':
         documentReady = true;
         mutationApi = frame.contentWindow.Asc?.editor;
+        // CTOX's shell schedules native commits; the inherited server timer
+        // must stay disabled even when an older browser saved SDK preferences.
+        mutationApi?.asc_setAutoSaveGap?.(0);
         mutationApi?.asc_unregisterCallback?.('asc_onUserActionEnd', onUserActionEnd);
         mutationApi?.asc_registerCallback?.('asc_onUserActionEnd', onUserActionEnd);
         applyCtoxForkTheme(frame.contentWindow, requestedTheme, productId, true);
@@ -146,7 +161,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   }
 
   function beginSdkSave() {
-    if (destroyed || pendingSave?.serialized) return false;
+    if (destroyed || access.write === false || pendingSave?.serialized) return false;
     pendingSave ||= createPendingSave('toolbar');
     pendingSave.serialized = true;
     pendingSave.snapshot = saveTracker.snapshot();
@@ -286,6 +301,7 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       destroyed = true;
       clearTimeout(readyTimeout);
       window.removeEventListener('message', onMessage);
+      frame.contentWindow?.removeEventListener('keydown', onEditorSaveShortcut, true);
       colorScheme.removeEventListener?.('change', onColorSchemeChange);
       mutationApi?.asc_unregisterCallback?.('asc_onUserActionEnd', onUserActionEnd);
       pendingSave?.reject?.(new Error(`${productName} runtime destroyed`));
@@ -455,7 +471,10 @@ function installCtoxSdkAdapter(upstream, kind, beginSave = () => true) {
   if (kind === 'document') {
     const upstreamSave = prototype.asc_Save;
     prototype.asc_Save = function (isAutoSave, isIdle) {
-      if (isAutoSave) return upstreamSave.call(this, isAutoSave, isIdle);
+      // The shell owns debounced, durable saves through bridge.commit. The
+      // inherited timer targets the excluded coauthoring server and otherwise
+      // leaves its save action pending forever.
+      if (isAutoSave) return false;
       if (!beginSave()) return false;
       if (typeof this.asc_nativeGetFile2 !== 'function') return upstreamSave.call(this, isAutoSave, isIdle);
       const encoded = this.asc_nativeGetFile2();
@@ -469,7 +488,7 @@ function installCtoxSdkAdapter(upstream, kind, beginSave = () => true) {
   } else {
     const upstreamSave = prototype.asc_Save;
     prototype.asc_Save = function (isAutoSave, isIdle) {
-      if (isAutoSave) return upstreamSave.call(this, isAutoSave, isIdle);
+      if (isAutoSave) return false;
       if (!beginSave()) return false;
       if (typeof this.asc_nativeGetFile !== 'function') return upstreamSave.call(this, isAutoSave, isIdle);
       const encoded = this.asc_nativeGetFile();
@@ -665,6 +684,7 @@ function editorConfig(locale, permissions, theme = 'system') {
       help: false,
       plugins: false,
       macros: false,
+      autosave: false,
       compactHeader: true,
       toolbarHideFileName: true,
       compactToolbar: false,

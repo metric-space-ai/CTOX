@@ -160,6 +160,15 @@ try {
     const blankRuntime=page.frames().find(frame=>frame.parentFrame()===page.mainFrame());
     await blankRuntime.waitForFunction(()=>window.__officeLabReady===true,null,{timeout:30000});
     assert.equal(await page.locator('#lab-drawer').count(),0,'Blank creation must not require a prompt dialog');
+    await editor.locator('#viewport').evaluate(viewport => {
+      const sdkWindow = viewport.ownerDocument.defaultView;
+      sdkWindow.__officeLabSaveActions = [];
+      for (const event of ['asc_onStartAction', 'asc_onEndAction']) {
+        sdkWindow.Asc.editor.asc_registerCallback(event, (type, id) => {
+          sdkWindow.__officeLabSaveActions.push({event, type, id});
+        });
+      }
+    });
     let replacement=`CTOX_OFFICE_${kind.toUpperCase()}_SAVED`;
     if(kind==='spreadsheet') {
       await editor.locator('#ce-cell-name').fill('A1'); await editor.locator('#ce-cell-name').press('Enter');
@@ -168,7 +177,7 @@ try {
       if (duringSave) {
         assert.ok(realtime, '--during-save requires the realtime fixture');
         const activeEditorFrame = await page.locator('iframe[data-ctox-office-kind="spreadsheet"]').elementHandle();
-        await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
+        await page.keyboard.press('Meta+s');
         await page.waitForFunction(()=>window.officeLab.commands.some(command=>command.type.endsWith('.commit')));
         await editor.locator('#ce-cell-name').fill('B1'); await editor.locator('#ce-cell-name').press('Enter');
         await editor.locator('#ce-cell-content').pressSequentially('DURING_SAVE', {delay:50});
@@ -209,6 +218,12 @@ try {
     // must not manufacture another dirty revision and an endless autosave loop.
     await page.waitForTimeout(3500);
     assert.equal(await page.evaluate(()=>window.officeLab.commands.filter(command=>command.type.endsWith('.commit')).length),settledCommitCount,'An idle saved editor must not repeatedly commit itself');
+    console.log(JSON.stringify(await editor.locator('#viewport').evaluate(viewport => {
+      const sdkWindow = viewport.ownerDocument.defaultView;
+      return {saveActions: sdkWindow.__officeLabSaveActions, saveActionId: sdkWindow.Asc.c_oAscAsyncAction.Save};
+    })));
+    assert.equal(await editor.getByText('Dokument wird gespeichert...', { exact: true }).count(), 0,
+      'The editor must stop showing an in-progress save after its native commit succeeds');
     const saved=await page.evaluate(()=>{
       const command=window.officeLab.commands.findLast(command=>command.type.endsWith('.commit'));
       return window.officeLab.chunks.filter(row=>row.blob_id===command.payload.editor_blob_id).sort((a,b)=>a.idx-b.idx).map(row=>row.data);
