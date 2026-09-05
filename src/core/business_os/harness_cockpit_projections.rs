@@ -2,7 +2,7 @@
 #[cfg(test)]
 #[path = "harness_cockpit_projection_tests.rs"]
 mod tests;
-use super::{queue_pause, queue_retention};
+use super::{queue_pause_state, queue_retention};
 use crate::business_os::store::{self, BusinessProjectionWriter as NativeProjectionWriter};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -33,9 +33,27 @@ struct BusinessProjectionWriter {
 }
 impl BusinessProjectionWriter {
     fn open(root: &Path) -> Result<Self> {
-        store::open_store(root)?.execute_batch("CREATE INDEX IF NOT EXISTS idx_cockpit_live_records ON business_records(collection,record_id) WHERE deleted=0;
-            CREATE INDEX IF NOT EXISTS idx_cockpit_event_task_time ON business_records(json_extract(payload_json,'$.task_id'),json_extract(payload_json,'$.created_at_ms') DESC,record_id DESC) WHERE collection='ctox_harness_events' AND deleted=0;
-            CREATE INDEX IF NOT EXISTS idx_cockpit_run_finished ON business_records(json_extract(payload_json,'$.finished_at_ms') DESC,record_id DESC) WHERE collection='ctox_runs' AND deleted=0;")?;
+        store::open_store(root)?.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_cockpit_live_records
+                ON business_records(collection, record_id) WHERE deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_cockpit_event_task_time
+                ON business_records(json_extract(payload_json,'$.task_id'),
+                    json_extract(payload_json,'$.created_at_ms') DESC, record_id DESC)
+                WHERE collection='ctox_harness_events' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_cockpit_event_created
+                ON business_records(collection, json_extract(payload_json,'$.created_at_ms'), record_id)
+                WHERE collection='ctox_harness_events' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_cockpit_run_finished
+                ON business_records(json_extract(payload_json,'$.finished_at_ms') DESC, record_id DESC)
+                WHERE collection='ctox_runs' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_cockpit_run_task_finished
+                ON business_records(json_extract(payload_json,'$.task_id'),
+                    json_extract(payload_json,'$.finished_at_ms') DESC, record_id DESC)
+                WHERE collection='ctox_runs' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_cockpit_run_crew
+                ON business_records(json_extract(payload_json,'$.crew_member_id'), record_id)
+                WHERE collection='ctox_runs' AND deleted=0;",
+        )?;
         Ok(Self {
             inner: NativeProjectionWriter::open(root)?,
             payloads: BTreeMap::new(),
@@ -76,7 +94,14 @@ impl BusinessProjectionWriter {
 
 fn persisted_snapshot(root: &Path) -> Result<WorkerSnapshot> {
     let conn = store::open_store(root)?;
-    let raw:Option<String>=conn.query_row("SELECT payload_json FROM business_records WHERE collection='ctox_harness_status' AND record_id='harness' AND deleted=0",[],|row|row.get(0)).optional()?;
+    let raw: Option<String> = conn
+        .query_row(
+            "SELECT payload_json FROM business_records
+         WHERE collection='ctox_harness_status' AND record_id='harness' AND deleted=0",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
     Ok(raw
         .map(|raw| serde_json::from_str(&raw))
         .transpose()?
@@ -255,14 +280,14 @@ pub(crate) fn refresh_after_finalization(db_path: &Path) {
     }
 }
 
-fn millis(value: &str) -> i64 {
+fn millis(value: &str) -> Option<i64> {
     // LCM finalizations use epoch-millisecond strings; flow/routing use RFC3339.
     if let Ok(value) = value.parse::<i64>() {
-        return value;
+        return Some(value);
     }
     DateTime::parse_from_rfc3339(value)
         .map(|date| date.timestamp_millis())
-        .unwrap_or(0)
+        .ok()
 }
 
 fn has_table(conn: &Connection, table: &str) -> Result<bool> {
@@ -278,11 +303,19 @@ fn core(root: &Path) -> Result<Connection> {
     conn.busy_timeout(Duration::from_millis(100))?;
     // Indexes are additive. The flow ledger remains the authoritative evidence.
     if has_table(&conn, "ctox_harness_flow_events")? {
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_cockpit_flow_attempt ON ctox_harness_flow_events(json_extract(metadata_json,'$.attempt_id'),created_at);
-            CREATE INDEX IF NOT EXISTS idx_cockpit_flow_task_time ON ctox_harness_flow_events(message_key,created_at DESC);")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_cockpit_flow_attempt
+                ON ctox_harness_flow_events(json_extract(metadata_json,'$.attempt_id'), created_at);
+             CREATE INDEX IF NOT EXISTS idx_cockpit_flow_task_time
+                ON ctox_harness_flow_events(message_key, created_at DESC);",
+        )?;
     }
     if has_table(&conn, "worker_attempt_finalizations")? {
-        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_cockpit_finalized_time ON worker_attempt_finalizations(COALESCE(terminal_at,updated_at) DESC,attempt_id DESC) WHERE status!='finalizing';")?;
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS idx_cockpit_finalized_time
+                ON worker_attempt_finalizations(COALESCE(terminal_at,updated_at) DESC, attempt_id DESC)
+                WHERE status!='finalizing';",
+        )?;
     }
     if has_table(&conn, "api_model_cost_events")? {
         conn.execute_batch(
@@ -350,7 +383,9 @@ fn project_status(
         snapshot.active_task_ids.clear();
     }
     let mut statement = conn.prepare(
-        "SELECT r.route_status,COUNT(*) FROM communication_routing_state r JOIN communication_messages m ON m.message_key=r.message_key WHERE m.channel='queue' AND m.direction='inbound' GROUP BY r.route_status",
+        "SELECT r.route_status, COUNT(*) FROM communication_routing_state r
+         JOIN communication_messages m ON m.message_key=r.message_key
+         WHERE m.channel='queue' AND m.direction='inbound' GROUP BY r.route_status",
     )?;
     for row in statement.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
@@ -359,15 +394,53 @@ fn project_status(
         counts.insert(status, count);
     }
     let count = |status: &str| counts.get(status).copied().unwrap_or(0);
-    let failed_recent: i64 = conn.query_row("SELECT COUNT(*) FROM communication_routing_state r JOIN communication_messages m ON m.message_key=r.message_key WHERE m.channel='queue' AND m.direction='inbound' AND r.route_status='failed' AND julianday(r.updated_at)>=julianday('now','-1 day')",[],|row|row.get(0))?;
+    let failed_recent: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM communication_routing_state r
+         JOIN communication_messages m ON m.message_key=r.message_key
+         WHERE m.channel='queue' AND m.direction='inbound' AND r.route_status='failed'
+           AND julianday(r.updated_at)>=julianday('now','-1 day')",
+        [],
+        |row| row.get(0),
+    )?;
     let review_count = if has_table(conn, "business_command_aggregates")?
         && has_table(conn, "business_command_task_links")?
     {
-        conn.query_row("SELECT COUNT(*) FROM communication_routing_state r JOIN communication_messages m ON m.message_key=r.message_key WHERE m.channel='queue' AND m.direction='inbound' AND (r.route_status='review_rework' OR EXISTS(SELECT 1 FROM business_command_task_links l JOIN business_command_aggregates a ON a.command_id=l.command_id WHERE l.task_id=r.message_key AND a.execution_phase='awaiting_review'))",[],|row|row.get::<_,i64>(0))?
+        conn.query_row(
+            "SELECT COUNT(*) FROM communication_routing_state r
+             JOIN communication_messages m ON m.message_key=r.message_key
+             WHERE m.channel='queue' AND m.direction='inbound'
+               AND (r.route_status='review_rework' OR EXISTS (
+                   SELECT 1 FROM business_command_task_links l
+                   JOIN business_command_aggregates a ON a.command_id=l.command_id
+                   WHERE l.task_id=r.message_key AND a.execution_phase='awaiting_review'))",
+            [],
+            |row| row.get::<_, i64>(0),
+        )?
     } else {
         count("review_rework")
     };
-    let pause = queue_pause(root)?;
+    // The persisted snapshot may contain our previous configuration diagnostic.
+    // Recompute it, so repairing queue.pause also clears the visible error.
+    snapshot.last_error = snapshot.last_error.and_then(|error| {
+        if error.starts_with("Invalid queue.pause;") {
+            None
+        } else {
+            Some(
+                error
+                    .split("; Invalid queue.pause;")
+                    .next()
+                    .unwrap_or(&error)
+                    .to_string(),
+            )
+        }
+    });
+    let (pause, pause_error) = queue_pause_state(root);
+    if let Some(error) = pause_error {
+        snapshot.last_error = Some(match snapshot.last_error {
+            Some(previous) => format!("{previous}; {error}"),
+            None => error,
+        });
+    }
     let now = Utc::now().timestamp_millis();
     let capacity = crate::service::configure_queue_worker_capacity(root, None)?;
     let threshold = crate::service::queue_pressure_threshold();
@@ -398,6 +471,10 @@ fn event_kind(kind: &str) -> Option<&'static str> {
     })
 }
 
+// Each query materializes at most one page. Keyset iteration also preserves
+// all active tasks/runs when their count exceeds the terminal retention limit.
+const PROJECTION_PAGE_SIZE: i64 = 128;
+
 fn project_events(
     _root: &Path,
     conn: &Connection,
@@ -406,47 +483,138 @@ fn project_events(
     if !has_table(conn, "ctox_harness_flow_events")? {
         return Ok(());
     }
-    // A short turn may finish before this lossy worker wakes. Eligibility was recorded
-    // at emission; replay recent terminal tasks too so their last events are not lost.
-    let mut tasks = conn.prepare("SELECT message_key FROM communication_routing_state WHERE route_status NOT IN ('handled','failed','cancelled') OR julianday(updated_at)>=julianday('now','-1 day')")?;
-    let tasks = tasks
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for task in tasks {
-        let mut statement=conn.prepare("SELECT event_id,event_kind,title,attempt_index,metadata_json,created_at FROM ctox_harness_flow_events
-            WHERE message_key=?1 AND COALESCE(json_extract(metadata_json,'$.cockpit_eligible'),1)=1 AND event_kind IN ('worker.turn_started','worker.tool_started','worker.tool_completed','worker.thinking_started','worker.thinking','worker.plan_updated','worker.token_usage','worker.turn_completed','worker.phase','crew.selected','crew_selected')
-            ORDER BY created_at DESC,event_id DESC LIMIT 200")?;
-        let events = statement
-            .query_map([&task], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                    r.get::<_, Option<i64>>(3)?,
-                    r.get::<_, String>(4)?,
-                    r.get::<_, String>(5)?,
-                ))
+    let mut cursor = String::new();
+    loop {
+        // Short turns may finish before the pump wakes. Replay recent terminal
+        // tasks as well; explicit false eligibility always excludes an event.
+        let tasks = conn
+            .prepare(
+                "SELECT message_key FROM communication_routing_state
+             WHERE message_key > ?1
+               AND (route_status NOT IN ('handled','failed','cancelled')
+                    OR julianday(updated_at) >= julianday('now','-1 day'))
+             ORDER BY message_key LIMIT ?2",
+            )?
+            .query_map(params![cursor, PROJECTION_PAGE_SIZE], |row| {
+                row.get::<_, String>(0)
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id, kind, title, attempt, metadata, created_at) in events {
-            let metadata: Value = serde_json::from_str(&metadata)?;
-            let created_at_ms = millis(&created_at);
-            let usage = metadata.get("usage").unwrap_or(&Value::Null);
-            // Tool arguments/results and raw reasoning are deliberately absent from this projection.
-            writer.upsert_source_projection("ctox_harness_events",&id,created_at_ms,json!({
-                "id":id,"task_id":task,"command_id":metadata.get("command_id"),"attempt":attempt.or_else(||metadata.get("attempt").and_then(Value::as_i64)),
-                "kind":event_kind(&kind),"title":title,"tool_type":metadata.pointer("/tool/type"),"tool_name":metadata.pointer("/tool/name"),"call_id":metadata.pointer("/tool/call_id"),
-                "success":metadata.pointer("/tool/success"),"usage":{"input":usage.get("input_tokens"),"output":usage.get("output_tokens"),"reasoning":usage.get("reasoning_output_tokens"),"total":usage.get("total_tokens")},
-                "runtime_seconds":metadata.pointer("/runtime/seconds"),"step_position":metadata.get("step_position"),
-                "created_at_ms":created_at_ms,"updated_at_ms":created_at_ms
-            }))?;
+        if tasks.is_empty() {
+            break;
+        }
+        for task in tasks {
+            cursor = task.clone();
+            let mut statement = conn.prepare(
+                "SELECT event_id, event_kind, title, attempt_index, metadata_json, created_at
+                 FROM ctox_harness_flow_events
+                 WHERE message_key=?1
+                   AND COALESCE(json_extract(metadata_json,'$.cockpit_eligible'),1)=1
+                   AND event_kind IN (
+                       'worker.turn_started','worker.tool_started','worker.tool_completed',
+                       'worker.thinking_started','worker.thinking','worker.plan_updated',
+                       'worker.token_usage','worker.turn_completed','worker.phase',
+                       'crew.selected','crew_selected')
+                 ORDER BY created_at DESC, event_id DESC LIMIT 200",
+            )?;
+            let events = statement
+                .query_map([&task], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, String>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (id, kind, title, attempt, metadata, created_at) in events {
+                let metadata: Value = serde_json::from_str(&metadata)?;
+                let created_at_ms = millis(&created_at);
+                let usage = metadata.get("usage").unwrap_or(&Value::Null);
+                let attempt_id = metadata.get("attempt_id").and_then(Value::as_str);
+                let attempt = attempt.or_else(|| metadata.get("attempt").and_then(Value::as_i64));
+                let attempt = if attempt.is_some() || attempt_id.is_none() {
+                    attempt
+                } else {
+                    conn.query_row(
+                        "SELECT json_extract(metadata_json,'$.attempt')
+                         FROM ctox_harness_flow_events
+                         WHERE message_key=?1 AND json_extract(metadata_json,'$.attempt_id')=?2
+                           AND json_extract(metadata_json,'$.attempt') IS NOT NULL
+                         ORDER BY created_at, event_id LIMIT 1",
+                        params![task, attempt_id],
+                        |r| r.get::<_, Option<i64>>(0),
+                    )
+                    .optional()?
+                    .flatten()
+                };
+                let step_position = event_step_position(conn, &task, &created_at, &metadata)?;
+                // Tool payloads and raw reasoning stay in the authoritative ledger.
+                writer.upsert_source_projection(
+                    "ctox_harness_events", &id,
+                    created_at_ms.unwrap_or_else(|| Utc::now().timestamp_millis()),
+                    json!({
+                        "id":id,"task_id":task,"command_id":metadata.get("command_id"),"attempt":attempt,
+                        "kind":event_kind(&kind),"title":title,"tool_type":metadata.pointer("/tool/type"),
+                        "tool_name":metadata.pointer("/tool/name"),"call_id":metadata.pointer("/tool/call_id"),
+                        "success":metadata.pointer("/tool/success"),
+                        "usage":{"input":usage.get("input_tokens"),"output":usage.get("output_tokens"),
+                            "reasoning":usage.get("reasoning_output_tokens"),"total":usage.get("total_tokens")},
+                        "runtime_seconds":metadata.pointer("/runtime/seconds"),"step_position":step_position,
+                        "created_at_ms":created_at_ms,"updated_at_ms":created_at_ms
+                    }),
+                )?;
+            }
         }
     }
     Ok(())
 }
 
+/// Resolve the plan at the event's time, not the task's newest revision. This
+/// runs exclusively on the projection pump, never in the harness progress hook.
+fn event_step_position(
+    conn: &Connection,
+    task: &str,
+    created: &str,
+    metadata: &Value,
+) -> Result<Value> {
+    if let Some(position) = metadata.get("step_position") {
+        return Ok(position.clone());
+    }
+    let current_steps = metadata.pointer("/plan/plan").and_then(Value::as_array);
+    let prior: Option<String> = if current_steps.is_none() {
+        conn.query_row(
+            "SELECT json_extract(metadata_json,'$.plan.plan')
+             FROM ctox_harness_flow_events
+             WHERE message_key=?1 AND event_kind='worker.plan_updated' AND created_at<=?2
+               AND (?3 IS NULL OR json_extract(metadata_json,'$.attempt_id')=?3)
+             ORDER BY created_at DESC, event_id DESC LIMIT 1",
+            params![
+                task,
+                created,
+                metadata.get("attempt_id").and_then(Value::as_str)
+            ],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten()
+    } else {
+        None
+    };
+    let prior = prior
+        .map(|raw| serde_json::from_str::<Value>(&raw))
+        .transpose()?;
+    let steps = current_steps.or_else(|| prior.as_ref().and_then(Value::as_array));
+    Ok(json!(steps
+        .and_then(|steps| steps
+            .iter()
+            .position(|step| { step.get("status").and_then(Value::as_str) == Some("in_progress") }))
+        .map(|position| position + 1)))
+}
+
 fn project_runs(
-    root: &Path,
+    _root: &Path,
     conn: &Connection,
     writer: &mut BusinessProjectionWriter,
 ) -> Result<()> {
@@ -455,65 +623,143 @@ fn project_runs(
     {
         return Ok(());
     }
-    let mut statement=conn.prepare("WITH selected AS (
-        SELECT attempt_id FROM (SELECT attempt_id FROM worker_attempt_finalizations WHERE status!='finalizing' ORDER BY COALESCE(terminal_at,updated_at) DESC,attempt_id DESC LIMIT 500)
-        UNION SELECT DISTINCT json_extract(e.metadata_json,'$.attempt_id') FROM communication_routing_state r JOIN ctox_harness_flow_events e ON e.message_key=r.message_key WHERE r.route_status NOT IN ('handled','failed','cancelled') AND json_extract(e.metadata_json,'$.attempt_id') IS NOT NULL
-        )
-        SELECT f.attempt_id,(SELECT e.work_id FROM ctox_harness_flow_events e WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id AND e.work_id IS NOT NULL ORDER BY e.created_at LIMIT 1),f.status,f.agent_outcome,f.created_at,COALESCE(f.terminal_at,f.updated_at),f.error_text,f.resumable,
-        (SELECT e.message_key FROM ctox_harness_flow_events e WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id AND e.message_key IS NOT NULL ORDER BY e.created_at LIMIT 1)
-        FROM selected s JOIN worker_attempt_finalizations f ON f.attempt_id=s.attempt_id WHERE f.status!='finalizing'
-        ORDER BY f.updated_at LIMIT (SELECT COUNT(*) FROM selected)")?;
-    let rows = statement
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, String>(3)?,
-                r.get::<_, String>(4)?,
-                r.get::<_, String>(5)?,
-                r.get::<_, Option<String>>(6)?,
-                r.get::<_, bool>(7)?,
-                r.get::<_, Option<String>>(8)?,
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    for (id, work, status, outcome, created, finished, error, resumable, task) in rows {
-        let (started,command_id):(Option<String>,Option<String>)=conn.query_row("SELECT MIN(created_at),MAX(json_extract(metadata_json,'$.command_id')) FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1",[&id],|r|Ok((r.get(0)?,r.get(1)?)))?;
-        let started_ms = millis(started.as_deref().unwrap_or(&created));
-        let finished_ms = millis(&finished);
-        let mut metrics = run_metrics(root, conn, &id)?;
-        metrics["elapsed_ms"] = json!((finished_ms - started_ms).max(0));
-        let review:Option<String>=conn.query_row("SELECT json_extract(metadata_json,'$.review') FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1 AND json_extract(metadata_json,'$.review') IS NOT NULL ORDER BY created_at DESC LIMIT 1",[&id],|r|r.get(0)).optional()?;
-        let review = review
-            .and_then(|r| serde_json::from_str::<Value>(&r).ok())
-            .unwrap_or(json!({"disposition":null,"hold_reason":null}));
-        writer.upsert_source_projection("ctox_runs",&id,finished_ms,json!({
-            "id":id,"attempt_id":id,"task_id":task,"command_id":command_id,"work_id":work,"crew_member_id":null,
-            "status":status,"agent_outcome":outcome,"started_at_ms":started_ms,"finished_at_ms":finished_ms,
-            "metrics":metrics,"review":review,"error_text":error,"resumable":resumable,"retrospective":null,"updated_at_ms":finished_ms
-        }))?;
+    let mut cursor = String::new();
+    loop {
+        // A fixed page replaces the unbounded active-run UNION and COUNT limit.
+        // The bounded recent set plus an indexed EXISTS retains every active run.
+        let mut statement = conn.prepare(
+            "SELECT f.attempt_id,
+                    (SELECT e.work_id FROM ctox_harness_flow_events e
+                     WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
+                       AND e.work_id IS NOT NULL ORDER BY e.created_at LIMIT 1),
+                    f.status, f.agent_outcome, f.created_at,
+                    COALESCE(f.terminal_at,f.updated_at), f.error_text, f.resumable,
+                    (SELECT e.message_key FROM ctox_harness_flow_events e
+                     WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
+                       AND e.message_key IS NOT NULL ORDER BY e.created_at LIMIT 1)
+             FROM worker_attempt_finalizations f
+             WHERE f.attempt_id>?1 AND f.status!='finalizing'
+               AND (f.attempt_id IN (
+                        SELECT attempt_id FROM worker_attempt_finalizations
+                        WHERE status!='finalizing'
+                        ORDER BY COALESCE(terminal_at,updated_at) DESC, attempt_id DESC LIMIT 500)
+                    OR EXISTS (
+                        SELECT 1 FROM ctox_harness_flow_events e
+                        JOIN communication_routing_state r ON r.message_key=e.message_key
+                        WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
+                          AND r.route_status NOT IN ('handled','failed','cancelled')))
+             ORDER BY f.attempt_id LIMIT ?2",
+        )?;
+        let rows = statement
+            .query_map(params![cursor, PROJECTION_PAGE_SIZE], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                    r.get::<_, String>(4)?,
+                    r.get::<_, String>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, bool>(7)?,
+                    r.get::<_, Option<String>>(8)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() {
+            break;
+        }
+        for (id, work, status, outcome, created, finished, error, resumable, task) in rows {
+            cursor = id.clone();
+            let (started, command_id): (Option<String>, Option<String>) = conn.query_row(
+                "SELECT MIN(created_at), MAX(json_extract(metadata_json,'$.command_id'))
+                 FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            let started_ms = millis(started.as_deref().unwrap_or(&created));
+            let finished_ms = millis(&finished);
+            let mut metrics = run_metrics(conn, &id)?;
+            metrics["elapsed_ms"] = json!(finished_ms
+                .zip(started_ms)
+                .map(|(finished, started)| finished.saturating_sub(started).max(0)));
+            let review: Option<String> = conn
+                .query_row(
+                    "SELECT json_extract(metadata_json,'$.review') FROM ctox_harness_flow_events
+                 WHERE json_extract(metadata_json,'$.attempt_id')=?1
+                   AND json_extract(metadata_json,'$.review') IS NOT NULL
+                 ORDER BY created_at DESC LIMIT 1",
+                    [&id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let review = review
+                .and_then(|r| serde_json::from_str::<Value>(&r).ok())
+                .unwrap_or(json!({"disposition":null,"hold_reason":null}));
+            writer.upsert_source_projection(
+                "ctox_runs", &id, finished_ms.unwrap_or_else(|| Utc::now().timestamp_millis()),
+                json!({
+                    "id":id,"task_id":task,"command_id":command_id,"work_id":work,"crew_member_id":null,
+                    "status":status,"agent_outcome":outcome,"started_at_ms":started_ms,"finished_at_ms":finished_ms,
+                    "metrics":metrics,"review":review,"error_text":error,"resumable":resumable,
+                    "retrospective":null,"updated_at_ms":finished_ms
+                }),
+            )?;
+        }
     }
     Ok(())
 }
 
-fn run_metrics(root: &Path, conn: &Connection, attempt: &str) -> Result<Value> {
-    let (tools,thinking):(i64,i64)=conn.query_row("SELECT COUNT(DISTINCT CASE WHEN event_kind='worker.tool_started' THEN COALESCE(json_extract(metadata_json,'$.tool.call_id'),event_id) END),COUNT(DISTINCT CASE WHEN event_kind='worker.thinking_started' THEN COALESCE(json_extract(metadata_json,'$.activity.id'),event_id) END) FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1",[attempt],|r|Ok((r.get(0)?,r.get(1)?)))?;
-    let mut result = json!({"model":null,"provider":null,"input_tokens":null,"output_tokens":null,"reasoning_tokens":null,"cost_usd":null,"tool_calls":tools,"thinking_turns":thinking});
-    let _ = root;
+fn run_metrics(conn: &Connection, attempt: &str) -> Result<Value> {
+    let (tools, thinking): (i64, i64) = conn.query_row(
+        "SELECT COUNT(DISTINCT CASE WHEN event_kind='worker.tool_started'
+                    THEN COALESCE(json_extract(metadata_json,'$.tool.call_id'),event_id) END),
+                COUNT(DISTINCT CASE WHEN event_kind='worker.thinking_started'
+                    THEN COALESCE(json_extract(metadata_json,'$.activity.id'),event_id) END)
+         FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1",
+        [attempt],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let mut result = json!({"model":null,"provider":null,"input_tokens":null,"output_tokens":null,
+        "reasoning_tokens":null,"cost_usd":null,"tool_calls":tools,"thinking_turns":thinking});
     if !has_table(conn, "api_model_cost_events")? {
         return Ok(result);
     }
-    let (input,output,reasoning,provider,model):(Option<i64>,Option<i64>,Option<i64>,Option<String>,Option<String>)=conn.query_row("SELECT SUM(input_tokens),SUM(output_tokens),SUM(reasoning_output_tokens),GROUP_CONCAT(DISTINCT provider),GROUP_CONCAT(DISTINCT model) FROM api_model_cost_events WHERE turn_id IN (SELECT DISTINCT json_extract(metadata_json,'$.turn_id') FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1)",[attempt],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
+    let (input, output, reasoning, provider, model): (
+        Option<i64>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    ) = conn.query_row(
+        "SELECT SUM(input_tokens), SUM(output_tokens), SUM(reasoning_output_tokens),
+                GROUP_CONCAT(DISTINCT provider), GROUP_CONCAT(DISTINCT model)
+         FROM api_model_cost_events WHERE turn_id IN (
+             SELECT DISTINCT json_extract(metadata_json,'$.turn_id')
+             FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1)",
+        [attempt],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+    )?;
     result["input_tokens"] = json!(input);
     result["output_tokens"] = json!(output);
     result["reasoning_tokens"] = json!(reasoning);
     result["provider"] = json!(provider);
     result["model"] = json!(model);
     if has_table(conn, "api_model_price_rates")? {
-        let (count,priced,cost):(i64,i64,Option<f64>)=conn.query_row("SELECT COUNT(*),COUNT(p.model),SUM(((e.input_tokens-e.cached_input_tokens)*p.input_usd_per_million+e.cached_input_tokens*COALESCE(p.cached_input_usd_per_million,p.input_usd_per_million)+e.output_tokens*p.output_usd_per_million)/1000000.0)
-            FROM api_model_cost_events e LEFT JOIN api_model_price_rates p ON p.provider=e.provider AND p.model=e.model AND p.effective_from_day=(SELECT MAX(p2.effective_from_day) FROM api_model_price_rates p2 WHERE p2.provider=e.provider AND p2.model=e.model AND p2.effective_from_day<=e.day)
-            WHERE e.turn_id IN (SELECT DISTINCT json_extract(metadata_json,'$.turn_id') FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1)",[attempt],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let (count, priced, cost): (i64, i64, Option<f64>) = conn.query_row(
+            "SELECT COUNT(*), COUNT(p.model), SUM((
+                 (e.input_tokens-e.cached_input_tokens)*p.input_usd_per_million
+                 + e.cached_input_tokens*COALESCE(p.cached_input_usd_per_million,p.input_usd_per_million)
+                 + e.output_tokens*p.output_usd_per_million)/1000000.0)
+             FROM api_model_cost_events e
+             LEFT JOIN api_model_price_rates p ON p.provider=e.provider AND p.model=e.model
+                 AND p.effective_from_day=(
+                     SELECT MAX(p2.effective_from_day) FROM api_model_price_rates p2
+                     WHERE p2.provider=e.provider AND p2.model=e.model AND p2.effective_from_day<=e.day)
+             WHERE e.turn_id IN (
+                 SELECT DISTINCT json_extract(metadata_json,'$.turn_id')
+                 FROM ctox_harness_flow_events WHERE json_extract(metadata_json,'$.attempt_id')=?1)",
+            [attempt], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )?;
         if count > 0 && count == priced {
             result["cost_usd"] = json!(cost);
         }
@@ -545,18 +791,52 @@ fn retain_selected(
     collections: &[&str],
 ) -> Result<()> {
     let business = store::open_store(root)?;
+    // Function-local, unpooled connection: Drop detaches cockpit_core on every
+    // return path, including errors. No attachment survives into another sweep.
     business.execute(
         "ATTACH DATABASE ?1 AS cockpit_core",
         [crate::paths::core_db(root).to_string_lossy().as_ref()],
     )?;
     let retention = queue_retention(root)?;
     for &collection in collections {
-        let predicate=match collection {
-            "ctox_queue_tasks"=>"record_id NOT IN (SELECT message_key FROM cockpit_core.communication_routing_state WHERE route_status IN ('handled','failed','cancelled') ORDER BY updated_at DESC,message_key DESC LIMIT ?2) AND EXISTS(SELECT 1 FROM cockpit_core.communication_routing_state r WHERE r.message_key=record_id AND r.route_status IN ('handled','failed','cancelled'))",
-            "ctox_harness_events"=>"json_extract(payload_json,'$.task_id') IN (SELECT message_key FROM cockpit_core.communication_routing_state WHERE route_status IN ('handled','failed','cancelled') AND julianday(updated_at)<julianday(?3/1000.0,'unixepoch','-1 day')) OR record_id IN (SELECT record_id FROM (SELECT record_id,ROW_NUMBER() OVER (PARTITION BY json_extract(payload_json,'$.task_id') ORDER BY json_extract(payload_json,'$.created_at_ms') DESC,record_id DESC) position FROM business_records WHERE collection='ctox_harness_events' AND deleted=0) WHERE position>200)",
-            _=>"record_id NOT IN (SELECT record_id FROM business_records WHERE collection='ctox_runs' AND deleted=0 ORDER BY json_extract(payload_json,'$.finished_at_ms') DESC,record_id DESC LIMIT 500) AND NOT EXISTS(SELECT 1 FROM cockpit_core.communication_routing_state r WHERE r.message_key=json_extract(payload_json,'$.task_id') AND r.route_status NOT IN ('handled','failed','cancelled'))",
+        let predicate = match collection {
+            "ctox_queue_tasks" => "
+                record_id NOT IN (
+                    SELECT message_key FROM cockpit_core.communication_routing_state
+                    WHERE route_status IN ('handled','failed','cancelled')
+                    ORDER BY updated_at DESC, message_key DESC LIMIT ?2)
+                AND EXISTS (
+                    SELECT 1 FROM cockpit_core.communication_routing_state r
+                    WHERE r.message_key=record_id AND r.route_status IN ('handled','failed','cancelled'))",
+            "ctox_harness_events" => "
+                json_extract(payload_json,'$.task_id') IN (
+                    SELECT message_key FROM cockpit_core.communication_routing_state
+                    WHERE route_status IN ('handled','failed','cancelled')
+                      AND julianday(updated_at)<julianday(?3/1000.0,'unixepoch','-1 day'))
+                OR record_id IN (
+                    SELECT record_id FROM (
+                        SELECT record_id, ROW_NUMBER() OVER (
+                            PARTITION BY json_extract(payload_json,'$.task_id')
+                            ORDER BY json_extract(payload_json,'$.created_at_ms') DESC, record_id DESC
+                        ) position
+                        FROM business_records WHERE collection='ctox_harness_events' AND deleted=0)
+                    WHERE position>200)",
+            "ctox_runs" => "
+                record_id NOT IN (
+                    SELECT record_id FROM business_records WHERE collection='ctox_runs' AND deleted=0
+                    ORDER BY json_extract(payload_json,'$.finished_at_ms') DESC, record_id DESC LIMIT 500)
+                AND NOT EXISTS (
+                    SELECT 1 FROM cockpit_core.communication_routing_state r
+                    WHERE r.message_key=json_extract(payload_json,'$.task_id')
+                      AND r.route_status NOT IN ('handled','failed','cancelled'))",
+            _ => anyhow::bail!("unknown cockpit retention collection: {collection}"),
         };
-        let sql=format!("SELECT record_id FROM business_records WHERE collection=?1 AND deleted=0 AND ({predicate}) AND ?2>=0 AND ?3>=0 AND record_id>?4 ORDER BY record_id LIMIT 256");
+        let sql = format!(
+            "SELECT record_id FROM business_records
+             WHERE collection=?1 AND deleted=0 AND ({predicate})
+               AND ?2>=0 AND ?3>=0 AND record_id>?4
+             ORDER BY record_id LIMIT 256"
+        );
         let mut cursor = String::new();
         loop {
             let ids = business
@@ -575,7 +855,11 @@ fn retain_selected(
                 // Re-read after the tombstone: an earlier transition is repaired here; a later
                 // transition's normal source callback writes after our tombstone.
                 if collection == "ctox_queue_tasks" {
-                    let active:bool=core.query_row("SELECT EXISTS(SELECT 1 FROM communication_routing_state WHERE message_key=?1 AND route_status NOT IN ('handled','failed','cancelled'))",[&id],|r|r.get(0))?;
+                    let active: bool = core.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM communication_routing_state
+                         WHERE message_key=?1 AND route_status NOT IN ('handled','failed','cancelled'))",
+                        [&id], |r| r.get(0),
+                    )?;
                     if active {
                         if let Some(task) = crate::mission::channels::load_queue_task(root, &id)? {
                             if store::refresh_business_command_queue_task_projection(root, &id)?
@@ -593,6 +877,5 @@ fn retain_selected(
             }
         }
     }
-    let _ = core;
     Ok(())
 }

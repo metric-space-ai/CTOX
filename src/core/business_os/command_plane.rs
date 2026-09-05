@@ -1703,9 +1703,9 @@ fn dispatch_business_command(
             handle_mailserver_command(root, command).map(BusinessCommandDispatchOutcome::Returned)
         }
         _ => {
-            // These existing native handlers are queued work, not immediate
-            // controls. Keep them in the queue fallback so the exact-control
-            // inventory and admission classifier describe the same contract.
+            // Legacy native dispatch: these types are outside EXACT_CONTROL_TYPES
+            // but still execute immediately and return before record_command.
+            // Their inventory classification does not imply durable queue admission.
             if matches!(
                 command.command_type.as_str(),
                 "kundenpipeline.triage.write"

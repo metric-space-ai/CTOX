@@ -324,10 +324,7 @@ pub const ADMIN_ONLY_COLLECTIONS: &[&str] = &[
     "ctox_runtime_settings",
 ];
 
-/// Server-authoritative per-collection READ gate for the sync mesh. Chef/Admin
-/// may read every collection; Founder/User are denied the admin-only set above.
-/// Deny-by-exception (not deny-by-default) so it is safe to enable without
-/// breaking access to ordinary business data.
+/// Shared classification for native permission checks, grants and audit output.
 pub fn is_cockpit_projection(collection: &str) -> bool {
     matches!(
         collection,
@@ -335,14 +332,14 @@ pub fn is_cockpit_projection(collection: &str) -> bool {
     )
 }
 
+/// Role-only summary for CLI policy audits. Runtime authorization additionally
+/// checks the actor, permission and scope through `evaluate`.
 pub fn role_may_read_collection(role: BusinessOsRole, collection: &str) -> bool {
     match role {
         BusinessOsRole::Chef | BusinessOsRole::Admin => true,
         BusinessOsRole::Founder => !ADMIN_ONLY_COLLECTIONS.contains(&collection),
         BusinessOsRole::User => {
-            !ADMIN_ONLY_COLLECTIONS.contains(&collection)
-                && !["ctox_harness_events", "ctox_harness_status", "ctox_runs"]
-                    .contains(&collection)
+            !ADMIN_ONLY_COLLECTIONS.contains(&collection) && !is_cockpit_projection(collection)
         }
     }
 }

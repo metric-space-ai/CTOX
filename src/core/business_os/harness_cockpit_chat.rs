@@ -65,6 +65,7 @@ pub(crate) fn queued_chat_text(command: &store::BusinessCommand) -> &'static str
 
 pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
     let business = store::open_store(root)?;
+    let mut writer = store::BusinessProjectionWriter::open(root)?;
     business.execute_batch("CREATE TABLE IF NOT EXISTS cockpit_chat_delivery(command_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS cockpit_chat_message_delivery(command_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(command_id,message_id));")?;
     // Only materialized chats are candidates; projection never creates chats for background work.
@@ -237,7 +238,6 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
             {
                 trim_messages(messages);
                 chat["updated_at_ms"] = json!(now);
-                let mut writer = store::BusinessProjectionWriter::open(root)?;
                 writer.upsert_source_projection("business_chats", &chat_id, now, chat)?;
                 if writer.delivered_to_rxdb("business_chats") {
                     let tx = business.unchecked_transaction()?;

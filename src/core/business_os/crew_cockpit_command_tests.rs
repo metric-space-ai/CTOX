@@ -102,6 +102,16 @@ fn all_cockpit_controls_deny_user_before_effects_and_audit_admin() -> anyhow::Re
                     .is_some_and(|s| !s.is_empty()));
             } else {
                 assert_eq!(result["ok"], true, "{name}: {result}");
+                if name == "release" {
+                    assert_eq!(
+                        channels::load_queue_task(root.path(), &task.message_key)?
+                            .unwrap()
+                            .status_note
+                            .as_deref(),
+                        Some("fixture hold"),
+                        "release without note must preserve the existing status note"
+                    );
+                }
             }
             if role == "admin" {
                 let replay = accept_rxdb_business_command_with_origin(
@@ -148,6 +158,33 @@ fn all_cockpit_controls_deny_user_before_effects_and_audit_admin() -> anyhow::Re
             _ => {}
         }
     }
+    Ok(())
+}
+
+#[test]
+fn ordinary_queue_block_preserves_the_harness_hold_reason() -> anyhow::Result<()> {
+    let root = tempfile::tempdir()?;
+    let task = task(root.path())?;
+    let core = rusqlite::Connection::open(crate::paths::core_db(root.path()))?;
+    core.execute(
+        "UPDATE communication_routing_state SET hold_reason='awaiting_review' WHERE message_key=?1",
+        [&task.message_key],
+    )?;
+    channels::update_queue_task(
+        root.path(),
+        channels::QueueTaskUpdateRequest {
+            message_key: task.message_key.clone(),
+            route_status: Some("blocked".into()),
+            ..Default::default()
+        },
+    )?;
+    assert_eq!(
+        channels::load_queue_task(root.path(), &task.message_key)?
+            .unwrap()
+            .hold_reason
+            .as_deref(),
+        Some("awaiting_review")
+    );
     Ok(())
 }
 

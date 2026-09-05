@@ -91,6 +91,11 @@ writes the stopped singleton before exit; a known dead service PID clears stale
 worker activity. No-op payloads do not create revision churn, and missing RxDB
 collections are retried when they appear.
 
+Progress hooks take the attempt counter from the held lease. They add no
+cockpit routing/progress reads: missing plan-step metadata is resolved from the
+flow ledger on the pump. Unknown eligibility stays absent and remains replayable;
+only an explicit false excludes an event. Events and runs use bounded keyset pages.
+
 The exact commands `ctox.queue.release`, `.block`, `.retry`, `.capacity`, `.pause`
 and `.abort_turn` enter through `enforce_command_policy` under `ctox.task.manage`.
 Task controls use task scope; capacity/pause use workspace scope. Accepted controls
@@ -106,6 +111,12 @@ completes normally. `abort_turn` finishes its receipt as `failed`, with
 `result.status = "unsupported"` and a reason:
 a safe session-specific interrupt acknowledgement plus atomic attempt/queue
 finalization is not yet available; killing the service is not a substitute.
+
+Release/block/retry reject leased tasks; the owner cannot block an active slice
+through these controls. Release without a note preserves the existing note, and
+ordinary queue updates preserve harness-owned hold reasons. Malformed `queue.pause`
+does not pause admission: it logs once until repaired and appears in
+`ctox_harness_status.last_error`.
 
 Server-authored chat messages expose lease, plan revision, retry/block/review
 rework, and typed `result.user_message` before terminal completion. Message kinds

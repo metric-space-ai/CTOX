@@ -35,7 +35,38 @@ pub fn queue_pause(root: &Path) -> Result<QueuePause> {
 }
 
 pub fn queue_is_paused(root: &Path) -> bool {
-    queue_pause(root).map(|value| value.paused).unwrap_or(true)
+    queue_pause_state(root).0.paused
+}
+
+/// Invalid configuration must be visible, but must not silently stop admission.
+/// Report once per root until the configuration has been repaired.
+pub(super) fn queue_pause_state(root: &Path) -> (QueuePause, Option<String>) {
+    use std::collections::BTreeSet;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+    static REPORTED: OnceLock<Mutex<BTreeSet<PathBuf>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(BTreeSet::new()));
+    match queue_pause(root) {
+        Ok(pause) => {
+            reported
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(root);
+            (pause, None)
+        }
+        Err(error) => {
+            let error = format!("Invalid queue.pause; admission remains enabled: {error:#}");
+            let first = reported
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(root.to_path_buf());
+            if first {
+                eprintln!("[ctox cockpit] {}: {error}", root.display());
+                schedule_refresh(root);
+            }
+            (QueuePause::default(), Some(error))
+        }
+    }
 }
 
 pub fn queue_retention(root: &Path) -> Result<i64> {
@@ -148,7 +179,7 @@ pub(super) fn control(
                         } else {
                             None
                         },
-                        clear_note: note.is_none(),
+                        clear_note: command.command_type == "ctox.queue.retry",
                         status_note: note,
                         ..Default::default()
                     },

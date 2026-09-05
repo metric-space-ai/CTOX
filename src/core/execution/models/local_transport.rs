@@ -855,15 +855,29 @@ mod tests {
     #[test]
     fn unix_socket_listener_accepts_and_streams_newline_json() {
         // SUN_LEN limits the supplied pathname, even when TMPDIR is valid for
-        // ordinary files. Keep this socket fixture short on the operator's
-        // disposable volume; no production endpoint or transport is changed.
+        // ordinary files. macOS CI must also avoid /var/folders/.../T, even
+        // when the operator's disposable volume is not mounted.
         let temporary_root = std::env::temp_dir();
         let socket_root =
             if cfg!(target_os = "macos") && std::path::Path::new("/Volumes/tmp").is_dir() {
                 std::path::Path::new("/Volumes/tmp/dev-artifacts/ctox/socket-tests")
+            } else if cfg!(target_os = "macos") {
+                std::path::Path::new("/tmp")
             } else {
                 temporary_root.as_path()
             };
+        unix_socket_roundtrip_in(socket_root);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unix_socket_roundtrip_uses_short_macos_ci_fallback() {
+        // Exercise the unmounted-volume branch on the operator's Mac too.
+        unix_socket_roundtrip_in(std::path::Path::new("/tmp"));
+    }
+
+    #[cfg(unix)]
+    fn unix_socket_roundtrip_in(socket_root: &std::path::Path) {
         std::fs::create_dir_all(socket_root).expect("create socket fixture root");
         let dir = tempfile::Builder::new()
             .prefix("ctox-lt-")

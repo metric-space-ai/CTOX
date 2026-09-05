@@ -34,6 +34,150 @@ fn record(root: &Path, collection: &str, id: &str) -> Result<Value> {
 }
 
 #[test]
+fn malformed_pause_is_visible_without_stopping_admission_and_recovers() -> Result<()> {
+    let (root, conn) = setup()?;
+    crate::inference::runtime_env::set_runtime_env_value(root.path(), "queue.pause", "{broken")?;
+    assert!(!super::super::queue_is_paused(root.path()));
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_status(root.path(), &conn, &mut writer, &WorkerSnapshot::default())?;
+    let status = record(root.path(), "ctox_harness_status", "harness")?;
+    assert_eq!(status["paused"], false);
+    assert!(status["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("Invalid queue.pause"));
+    crate::inference::runtime_env::set_runtime_env_value(
+        root.path(),
+        "queue.pause",
+        r#"{"paused":false,"reason":null}"#,
+    )?;
+    // Also clear a diagnostic restored from the previously persisted singleton.
+    let snapshot = persisted_snapshot(root.path())?;
+    project_status(root.path(), &conn, &mut writer, &snapshot)?;
+    assert!(record(root.path(), "ctox_harness_status", "harness")?["last_error"].is_null());
+    Ok(())
+}
+
+#[test]
+fn event_step_uses_the_plan_at_emission_and_unknown_eligibility_replays() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute(
+        "INSERT INTO communication_routing_state VALUES('task','leased','2026-01-01T00:00:00Z')",
+        [],
+    )?;
+    for (id, at, steps) in [
+        (
+            "plan-1",
+            "2026-01-01T00:00:01Z",
+            json!([{"step":"one","status":"in_progress"},{"step":"two","status":"pending"}]),
+        ),
+        (
+            "plan-2",
+            "2026-01-01T00:00:03Z",
+            json!([{"step":"one","status":"completed"},{"step":"two","status":"in_progress"}]),
+        ),
+    ] {
+        conn.execute("INSERT INTO ctox_harness_flow_events VALUES(?1,'worker.plan_updated','Plan','','task',NULL,NULL,?2,?3)",
+            params![id, json!({"attempt_id":"attempt","attempt":7,"plan":{"plan":steps}}).to_string(), at])?;
+    }
+    for (id, at) in [
+        ("tool-1", "2026-01-01T00:00:02Z"),
+        ("tool-2", "2026-01-01T00:00:04Z"),
+    ] {
+        conn.execute("INSERT INTO ctox_harness_flow_events VALUES(?1,'worker.tool_started','Tool','','task',NULL,NULL,?2,?3)",
+            params![id, json!({"attempt_id":"attempt"}).to_string(), at])?;
+    }
+    project_events(
+        root.path(),
+        &conn,
+        &mut BusinessProjectionWriter::open(root.path())?,
+    )?;
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "tool-1")?["step_position"],
+        1
+    );
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "tool-2")?["step_position"],
+        2
+    );
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "tool-1")?["attempt"],
+        7
+    );
+    Ok(())
+}
+
+#[test]
+fn invalid_run_times_remain_unknown_instead_of_epoch_sized_elapsed() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute("INSERT INTO worker_attempt_finalizations VALUES('invalid','work','failed','failed','bad','1767225603000','1767225603000',NULL,0)", [])?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_runs(root.path(), &conn, &mut writer)?;
+    let run = record(root.path(), "ctox_runs", "invalid")?;
+    assert!(run["started_at_ms"].is_null());
+    assert!(run["metrics"]["elapsed_ms"].is_null());
+    assert_eq!(run["finished_at_ms"], 1767225603000_i64);
+    assert!(
+        run.get("attempt_id").is_none(),
+        "id alone is the attempt identity"
+    );
+    assert_eq!(millis("bad"), None);
+    assert_eq!(millis("0"), Some(0));
+    Ok(())
+}
+
+#[test]
+fn native_cockpit_queries_use_the_declared_time_task_and_crew_indexes() -> Result<()> {
+    let (root, _) = setup()?;
+    let _writer = BusinessProjectionWriter::open(root.path())?;
+    let conn = store::open_store(root.path())?;
+    for (query, index) in [
+        ("SELECT record_id FROM business_records WHERE collection='ctox_runs' AND deleted=0 AND json_extract(payload_json,'$.task_id')='task' ORDER BY json_extract(payload_json,'$.finished_at_ms') DESC", "idx_cockpit_run_task_finished"),
+        ("SELECT record_id FROM business_records WHERE collection='ctox_runs' AND deleted=0 AND json_extract(payload_json,'$.crew_member_id')='member'", "idx_cockpit_run_crew"),
+        ("SELECT record_id FROM business_records WHERE collection='ctox_harness_events' AND deleted=0 AND json_extract(payload_json,'$.created_at_ms')>=1 ORDER BY json_extract(payload_json,'$.created_at_ms')", "idx_cockpit_event_created"),
+    ] {
+        let details = conn.prepare(&format!("EXPLAIN QUERY PLAN {query}"))?
+            .query_map([], |r| r.get::<_, String>(3))?
+            .collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
+        assert!(details.contains(index), "{index}: {details}");
+    }
+    Ok(())
+}
+
+#[test]
+fn keyset_pages_project_every_active_task_and_older_active_run() -> Result<()> {
+    let (root, conn) = setup()?;
+    for index in 0..PROJECTION_PAGE_SIZE + 1 {
+        let id = format!("active-{index:04}");
+        conn.execute(
+            "INSERT INTO communication_routing_state VALUES(?1,'pending','2020-01-01T00:00:00Z')",
+            [&id],
+        )?;
+        conn.execute("INSERT INTO worker_attempt_finalizations VALUES(?1,'work','failed','failed','1','2','2',NULL,1)", [&id])?;
+        conn.execute("INSERT INTO ctox_harness_flow_events VALUES(?1,'worker.phase','Phase','',?1,NULL,1,?2,'2020-01-01T00:00:00Z')",
+            params![id, json!({"attempt_id":id,"step_position":null}).to_string()])?;
+    }
+    for index in 0..501 {
+        conn.execute("INSERT INTO worker_attempt_finalizations VALUES(?1,'work','succeeded','success','3','4','4',NULL,0)", [format!("terminal-{index:04}")])?;
+    }
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_events(root.path(), &conn, &mut writer)?;
+    project_runs(root.path(), &conn, &mut writer)?;
+    let business = store::open_store(root.path())?;
+    let events: i64 = business.query_row("SELECT COUNT(*) FROM business_records WHERE collection='ctox_harness_events' AND deleted=0", [], |r| r.get(0))?;
+    let runs: i64 = business.query_row(
+        "SELECT COUNT(*) FROM business_records WHERE collection='ctox_runs' AND deleted=0",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(events, PROJECTION_PAGE_SIZE + 1);
+    assert_eq!(runs, 500 + PROJECTION_PAGE_SIZE + 1);
+    assert!(record(root.path(), "ctox_runs", "terminal-0000").is_err());
+    assert!(record(root.path(), "ctox_runs", "active-0000").is_ok());
+    Ok(())
+}
+
+#[test]
 fn retention_keeps_active_tasks_and_tombstones_all_three_projection_surfaces() -> Result<()> {
     let (root, conn) = setup()?;
     crate::inference::runtime_env::set_runtime_env_value(

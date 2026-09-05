@@ -3556,7 +3556,7 @@ fn update_queue_task_with_optional_terminal_policy_grant(
         );
         tx.execute("UPDATE communication_routing_state SET failure_class=NULL,failure_attempt_count=0,retry_not_before=NULL,hold_reason=NULL,wait_entity_type=NULL,wait_entity_id=NULL WHERE message_key=?1", [&current.message_key])?;
     }
-    if requested_route_status == Some(QueueRouteStatus::Blocked) {
+    if cockpit_control && requested_route_status == Some(QueueRouteStatus::Blocked) {
         tx.execute(
             "UPDATE communication_routing_state SET hold_reason=?2 WHERE message_key=?1",
             params![current.message_key, request.status_note],

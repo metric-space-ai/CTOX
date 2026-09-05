@@ -260,15 +260,10 @@ pub fn record_harness_flow_event(
     ensure_event_schema(&conn)?;
     let created_at = Utc::now().to_rfc3339();
     let chain_key = chain_key(request.message_key, request.work_id, request.ticket_key);
-    let mut metadata = request.metadata;
-    if let Some(object) = metadata.as_object_mut() {
-        let eligible=request.message_key.and_then(|task|conn.query_row("SELECT route_status NOT IN ('handled','failed','cancelled') FROM communication_routing_state WHERE message_key=?1",[task],|row|row.get::<_,bool>(0)).ok()).unwrap_or(false);
-        object.insert(
-            "cockpit_eligible".to_string(),
-            serde_json::Value::Bool(eligible),
-        );
-    }
-    let metadata_json = serde_json::to_string(&metadata)?;
+    // Cockpit metadata comes from the caller's held lease or is resolved on
+    // the projection pump. No routing read belongs in this turn-path writer.
+    // An absent eligibility key means unknown, never a durable denial.
+    let metadata_json = serde_json::to_string(&request.metadata)?;
     let event_id = event_id(
         &chain_key,
         request.event_kind,
@@ -319,6 +314,31 @@ pub fn record_harness_flow_event(
 /// `record_harness_flow_event_lossy`, makes a lost forensic write detectable
 /// instead of silently swallowed (x-flow-event-lossy-nontxn).
 static DROPPED_HARNESS_FLOW_EVENTS: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(test)]
+#[test]
+fn cockpit_eligibility_remains_unknown_without_a_routing_row() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let event = record_harness_flow_event(
+        root.path(),
+        RecordHarnessFlowEventRequest {
+            event_kind: "worker.phase",
+            title: "Starting",
+            body_text: "",
+            message_key: Some("not-materialized-yet"),
+            work_id: None,
+            ticket_key: None,
+            attempt_index: None,
+            metadata: serde_json::json!({}),
+        },
+    )?;
+    let metadata: serde_json::Value = serde_json::from_str(&event.metadata_json)?;
+    assert!(
+        metadata.get("cockpit_eligible").is_none(),
+        "unknown must not become a permanent denial"
+    );
+    Ok(())
+}
 
 /// Number of forensic flow events dropped (write failed) since process start.
 pub fn dropped_harness_flow_event_count() -> u64 {

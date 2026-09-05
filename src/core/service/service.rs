@@ -5711,14 +5711,11 @@ fn record_prompt_worker_progress(
     if let Some(object) = metadata.as_object_mut() {
         object.insert("attempt_id".into(), serde_json::json!(attempt_id));
         object.insert("command_id".into(), serde_json::json!(command_id));
-        if let Ok(Some(task)) = channels::load_queue_task(root, task_id) {
-            object.insert("attempt".into(), serde_json::json!(task.attempt));
+        if let Some(attempt) = job.queue_task_metadata.get("cockpit_lease_attempt") {
+            object.insert("attempt".into(), attempt.clone());
         }
-        if let Ok(Some(progress)) = lcm::run_task_execution_progress_for_task(&db_path, task_id) {
-            object.insert(
-                "step_position".into(),
-                progress.get("current_step").cloned().unwrap_or(Value::Null),
-            );
+        if !task_id.is_empty() {
+            object.insert("cockpit_eligible".into(), Value::Bool(true));
         }
         object.insert(
             "source_label".to_string(),
@@ -5737,6 +5734,46 @@ fn record_prompt_worker_progress(
             attempt_index: None,
             metadata,
         },
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+#[test]
+fn cockpit_progress_uses_held_lease_attempt_without_reloading_routing() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let task = channels::create_queue_task(
+        root.path(),
+        channels::QueueTaskCreateRequest {
+            title: "Cockpit progress".into(),
+            prompt: "Fixture progress".into(),
+            thread_key: "cockpit-progress".into(),
+            workspace_root: None,
+            priority: "normal".into(),
+            suggested_skill: None,
+            parent_message_key: None,
+            extra_metadata: None,
+        },
+    )?;
+    let leased = channels::lease_queue_task(root.path(), &task.message_key, "fixture-worker")?;
+    let held_attempt = leased.attempt;
+    let job = queued_prompt_from_queue_task(leased);
+    let conn = rusqlite::Connection::open(crate::paths::core_db(root.path()))?;
+    conn.execute(
+        "UPDATE communication_routing_state SET attempt=99 WHERE message_key=?1",
+        [&task.message_key],
+    )?;
+    record_prompt_worker_progress(root.path(), &job, "held-attempt", "invoke-model")?;
+    let metadata: String = conn.query_row(
+        "SELECT metadata_json FROM ctox_harness_flow_events WHERE event_kind='worker.phase' AND message_key=?1 ORDER BY created_at DESC LIMIT 1",
+        [&task.message_key], |r| r.get(0),
+    )?;
+    let metadata: Value = serde_json::from_str(&metadata)?;
+    assert_eq!(metadata["attempt"], held_attempt);
+    assert_eq!(metadata["cockpit_eligible"], true);
+    assert!(
+        metadata.get("step_position").is_none(),
+        "the pump resolves absent step metadata"
     );
     Ok(())
 }
@@ -16667,8 +16704,13 @@ include!("service_queue_capacity.rs");
 include!("service_command_writeback.rs");
 
 fn queued_prompt_from_queue_task(task: channels::QueueTaskView) -> QueuedPrompt {
+    let mut metadata = task.metadata.clone();
+    if !metadata.is_object() {
+        metadata = serde_json::json!({});
+    }
+    metadata["cockpit_lease_attempt"] = serde_json::json!(task.attempt);
     QueuedPrompt {
-        queue_task_metadata: task.metadata.clone(),
+        queue_task_metadata: metadata,
         preview: preview_text(&task.prompt),
         source_label: "queue".to_string(),
         goal: task.title.clone(),

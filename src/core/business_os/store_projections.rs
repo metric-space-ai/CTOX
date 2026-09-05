@@ -1061,6 +1061,8 @@ pub fn repair_queue_projections(
     } else {
         false
     };
+    // This fresh connection is local to the repair call. Dropping it detaches
+    // cockpit_repair_core on success and on every error path; it is never pooled.
     if has_routing {
         conn.execute(
             "ATTACH DATABASE ?1 AS cockpit_repair_core",
