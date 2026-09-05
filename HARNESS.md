@@ -785,3 +785,9 @@ stehen und entfernt zuerst die ältesten unbestätigten.
 
 `ctox crew list` und `ctox crew show <id>` lesen diese Core-Identität ohne Browser.
 Queue-Zulassung, Review-Gates, Kapazität und Wiederholungssemantik bleiben unverändert.
+
+Die Auswahl wird am vorhandenen Queue-/Prompt-Worker vor dem Harness-Aufruf
+gebunden. Direkte Control-Ausführungen ohne Queue-Lease (auf dieser Basis etwa
+`ctox.coding.turn` mit direktem Pi-Sidecar-Aufruf) erzeugen dadurch noch keinen
+Crew-Attempt. Sie benötigen eine gesonderte Vereinheitlichung ihrer Ausführung;
+PR-2 routet solche Commands nicht stillschweigend in die Queue um.
