@@ -24,6 +24,7 @@ const realtime = process.argv.includes('--realtime');
 const duringSave = process.argv.includes('--during-save');
 const closeSafety = process.argv.includes('--close-safety');
 const emptyLibrary = process.argv.includes('--empty-library');
+const formulas = process.argv.includes('--formulas');
 const selectedKind = process.argv.find(value=>value.startsWith('--kind='))?.slice('--kind='.length);
 assert.ok(!selectedKind || ['document','spreadsheet'].includes(selectedKind), 'Unknown test kind');
 
@@ -190,6 +191,12 @@ try {
           'A realtime save acknowledgement must not replace the editor while the user is typing');
       }
     }
+    if(formulas && kind==='spreadsheet') {
+      for(const [cell,value] of [['A2','2'],['B2','3'],['C2','=SUM(A2:B2)']]) {
+        await editor.locator('#ce-cell-name').fill(cell);await editor.locator('#ce-cell-name').press('Enter');
+        await editor.locator('#ce-cell-content').fill(value);await editor.locator('#ce-cell-content').press('Enter');
+      }
+    }
     await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
     if(duringSave) {
       assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0,'Continued editing must occur before the first save is acknowledged');
@@ -220,6 +227,12 @@ try {
       if(duringSave) assert.ok(inspection.stdout.includes('DURING_SAVE'),'Native inspection must preserve the cell edited during the earlier save');
       const exported=path.join(temporary,'spreadsheet-saved.xlsx');
       await run(engineBin,['export',kind,savedFile,path.join(temporary,'spreadsheet.input'),exported]);
+      if(formulas) {
+        const sheet=await run('unzip',['-p',exported,'xl/worksheets/sheet1.xml']);
+        const cell=sheet.stdout.match(/<c\b[^>]*\br="C2"[^>]*>[\s\S]*?<\/c>/)?.[0] || '';
+        assert.match(cell,/<f\b[^>]*>SUM\(A2:B2\)<\/f>/,'Exported workbook must retain the entered formula');
+        assert.match(cell,/<v>5<\/v>/,'SUM must calculate 2 + 3 = 5 in the actual editor before export');
+      }
       const reopenedBinary=path.join(temporary,'spreadsheet-export-reopened.bin');
       await run(engineBin,['prepare-editor',kind,exported,reopenedBinary]);
       const reopenedInspection=await run(engineBin,['inspect-editor',kind,reopenedBinary]);
@@ -244,6 +257,12 @@ try {
     if(kind==='spreadsheet') {
       await editor.locator('#ce-cell-name').fill('A1');await editor.locator('#ce-cell-name').press('Enter');
       assert.equal(await editor.locator('#ce-cell-content').inputValue(),replacement);
+      if(formulas) {
+        await editor.locator('#ce-cell-name').fill('C2');await editor.locator('#ce-cell-name').press('Enter');
+        // OOXML stores English function names; the German editor displays its
+        // localized name on reopen while retaining the same range/expression.
+        assert.equal(await editor.locator('#ce-cell-content').inputValue(),'=SUMME(A2:B2)','Reopened formula must remain editable in the selected locale');
+      }
       if(duringSave) {
         await editor.locator('#ce-cell-name').fill('B1');await editor.locator('#ce-cell-name').press('Enter');
         assert.equal(await editor.locator('#ce-cell-content').inputValue(),'DURING_SAVE');
