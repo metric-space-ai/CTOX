@@ -118,7 +118,9 @@
       persist();return {status:'completed',payload:{outcome:{ok:true,record_id:record.id,version_id:version.id,editor_blob_id:version.editor_blob_id,editor_protocol:version.editor_protocol,editor_protocol_version:10,conversion_state:'prepared'}}};
     }},
     closeDrawers(){document.querySelector('#lab-drawer')?.remove();},
-    openLeftDrawer(content){const drawer=document.createElement('aside');drawer.id='lab-drawer';drawer.append(content);ctx.host.append(drawer);},openRightDrawer(){},openBottomDrawer(){},
+    // Mirror the shell's drawer DOM/classes; collections and command dispatch
+    // remain isolated fixtures, not a substitute for live tenant acceptance.
+    openLeftDrawer(content){ctx.closeDrawers();const drawer=document.createElement('div');drawer.id='lab-drawer';drawer.className='shell-module-drawer-overlay shell-module-drawer-overlay--left';const panel=document.createElement('section');panel.className='shell-module-drawer-panel';panel.setAttribute('role','dialog');panel.setAttribute('aria-modal','true');panel.append(content);drawer.append(panel);ctx.host.append(drawer);},openRightDrawer(){},openBottomDrawer(){},
   };
   window.officeLab={rows,records,versions,chunks,commands,completedCommits,ctx,managedWindow};
   window.officeLab.cleanup=await mount(ctx);

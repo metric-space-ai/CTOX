@@ -25,6 +25,8 @@ const duringSave = process.argv.includes('--during-save');
 const closeSafety = process.argv.includes('--close-safety');
 const emptyLibrary = process.argv.includes('--empty-library');
 const formulas = process.argv.includes('--formulas');
+const importRoundtrip = process.argv.includes('--import-roundtrip');
+const formatting = process.argv.includes('--formatting');
 const selectedKind = process.argv.find(value=>value.startsWith('--kind='))?.slice('--kind='.length);
 assert.ok(!selectedKind || ['document','spreadsheet'].includes(selectedKind), 'Unknown test kind');
 
@@ -206,6 +208,16 @@ try {
         await editor.locator('#ce-cell-content').fill(value);await editor.locator('#ce-cell-content').press('Enter');
       }
     }
+    if(formatting) {
+      if(kind==='spreadsheet') {
+        await editor.locator('#ce-cell-name').fill('A1');await editor.locator('#ce-cell-name').press('Enter');
+      } else {
+        await page.keyboard.press('Meta+a');
+      }
+      await editor.locator('#id-toolbar-btn-bold').click();
+      await editor.locator('#id-toolbar-btn-undo').click();
+      await editor.locator('#id-toolbar-btn-redo').click();
+    }
     await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
     if(duringSave) {
       assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0,'Continued editing must occur before the first save is acknowledged');
@@ -237,11 +249,16 @@ try {
       await run(engineBin,['export',kind,savedFile,path.join(temporary,'document.input'),exported]);
       const xml=await run('unzip',['-p',exported,'word/document.xml']);
       assert.ok(xml.stdout.replace(/<[^>]+>/g,'').includes(replacement),'Native DOCX export must preserve the typed text');
+      if(formatting) assert.match(xml.stdout,/<w:b(?:\s[^>]*)?\/>/,'Bold after undo/redo must survive native DOCX export');
     } else {
       assert.ok(inspection.stdout.includes(replacement),'Native inspection must find the cell entered through the UI');
       if(duringSave) assert.ok(inspection.stdout.includes('DURING_SAVE'),'Native inspection must preserve the cell edited during the earlier save');
       const exported=path.join(temporary,'spreadsheet-saved.xlsx');
       await run(engineBin,['export',kind,savedFile,path.join(temporary,'spreadsheet.input'),exported]);
+      if(formatting) {
+        const styles=await run('unzip',['-p',exported,'xl/styles.xml']);
+        assert.match(styles.stdout,/<b(?:\s[^>]*)?\/>/,'Bold after undo/redo must survive native XLSX export');
+      }
       if(formulas) {
         const sheet=await run('unzip',['-p',exported,'xl/worksheets/sheet1.xml']);
         const cell=sheet.stdout.match(/<c\b[^>]*\br="C2"[^>]*>[\s\S]*?<\/c>/)?.[0] || '';
@@ -301,6 +318,65 @@ try {
       assert.ok(chrome.statusTabs.every(tab=>tab.textRect?.width > 0 && tab.textRect.top >= chrome.statusbar.rect.top && tab.textRect.bottom <= chrome.statusbar.rect.bottom), 'Sheet label text must fit inside the status bar, not below the viewport');
     }
     await page.screenshot({path:path.join(output,`${kind}-reopened.png`)});
+    if(importRoundtrip) {
+      assert.ok(!closeSafety, 'Import and close failure scenarios run independently');
+      const importedName = `${kind}-saved`;
+      const sourceFile = path.join(temporary, `${importedName}.${kind==='document'?'docx':'xlsx'}`);
+      const recordCount = await page.evaluate(()=>window.officeLab.records.length);
+      const previousFrame = await page.locator(`iframe[data-ctox-office-kind="${kind}"]`).elementHandle();
+      await page.locator(`[data-${prefix}-import-open]`).click();
+      const chooserPromise = page.waitForEvent('filechooser');
+      await page.locator('#lab-drawer input[type="file"]').click();
+      await (await chooserPromise).setFiles(sourceFile);
+      await page.locator('#lab-drawer button[type="submit"]').click();
+      await page.waitForFunction(count=>window.officeLab.records.length===count+1, recordCount);
+      await previousFrame.waitForElementState('hidden');
+      await editor.locator('#viewport').waitFor({state:'visible',timeout:30000});
+      const importedRuntime=page.frames().find(frame=>frame.parentFrame()===page.mainFrame());
+      await importedRuntime.waitForFunction(()=>window.__officeLabReady===true,null,{timeout:30000});
+      assert.equal(await page.locator('#lab-drawer').count(),0,'A completed import must close its dialog');
+      if(kind==='document') {
+        // Document inspection reports a binary directory, not paragraph text.
+        // Verify the actual editor selection through its normal Copy command.
+        await context.grantPermissions(['clipboard-read','clipboard-write'],{origin:'http://127.0.0.1:8766'});
+        await page.evaluate(()=>navigator.clipboard.writeText('OFFICE_COPY_NOT_COMPLETED'));
+        const canvas=editor.locator('#id_viewer_overlay');const box=await canvas.boundingBox();
+        await canvas.click({position:{x:box.width*0.35,y:120}});
+        await page.keyboard.press('Meta+a');await page.keyboard.press('Meta+c');
+        await page.waitForFunction(async()=>await navigator.clipboard.readText()!=='OFFICE_COPY_NOT_COMPLETED',null,{timeout:5000});
+        const copied=await page.evaluate(()=>navigator.clipboard.readText());
+        assert.equal(copied.trim(),replacement,'Imported Word content must remain complete in the real editor');
+        await page.keyboard.press('ArrowRight');
+      } else {
+        const importedInspection = await run(engineBin, ['inspect-editor',kind,path.join(temporary,`${kind}.bin`)]);
+        assert.ok(importedInspection.stdout.includes(replacement),'The imported editor binary must retain all text from the native export');
+      }
+      if(kind==='spreadsheet') {
+        await editor.locator('#ce-cell-name').fill('A1');await editor.locator('#ce-cell-name').press('Enter');
+        assert.equal(await editor.locator('#ce-cell-content').inputValue(),replacement);
+      }
+      await page.screenshot({path:path.join(output,`${kind}-imported.png`)});
+      await page.reload();
+      await page.locator(`.${prefix}-card-main`).filter({hasText:new RegExp(`${kind}[- ]saved`)}).click();
+      await editor.locator('#viewport').waitFor({state:'visible',timeout:30000});
+      const importReloadRuntime=page.frames().find(frame=>frame.parentFrame()===page.mainFrame());
+      await importReloadRuntime.waitForFunction(()=>window.__officeLabReady===true,null,{timeout:30000});
+      if(kind==='spreadsheet') {
+        await editor.locator('#ce-cell-name').fill('A1');await editor.locator('#ce-cell-name').press('Enter');
+        assert.equal(await editor.locator('#ce-cell-content').inputValue(),replacement);
+      } else {
+        await page.evaluate(()=>navigator.clipboard.writeText('OFFICE_REOPEN_COPY_NOT_COMPLETED'));
+        const canvas=editor.locator('#id_viewer_overlay');const box=await canvas.boundingBox();
+        await canvas.click({position:{x:box.width*0.35,y:120}});
+        await page.keyboard.press('Meta+a');await page.keyboard.press('Meta+c');
+        await page.waitForFunction(async()=>await navigator.clipboard.readText()!=='OFFICE_REOPEN_COPY_NOT_COMPLETED',null,{timeout:5000});
+        const copied=await page.evaluate(()=>navigator.clipboard.readText());
+        assert.equal(copied.trim(),replacement,'Reopened imported Word content must remain complete');
+        await page.keyboard.press('ArrowRight');
+      }
+      await page.screenshot({path:path.join(output,`${kind}-import-reopened.png`)});
+      console.log(`${kind}: native exported file imported through the real file chooser and reopened after reload`);
+    }
     if(closeSafety) {
       assert.ok(!duringSave, 'Close safety uses its own save failure/retry scenario');
       const originalFrame = await page.locator(`iframe[data-ctox-office-kind="${kind}"]`).elementHandle();
