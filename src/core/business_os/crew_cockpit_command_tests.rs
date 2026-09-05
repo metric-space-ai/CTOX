@@ -70,12 +70,13 @@ fn all_cockpit_controls_deny_user_before_effects_and_audit_admin() -> anyhow::Re
                     now_ms() as i64,
                 )?;
             let id = format!("cockpit-{name}-{role}");
+            let request = json!({
+                "id":id,"command_id":id,"module":"ctox","command_type":format!("ctox.queue.{name}"),
+                "payload":payload,"client_context":{"capability_token":token,"actor":{"id":actor,"role":role,"is_admin":role=="admin"}},
+            });
             let result = accept_rxdb_business_command_with_origin(
                 root.path(),
-                json!({
-                    "id":id,"command_id":id,"module":"ctox","command_type":format!("ctox.queue.{name}"),
-                    "payload":payload,"client_context":{"capability_token":token,"actor":{"id":actor,"role":role,"is_admin":role=="admin"}},
-                }),
+                request.clone(),
                 CommandOrigin::ReplicatedPeer,
             )?;
             if role == "user" {
@@ -95,10 +96,33 @@ fn all_cockpit_controls_deny_user_before_effects_and_audit_admin() -> anyhow::Re
                     4
                 );
             } else if name == "abort_turn" {
-                assert_eq!(result["status"], "unsupported", "{result}");
-                assert!(result["reason"].as_str().is_some_and(|s| !s.is_empty()));
+                assert_eq!(result["result"]["status"], "unsupported", "{result}");
+                assert!(result["result"]["reason"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty()));
             } else {
                 assert_eq!(result["ok"], true, "{name}: {result}");
+            }
+            if role == "admin" {
+                let replay = accept_rxdb_business_command_with_origin(
+                    root.path(),
+                    request,
+                    CommandOrigin::ReplicatedPeer,
+                )?;
+                assert_eq!(replay["already_accepted"], true, "{name}: {replay}");
+                assert_eq!(
+                    replay["status"],
+                    if name == "abort_turn" {
+                        "failed"
+                    } else {
+                        "completed"
+                    },
+                    "control claim must have a durable terminal outcome"
+                );
+                assert_eq!(
+                    replay["execution_task_id"], "",
+                    "a control must not claim the target task as its own execution"
+                );
             }
         }
         let audited:i64=core.query_row("SELECT COUNT(*) FROM ctox_harness_flow_events WHERE event_kind='cockpit.control' AND json_extract(metadata_json,'$.actor')='cockpit-admin'",[],|r|r.get(0))?;

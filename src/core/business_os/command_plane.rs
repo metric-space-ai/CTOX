@@ -1244,8 +1244,28 @@ fn dispatch_business_command(
         | "ctox.queue.pause"
         | "ctox.queue.abort_turn" => {
             let session = authorized_dispatch_session(authorized_session, &command.command_type)?;
-            super::harness_cockpit::control(root, command, session)
-                .map(BusinessCommandDispatchOutcome::Returned)
+            // Finish the durable control claim and replicate its outcome. The
+            // target queue task is not an execution task of this control command.
+            Ok(
+                match super::harness_cockpit::control(root, command, session) {
+                    Ok(result)
+                        if result.get("status").and_then(Value::as_str) == Some("unsupported") =>
+                    {
+                        BusinessCommandDispatchOutcome::Control {
+                            status: "failed".into(),
+                            task_id: None,
+                            task_status: Some("failed".into()),
+                            result,
+                        }
+                    }
+                    Ok(result) => BusinessCommandDispatchOutcome::completed(result, None),
+                    Err(error) => BusinessCommandDispatchOutcome::failed(
+                        None,
+                        serde_json::json!({"ok":false,"error":error.to_string()}),
+                        error,
+                    ),
+                },
+            )
         }
         "ctox.maintenance.client_ready"
         | "ctox.task.update"

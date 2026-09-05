@@ -1268,9 +1268,13 @@ commands `ctox.queue.release {task_id,priority?,note?}`, `.block {task_id,reason
 `.retry {task_id}`, `.capacity {workers}` (1–8), `.pause {paused,reason?}`, and
 `.abort_turn {task_id}`. Release/block/retry/abort use task scope, capacity/pause
 workspace scope. Controls preserve existing review/validation guards and record
-the authenticated actor. A terminal Business OS aggregate cannot be reopened by
+the authenticated actor. Each control persists its own terminal command receipt,
+so duplicate command IDs replay the outcome without repeating the action. The
+target task is not the control's `execution_task_id`.
+A terminal Business OS aggregate cannot be reopened by
 release/retry; retrying such work requires a new command. Abort currently returns
-a reasoned `unsupported` result. The read/write restriction also applies to MCP:
+a failed command receipt with `result.status = "unsupported"` and `result.reason`.
+The read/write restriction also applies to MCP:
 module and record grants cannot bypass a cockpit collection denial.
 
 `business_commands` and `ctox_queue_tasks` schema versions become 2; `ctox_runs`

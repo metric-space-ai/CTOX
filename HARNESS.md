@@ -94,12 +94,16 @@ collections are retried when they appear.
 The exact commands `ctox.queue.release`, `.block`, `.retry`, `.capacity`, `.pause`
 and `.abort_turn` enter through `enforce_command_policy` under `ctox.task.manage`.
 Task controls use task scope; capacity/pause use workspace scope. Accepted controls
-record `cockpit.control` with the authenticated actor and outcome. Retry clears
+record `cockpit.control` with the authenticated actor and outcome. Their own
+`business_commands` receipt is completed or failed durably; replaying the same
+command ID does not repeat the action or attach the target as its execution task.
+Retry clears
 failure/retry/hold state only for failed/blocked tasks and preserves terminal and
 validation guards. An already terminal Business OS command must be retried as a
 new command; the cockpit does not reopen an immutable terminal aggregate. The
 persisted `queue.pause` switch stops new admission while an already running slice
-completes normally. `abort_turn` returns `unsupported`:
+completes normally. `abort_turn` finishes its receipt as `failed`, with
+`result.status = "unsupported"` and a reason:
 a safe session-specific interrupt acknowledgement plus atomic attempt/queue
 finalization is not yet available; killing the service is not a substitute.
 
