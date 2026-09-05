@@ -64,6 +64,13 @@ both isolated editor frames. The frames use locally generated HTML rather than
 navigating to a tenant HTML response that may deny framing. No document data
 path or HTTP fallback is introduced.
 
+Both frame layers use same-origin `srcdoc` HTML. The inner editor must not
+navigate to a blob URL: embedded browser hosts can reject that navigation and
+leave `about:blank` without emitting an iframe load error. The embedded entry
+retains its explicit asset base and launch query. Browser acceptance must cover
+the embedded host as well as a standalone browser; Chromium alone is not proof
+of embedded-browser compatibility.
+
 `shell-integration.browser.mjs` mounts both actual apps and editor engines,
 checks library interactions and responsive/theme changes, creates blank files,
 types and saves through the UI, verifies native output, then reopens the saved

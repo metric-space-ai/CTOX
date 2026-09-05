@@ -12,6 +12,8 @@ import { chromium } from '../node_modules/playwright/index.mjs';
 // this is not tenant WebRTC/permission or deployment verification.
 
 const root = fileURLToPath(new URL('../../../../', import.meta.url));
+const engineBin = process.argv.find(value => value.startsWith('--engine-bin='))?.slice('--engine-bin='.length)
+  || path.join(root, 'runtime/build/cargo-target/debug/ctox-office-engine');
 const output = path.join(root, 'output/playwright/office-integration');
 await mkdir(output, { recursive: true });
 const temporary = await mkdtemp(path.join(output, 'native-'));
@@ -57,7 +59,7 @@ try {
       const input = path.join(temporary, `${kind}.input`);
       const result = path.join(temporary, `${kind}.bin`);
       await writeFile(input, source);
-      await run(path.join(root, 'runtime/build/cargo-target/debug/ctox-office-engine'), ['prepare-editor', kind, input, result]);
+      await run(engineBin, ['prepare-editor', kind, input, result]);
       return (await readFile(result)).toString('base64');
     });
     const page = await context.newPage();
@@ -153,11 +155,11 @@ try {
     });
     const savedFile=path.join(temporary,`${kind}-saved.bin`);
     await writeFile(savedFile,Buffer.concat(saved.map(value=>Buffer.from(value,'base64'))));
-    const inspection=await run(path.join(root,'runtime/build/cargo-target/debug/ctox-office-engine'),['inspect-editor',kind,savedFile]);
+    const inspection=await run(engineBin,['inspect-editor',kind,savedFile]);
     assert.equal(JSON.parse(inspection.stdout).kind,kind);
     if(kind==='document') {
       const exported=path.join(temporary,'document-saved.docx');
-      await run(path.join(root,'runtime/build/cargo-target/debug/ctox-office-engine'),['export',kind,savedFile,path.join(temporary,'document.input'),exported]);
+      await run(engineBin,['export',kind,savedFile,path.join(temporary,'document.input'),exported]);
       const xml=await run('unzip',['-p',exported,'word/document.xml']);
       assert.ok(xml.stdout.replace(/<[^>]+>/g,'').includes(replacement),'Native DOCX export must preserve the typed text');
     } else assert.ok(inspection.stdout.includes(replacement),'Native inspection must find the cell entered through the UI');

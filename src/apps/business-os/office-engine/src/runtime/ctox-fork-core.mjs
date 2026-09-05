@@ -41,10 +41,11 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
   const assetRevision = new URL(import.meta.url).searchParams.get('v');
   if (assetRevision) entry.searchParams.set('v', assetRevision);
   const embeddedHtml = embeddedEditorDocument(kind, entry);
-  const embeddedFrameUrl = embeddedHtml
-    ? URL.createObjectURL(new Blob([embeddedHtml], { type: 'text/html' }))
-    : '';
-  frame.src = embeddedFrameUrl || entry.href;
+  // Keep the same-origin document in the frame. Some embedded browser hosts
+  // reject blob navigations, leaving about:blank without a load error.
+  // The embedded document already supplies its asset base and launch query.
+  if (embeddedHtml) frame.srcdoc = embeddedHtml;
+  else frame.src = entry.href;
   root.replaceChildren(frame);
 
   let resolveAppReady;
@@ -242,7 +243,6 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       forkUi?.destroy?.();
       forkUi = null;
       frame.remove();
-      if (embeddedFrameUrl) URL.revokeObjectURL(embeddedFrameUrl);
     },
   };
 }

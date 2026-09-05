@@ -768,14 +768,15 @@ test('Office asset revision propagates through every iframe and runtime boundary
   assert.match(forkRuntime, /entry\.searchParams\.set\('v', assetRevision\)/);
 });
 
-test('Office frames do not navigate to tenant assets that can be blocked by X-Frame-Options', async () => {
+test('Office frames embed same-origin HTML without tenant or blob navigation', async () => {
   const capsule = await readFile(new URL('./src/capsule.mjs', import.meta.url), 'utf8');
   const forkRuntime = await readFile(new URL('./src/runtime/ctox-fork-core.mjs', import.meta.url), 'utf8');
   const builder = await readFile(new URL('../../../scripts/vendor-builds/build-ctox-office.mjs', import.meta.url), 'utf8');
   assert.match(capsule, /frame\.srcdoc = capsuleFrameDocument/);
   assert.doesNotMatch(capsule, /frame\.src = frameUrl\.href/);
   assert.match(forkRuntime, /EMBEDDED_EDITOR_HTML_BASE64/);
-  assert.match(forkRuntime, /URL\.createObjectURL\(new Blob/);
+  assert.match(forkRuntime, /if \(embeddedHtml\) frame\.srcdoc = embeddedHtml/);
+  assert.doesNotMatch(forkRuntime, /embeddedFrameUrl/);
   assert.match(builder, /embedOfficeEntryDocuments/);
 });
 

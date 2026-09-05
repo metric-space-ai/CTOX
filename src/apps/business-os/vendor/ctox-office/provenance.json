@@ -111,7 +111,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/runtime/ctox-fork-core.mjs",
-      "sha256": "c1630de630d36307955467adf9fd1abd4242f6fe820786c2799ab9769b19dbbf"
+      "sha256": "168c91a4fb9858785625ec7c1babd939fd3f1d2590cfaaac7cf8803c04c8b619"
     },
     {
       "path": "src/apps/business-os/office-engine/src/runtime/ctox-spreadsheets.mjs",
@@ -4007,8 +4007,8 @@
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/runtime/ctox-fork-core.mjs",
-      "bytes": 809518,
-      "sha256": "3d4036c1fc51ae7d5b0acd2c7d252aa4337492589d9a2de475e672219d2acafb"
+      "bytes": 809586,
+      "sha256": "3a431ad8bcb530a35c6a0ac5e8a3fa3fe3870d3599d617e42ecf53b6bd0b1e0b"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/runtime/ctox-spreadsheets.mjs",
