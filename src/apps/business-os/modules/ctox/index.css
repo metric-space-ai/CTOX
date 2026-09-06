@@ -1478,6 +1478,271 @@
   min-width: 0;
 }
 
+/* Crew at home (slice 4): the members as the existing map creatures, resting
+   side by side while nothing runs. Same shell as on the map, only larger. */
+.ctox-crew-home {
+  display: grid;
+  place-items: center;
+  padding: 28px 24px;
+}
+.ctox-crew-home-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 28px 34px;
+  max-width: 100%;
+}
+.ctox-crew-home-member {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 96px;
+  padding: 10px 8px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.ctox-crew-home-member:hover,
+.ctox-crew-home-member:focus-visible {
+  border-color: var(--line);
+  background: var(--kit-hover, color-mix(in srgb, var(--text) 5%, transparent));
+  outline: none;
+}
+.ctox-crew-home-member:focus-visible {
+  box-shadow: var(--focus-ring, 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent));
+}
+.ctox-crew-home-member strong {
+  font-size: var(--fs-body, 13px);
+  font-weight: 640;
+  line-height: 1.2;
+}
+.ctox-crew-home-member small {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+  line-height: 1.25;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctox-crew-home-member.is-on_duty strong {
+  color: var(--accent);
+}
+.ctox-crew-home-member.is-resting_after_failure small {
+  color: var(--danger);
+}
+.ctox-crew-home-creature {
+  display: block;
+  width: 72px;
+  height: 72px;
+}
+.ctox-crew-home-member.is-home .ctox-crew-home-creature,
+.ctox-crew-home-member.is-resting_after_failure .ctox-crew-home-creature {
+  opacity: .82;
+}
+
+/* Member portrait inside the task drawer lease line: a small clickable creature. */
+.ctox-task-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ctox-task-member:hover,
+.ctox-task-member:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+.ctox-task-member-portrait {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+}
+
+/* Member profile drawer */
+.ctox-member-header-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.ctox-member-portrait {
+  display: block;
+  flex: 0 0 56px;
+  width: 56px;
+  height: 56px;
+}
+.ctox-member-header h2 {
+  margin: 0;
+}
+.ctox-member-header small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-member-soul .ctox-card-body {
+  display: grid;
+  gap: 12px;
+}
+.ctox-soul-axes {
+  display: grid;
+  gap: 8px;
+}
+.ctox-soul-axis {
+  display: grid;
+  grid-template-columns: 5.5em 1fr 5.5em;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-meta, 12px);
+  color: var(--muted);
+}
+.ctox-soul-axis-right {
+  text-align: right;
+}
+.ctox-soul-axis input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.ctox-soul-axis input[type="range"]:disabled {
+  cursor: default;
+  opacity: .6;
+}
+.ctox-soul-axis input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+.ctox-soul-axis input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--line));
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.ctox-soul-axis input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+.ctox-soul-axis input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--line));
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.ctox-member-specialties {
+  display: grid;
+  gap: 6px;
+}
+.ctox-member-stats {
+  grid-template-columns: auto 1fr;
+}
+.ctox-member-learnings,
+.ctox-timesheet {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ctox-member-learning {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+.ctox-member-learning:last-child {
+  border-bottom: 0;
+}
+.ctox-member-learning p {
+  margin: 0;
+}
+.ctox-member-learning small {
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-member-learning.is-confirmed small {
+  color: var(--success, var(--accent));
+}
+.ctox-member-learning-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.ctox-member-learning-actions .ctox-button {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-member-learning-actions .ctox-button.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+  background: transparent;
+}
+.ctox-timesheet-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-timesheet-row:last-child {
+  border-bottom: 0;
+}
+.ctox-timesheet-row[data-timesheet-task-id] {
+  cursor: pointer;
+}
+.ctox-timesheet-row[data-timesheet-task-id]:hover .ctox-timesheet-title {
+  color: var(--accent);
+}
+.ctox-timesheet-when {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctox-timesheet-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctox-timesheet-outcome {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ctox-timesheet-row.is-problem .ctox-timesheet-outcome {
+  color: var(--danger);
+}
+.ctox-timesheet-row small {
+  grid-column: 2 / -1;
+  color: var(--muted);
+}
+
 /* Task controls (slice 2): sit under the status strip, same rhythm as the edit form. */
 .ctox-task-controls {
   display: flex;

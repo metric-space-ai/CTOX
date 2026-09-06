@@ -1982,6 +1982,16 @@ function crewIdentityKey(subject = {}) {
 
 function crewIdentity(chat = {}) {
   const hash = crewHash(crewIdentityKey(chat));
+  // A crew member from `ctox_crew_members` brings its own name, colour and
+  // shape; only a subject without a member falls back to the seeded identity.
+  const explicit = chat?.crewIdentity;
+  if (explicit && typeof explicit === 'object') {
+    return {
+      name: String(explicit.name || CREW_NAMES[hash % CREW_NAMES.length]),
+      color: /^#[0-9a-f]{6}$/i.test(String(explicit.color || '')) ? String(explicit.color) : CREW_COLORS[(hash >>> 3) % CREW_COLORS.length],
+      shape: CREW_SHAPES.includes(explicit.shape) ? explicit.shape : CREW_SHAPES[(hash >>> 6) % CREW_SHAPES.length],
+    };
+  }
   return {
     name: CREW_NAMES[hash % CREW_NAMES.length],
     color: CREW_COLORS[(hash >>> 3) % CREW_COLORS.length],

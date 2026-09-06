@@ -23,6 +23,11 @@ const { __ctoxTestHooks: hooks } = await importBrowserBundle('./index.js');
 const {
   aggregateFlowMetrics,
   aggregateRunMetrics,
+  crewHomeMarkup,
+  memberCreatureState,
+  memberIdentity,
+  shouldShowCrewHome,
+  taskCrewMember,
   changeConcernsSelectedTask,
   flowForSelectedTask,
   harnessFlowFromEvents,
@@ -987,4 +992,49 @@ test('A deep-linked task is consumed once it is on screen', () => {
   state.selectedTaskId = 'queue-task-a';
   reconcileSelection(state);
   assert.equal(state.selectedTaskId, 'queue-task-a');
+});
+
+// --- Scheibe 4: Wesen = Mitglieder, Crew zu Hause ---------------------------------
+
+const crewFixture = [
+  { id: 'crew:milo', name: 'Milo', shape: 'blob', color: '#00aa9a', archived: false, state: 'on_duty', active_task_id: 'task-working' },
+  { id: 'crew:nori', name: 'Nori', shape: 'square', color: '#7c6df2', archived: false, state: 'home', active_task_id: null },
+  { id: 'crew:tavi', name: 'Tavi', shape: 'triangle', color: '#e97255', archived: false, state: 'resting_after_failure', active_task_id: null },
+  { id: 'crew:old', name: 'Old', shape: 'round', color: '#7d7f84', archived: true, state: 'home', active_task_id: null },
+];
+
+test('Task creatures carry the crew member identity, unassigned tasks stay neutral', () => {
+  const working = { id: 'queue-task-working', taskId: 'task-working', commandId: 'cmd-working', title: 'Working task', status: 'running', routeStatus: 'running', crewMemberId: 'crew:milo', executionProgress: { phase: 'working', percent: 20, steps: [{ position: 1, label: 'A', status: 'in_progress' }] } };
+  const orphan = { id: 'queue-task-orphan', taskId: 'task-orphan', commandId: 'cmd-orphan', title: 'Orphan', status: 'running', routeStatus: 'running' };
+  const model = { activeTask: working, activeNodeId: 'running', tasks: [working, orphan], nodeMap: new Map([['running', { id: 'running', x: 400, y: 160 }], ['queued', { id: 'queued', x: 100, y: 160 }]]) };
+  const state = { lang: 'de', crewMembers: crewFixture, model };
+  assert.equal(taskCrewMember(working, state).name, 'Milo');
+  assert.equal(taskCrewMember(orphan, state), null);
+  assert.deepEqual(memberIdentity(crewFixture[0]), { name: 'Milo', color: '#00aa9a', shape: 'blob' });
+  const html = flowCrewSvg(model, working, state);
+  assert.match(html, /data-task-id="queue-task-working"[^>]*aria-label="Milo · /);
+  assert.match(html, /--crew-color:#00aa9a/);
+  assert.match(html, /is-blob/);
+  assert.match(html, /data-crew-key="crew:milo:map"/);
+  assert.match(html, /data-task-id="queue-task-orphan"[^>]*aria-label="ohne Crew-Zuordnung · /);
+});
+
+test('Crew at home shows every active member with its state, only while nothing runs', () => {
+  const state = { lang: 'de', crewMembers: crewFixture, model: { liveWork: false, tasks: [{ id: 'queue-task-working', taskId: 'task-working', title: 'Recherche Kunde X', status: 'queued', routeStatus: 'queued' }] } };
+  assert.equal(shouldShowCrewHome(state), true);
+  assert.equal(shouldShowCrewHome({ ...state, model: { ...state.model, liveWork: true } }), false);
+  assert.equal(shouldShowCrewHome({ ...state, crewMembers: [] }), false);
+  const html = crewHomeMarkup(state);
+  assert.equal((html.match(/data-crew-member-id=/g) || []).length, 3);
+  assert.doesNotMatch(html, /crew:old/);
+  assert.match(html, /data-crew-member-id="crew:milo"[^>]*aria-label="Milo: Recherche Kunde X"/);
+  assert.match(html, /data-crew-member-id="crew:nori"[^>]*aria-label="Nori: zu Hause"/);
+  assert.match(html, /data-crew-member-id="crew:tavi"[^>]*aria-label="Tavi: erholt sich nach einem Fehlschlag"/);
+  assert.equal(memberCreatureState(crewFixture[0]), 'running');
+  assert.equal(memberCreatureState(crewFixture[1]), 'idle');
+  assert.equal(memberCreatureState(crewFixture[2]), 'failed');
+  // The expressions are the existing creature modes: working, sleeping, failed (X eyes).
+  assert.match(html, /crew:milo[\s\S]*?is-working/);
+  assert.match(html, /crew:nori[\s\S]*?is-sleeping/);
+  assert.match(html, /crew:tavi[\s\S]*?ctox-crew-eyes-x/);
 });
