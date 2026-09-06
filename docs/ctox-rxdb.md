@@ -14,6 +14,32 @@ Two implementations, one contract:
 | Daemon | `rxdb-rs` (crate `ctox-rxdb`, lib name `rxdb`) | `src/core/rxdb/` + `src/core/business_os/rxdb_peer.rs` |
 
 ---
+## Shell artifact boundary
+
+The native instance selects and verifies its signed Business OS release.
+For a selected slot, the root document receives the base URL
+`/business-os/_shell/<release-version>/` before its first asset. Relative
+scripts, styles, packaged module documents and their imports therefore resolve
+inside one release; an asset's `?v=` cache key is not its release identity.
+
+`src/core/business_os/shell_assets.rs` validates these addresses and checks
+each read against the admitted file size and SHA256. `shell_update.rs` owns
+signature, compatibility and complete inventory admission. Missing retained
+releases return 410; invalid addresses return 400; failed verification returns
+503. These requests never fall through to another release or an installed app.
+Installed module assets keep their separate instance path.
+
+A selected slot that fails verification prevents native shell startup.
+`server.rs` no longer silently chooses the archived Business OS tree.
+Source installations without a selected slot can still use their explicit
+`business-os` or `src/apps/business-os` tree. Legacy unversioned request
+handling remains for previously loaded clients and is a tracked removal item.
+
+This is the HTTP static-artifact boundary only: business records, command
+results, runtime projections and files continue through CTOX Sync/WebRTC.
+The immutable address mechanism alone does not certify bootstrap performance,
+mobile suspend/resume, or full runtime compatibility across all hosts.
+
 
 ## 1. What CTOX Sync Engine is
 
