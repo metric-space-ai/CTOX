@@ -64,5 +64,21 @@
   "promptMissingInputs": "Missing values (comma-separated)",
   "promptReviewSummary": "Review note",
   "promptResponseKey": "Answer reference",
-  "promptResponseBody": "Answer body"
+  "promptResponseBody": "Answer body",
+  "crew": "Crew",
+  "crewUnassigned": "Crew, nobody assigned yet",
+  "assignMember": "Assign",
+  "assignChoose": "Choose member",
+  "assigned": "Assigned.",
+  "crewFailed": "failed",
+  "crewBlocked": "blocked",
+  "waitsFor": "waiting for",
+  "retryAt": "retry at",
+  "crewWorking": "on duty",
+  "crewQueued": "waiting in the queue",
+  "holdTechnical": "technical hold",
+  "holdMissingReviewEvidence": "review evidence missing",
+  "holdMissingArtifact": "result missing",
+  "holdWaitingExternal": "waiting for a reply",
+  "holdAbortedByOwner": "aborted by the owner"
 }

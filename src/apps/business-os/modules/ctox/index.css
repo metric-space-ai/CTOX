@@ -1749,6 +1749,106 @@
   color: var(--muted);
 }
 
+/* Member memory (H3): the two continuity documents, readable and editable. */
+.ctox-member-memory {
+  display: grid;
+  gap: 10px;
+}
+.ctox-member-memory > .ctox-pane-kicker {
+  margin-top: 4px;
+}
+.ctox-memory-doc > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ctox-memory-entries {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ctox-memory-entry {
+  display: grid;
+  gap: 3px;
+  padding: 6px 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+.ctox-memory-entry:last-child {
+  border-bottom: 0;
+}
+.ctox-memory-entry p {
+  margin: 0;
+}
+.ctox-memory-entry small {
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-memory-entry.is-confirmed small {
+  color: var(--success, var(--accent));
+}
+.ctox-memory-entry .ctox-button {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-memory-consequence {
+  color: var(--muted);
+}
+.ctox-memory-editor {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ctox-memory-editor textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.ctox-crew-home-domain {
+  color: var(--muted);
+}
+.ctox-crew-home-member.is-new {
+  color: var(--muted);
+  border-style: dashed;
+  border-color: var(--line);
+}
+.ctox-crew-home-new-icon {
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+}
+.ctox-crew-home-new-icon svg {
+  width: 28px;
+  height: 28px;
+}
+.ctox-member-identity-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.ctox-member-archive {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+.ctox-member-archive .ctox-button.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+  background: transparent;
+}
+.ctox-task-selection-line {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+
 /* Honest states (slice 6) */
 .ctox-load-error div {
   display: grid;

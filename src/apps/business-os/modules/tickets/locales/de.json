@@ -64,5 +64,21 @@
   "promptMissingInputs": "Fehlende Werte (kommagetrennt)",
   "promptReviewSummary": "Prüfnotiz",
   "promptResponseKey": "Antwort-Referenz",
-  "promptResponseBody": "Antwortinhalt"
+  "promptResponseBody": "Antwortinhalt",
+  "crew": "Crew",
+  "crewUnassigned": "Crew, noch niemand zugeordnet",
+  "assignMember": "Zuweisen",
+  "assignChoose": "Mitglied wählen",
+  "assigned": "Zugewiesen.",
+  "crewFailed": "gescheitert",
+  "crewBlocked": "blockiert",
+  "waitsFor": "wartet auf",
+  "retryAt": "Wiederholung um",
+  "crewWorking": "im Einsatz",
+  "crewQueued": "wartet in der Queue",
+  "holdTechnical": "technischer Halt",
+  "holdMissingReviewEvidence": "Review-Nachweis fehlt",
+  "holdMissingArtifact": "Ergebnis fehlt",
+  "holdWaitingExternal": "wartet auf Rückmeldung",
+  "holdAbortedByOwner": "vom Owner abgebrochen"
 }

@@ -1990,23 +1990,55 @@ function crewIdentityKey(subject = {}) {
     || 'ctox-crew';
 }
 
+// Identity comes from the crew, never from a hash: a member of
+// `ctox_crew_members` brings its own name, colour and shape. Until the router
+// has decided who takes a task, the owner talks to the crew as a whole — one
+// neutral creature, the same in the chat bar and on the map.
+const NEUTRAL_CREW_IDENTITY = Object.freeze({ name: 'Crew', color: '#7d7f84', shape: 'round' });
+
 function crewIdentity(chat = {}) {
-  const hash = crewHash(crewIdentityKey(chat));
-  // A crew member from `ctox_crew_members` brings its own name, colour and
-  // shape; only a subject without a member falls back to the seeded identity.
   const explicit = chat?.crewIdentity;
-  if (explicit && typeof explicit === 'object') {
+  if (explicit && typeof explicit === 'object' && String(explicit.name || '').trim()) {
     return {
-      name: String(explicit.name || CREW_NAMES[hash % CREW_NAMES.length]),
-      color: /^#[0-9a-f]{6}$/i.test(String(explicit.color || '')) ? String(explicit.color) : CREW_COLORS[(hash >>> 3) % CREW_COLORS.length],
-      shape: CREW_SHAPES.includes(explicit.shape) ? explicit.shape : CREW_SHAPES[(hash >>> 6) % CREW_SHAPES.length],
+      name: String(explicit.name).trim(),
+      color: /^#[0-9a-f]{6}$/i.test(String(explicit.color || '')) ? String(explicit.color) : NEUTRAL_CREW_IDENTITY.color,
+      shape: CREW_SHAPES.includes(explicit.shape) ? explicit.shape : NEUTRAL_CREW_IDENTITY.shape,
     };
   }
-  return {
-    name: CREW_NAMES[hash % CREW_NAMES.length],
-    color: CREW_COLORS[(hash >>> 3) % CREW_COLORS.length],
-    shape: CREW_SHAPES[(hash >>> 6) % CREW_SHAPES.length],
-  };
+  return { ...NEUTRAL_CREW_IDENTITY };
+}
+
+// The member holding a chat's command, as the harness recorded it; the reason
+// the router gave, as the owner reads it.
+async function findCrewMembersByIds(collection, ids) {
+  return findDocsByIds(collection, ids);
+}
+
+function selectionSentenceFromEventTitle(title, name) {
+  const text = String(title || '');
+  const judged = /^(routed|selected):\s*(.*?)\s*\(([^)]*)\):\s*(.*)$/s.exec(text);
+  if (judged) return judged[4];
+  const pinned = /^(assigned|continuity):\s*(.*?):\s*(.*?)\s*\(([^)]*)\)$/s.exec(text);
+  if (pinned) return pinned[2];
+  return text.replace(new RegExp(`^${name}[:,]?\\s*`), '');
+}
+
+async function crewSelectionReason(events, taskId) {
+  if (!events || !taskId || typeof events.find !== 'function') return '';
+  try {
+    const docs = await events.find({ selector: { task_id: taskId, kind: 'crew_selected' }, limit: 4 }).exec();
+    const rows = (Array.isArray(docs) ? docs : []).map((doc) => doc?.toJSON?.() || doc);
+    rows.sort((a, b) => (Number(b?.created_at_ms) || 0) - (Number(a?.created_at_ms) || 0));
+    return String(rows[0]?.title || '');
+  } catch {
+    return '';
+  }
+}
+
+function takeoverText(name, reasonTitle) {
+  const reason = selectionSentenceFromEventTitle(reasonTitle, name).trim();
+  if (chatUiIsGerman()) return reason ? `${name} übernimmt: ${reason}` : `${name} übernimmt.`;
+  return reason ? `${name} takes over: ${reason}` : `${name} takes over.`;
 }
 
 function crewBodyMarkup(shape) {
@@ -3612,6 +3644,13 @@ async function syncTrackedMessages({ state, db, sync = null }) {
   }
   const taskDocs = await findDocsByIds(queue, taskIds);
   const taskDocsByCommand = await findQueueDocsByCommandIds(queue, commandIds);
+  // Members holding any tracked task, loaded once per sync.
+  const memberIds = new Set();
+  for (const doc of [...taskDocs.values(), ...taskDocsByCommand.values()]) {
+    const memberId = String(doc?.crew_member_id || '').trim();
+    if (memberId) memberIds.add(memberId);
+  }
+  const memberDocs = memberIds.size ? await findCrewMembersByIds(db?.raw?.ctox_crew_members, memberIds) : new Map();
 
   for (const chat of state.chats) {
     let chatChanged = false;
@@ -3627,6 +3666,33 @@ async function syncTrackedMessages({ state, db, sync = null }) {
         || String(taskDocByCommand?.id || '').trim();
       const taskDoc = (resolvedTaskId ? taskDocs.get(resolvedTaskId) || null : null) || taskDocByCommand;
       const nextTaskId = taskId || resolvedTaskId || taskDoc?.id || '';
+      // The creature becomes the member the moment the harness attaches one;
+      // it then stays that member for the whole conversation.
+      const memberId = String(taskDoc?.crew_member_id || '').trim();
+      const member = memberId ? memberDocs.get(memberId) || null : null;
+      if (member && chat.crew_member_id !== memberId) {
+        chat.crew_member_id = memberId;
+        chat.crewIdentity = { name: String(member.name || ''), shape: String(member.shape || ''), color: String(member.color || '') };
+        changed = true;
+        chatChanged = true;
+      }
+      const takeoverKey = nextTaskId || commandId;
+      if (member && takeoverKey && !chat.messages.some((item) => item.takeoverFor === takeoverKey)) {
+        const reasonTitle = await crewSelectionReason(db?.raw?.ctox_harness_events, String(taskDoc?.task_id || taskDoc?.id || nextTaskId).replace(/^queue-/, ''));
+        chat.messages.push({
+          id: `takeover_${crypto.randomUUID()}`,
+          role: 'ctox',
+          text: takeoverText(String(member.name || ''), reasonTitle),
+          takeoverFor: takeoverKey,
+          commandId: commandId || '',
+          taskId: nextTaskId || '',
+          crewMemberId: memberId,
+          status: 'running',
+          createdAt: Date.now(),
+        });
+        changed = true;
+        chatChanged = true;
+      }
       const orphanedTracking = !commandDoc && !taskDoc && isActiveTrackingStatus(message.status) && trackingMessageAgeMs(message) > 10 * 60 * 1000;
       const nextStatus = orphanedTracking ? 'failed' : preferredTrackingStatus(commandDoc, taskDoc, message.status);
       const nextProgress = taskDoc?.execution_progress

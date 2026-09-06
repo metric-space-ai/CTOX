@@ -14,6 +14,8 @@ export const collections = {
       soul: { type: 'object', additionalProperties: true },
       specialties: { type: 'object', additionalProperties: true },
       stats: { type: 'object', additionalProperties: true },
+      memory: { type: 'object', additionalProperties: true },
+      domain: { type: 'array', items: { type: 'string' } },
       updated_at_ms: { type: 'number' }
     },
     required: ['id', 'name', 'shape', 'color', 'archived', 'state', 'updated_at_ms'],
@@ -97,6 +99,7 @@ export const collections = {
       attempt: { type: 'number' },
       crew_member_id: { type: 'string' },
       crew_assigned_member_id: { type: 'string' },
+      ticket_key: { type: ['string', 'null'] },
       execution_progress: { type: 'object', additionalProperties: true },
       updated_at_ms: { type: 'number' }
     },

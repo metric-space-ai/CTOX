@@ -54,6 +54,28 @@ const labels = {
     taskResumed: 'Folgeauftrag angelegt.',
     taskDeleted: 'Task gelöscht.',
     taskActionFailed: 'Aktion fehlgeschlagen.',
+    memoryTitle: "Gedächtnis",
+    knowledge: "Was es weiß",
+    experience: "Was es erlebt hat",
+    editMemory: "Bearbeiten",
+    saveMemory: "Speichern",
+    cancelEdit: "Abbrechen",
+    confirmAnchor: "Bestätigen",
+    memoryConfirmed: "vom Owner bestätigt",
+    memoryHypothesis: "Hypothese",
+    memoryEmpty: "Noch nichts. Entsteht mit den ersten Einsätzen.",
+    noDomain: "noch ohne Fachgebiet",
+    assignmentsWord: "Einsätze",
+    newMember: "Neues Mitglied",
+    archiveMember: "Archivieren",
+    createMember: "Anlegen",
+    memberCreated: "Angelegt.",
+    shapeLabel: "Form",
+    colorLabel: "Farbe",
+    shape_round: "rund",
+    shape_blob: "Tropfen",
+    shape_square: "eckig",
+    shape_triangle: "Dreieck",
     loadFailed: "Laden fehlgeschlagen",
     retryLoad: "Erneut laden",
     syncDisconnected: "Sync nicht verbunden – Anzeige kann veraltet sein",
@@ -92,12 +114,6 @@ const labels = {
     reviewRejectedCount: "Review abgelehnt",
     avgElapsed: "Ø Dauer",
     lastActive: "zuletzt aktiv",
-    learnings: "Learnings",
-    noLearnings: "Noch keine Learnings.",
-    confirmLearning: "Bestätigen",
-    editLearning: "Bearbeiten",
-    deleteLearning: "Löschen",
-    confirmedWord: "bestätigt",
     timesheet: "Stundenzettel",
     noRuns: "Noch keine Einsätze.",
     saveMember: "Speichern",
@@ -313,6 +329,28 @@ const labels = {
     taskResumed: 'Follow-up task queued.',
     taskDeleted: 'Task deleted.',
     taskActionFailed: 'Action failed.',
+    memoryTitle: "Memory",
+    knowledge: "What it knows",
+    experience: "What it has been through",
+    editMemory: "Edit",
+    saveMemory: "Save",
+    cancelEdit: "Cancel",
+    confirmAnchor: "Confirm",
+    memoryConfirmed: "confirmed by the owner",
+    memoryHypothesis: "hypothesis",
+    memoryEmpty: "Nothing yet. It grows with the first assignments.",
+    noDomain: "no field of work yet",
+    assignmentsWord: "assignments",
+    newMember: "New member",
+    archiveMember: "Archive",
+    createMember: "Create",
+    memberCreated: "Created.",
+    shapeLabel: "Shape",
+    colorLabel: "Colour",
+    shape_round: "round",
+    shape_blob: "blob",
+    shape_square: "square",
+    shape_triangle: "triangle",
     loadFailed: "Loading failed",
     retryLoad: "Reload",
     syncDisconnected: "Sync not connected – the view may be stale",
@@ -351,12 +389,6 @@ const labels = {
     reviewRejectedCount: "Review rejected",
     avgElapsed: "Avg. duration",
     lastActive: "last active",
-    learnings: "Learnings",
-    noLearnings: "No learnings yet.",
-    confirmLearning: "Confirm",
-    editLearning: "Edit",
-    deleteLearning: "Delete",
-    confirmedWord: "confirmed",
     timesheet: "Timesheet",
     noRuns: "No assignments yet.",
     saveMember: "Save",
@@ -845,7 +877,7 @@ function changeConcernsSelectedTask(state, change) {
 }
 
 function wireLocalRealtime(state) {
-  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports', 'ctox_crew_members', 'ctox_harness_status', 'ctox_runs', 'ctox_harness_events', 'ctox_crew_learnings'];
+  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports', 'ctox_crew_members', 'ctox_harness_status', 'ctox_runs', 'ctox_harness_events'];
   const selectedTaskOnly = new Set(['ctox_runs', 'ctox_harness_events']);
   let renderTimer = null;
   const scheduleRender = () => {
@@ -1698,6 +1730,7 @@ function actionIcon(state, name) {
     play: 'M8 5.5v13l10-6.5-10-6.5Z',
     pause: 'M8 5v14M16 5v14',
     chat: 'M4 5h16v10H9l-5 4V5Z',
+    edit: 'M4 20h4l10-10-4-4L4 16v4ZM13 7l4 4',
     trash: 'M5 7h14M10 7V5h4v2M8 7l1 13h6l1-13M10.5 11v5M13.5 11v5',
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name] || paths.open}"></path></svg>`;
@@ -2703,7 +2736,7 @@ function flowCrewSvg(model, selectedTask, state) {
       // Without a member the seeded identity stays, so the chat bar and the map
       // keep showing the same creature for the same task; the title says so.
       crewKey: member ? member.id : (task.commandId || task.command_id || task.taskId || task.task_id || task.id),
-      crewIdentity: member ? memberIdentity(member) : null,
+      crewIdentity: member ? memberIdentity(member) : null,  // null = the neutral crew creature (shared)
       executionProgress: liveTask.executionProgress || liveTask.execution_progress,
     }, status, 'map');
     return `
@@ -3108,6 +3141,9 @@ function syncDetailDrawer(state) {
     state.ctx.openLeftDrawer(webStackDrawer(state));
     return;
   }
+  if (state.detailDrawer.type === 'new-member') {
+    return;
+  }
   if (state.detailDrawer.type === 'member') {
     const member = crewMemberById(state, state.detailDrawer.memberId);
     if (member && !drawerIsBusy()) state.ctx.openLeftDrawer(crewMemberDrawer(member, state));
@@ -3276,7 +3312,8 @@ function taskLeaseLineMarkup(task, state) {
   if (task.leaseOwner) bits.push(`${t.leaseOwner}: ${task.leaseOwner}${task.leaseExpiresAt ? ` (${t.until} ${formatClockTime(task.leaseExpiresAt)})` : ''}`);
   if (Number.isFinite(task.attempt) && task.attempt > 0) bits.push(`${t.attemptLabel} ${task.attempt}`);
   if (!bits.length && !memberBit) return '';
-  return `<small class="ctox-task-lease-line">${memberBit}${bits.map((bit) => `<span>${escapeHtml(bit)}</span>`).join('')}</small>`;
+  const selection = taskSelectionSentence(task, state);
+  return `<small class="ctox-task-lease-line">${memberBit}${bits.map((bit) => `<span>${escapeHtml(bit)}</span>`).join('')}</small>${selection ? `<small class="ctox-task-selection-line">${escapeHtml(selection)}</small>` : ''}`;
 }
 
 function canResumeCtoxTask(task) {
@@ -4749,6 +4786,19 @@ function memberStateLine(member, state) {
   return t.atHome;
 }
 
+// What a member has become good at: derived from its successful attempts
+// (server-side `domain`), never typed by the owner.
+function memberDomainLine(member, state) {
+  const t = labels[state.lang];
+  const domain = Array.isArray(member?.domain) ? member.domain.filter(Boolean) : [];
+  const total = Number(member?.stats?.tasks_total) || 0;
+  const bits = [];
+  if (domain.length) bits.push(domain.map((item) => displayWorkSource(item)).join(', '));
+  else bits.push(t.noDomain);
+  if (total > 0) bits.push(`${total} ${t.assignmentsWord}`);
+  return bits.join(' · ');
+}
+
 function memberCreatureHtml(member, state, taskState = memberCreatureState(member)) {
   if (state?.ctx && !syncIsConnected(state)) taskState = 'idle';
   const task = member?.active_task_id ? taskByNativeId(state, member.active_task_id) : null;
@@ -4772,11 +4822,17 @@ function crewHomeMarkup(state) {
         <span class="ctox-flow-creature-shell ctox-crew-home-creature">${memberCreatureHtml(member, state)}</span>
         <strong>${escapeHtml(member.name)}</strong>
         <small>${escapeHtml(line)}</small>
+        <small class="ctox-crew-home-domain">${escapeHtml(memberDomainLine(member, state))}</small>
       </button>`;
   }).join('');
+  const canCreate = mayManageCrew(state, 'ctox.crew.member.create') && Boolean(state.ctx?.commandBus?.dispatch);
   return `
     <section class="ctox-canvas-container ctox-flow-well ctox-crew-home" data-crew-home aria-label="${escapeAttr(t.crewHome)}">
-      <div class="ctox-crew-home-row">${cards}</div>
+      <div class="ctox-crew-home-row">${cards}${canCreate ? `
+        <button type="button" class="ctox-crew-home-member is-new" data-crew-new-member aria-label="${escapeAttr(t.newMember)}" title="${escapeAttr(t.newMember)}">
+          <span class="ctox-crew-home-new-icon">${actionIcon(state, 'add')}</span>
+          <strong>${escapeHtml(t.newMember)}</strong>
+        </button>` : ''}</div>
     </section>`;
 }
 
@@ -4792,16 +4848,105 @@ function wireCrewHome(state, main) {
       openCrewMemberDrawer(state, button.dataset.crewMemberId);
     });
   });
+  main.querySelector('[data-crew-new-member]')?.addEventListener('click', () => {
+    state.detailDrawer = { type: 'new-member' };
+    state.ctx.openLeftDrawer(newCrewMemberDrawer(state));
+  });
+}
+
+const CREW_MEMBER_COLORS = Object.freeze(['#1685ee', '#00aa9a', '#7d7f84', '#7c6df2', '#e97255', '#34a26f']);
+const CREW_MEMBER_SHAPES = Object.freeze(['round', 'blob', 'square', 'triangle']);
+
+// The pool is owner-managed: a new member starts with a persona and no memory.
+function newCrewMemberDrawer(state) {
+  const t = labels[state.lang];
+  const body = document.createElement('div');
+  body.className = 'drawer-body ctox-task-drawer ctox-member-drawer';
+  body.setAttribute('data-context-record-type', 'ctox_crew_member_new');
+  body.setAttribute('data-context-label', t.newMember);
+  const preview = (shape, color) => crewCreatureHtml({ crewKey: `new:${shape}:${color}`, crewIdentity: { name: '', shape, color } }, 'idle', 'map');
+  body.innerHTML = `
+    <header class="drawer-header-row ctox-member-header">
+      <div class="ctox-member-header-identity">
+        <span class="ctox-flow-creature-shell ctox-member-portrait" data-new-member-preview>${preview('round', CREW_MEMBER_COLORS[0])}</span>
+        <div>
+          <span class="ctox-pane-kicker">${escapeHtml(t.crewMember)}</span>
+          <h2>${escapeHtml(t.newMember)}</h2>
+        </div>
+      </div>
+      <button class="ctox-pane-icon ctox-drawer-close" type="button" data-close-ctox-drawer aria-label="${escapeAttr(t.close)}" title="${escapeAttr(t.close)}">${actionIcon(state, 'close')}</button>
+    </header>
+    <form class="ctox-card ctox-member-soul" data-new-member-form>
+      <header>${escapeHtml(t.soul)}</header>
+      <div class="ctox-card-body">
+        <label class="ctox-task-edit-field"><span class="ctox-field-label">${escapeHtml(t.memberName)}</span><input class="ctox-input" name="name" maxlength="60" required /></label>
+        <div class="ctox-member-identity-row">
+          <label class="ctox-task-edit-field"><span class="ctox-field-label">${escapeHtml(t.shapeLabel)}</span>
+            <select class="ctox-select" name="shape">${CREW_MEMBER_SHAPES.map((shape) => `<option value="${shape}">${escapeHtml(t[`shape_${shape}`] || shape)}</option>`).join('')}</select></label>
+          <label class="ctox-task-edit-field"><span class="ctox-field-label">${escapeHtml(t.colorLabel)}</span>
+            <select class="ctox-select" name="color">${CREW_MEMBER_COLORS.map((color) => `<option value="${color}">${color}</option>`).join('')}</select></label>
+        </div>
+        <div class="ctox-soul-axes">${SOUL_AXES.map((axis) => soulAxisMarkup(axis, 50, true, t)).join('')}</div>
+        <label class="ctox-task-edit-field"><span class="ctox-field-label">${escapeHtml(t.voice)}</span><input class="ctox-input" name="voice" maxlength="200" required /><small>${escapeHtml(t.voiceHint)}</small></label>
+        <label class="ctox-task-edit-field"><span class="ctox-field-label">${escapeHtml(t.sketch)}</span><textarea class="ctox-textarea" name="sketch" rows="3" maxlength="600"></textarea></label>
+        <div class="ctox-task-edit-actions">
+          <button type="submit" class="ctox-button is-primary">${escapeHtml(t.createMember)}</button>
+          <small data-member-status></small>
+        </div>
+      </div>
+    </form>`;
+  body.querySelector('[data-close-ctox-drawer]')?.addEventListener('click', () => closeDetailDrawer(state));
+  const form = body.querySelector('[data-new-member-form]');
+  const updatePreview = () => {
+    const data = new FormData(form);
+    const slot = body.querySelector('[data-new-member-preview]');
+    if (slot) slot.innerHTML = preview(String(data.get('shape') || 'round'), String(data.get('color') || CREW_MEMBER_COLORS[0]));
+  };
+  form.addEventListener('input', () => { body.dataset.dirty = '1'; });
+  form.addEventListener('change', updatePreview);
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const data = new FormData(form);
+    const status = body.querySelector('[data-member-status]');
+    const submit = form.querySelector('button[type="submit"]');
+    const soul = { sketch: String(data.get('sketch') || '').trim(), voice: String(data.get('voice') || '').trim() };
+    for (const axis of SOUL_AXES) soul[axis.key] = clampMetric(Number(data.get(axis.key)) || 50, 0, 100);
+    submit?.setAttribute('disabled', 'disabled');
+    try {
+      await dispatchCtoxTaskMutation(state, {
+        commandType: 'ctox.crew.member.create',
+        payload: { name: String(data.get('name') || '').trim(), shape: String(data.get('shape') || 'round'), color: String(data.get('color') || CREW_MEMBER_COLORS[0]), soul, specialties: {} },
+        commandPath: 'ctox_crew_member_create',
+      });
+      body.dataset.dirty = '0';
+      if (status) status.textContent = t.memberCreated;
+      closeDetailDrawer(state);
+      refresh(state).catch(() => {});
+    } catch (error) {
+      if (status) status.textContent = humanTaskActionError(error, t);
+      submit?.removeAttribute('disabled');
+    }
+  });
+  return body;
+}
+
+// The router's decision for a task, as the owner reads it: "Milo: <reason>".
+function taskSelectionSentence(task, state) {
+  const live = state?.selectedLive;
+  if (!task || !live || live.key !== taskLiveKey(task)) return '';
+  const event = [...(live.events || [])].reverse().find((item) => item.kind === 'crew_selected');
+  if (!event?.title) return '';
+  const title = String(event.title);
+  // routed/selected: "<kind>: <Name> (<id>): <reason>"
+  const judged = /^(routed|selected):\s*(.*?)\s*\(([^)]*)\):\s*(.*)$/s.exec(title);
+  if (judged) return `${judged[2]}: ${judged[4]}`;
+  // assigned/continuity: "<kind>: <reason>: <Name> (<id>)"
+  const pinned = /^(assigned|continuity):\s*(.*?):\s*(.*?)\s*\(([^)]*)\)$/s.exec(title);
+  if (pinned) return `${pinned[3]}: ${pinned[2]}`;
+  return title;
 }
 
 // --- Member profile drawer ------------------------------------------------------
-
-async function loadLocalCrewLearnings(ctx, memberId) {
-  const collection = ctoxCollection(ctx, 'ctox_crew_learnings');
-  if (!collection || !memberId) return [];
-  const rows = await findLocalDocs(collection, { member_id: memberId }, 200, 'updated_at_ms', 'desc');
-  return rows.filter((row) => !row.archived);
-}
 
 async function loadLocalRunsForMember(ctx, memberId) {
   const collection = ctoxCollection(ctx, 'ctox_runs');
@@ -4823,14 +4968,11 @@ function openCrewMemberDrawer(state, memberId) {
   const member = crewMemberById(state, memberId);
   if (!member) return;
   state.detailDrawer = { type: 'member', memberId };
-  state.memberDrawerData = state.memberDrawerData?.memberId === memberId ? state.memberDrawerData : { memberId, learnings: null, runs: null };
+  state.memberDrawerData = state.memberDrawerData?.memberId === memberId ? state.memberDrawerData : { memberId, runs: null };
   state.ctx.openLeftDrawer(crewMemberDrawer(member, state));
-  void Promise.all([
-    loadLocalCrewLearnings(state.ctx, memberId).catch(() => []),
-    loadLocalRunsForMember(state.ctx, memberId).catch(() => []),
-  ]).then(([learnings, runs]) => {
+  void loadLocalRunsForMember(state.ctx, memberId).catch(() => []).then((runs) => {
     if (state.disposed || state.detailDrawer?.type !== 'member' || state.detailDrawer.memberId !== memberId) return;
-    state.memberDrawerData = { memberId, learnings, runs };
+    state.memberDrawerData = { memberId, runs };
     syncDetailDrawer(state);
   });
 }
@@ -4887,31 +5029,153 @@ function memberStatsMarkup(member, state) {
     </section>`;
 }
 
-function memberLearningsMarkup(member, state) {
+// Continuity documents ("- key: value" lines under "## Entries") as one line
+// per entry, mirroring the harness renderer so the owner reads what the
+// member reads.
+function memoryEntries(content, startKey, tagKey, primaryKey, secondaryKey = null) {
+  const entries = [];
+  let current = null;
+  for (const raw of String(content || '').split('\n')) {
+    const trimmed = raw.trim().replace(/^- /, '').trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const index = trimmed.indexOf(':');
+    if (index < 0) continue;
+    const key = trimmed.slice(0, index).trim().toLowerCase();
+    const value = trimmed.slice(index + 1).trim().replace(/\s+/g, ' ');
+    if (key === startKey) {
+      if (current) entries.push(current);
+      current = {};
+    }
+    if (current && value && !(key in current)) current[key] = value;
+  }
+  if (current) entries.push(current);
+  return entries
+    .filter((entry) => entry[primaryKey])
+    .map((entry) => ({
+      id: entry[startKey] || '',
+      tag: entry[tagKey] || '',
+      text: entry[primaryKey],
+      more: secondaryKey ? entry[secondaryKey] || '' : '',
+      scope: entry.scope || '',
+      source: entry.source_ref || '',
+    }));
+}
+
+function memberMemoryMarkup(member, state) {
   const t = labels[state.lang];
-  const data = state.memberDrawerData?.memberId === member.id ? state.memberDrawerData : null;
-  const learnings = data?.learnings;
-  if (learnings === null || learnings === undefined) return '';
-  const canManage = mayManageCrew(state, 'ctox.crew.learning.update');
-  const items = learnings.map((learning) => `
-    <li class="ctox-member-learning ${learning.confirmed_by_owner ? 'is-confirmed' : ''}" data-learning-id="${escapeAttr(learning.id)}">
-      <p data-learning-text>${escapeHtml(learning.text || '')}</p>
-      <small>${escapeHtml([learning.kind, learning.confirmed_by_owner ? t.confirmedWord : '', learning.evidence_run_id ? `${t.evidence} ${String(learning.evidence_run_id).slice(0, 12)}` : ''].filter(Boolean).join(' · '))}</small>
-      ${canManage ? `
-        <span class="ctox-member-learning-actions">
-          ${learning.confirmed_by_owner ? '' : `<button type="button" class="ctox-button" data-learning-action="confirm">${escapeHtml(t.confirmLearning)}</button>`}
-          <button type="button" class="ctox-button" data-learning-action="edit">${escapeHtml(t.editLearning)}</button>
-          <button type="button" class="ctox-button is-danger" data-learning-action="delete">${escapeHtml(t.deleteLearning)}</button>
-        </span>` : ''}
+  const memory = member.memory && typeof member.memory === 'object' ? member.memory : null;
+  if (!memory) return '';
+  const editable = mayManageCrew(state, 'ctox.crew.memory.update') && Boolean(state.ctx?.commandBus?.dispatch);
+  const anchors = memoryEntries(memory.anchors, 'anchor_id', 'anchor_type', 'statement');
+  const narrative = memoryEntries(memory.narrative, 'entry_id', 'event_type', 'summary', 'consequence');
+  const tagLabel = (tag) => ({ owner_confirmed: t.memoryConfirmed, hypothesis: t.memoryHypothesis }[tag] || tag);
+  const anchorItems = anchors.map((entry) => `
+    <li class="ctox-memory-entry ${entry.tag === 'owner_confirmed' ? 'is-confirmed' : ''}" data-anchor-id="${escapeAttr(entry.id)}">
+      <p>${escapeHtml(entry.text)}</p>
+      <small>${escapeHtml([tagLabel(entry.tag), entry.scope, entry.source ? `${t.evidence} ${entry.source.slice(0, 18)}` : ''].filter(Boolean).join(' · '))}</small>
+      ${editable && entry.tag === 'hypothesis' && entry.id ? `<button type="button" class="ctox-button" data-memory-confirm="${escapeAttr(entry.id)}">${escapeHtml(t.confirmAnchor)}</button>` : ''}
     </li>`).join('');
-  return `
-    <section class="ctox-card">
-      <header>${escapeHtml(t.learnings)}</header>
+  const narrativeItems = narrative.slice().reverse().map((entry) => `
+    <li class="ctox-memory-entry">
+      <p>${escapeHtml(entry.text)}${entry.more ? ` <span class="ctox-memory-consequence">${escapeHtml(entry.more)}</span>` : ''}</p>
+      ${entry.tag ? `<small>${escapeHtml(entry.tag)}</small>` : ''}
+    </li>`).join('');
+  const document = (kind, title, items, raw) => `
+    <section class="ctox-card ctox-memory-doc" data-memory-kind="${kind}">
+      <header>${escapeHtml(title)}${editable ? `<button type="button" class="ctox-pane-icon" data-memory-edit="${kind}" aria-label="${escapeAttr(t.editMemory)}" title="${escapeAttr(t.editMemory)}">${actionIcon(state, 'edit')}</button>` : ''}</header>
       <div class="ctox-card-body">
-        ${items ? `<ul class="ctox-member-learnings">${items}</ul>` : `<p>${escapeHtml(t.noLearnings)}</p>`}
-        <small data-learning-status></small>
+        ${items ? `<ul class="ctox-memory-entries" data-memory-view>${items}</ul>` : `<p data-memory-view>${escapeHtml(t.memoryEmpty)}</p>`}
+        ${editable ? `
+          <form class="ctox-memory-editor" data-memory-form="${kind}" hidden>
+            <textarea class="ctox-textarea" name="body" rows="10" spellcheck="false">${escapeHtml(raw || '')}</textarea>
+            <div class="ctox-task-edit-actions">
+              <button type="submit" class="ctox-button is-primary">${escapeHtml(t.saveMemory)}</button>
+              <button type="button" class="ctox-button" data-memory-cancel>${escapeHtml(t.cancelEdit)}</button>
+              <small data-memory-status></small>
+            </div>
+          </form>` : ''}
       </div>
     </section>`;
+  return `
+    <div class="ctox-member-memory">
+      <span class="ctox-pane-kicker">${escapeHtml(t.memoryTitle)}</span>
+      ${document('anchors', t.knowledge, anchorItems, memory.anchors)}
+      ${document('narrative', t.experience, narrativeItems, memory.narrative)}
+    </div>`;
+}
+
+async function saveMemberMemory(state, member, kind, body, statusNode) {
+  const t = labels[state.lang];
+  try {
+    await dispatchCtoxTaskMutation(state, {
+      commandType: 'ctox.crew.memory.update',
+      payload: { member_id: member.id, kind, mode: 'full', body },
+      commandPath: 'ctox_crew_memory_update',
+    });
+    if (statusNode) statusNode.textContent = t.memberSaved;
+    return true;
+  } catch (error) {
+    if (statusNode) statusNode.textContent = humanTaskActionError(error, t);
+    return false;
+  }
+}
+
+// Confirming a hypothesis rewrites only that entry's type in the document.
+function confirmAnchorBody(anchorsDocument, anchorId) {
+  const lines = String(anchorsDocument || '').split('\n');
+  let inside = false;
+  return lines.map((line) => {
+    const trimmed = line.trim().replace(/^- /, '');
+    if (/^anchor_id:/i.test(trimmed)) inside = trimmed.slice('anchor_id:'.length).trim() === anchorId;
+    if (inside && /^anchor_type:\s*hypothesis\s*$/i.test(trimmed)) {
+      return line.replace(/hypothesis\s*$/i, 'owner_confirmed');
+    }
+    return line;
+  }).join('\n');
+}
+
+function wireMemberMemory(state, member, body) {
+  body.querySelectorAll('[data-memory-edit]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const doc = button.closest('[data-memory-kind]');
+      const form = doc?.querySelector('[data-memory-form]');
+      const view = doc?.querySelector('[data-memory-view]');
+      if (!form) return;
+      form.hidden = !form.hidden;
+      if (view) view.hidden = !form.hidden;
+      if (!form.hidden) {
+        body.dataset.dirty = '1';
+        form.querySelector('textarea')?.focus();
+      } else {
+        body.dataset.dirty = '0';
+      }
+    });
+  });
+  body.querySelectorAll('[data-memory-form]').forEach((form) => {
+    form.querySelector('[data-memory-cancel]')?.addEventListener('click', () => {
+      form.hidden = true;
+      const view = form.closest('[data-memory-kind]')?.querySelector('[data-memory-view]');
+      if (view) view.hidden = false;
+      body.dataset.dirty = '0';
+    });
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const kind = form.dataset.memoryForm;
+      const text = String(new FormData(form).get('body') || '').trim();
+      if (!text) return;
+      const ok = await saveMemberMemory(state, member, kind, text, form.querySelector('[data-memory-status]'));
+      if (ok) body.dataset.dirty = '0';
+    });
+  });
+  body.querySelectorAll('[data-memory-confirm]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const next = confirmAnchorBody(member.memory?.anchors, button.dataset.memoryConfirm);
+      if (next === String(member.memory?.anchors || '')) return;
+      button.setAttribute('disabled', 'disabled');
+      const ok = await saveMemberMemory(state, member, 'anchors', next, body.querySelector('[data-memory-status]'));
+      if (!ok) button.removeAttribute('disabled');
+    });
+  });
 }
 
 function memberTimesheetMarkup(member, state) {
@@ -4966,6 +5230,7 @@ function crewMemberDrawer(member, state) {
           <span class="ctox-pane-kicker">${escapeHtml(t.crewMember)}</span>
           <h2>${escapeHtml(member.name)}</h2>
           <small>${escapeHtml(line)}</small>
+          <small>${escapeHtml(memberDomainLine(member, state))}</small>
         </div>
       </div>
       <button class="ctox-pane-icon ctox-drawer-close" type="button" data-close-ctox-drawer aria-label="${escapeAttr(t.close)}" title="${escapeAttr(t.close)}">${actionIcon(state, 'close')}</button>
@@ -5015,8 +5280,9 @@ function crewMemberDrawer(member, state) {
         </div>
       </form>` : ''}
     ${memberStatsMarkup(member, state)}
-    ${memberLearningsMarkup(member, state)}
+    ${memberMemoryMarkup(member, state)}
     ${memberTimesheetMarkup(member, state)}
+    ${mayManageCrew(state) && !member.archived ? `<div class="ctox-member-archive"><button type="button" class="ctox-button is-danger" data-member-archive>${escapeHtml(t.archiveMember)}</button><small data-member-archive-status></small></div>` : ''}
   `;
   body.querySelector('[data-close-ctox-drawer]')?.addEventListener('click', () => closeDetailDrawer(state));
   body.querySelector('[data-member-open-task]')?.addEventListener('click', (event) => {
@@ -5033,12 +5299,19 @@ function crewMemberDrawer(member, state) {
       await saveCrewMemberFromDrawer(state, member, body);
     });
   }
-  body.querySelectorAll('[data-learning-action]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const item = button.closest('[data-learning-id]');
-      if (!item) return;
-      await runLearningAction(state, member, item.dataset.learningId, button.dataset.learningAction, body, item);
-    });
+  wireMemberMemory(state, member, body);
+  body.querySelector('[data-member-archive]')?.addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const status = body.querySelector('[data-member-archive-status]');
+    button.setAttribute('disabled', 'disabled');
+    try {
+      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.crew.member.update', payload: { member_id: member.id, archived: true }, commandPath: 'ctox_crew_member_archive' });
+      closeDetailDrawer(state);
+      refresh(state).catch(() => {});
+    } catch (error) {
+      if (status) status.textContent = humanTaskActionError(error, t);
+      button.removeAttribute('disabled');
+    }
   });
   return body;
 }
@@ -5072,61 +5345,6 @@ async function saveCrewMemberFromDrawer(state, member, body) {
     if (status) status.textContent = humanTaskActionError(error, t);
   } finally {
     submit?.removeAttribute('disabled');
-  }
-}
-
-async function runLearningAction(state, member, learningId, action, body, item) {
-  const t = labels[state.lang];
-  const status = body.querySelector('[data-learning-status]');
-  if (status) status.textContent = '';
-  try {
-    if (action === 'confirm') {
-      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.crew.learning.confirm', payload: { learning_id: learningId }, commandPath: 'ctox_crew_learning_confirm' });
-    } else if (action === 'delete') {
-      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.crew.learning.delete', payload: { learning_id: learningId }, commandPath: 'ctox_crew_learning_delete' });
-      item.remove();
-    } else if (action === 'edit') {
-      const paragraph = item.querySelector('[data-learning-text]');
-      if (!paragraph || item.querySelector('[data-learning-edit]')) return;
-      const editor = document.createElement('textarea');
-      editor.className = 'ctox-textarea';
-      editor.rows = 3;
-      editor.maxLength = 400;
-      editor.value = paragraph.textContent || '';
-      editor.setAttribute('data-learning-edit', '');
-      paragraph.replaceWith(editor);
-      body.dataset.dirty = '1';
-      const save = document.createElement('button');
-      save.type = 'button';
-      save.className = 'ctox-button is-primary';
-      save.textContent = t.saveMember;
-      editor.after(save);
-      editor.focus();
-      save.addEventListener('click', async () => {
-        const text = editor.value.trim();
-        if (!text) return;
-        try {
-          await dispatchCtoxTaskMutation(state, { commandType: 'ctox.crew.learning.update', payload: { learning_id: learningId, text }, commandPath: 'ctox_crew_learning_update' });
-          const restored = document.createElement('p');
-          restored.setAttribute('data-learning-text', '');
-          restored.textContent = text;
-          editor.replaceWith(restored);
-          save.remove();
-          body.dataset.dirty = '0';
-          if (status) status.textContent = t.memberSaved;
-        } catch (error) {
-          if (status) status.textContent = humanTaskActionError(error, t);
-        }
-      });
-      return;
-    }
-    if (status) status.textContent = t.controlApplied;
-    const data = state.memberDrawerData;
-    if (data?.memberId === member.id) {
-      data.learnings = await loadLocalCrewLearnings(state.ctx, member.id).catch(() => data.learnings);
-    }
-  } catch (error) {
-    if (status) status.textContent = humanTaskActionError(error, t);
   }
 }
 
@@ -6173,6 +6391,10 @@ export const __ctoxTestHooks = {
   aggregateFlowMetrics,
   crewHomeMarkup,
   crewMemberDrawer,
+  memoryEntries,
+  confirmAnchorBody,
+  memberDomainLine,
+  taskSelectionSentence,
   memberIdentity,
   memberCreatureState,
   shouldShowCrewHome,

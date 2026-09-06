@@ -24,6 +24,10 @@ const {
   aggregateFlowMetrics,
   aggregateRunMetrics,
   crewHomeMarkup,
+  confirmAnchorBody,
+  memberDomainLine,
+  memoryEntries,
+  taskSelectionSentence,
   memberCreatureState,
   memberIdentity,
   shouldShowCrewHome,
@@ -1037,4 +1041,37 @@ test('Crew at home shows every active member with its state, only while nothing 
   assert.match(html, /crew:milo[\s\S]*?is-working/);
   assert.match(html, /crew:nori[\s\S]*?is-sleeping/);
   assert.match(html, /crew:tavi[\s\S]*?ctox-crew-eyes-x/);
+});
+
+// --- H3: memory documents, field of work, takeover sentence ---------------------
+
+test('Memory documents render one line per entry and confirmation rewrites only that entry', () => {
+  const anchors = [
+    '# Anchors', '', '## Entries',
+    '- anchor_id: a1', '- anchor_type: hypothesis', '- statement: Vor dem Import das Schema prüfen.', '- scope: module=reports', '- source_ref: attempt-1',
+    '- anchor_id: a2', '- anchor_type: owner_confirmed', '- statement: Nie ohne Backup migrieren.',
+  ].join('\n');
+  const entries = memoryEntries(anchors, 'anchor_id', 'anchor_type', 'statement');
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries[0], { id: 'a1', tag: 'hypothesis', text: 'Vor dem Import das Schema prüfen.', more: '', scope: 'module=reports', source: 'attempt-1' });
+  const confirmed = confirmAnchorBody(anchors, 'a1');
+  assert.match(confirmed, /anchor_id: a1\n- anchor_type: owner_confirmed/);
+  assert.equal((confirmed.match(/owner_confirmed/g) || []).length, 2);
+  assert.equal(confirmAnchorBody(anchors, 'a2'), anchors);
+  const narrative = memoryEntries('## Entries\n- entry_id: e1\n- event_type: success\n- summary: Import lief.\n- consequence: Schema zuerst.\n', 'entry_id', 'event_type', 'summary', 'consequence');
+  assert.equal(narrative[0].more, 'Schema zuerst.');
+});
+
+test('Field of work is derived, and the takeover sentence reads the router event', () => {
+  const state = { lang: 'de', selectedLive: { key: 'task-1', events: [
+    { kind: 'phase', title: 'x' },
+    { kind: 'crew_selected', title: 'routed: Milo (crew:milo): hat zuletzt drei ähnliche Importe sauber abgeschlossen' },
+  ] } };
+  assert.equal(memberDomainLine({ domain: ['reports', 'imports'], stats: { tasks_total: 14 } }, state), 'Reports, Imports · 14 Einsätze');
+  assert.equal(memberDomainLine({ domain: [], stats: { tasks_total: 0 } }, state), 'noch ohne Fachgebiet');
+  const task = { id: 'queue-task-1', taskId: 'task-1' };
+  assert.equal(taskSelectionSentence(task, state), 'Milo: hat zuletzt drei ähnliche Importe sauber abgeschlossen');
+  assert.equal(taskSelectionSentence({ id: 'queue-task-2', taskId: 'task-2' }, state), '');
+  state.selectedLive.events[1].title = 'assigned: Manuelle Zuordnung vor dem Lease: Nori (crew:nori)';
+  assert.equal(taskSelectionSentence(task, state), 'Nori: Manuelle Zuordnung vor dem Lease');
 });
