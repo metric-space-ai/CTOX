@@ -71,3 +71,20 @@ critical-collection boot p95 target has been verified by this UI measurement.
 Native four-process admission, SSH/QR onboarding, real harness failover and the
 remaining architecture migration requirements remain open. There is no
 production-readiness claim for the Sync architecture or other apps.
+
+## Subsequent release change during acceptance
+
+At 07:29:17 UTC, a separate deployment activated 0.1.46-beta.6 and restarted
+CTOX (PID 2362225). Its source f823420f1 contains the Harness fix plus an Office
+source-synchronization change; release run 34019072184 succeeded. We did not
+activate that release. A follow-up browser reload did not prove beta.6 loaded:
+after the 40-second observation window the UI subsequently rendered 16 nodes
+but still displayed v0.1.46-beta.5. Do not transfer beta.5 measurements or its
+UI acceptance to beta.6. The active-versus-browser version discrepancy remains
+unresolved. Direct unauthenticated manifest requests return 403; no browser
+authentication state was extracted to bypass that boundary. Local 8080/8081
+manifest guesses returned 404 and do not identify the Business OS asset server.
+The existing `requestTenantBusinessOsAsset` control-plane function subsequently
+returned the native `ctox.business-os-shell.v1` manifest with version
+0.1.46-beta.6. Thus the instance asset server and its supported SSH forwarding
+path expose beta.6; the remaining discrepancy is on the hosted/browser path.
