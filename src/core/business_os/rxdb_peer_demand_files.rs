@@ -92,6 +92,24 @@ pub(super) fn demand_file_source_configs(root: &Path) -> Vec<DemandFileSourceCon
     configs
 }
 
+/// File bytes are authoritative storage, never a lossy business projection.
+pub(super) fn is_demand_file_storage_collection(root: &Path, collection: &str) -> bool {
+    if DEMAND_FILE_CHUNK_COLLECTIONS
+        .iter()
+        .any(|source| source.storage_collection == collection)
+    {
+        return true;
+    }
+    // Installed modules cannot shadow built-in schemas. Avoid rescanning
+    // every installed module when opening an ordinary projection writer.
+    if super::rxdb_peer::business_os_schema_contract().contains_key(collection) {
+        return false;
+    }
+    runtime_module_demand_chunk_sources(root)
+        .iter()
+        .any(|(name, _)| name == collection)
+}
+
 /// Phase 4: register a bounded-memory file stream source on the pool's file
 /// fetch registry for each file-bearing chunk collection that is actually
 /// registered on this database. Without this, `rxdb.file.fetch` always returns

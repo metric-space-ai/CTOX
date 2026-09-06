@@ -617,6 +617,16 @@ and loaded by deterministic chunk ids, so opening a file does not scan or
 replicate the full chunk store into IndexedDB. Browser-side chunk writes (for
 uploads/attachments) may still use the chunk collection push path.
 
+Chunk storage is authoritative file data and must never be reduced to
+projection omission markers. Both direct native writes and startup projection
+maintenance exclude storage collections resolved by the canonical demand-file
+registry, including runtime-declared sources. This exemption follows the
+storage collection, so `desktop_files` metadata retains its projection policy.
+Wire frame/chunk limits govern transport; they must not destructively rewrite
+persisted bytes. The native regression
+`demand_file_wire_budget_preserves_bytes_on_write_and_restart` checks oversized
+chunks in actual SQLite tables across writes and reopened startup maintenance.
+
 Runtime-installed modules can declare the same treatment for their own
 collections (SYNC-32): in `collections.schema.json` a collection entry's
 wrapper form may carry `"syncProfile": "eager" | "demand-only" |

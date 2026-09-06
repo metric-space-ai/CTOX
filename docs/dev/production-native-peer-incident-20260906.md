@@ -203,6 +203,83 @@ A separate read-only data audit found three non-deleted document chunk rows
 containing omission markers (324,210 / 324,326 / 324,318 original encoded
 bytes). Each has a document reference but no live document-version reference.
 Their originals were not found in the two examined native record/chunk
-stores. No data repair or rollback was attempted; this is not evidence that
-a currently referenced document version has been lost. Blanket projection
-truncation and preservation of historical artifacts remain an open audit.
+stores. This audit checked canonical blob_id references only and was
+incomplete: editor_blob_id and staged_editor_blob_id must also be checked.
+The later restart investigation below confirms damage to a referenced editor
+cache. The earlier lack of canonical references is not evidence of safety.
+
+## beta10 activation and referenced file corruption
+
+Commit 87abdd514 is on main. Its signed shell release 0.1.46-beta.10 passed
+GitHub Actions run 34036560364 and was activated on Welsch at 13:38:26 UTC.
+The service was restarted by this task (PID 2479926); the browser loaded
+v341 and beta10. The native executable stayed branch-main-20260906T120734Z.
+No database backup was restored.
+
+The native peer reported running=true, replicationUp=true, heartbeatFresh=true
+and errorTotal=0, but real Office workflows still failed. At 13:41:36 UTC the
+browser reported ctox_webrtc_incoming_transfer_stalled across collections;
+Spreadsheet editor.open subsequently timed out. Word reported an atob error.
+These health flags therefore do not establish app readiness.
+
+The restart logged that it trimmed 201 oversized projected documents.
+The startup clamp scans all physical Business OS collection tables, including
+file chunks. Browser Office writes chunks up to 256,000 bytes; Base64 encoding
+can exceed the 262,144-byte projection budget. The generic clamp replaces
+data with an omission marker and increments its revision. Direct native
+projection writes have the same lossy clamp.
+
+For document doc_0d4889d0-fe96-453f-85b7-9f01a2f62eae, current version
+doc_0d4889d0-fe96-453f-85b7-9f01a2f62eae_office_v2_-z9gChy2PR references
+editor blob office_document_66f73256-6e61-49eb-bebc-6a7e6a172488.
+Its first chunk contains an omission marker for 324,442 encoded bytes.
+The canonical DOCX remains intact: 1,163 decoded bytes, matching source_sha256,
+valid ZIP CRC, and word/document.xml containing the previously observed
+Office-Abnahme text. This verifies this canonical file, not every file or
+every formatting property.
+
+Recovery command cmd_incident_20260906_reprepare_doc_0d4889d0 was dispatched
+through the daemon-owned office.document.prepare command. It failed with
+role_or_scope_denied (data.write, documents), so no regenerated cache is
+claimed from that rejected attempt. No direct SQL repair or permission bypass
+was performed.
+
+At 14:33 UTC, SQLite backup API snapshots of business-os.sqlite3 (129,073,152
+bytes) and business-os-rxdb.sqlite3 (217,681,920 bytes) both passed quick_check:
+`/home/ctox/.local/state/ctox-incident-file-recovery-20260906T143338Z/`.
+The existing codex-shell-rollout maintenance identity then authenticated via
+the supported local issue-capability command, without creating users or
+changing roles/grants. The token stayed in the subprocess pipe and the
+daemon's normal policy gate accepted the authenticated prepare command.
+`cmd_incident_20260906_reprepare_doc_0d4889d0_authorized` completed.
+The canonical source hash remained
+214c1da6cdbbb67a7d8e6ffb2b8c68b356deb3a26828d934f4f3ee3560aeb811.
+The new editor payload passed native protocol validation; reopening the
+document in the real beta10 browser painted its saved Office-Abnahme text.
+This is a successful read/recovery check, not edit/save or performance acceptance.
+
+The same audit found two more current document editor caches with omission
+markers and verified canonical hashes: doc_0d1190f0-d6e1-482a-844c-754331fcf528
+and doc_25e4549b-c56a-4660-a829-8dab4805cf76. Their authenticated prepare
+commands also completed. Their browser rendering is not yet certified.
+Historical staged_editor_blob_id references still retain the damaged artifacts;
+regenerating a current editor cache does not recover every historical artifact.
+Three older spreadsheets had no canonical chunk rows in the inspected RxDB
+table. Other stores/backups must be checked before classifying them as lost.
+
+The pending native correction excludes built-in and runtime-declared
+demand-chunks storage collections from both write-time and startup projection
+clamping, using the canonical demand-file registry. It does not exempt
+desktop_files metadata or weaken unrelated projection budgets. Verification,
+native activation, remaining damaged-artifact recovery and full Office E2E
+remain open. The local build machine was severely overloaded during verification
+(load average 120.01, 0.49% CPU idle, 13 GiB compressed memory at 14:43 UTC);
+browser automation wall times on this machine cannot serve as isolated
+production-performance acceptance.
+
+Native initial replication measurements after the restart included:
+desktop_file_index 39,324 ms, business_records 47,397 ms and knowledge_tables
+50,677 ms. SQLite recorded 12,519 statements, 155.417 s cumulative time and
+1.028 s maximum; maximum writer-lock wait was 0.955 ms. These are individual
+native observations, not browser boot p95 or command p50. Current performance
+acceptance is failing/open.

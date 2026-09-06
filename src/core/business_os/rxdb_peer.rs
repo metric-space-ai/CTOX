@@ -2661,7 +2661,7 @@ async fn run_native_peer(
     if repaired_revisions > 0 {
         eprintln!("[business-os] repaired {repaired_revisions} legacy business_commands revisions");
     }
-    let clamped_documents = clamp_oversized_projected_documents(&database_path)
+    let clamped_documents = clamp_oversized_projected_documents(&root, &database_path)
         .context("clamp oversized projected Business OS documents")?;
     if clamped_documents > 0 {
         eprintln!(
@@ -8071,10 +8071,15 @@ fn repair_legacy_business_command_revisions(database_path: &Path) -> anyhow::Res
 /// Runs once per peer bring-up, next to the legacy-revision repair, and uses
 /// the same revision contract: `revision` column and `data._rev` are written
 /// together, with the height incremented so peers pull the trimmed document.
-fn clamp_oversized_projected_documents(database_path: &Path) -> anyhow::Result<usize> {
+fn clamp_oversized_projected_documents(root: &Path, database_path: &Path) -> anyhow::Result<usize> {
     if !database_path.is_file() {
         return Ok(0);
     }
+    let file_storage_collections: HashSet<String> =
+        super::rxdb_peer_demand_files::demand_file_source_configs(root)
+            .into_iter()
+            .map(|source| source.storage_collection)
+            .collect();
     let mut conn = Connection::open(database_path)?;
     let tables = {
         let mut statement = conn.prepare(
@@ -8087,6 +8092,13 @@ fn clamp_oversized_projected_documents(database_path: &Path) -> anyhow::Result<u
     let transaction = conn.transaction()?;
     let mut clamped = 0usize;
     for table in tables {
+        let collection = table
+            .strip_prefix("ctox_business_os__")
+            .and_then(|name| name.rsplit_once("__v"))
+            .map(|(collection, _)| collection);
+        if collection.is_some_and(|name| file_storage_collections.contains(name)) {
+            continue;
+        }
         let quoted = sqlite_quote_identifier(&table);
         let rows = {
             let Ok(mut statement) = transaction.prepare(&format!(
@@ -9044,7 +9056,7 @@ fn normalize_schema_indexes(value: &mut Value) {
     }
 }
 
-fn business_os_schema_contract() -> &'static HashMap<String, Value> {
+pub(super) fn business_os_schema_contract() -> &'static HashMap<String, Value> {
     static CONTRACT: OnceLock<HashMap<String, Value>> = OnceLock::new();
     CONTRACT.get_or_init(|| {
         serde_json::from_str(include_str!("business_os_schema_contract.json"))
@@ -11468,6 +11480,61 @@ pub(in crate::business_os) mod tests {
         assert!(schema.properties.contains_key("title"));
         assert!(!schema.properties.contains_key("schema"));
         assert!(!schema.properties.contains_key("conflictStrategy"));
+        Ok(())
+    }
+
+    #[test]
+    fn demand_file_wire_budget_preserves_bytes_on_write_and_restart() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let mut extras = serde_json::Map::new();
+        extras.insert("syncProfile".to_owned(), json!("demand-chunks"));
+        write_sync_profile_chunk_module(root, &extras, demand_chunk_schema_properties())?;
+        let path = store::rxdb_store_path(root);
+        fs::create_dir_all(path.parent().expect("database parent"))?;
+        let conn = Connection::open(&path)?;
+        let collections: HashSet<_> =
+            super::super::rxdb_peer_demand_files::demand_file_source_configs(root)
+                .into_iter()
+                .map(|source| source.storage_collection)
+                .collect();
+        assert!(collections.contains("camscan_blob_chunks"));
+        assert!(!collections.contains("desktop_files"));
+        let bytes = "A".repeat(store::MAX_PROJECTED_DOCUMENT_BYTES + 65_536);
+        let mut snapshots = Vec::new();
+        for collection in collections {
+            let table = format!("ctox_business_os__{collection}__v0");
+            conn.execute_batch(&format!(
+                "CREATE TABLE {table} (id TEXT PRIMARY KEY, revision TEXT,
+                 data TEXT NOT NULL, lastWriteTime REAL NOT NULL, deleted INTEGER)"
+            ))?;
+            store::upsert_rxdb_collection_record(
+                root,
+                &collection,
+                "preserved-chunk",
+                1,
+                json!({"id":"preserved-chunk", "data":bytes, "idx":0,
+                       "blob_id":"preserved", "file_id":"preserved"}),
+            )?;
+            let raw: String = conn.query_row(
+                &format!("SELECT data FROM {table} WHERE id = 'preserved-chunk'"),
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(serde_json::from_str::<Value>(&raw)?["data"], bytes);
+            snapshots.push((table, raw));
+        }
+        drop(conn);
+        assert_eq!(clamp_oversized_projected_documents(root, &path)?, 0);
+        let reopened = Connection::open(&path)?;
+        for (table, before) in snapshots {
+            let after: String = reopened.query_row(
+                &format!("SELECT data FROM {table} WHERE id = 'preserved-chunk'"),
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(after, before, "{table}: restart changed stored file bytes");
+        }
         Ok(())
     }
 
