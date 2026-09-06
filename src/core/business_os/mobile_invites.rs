@@ -3,10 +3,10 @@
 
 use anyhow::Context;
 use base64::Engine;
-use qrcode::{EcLevel, QrCode, render::svg};
+use qrcode::{render::svg, EcLevel, QrCode};
 use ring::rand::SecureRandom;
-use rusqlite::{OptionalExtension, params};
-use serde_json::{Value, json};
+use rusqlite::{params, OptionalExtension};
+use serde_json::{json, Value};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -782,16 +782,12 @@ mod tests {
         assert!(
             super::claims_for_webrtc_invite_secret(root.path(), token, invite_expiry).is_none()
         );
-        assert!(
-            created["pairingUri"]
-                .as_str()
-                .is_some_and(|value| value.starts_with("workjet://pair?payload="))
-        );
-        assert!(
-            created["qrSvg"]
-                .as_str()
-                .is_some_and(|value| value.contains("<svg") && value.contains("<path"))
-        );
+        assert!(created["pairingUri"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("workjet://pair?payload=")));
+        assert!(created["qrSvg"]
+            .as_str()
+            .is_some_and(|value| value.contains("<svg") && value.contains("<path")));
         assert!(super::super::store::verify_capability_role(root.path(), token).is_none());
         assert!(
             super::super::store::verified_webrtc_capability_claims(root.path(), token).is_some()
