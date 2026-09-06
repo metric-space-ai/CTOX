@@ -136,6 +136,15 @@ for (const file of readdirSync(rustPluginDir).filter((name) => name.endsWith('.r
   if (!appBuild || loaderBusters.some((buster) => buster !== appBuild)) {
     offenders.push('db.js and sync.js must use identical RxDB loader busters matching APP_BUILD');
   }
+  // A fresh outer shell can otherwise reuse a four-hour-cached loader and
+  // silently execute the previous runtime. Pin the complete import chain,
+  // not just agreement between two equally stale loader importers.
+  const bundleBuster = loader.match(/ctox-rxdb-js\.mjs\?v=([^'"\s]+)/)?.[1];
+  const shellEntryBuster = readFileSync(resolve(repoRoot, 'src/apps/business-os/index.html'), 'utf8')
+    .match(/<script[^>]+src="app\.js\?v=([^"]+)"/)?.[1];
+  if (!bundleBuster || bundleBuster !== appBuild || shellEntryBuster !== appBuild) {
+    offenders.push('shell entry, APP_BUILD, RxDB loader and bundle must share one cache revision');
+  }
 }
 
 if (offenders.length) {

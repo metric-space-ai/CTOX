@@ -10869,6 +10869,7 @@ struct RxdbCollectionWriter {
     database_path: PathBuf,
     table: String,
     columns: HashSet<String>,
+    demand_file_storage: bool,
     last_replication_lwt: i64,
 }
 
@@ -10915,6 +10916,9 @@ impl RxdbCollectionWriter {
             database_path: path,
             table,
             columns,
+            demand_file_storage: super::rxdb_peer_demand_files::is_demand_file_storage_collection(
+                root, collection,
+            ),
             last_replication_lwt,
         }))
     }
@@ -10933,6 +10937,7 @@ impl RxdbCollectionWriter {
             updated_at_ms,
             updated_at_ms,
             payload,
+            self.demand_file_storage,
             false,
         )?;
         self.notify_committed_change();
@@ -10971,6 +10976,7 @@ impl RxdbCollectionWriter {
             source_updated_at_ms,
             replication_lwt,
             payload,
+            self.demand_file_storage,
             false,
         )?;
         self.notify_committed_change();
@@ -10997,6 +11003,7 @@ impl RxdbCollectionWriter {
                 "is_deleted": true,
                 "_deleted": true,
             }),
+            self.demand_file_storage,
             true,
         )?;
         self.notify_committed_change();
@@ -11023,6 +11030,7 @@ fn upsert_rxdb_collection_record_with_writer(
     payload_updated_at_ms: i64,
     replication_lwt_ms: i64,
     mut payload: Value,
+    demand_file_storage: bool,
     deleted: bool,
 ) -> anyhow::Result<()> {
     let mut previous_revision = None;
@@ -11062,7 +11070,9 @@ fn upsert_rxdb_collection_record_with_writer(
     // record is scrubbed too. The verified token lives only in the native
     // business_commands.client_context_json column, which peers never receive.
     redact_document_client_context_secrets(&mut payload);
-    clamp_projected_document_to_wire_budget(table, record_id, &mut payload);
+    if !demand_file_storage {
+        clamp_projected_document_to_wire_budget(table, record_id, &mut payload);
+    }
     let mut columns = vec!["id".to_string(), "data".to_string()];
     let mut values = vec![
         SqlValue::Text(record_id.to_string()),

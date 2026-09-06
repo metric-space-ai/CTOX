@@ -623,6 +623,16 @@ and loaded by deterministic chunk ids, so opening a file does not scan or
 replicate the full chunk store into IndexedDB. Browser-side chunk writes (for
 uploads/attachments) may still use the chunk collection push path.
 
+Chunk storage is authoritative file data and must never be reduced to
+projection omission markers. Both direct native writes and startup projection
+maintenance exclude storage collections resolved by the canonical demand-file
+registry, including runtime-declared sources. This exemption follows the
+storage collection, so `desktop_files` metadata retains its projection policy.
+Wire frame/chunk limits govern transport; they must not destructively rewrite
+persisted bytes. The native regression
+`demand_file_wire_budget_preserves_bytes_on_write_and_restart` checks oversized
+chunks in actual SQLite tables across writes and reopened startup maintenance.
+
 Runtime-installed modules can declare the same treatment for their own
 collections (SYNC-32): in `collections.schema.json` a collection entry's
 wrapper form may carry `"syncProfile": "eager" | "demand-only" |
@@ -1022,8 +1032,11 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
 **Cache-buster discipline.** The only bundle URL lives in
 `src/apps/business-os/shared/rxdb-runtime.js`. Both `shared/db.js` and
 `shared/sync.js` import that loader with the **same literal APP_BUILD query
-buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The data-plane guard checks both
-values against each other and the shell build.
+buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The bundle query revision and
+the HTML entry's `app.js` query must also equal APP_BUILD. The data-plane
+guard checks this entire chain: shared static assets can remain fresh in
+browser/CDN caches for four hours, so changing only the bundle URL inside
+an unchanged loader URL does not deliver the new runtime to existing users.
 
 Cancelled replication transfers must re-check their lifetime after asynchronous
 storage reads, dirty-marker updates, and transport responses. A retired state
@@ -1039,8 +1052,9 @@ facade, so it carries no buster and is no longer checked by the guard.
 A different loader URL can create a second module instance; an unversioned
 loader can keep an old bundle cached after a deployment. After any runtime
 `src/` change, rebuild dist with the command above and bump the single bundle
-buster in `rxdb-runtime.js`. Keep both loader import busters aligned with
-APP_BUILD. The shared promise resets after import rejection, so a later call
+buster in `rxdb-runtime.js`, APP_BUILD, the HTML entry and both loader imports
+to the same new revision. Shell-only build revisions also advance the canonical
+bundle URL even when its bytes are unchanged. The shared promise resets after import rejection, so a later call
 can retry the same URL without creating a second bundle identity.
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build

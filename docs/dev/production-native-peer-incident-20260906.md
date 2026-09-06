@@ -1,6 +1,77 @@
 # Production incident: native peer recovery, 2026-09-06
 
-Status at 11:14 UTC: partial recovery; not a production-readiness acceptance.
+## Native file-preservation test result
+
+The release-mode retry completed successfully at 16:22:28 UTC. Its journal
+records exactly one test passed, zero failed/ignored, 3,201 filtered, in
+0.02 seconds after a 7m20s build. It exercised the real root test binary
+/home/ctox/.cache/ctox/build-office-20260906/release/deps/ctox-b76f227b4caead72.
+The three changed native files in the tested main576 source exactly match the
+immutable fbeca32b7 archive by SHA256:
+- rxdb_peer.rs: 16711dbc104109229ab66dbbbe1f63ad3a8a611da0e74d6aff202d0c452fbb41
+- rxdb_peer_demand_files.rs: c3d1040367ff7af4b3ec0d8fd5acf93aed8dd50eda1371c6490b263fd9a861e7
+- store.rs: 549054acffb3e6ed3a2c922fd62f9cc421e5e548500a31951dca813ecce8fd06
+The peak was 8.3 GiB; this explains why the separate 6 GiB attempt could not
+finish compilation. The successful assertion is a file-store restart test,
+not production activation or the complete user-story/performance matrix.
+
+## Beta13 read checks and repeated Word cache recovery
+
+On the current beta13 shell, the real authenticated browser again showed
+the CTOX Live Flow, five tasks, the flow diagram and token counts. The beta9
+CSV acceptance file painted its saved rows (12/42, 7/8, 19/50). XLSX X2 painted
+its saved edit marker and preserved unrelated values. These are actual
+read/reopen observations, not a new edit/save or full performance acceptance.
+
+The native peer reported running=true, replicationUp=true, fresh heartbeat,
+health.errorTotal=0. The last startup projection durations remained high:
+business_records 15,383 ms, knowledge_tables 21,237 ms and desktop_file_index
+7,322 ms. Command observation had only two samples, mean 7,503 ms and maximum
+9,704 ms; these are not the specified local-fixture p50. A browser screenshot
+taken 30 seconds after CSV selection and 48 seconds after XLSX selection
+confirmed rendering, but those sampling delays are not measured paint latency.
+
+A subsequent read-only audit found seven omitted document chunk rows, zero
+omitted spreadsheet chunk rows, and one currently selected document version
+still pointing its editor_blob_id at a damaged chunk. The original three
+regenerated editor pointers remained repaired; historical staged pointers
+still name damaged artifacts. The newly affected current Word version was
+doc_0d4889d0-fe96-453f-85b7-9f01a2f62eae_office_v3_RDwUEoRItd.
+Its canonical DOCX passed SHA256 and ZIP CRC verification: 1,188 bytes,
+52a6477fb766d1d4f54790edba8c7f34a7e0808ccd966c5dd397e1503200fc5f.
+
+Fresh SQLite backup API copies of both stores passed quick_check at
+/home/ctox/.local/state/ctox-incident-file-recovery-20260906T160847Z/.
+The authenticated command
+cmd_incident_20260906_reprepare_doc_0d4889d0_v3_authorized completed using
+the existing maintenance principal and unchanged permissions. The token
+remained in the subprocess pipe. No direct SQL repair was used. The real beta13 browser subsequently painted the saved, bold Word text from that current version.
+
+The separate release-mode native regression initially failed compilation
+because its required pi-sidecar bundle was absent. This was another build
+failure, not a failed assertion or passing test. Native activation remains
+unverified. The destructive native startup clamp is still in the running
+release; successful cache regeneration does not remove that root cause.
+
+A retry of the original immutable fbeca32b7 source is now isolated in
+ctox-file-preservation-debug0-fbeca32b7.service, invocation
+c52d5317229540a9b595e1e89d0681cb, using test-debug0.sh/test-debug0.log under
+the original test root. It reuses the built sidecar and Cargo dependencies,
+sets only profile.test.package.ctox.debug=0, removes the virtual-address limit,
+and retains MemoryMax=6 GiB, one CPU, Nice=10, one Cargo job and a one-hour
+runtime bound. The test assertions and source are unchanged. The separate
+release-mode unit was confirmed failed/inactive before this retry started. The debug0 retry subsequently hit its physical MemoryMax limit (systemd Result=oom-kill, ExecMainStatus=15), before any test result. No higher-limit duplicate was started: production ctox-real alone held approximately 10.4 GiB RSS (10.3 GiB anonymous) and another release-mode test was using several GiB. Both aborted own attempts remain non-passing verification.
+
+Status: partial recovery. Welsch boots; the real beta13 browser renders the
+Harness flow and the checked Word, CSV and XLSX contents. The native storage
+regression passes, but its production activation remains outstanding.
+Full edit/save/restart E2E, historical artifact recovery and performance
+acceptance remain open. A separate fresh pre-activation backup at
+/home/ctox/.local/state/ctox-incident-pre-native-20260906T162646Z/ passed
+quick_check for both stores. Its file-chunk-manifest.json records data hashes
+for 1,057 chunks across desktop files, Word and spreadsheets, including the
+seven previously omitted Word chunks. This provides a comparison baseline;
+it is not a claim that activation or post-activation verification occurred.
 
 ## Routing mitigation already active
 
@@ -203,6 +274,139 @@ A separate read-only data audit found three non-deleted document chunk rows
 containing omission markers (324,210 / 324,326 / 324,318 original encoded
 bytes). Each has a document reference but no live document-version reference.
 Their originals were not found in the two examined native record/chunk
-stores. No data repair or rollback was attempted; this is not evidence that
-a currently referenced document version has been lost. Blanket projection
-truncation and preservation of historical artifacts remain an open audit.
+stores. This audit checked canonical blob_id references only and was
+incomplete: editor_blob_id and staged_editor_blob_id must also be checked.
+The later restart investigation below confirms damage to a referenced editor
+cache. The earlier lack of canonical references is not evidence of safety.
+
+## beta10 activation and referenced file corruption
+
+Commit 87abdd514 is on main. Its signed shell release 0.1.46-beta.10 passed
+GitHub Actions run 34036560364 and was activated on Welsch at 13:38:26 UTC.
+The service was restarted by this task (PID 2479926); the browser loaded
+v341 and beta10. The native executable stayed branch-main-20260906T120734Z.
+No database backup was restored.
+
+The native peer reported running=true, replicationUp=true, heartbeatFresh=true
+and errorTotal=0, but real Office workflows still failed. At 13:41:36 UTC the
+browser reported ctox_webrtc_incoming_transfer_stalled across collections;
+Spreadsheet editor.open subsequently timed out. Word reported an atob error.
+These health flags therefore do not establish app readiness.
+
+The restart logged that it trimmed 201 oversized projected documents.
+The startup clamp scans all physical Business OS collection tables, including
+file chunks. Browser Office writes chunks up to 256,000 bytes; Base64 encoding
+can exceed the 262,144-byte projection budget. The generic clamp replaces
+data with an omission marker and increments its revision. Direct native
+projection writes have the same lossy clamp.
+
+For document doc_0d4889d0-fe96-453f-85b7-9f01a2f62eae, current version
+doc_0d4889d0-fe96-453f-85b7-9f01a2f62eae_office_v2_-z9gChy2PR references
+editor blob office_document_66f73256-6e61-49eb-bebc-6a7e6a172488.
+Its first chunk contains an omission marker for 324,442 encoded bytes.
+The canonical DOCX remains intact: 1,163 decoded bytes, matching source_sha256,
+valid ZIP CRC, and word/document.xml containing the previously observed
+Office-Abnahme text. This verifies this canonical file, not every file or
+every formatting property.
+
+Recovery command cmd_incident_20260906_reprepare_doc_0d4889d0 was dispatched
+through the daemon-owned office.document.prepare command. It failed with
+role_or_scope_denied (data.write, documents), so no regenerated cache is
+claimed from that rejected attempt. No direct SQL repair or permission bypass
+was performed.
+
+At 14:33 UTC, SQLite backup API snapshots of business-os.sqlite3 (129,073,152
+bytes) and business-os-rxdb.sqlite3 (217,681,920 bytes) both passed quick_check:
+`/home/ctox/.local/state/ctox-incident-file-recovery-20260906T143338Z/`.
+The existing codex-shell-rollout maintenance identity then authenticated via
+the supported local issue-capability command, without creating users or
+changing roles/grants. The token stayed in the subprocess pipe and the
+daemon's normal policy gate accepted the authenticated prepare command.
+`cmd_incident_20260906_reprepare_doc_0d4889d0_authorized` completed.
+The canonical source hash remained
+214c1da6cdbbb67a7d8e6ffb2b8c68b356deb3a26828d934f4f3ee3560aeb811.
+The new editor payload passed native protocol validation; reopening the
+document in the real beta10 browser painted its saved Office-Abnahme text.
+This is a successful read/recovery check, not edit/save or performance acceptance.
+
+The same audit found two more current document editor caches with omission
+markers and verified canonical hashes: doc_0d1190f0-d6e1-482a-844c-754331fcf528
+and doc_25e4549b-c56a-4660-a829-8dab4805cf76. Their authenticated prepare
+commands also completed. The W3 document subsequently painted its saved
+"Greppy browser readiness W3" text in the real browser. The third document's
+rendering was not confirmed before the dedicated test tab was closed.
+Historical staged_editor_blob_id references still retain the damaged artifacts;
+regenerating a current editor cache does not recover every historical artifact.
+Three older spreadsheets had no canonical chunk rows in the inspected RxDB
+table. Other stores/backups must be checked before classifying them as lost.
+
+The pending native correction excludes built-in and runtime-declared
+demand-chunks storage collections from both write-time and startup projection
+clamping, using the canonical demand-file registry. It does not exempt
+desktop_files metadata or weaken unrelated projection budgets. Verification,
+native activation, remaining damaged-artifact recovery and full Office E2E
+remain open. The local build machine was severely overloaded during verification
+(load average 120.01, 0.49% CPU idle, 13 GiB compressed memory at 14:43 UTC);
+browser automation wall times on this machine cannot serve as isolated
+production-performance acceptance.
+
+The correction is on main in 88b4af3f8, merged with the subsequent retired-
+transfer and complete runtime-import-chain corrections in 812dd5a5d.
+The merged data-plane guard and retired-transfer boundary checks pass.
+CI run 34040775617 passed the Linux ARM native compile check. The aggregate
+run is not green: the Linux x86 job stops at the Explorer module-local
+contextmenu freeze guard; Desktop dependency audits stop at xmldom/fast-uri
+advisories. No guard or audit was weakened.
+
+The root SQLite preservation regression was still compiling on the overloaded
+local host. Its first invocation started before the built-in registry lookup
+optimization and the main merge; it cannot certify the final tree on its own.
+Adding the regression as an explicit Linux ARM CI execution step was rejected
+by GitHub because the available OAuth credential lacks workflow scope. That
+unpublished workflow change was withdrawn; the existing CI remains unchanged.
+The native preservation regression still needs a completed local run against
+the final source. No native rollout has followed this source change.
+
+Latest public route probes returned HTTP 200 for Welsch, SKF, Thesen and
+Miltonticket (individual TTFB 0.358, 0.313, 0.952 and 0.909 seconds respectively).
+These remain route probes, not authenticated app or performance acceptance.
+The beta9 CSV acceptance file still failed with Office RPC editor.open timeout
+in the real beta10 browser.
+
+## Isolated final-source native verification in progress
+
+The local test invocation was deliberately cancelled through its supervisor
+(exit 143 / child -15), after the final-source server run started. It did not
+execute the SQLite regression and is not a passing verification result.
+
+An immutable archive of main commit fbeca32b7 was uploaded and verified:
+SHA256 1d5762e5036b900a947994635192019a1b01a73ec87ff1b2453b05e89362b542.
+The separate source/test root on Welsch is
+`/home/ctox/.cache/ctox/file-preservation-fbeca32b7/`.
+The test unit is `ctox-file-preservation-test-fbeca32b7.service`,
+invocation 54a69f0fbf6540a1927f8a375e61df06. It builds the pinned sidecar and
+runs the exact native SQLite preservation regression. Source, Cargo target
+and temporary test databases are confined to this separate directory.
+`test.sh` and `test.log` retain the recipe and output.
+
+The unit has one CPU of quota, Nice=10, MemoryMax=6 GiB and a one-hour runtime
+bound; Cargo uses one build job and a 6 GiB virtual-address-space limit.
+These resource limits were read back from systemd. The run subsequently failed
+with Cargo exit 101 / rustc SIGABRT: `memory allocation of 27148 bytes failed`.
+The SQLite test did not execute; this is not a pass. The 6 GiB virtual-address
+limit was reached during compilation. Another isolated release-mode regression
+unit was already running when this result was inspected, so no duplicate retry
+was started. The production service has not been switched to the candidate by
+this task.
+
+The existing install rollback also needs explicit handling before activation:
+`rollback_to_previous_release` restores the pre-build database backup on
+service/unit refresh failures. An executable recovery must not rewind writes
+that occurred during a build. Do not invoke that path as an unchecked fallback.
+
+Native initial replication measurements after the restart included:
+desktop_file_index 39,324 ms, business_records 47,397 ms and knowledge_tables
+50,677 ms. SQLite recorded 12,519 statements, 155.417 s cumulative time and
+1.028 s maximum; maximum writer-lock wait was 0.955 ms. These are individual
+native observations, not browser boot p95 or command p50. Current performance
+acceptance is failing/open.
