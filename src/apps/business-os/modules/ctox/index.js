@@ -29,21 +29,12 @@ const TASK_SOURCE_COLLECTIONS = ['ctox_queue_tasks', 'business_commands', 'ctox_
 const labels = {
   de: {
     now: 'Jetzt',
-    noActiveWork: 'Keine aktive Arbeit',
-    idleDetail: 'Wartet auf den nächsten CTOX-Lauf oder ein Live-Ereignis.',
     loadingRuntime: 'CTOX Runtime wird geladen',
     loadingRuntimeDetail: 'Flow, Queue und Status werden aktualisiert.',
-    loadingQueue: 'Tasks werden geladen',
-    loadingQueueDetail: 'Synchronisiere aktuelle Arbeit.',
     live: 'Live',
-    recentWork: 'Zuletzt',
     tasks: 'Tasks',
     newestFirst: 'neueste zuerst',
     taskSteps: 'Zwischenschritte',
-    currentWork: 'Aktuell',
-    waitingWork: 'Wartet',
-    doneWork: 'Erledigt',
-    blockedWork: 'Blockiert',
     selectedTask: 'Ausgewählter Task',
     inboundChannels: 'Inbound-Kanäle',
     inboundItems: 'Eingänge',
@@ -55,8 +46,6 @@ const labels = {
     editTask: 'Task bearbeiten',
     taskTitle: 'Titel',
     taskPrompt: 'Prompt',
-    taskPromptRedacted: 'Prompt ausgeblendet, da er Code, Stack- oder Web-Stack-Daten enthält.',
-    redactedTechnicalDetail: 'Technische Details ausgeblendet',
     saveTask: 'Speichern',
     resumeTask: 'Als Folgeauftrag fortsetzen',
     deleteTask: 'Löschen',
@@ -65,6 +54,16 @@ const labels = {
     taskResumed: 'Folgeauftrag angelegt.',
     taskDeleted: 'Task gelöscht.',
     taskActionFailed: 'Aktion fehlgeschlagen.',
+    zoomOut: "Verkleinern",
+    zoomIn: "Vergrößern",
+    flowControls: "Flussdiagramm-Steuerung",
+    activityTimeline: "Aktivitätsverlauf",
+    selectActivityEvent: "Ereignis wählen",
+    noEventDetail: "Zu diesem Ereignis liegt noch kein Detail vor.",
+    flowDiagram: "CTOX-Arbeitsfluss",
+    laneCommunication: "Kommunikation mit dem Owner",
+    laneQueue: "Warteschlange und Ausführung",
+    laneEvidence: "Nachweisprüfung",
     crewHome: "Crew zu Hause",
     atHome: "zu Hause",
     restingAfterFailure: "erholt sich nach einem Fehlschlag",
@@ -166,8 +165,6 @@ const labels = {
     stationDetail: 'Stationsdetails',
     tools: 'Werkzeuge',
     openTaskDetail: 'Details im Drawer anzeigen',
-    activityPath: 'Aktivitätspfad',
-    finishedWork: 'Erledigt',
     liveFlow: 'CTOX Live Flow',
     doingNow: 'Was CTOX gerade tut',
     measurements: 'Messung',
@@ -199,13 +196,8 @@ const labels = {
     timeline: 'Timeline',
     queue: 'Pipeline',
     active: 'aktiv',
-    nowQueue: 'Jetzt',
-    messages: 'Nachrichten',
     tickets: 'Tickets',
-    backlog: 'Backlog',
     task: 'Neue Aufgabe',
-    sendNow: 'Direkt senden',
-    addQueue: 'In Queue',
     instruction: 'CTOX Anweisung',
     priority: 'Priorität',
     send: 'Senden',
@@ -214,23 +206,10 @@ const labels = {
     model: 'Modell',
     mode: 'Modus',
     context: 'Kontext',
-    maxRun: 'Max. Laufzeit',
-    applyModel: 'Modell anwenden',
-    communicationRule: 'Kommunikationsregel',
-    verifyRule: 'Regel prüfen',
-    queueAction: 'CTOX Live Flow weiterführen',
-    addTask: 'Aufgabe anlegen',
     importTasks: 'Tasks importieren',
     exportTasks: 'Tasks exportieren',
     tasksImported: '{count} Tasks importiert.',
     taskImportFailed: 'Import fehlgeschlagen — keine importierbaren Tasks in der Datei.',
-    chatToCtox: 'Chat to CTOX',
-    workWithData: 'Mit Daten arbeiten',
-    modifyApp: 'App modifizieren',
-    contextPrompt: 'Was soll CTOX hier tun oder prüfen?',
-    missingMessage: 'Nachricht fehlt.',
-    chatNotReady: 'Chat ist noch nicht bereit.',
-    openChat: 'Öffne Chat...',
     noWorkHere: 'Hier liegt gerade keine Arbeit.',
     syncingTasks: 'Tasks werden synchronisiert.',
     noRecentWork: 'Noch keine aktuelle Arbeit erfasst.',
@@ -238,8 +217,6 @@ const labels = {
     routing: 'Routing',
     inbound: 'Inbound',
     outbound: 'Outbound',
-    ticketsOpen: 'Offene Tickets',
-    runtimePolicy: 'Runtime / Policies',
     queued: 'Command angelegt',
     webStack: 'Web Stack',
     webStackSources: 'Quellen',
@@ -279,8 +256,6 @@ const labels = {
     auxHide: 'Status & Quellen ausblenden',
     harnessKicker: 'Harness',
     taskSearch: 'Tasks suchen',
-    cardsView: 'Kachelansicht',
-    compactFlowView: 'Kompakter Live Flow',
     showAsList: 'Als Liste anzeigen',
     showAsCards: 'Als Karten anzeigen',
     filters: 'Filter',
@@ -301,7 +276,6 @@ const labels = {
     pinTask: 'Task anpinnen',
     unpinTask: 'Pin lösen',
     pinned: 'Angepinnt',
-    sessionPins: 'Pins gelten für diese Sitzung',
     pipelineQueued: 'Queue',
     pipelineWorking: 'Arbeit',
     pipelineReview: 'Review',
@@ -310,21 +284,12 @@ const labels = {
   },
   en: {
     now: 'Now',
-    noActiveWork: 'No active work',
-    idleDetail: 'Waiting for the next CTOX run or live event.',
     loadingRuntime: 'Loading CTOX runtime',
     loadingRuntimeDetail: 'Updating flow, queue, and status.',
-    loadingQueue: 'Loading tasks',
-    loadingQueueDetail: 'Syncing current work.',
     live: 'Live',
-    recentWork: 'Recent work',
     tasks: 'Tasks',
     newestFirst: 'newest first',
     taskSteps: 'Steps',
-    currentWork: 'Current',
-    waitingWork: 'Waiting',
-    doneWork: 'Done',
-    blockedWork: 'Blocked',
     selectedTask: 'Selected task',
     inboundChannels: 'Inbound channels',
     inboundItems: 'inbound',
@@ -336,8 +301,6 @@ const labels = {
     editTask: 'Edit task',
     taskTitle: 'Title',
     taskPrompt: 'Prompt',
-    taskPromptRedacted: 'Prompt hidden because it contains code, stack, or Web Stack data.',
-    redactedTechnicalDetail: 'Technical details hidden',
     saveTask: 'Save',
     resumeTask: 'Continue as follow-up',
     deleteTask: 'Delete',
@@ -346,6 +309,16 @@ const labels = {
     taskResumed: 'Follow-up task queued.',
     taskDeleted: 'Task deleted.',
     taskActionFailed: 'Action failed.',
+    zoomOut: "Zoom out",
+    zoomIn: "Zoom in",
+    flowControls: "Flow chart controls",
+    activityTimeline: "Activity timeline",
+    selectActivityEvent: "Select activity event",
+    noEventDetail: "No detail is available for this event yet.",
+    flowDiagram: "CTOX work flow",
+    laneCommunication: "Owner communication",
+    laneQueue: "Queue and execution",
+    laneEvidence: "Evidence check",
     crewHome: "Crew at home",
     atHome: "at home",
     restingAfterFailure: "recovering after a failure",
@@ -447,8 +420,6 @@ const labels = {
     stationDetail: 'Station details',
     tools: 'Tools',
     openTaskDetail: 'Show details in drawer',
-    activityPath: 'Activity path',
-    finishedWork: 'Finished work',
     liveFlow: 'CTOX live flow',
     doingNow: 'What CTOX is doing now',
     measurements: 'Measurements',
@@ -480,13 +451,8 @@ const labels = {
     timeline: 'Timeline',
     queue: 'Pipeline',
     active: 'active',
-    nowQueue: 'Now',
-    messages: 'Messages',
     tickets: 'Tickets',
-    backlog: 'Backlog',
     task: 'New task',
-    sendNow: 'Send now',
-    addQueue: 'Add to queue',
     instruction: 'CTOX instruction',
     priority: 'Priority',
     send: 'Send',
@@ -495,23 +461,10 @@ const labels = {
     model: 'Model',
     mode: 'Mode',
     context: 'Context',
-    maxRun: 'Max run time',
-    applyModel: 'Apply model',
-    communicationRule: 'Communication rule',
-    verifyRule: 'Verify rule',
-    queueAction: 'Continue CTOX live flow',
-    addTask: 'Add task',
     importTasks: 'Import tasks',
     exportTasks: 'Export tasks',
     tasksImported: '{count} tasks imported.',
     taskImportFailed: 'Import failed — no importable tasks in the file.',
-    chatToCtox: 'Chat to CTOX',
-    workWithData: 'Work with data',
-    modifyApp: 'Modify app',
-    contextPrompt: 'What should CTOX do or check here?',
-    missingMessage: 'Message is missing.',
-    chatNotReady: 'Chat is not ready yet.',
-    openChat: 'Opening chat...',
     noWorkHere: 'No work here right now.',
     syncingTasks: 'Syncing tasks.',
     noRecentWork: 'No recent work recorded yet.',
@@ -519,8 +472,6 @@ const labels = {
     routing: 'Routing',
     inbound: 'Inbound',
     outbound: 'Outbound',
-    ticketsOpen: 'Open tickets',
-    runtimePolicy: 'Runtime / policies',
     queued: 'Command queued',
     webStack: 'Web Stack',
     webStackSources: 'Sources',
@@ -560,8 +511,6 @@ const labels = {
     auxHide: 'Hide status & sources',
     harnessKicker: 'Harness',
     taskSearch: 'Search tasks',
-    cardsView: 'Card view',
-    compactFlowView: 'Compact live flow',
     showAsList: 'Show as list',
     showAsCards: 'Show as cards',
     filters: 'Filters',
@@ -582,7 +531,6 @@ const labels = {
     pinTask: 'Pin task',
     unpinTask: 'Unpin task',
     pinned: 'Pinned',
-    sessionPins: 'Pins last for this session',
     pipelineQueued: 'Queued',
     pipelineWorking: 'Working',
     pipelineReview: 'Review',
@@ -1901,19 +1849,32 @@ function recentWebStackBrowserExtracts(state) {
     .sort((left, right) => Date.parse(right.timestamp || 0) - Date.parse(left.timestamp || 0));
 }
 
+// The Web Stack overview lives in the drawer (it is runtime plumbing, not part
+// of the harness view). The header icon opens it; the panel markup is unchanged.
+function openWebStackDrawer(state) {
+  state.detailDrawer = { type: 'webstack' };
+  syncDetailDrawer(state);
+  renderMain(state);
+  void refreshWebStackPanel(state);
+}
+
+function webStackDrawer(state) {
+  const body = document.createElement('div');
+  body.className = 'drawer-body ctox-task-drawer ctox-webstack-drawer';
+  body.setAttribute('data-context-record-type', 'ctox_web_stack');
+  body.innerHTML = webStackPanel({ ...state, webStackPanelOpen: true });
+  wireWebStackPanel(state, body);
+  return body;
+}
+
 function wireWebStackPanel(state, root) {
   root.querySelector('[data-webstack-close]')?.addEventListener('click', () => {
-    state.webStackPanelOpen = false;
-    const panel = root.querySelector('[data-webstack-panel]');
-    if (panel) panel.hidden = true;
-    const toggle = root.querySelector('[data-webstack-toggle]');
-    toggle?.classList.remove('is-active');
-    toggle?.setAttribute('aria-pressed', 'false');
-    toggle?.setAttribute('aria-expanded', 'false');
+    closeDetailDrawer(state);
+    renderMain(state);
   });
   root.querySelector('[data-webstack-check-projection]')?.addEventListener('click', async () => {
     state.webStack = { ...(state.webStack || {}), loading: true, notice: '' };
-    renderMain(state);
+    syncDetailDrawer(state);
     await refreshWebStackPanel(state);
   });
   root.querySelectorAll('[data-webstack-auth-source]').forEach((button) => {
@@ -2131,12 +2092,11 @@ function renderMain(state) {
         </div>
         <div class="ctox-pane-actions">
           ${harnessControlsMarkup(state)}
-          <button type="button" class="ctox-pane-icon ${state.webStackPanelOpen ? 'is-active' : ''}" data-webstack-toggle aria-pressed="${state.webStackPanelOpen}" aria-expanded="${state.webStackPanelOpen}" aria-label="${escapeAttr(t.webStack)}" title="${escapeAttr(t.webStack)}">${webStackIcon()}</button>
+          <button type="button" class="ctox-pane-icon ${state.detailDrawer?.type === 'webstack' ? 'is-active' : ''}" data-webstack-toggle aria-pressed="${state.detailDrawer?.type === 'webstack'}" aria-label="${escapeAttr(t.webStack)}" title="${escapeAttr(t.webStack)}">${webStackIcon()}</button>
           ${selectedTask ? `<button type="button" class="ctox-pane-icon" data-open-selected-task aria-label="${escapeAttr(t.openTaskDetail)}" title="${escapeAttr(t.openTaskDetail)}">${actionIcon(state, 'open')}</button>` : ''}
         </div>
       </div>
     </header>
-    ${webStackPanel(state)}
     <section class="ctox-metrics-strip" aria-label="${escapeAttr(t.measurements)}">
       ${metricCard(t.inputTokens, metrics.inputTokens, 'tokens', state.lang)}
       ${metricCard(t.outputTokens, metrics.outputTokens, 'tokens', state.lang)}
@@ -2146,10 +2106,10 @@ function renderMain(state) {
     </section>
     ${executionProgressBar(metrics, state)}
     ${shouldShowCrewHome(state) ? crewHomeMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
-      <div class="ctox-flow-toolbar" aria-label="Flow chart controls" data-flow-control>
-        <button type="button" class="ctox-pane-icon" data-zoom="-" aria-label="Zoom out" title="Zoom out" ${state.zoom <= MIN_ZOOM ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
+      <div class="ctox-flow-toolbar" aria-label="${escapeAttr(t.flowControls)}" data-flow-control>
+        <button type="button" class="ctox-pane-icon" data-zoom="-" aria-label="${escapeAttr(t.zoomOut)}" title="${escapeAttr(t.zoomOut)}" ${state.zoom <= MIN_ZOOM ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
         <span>${Math.round(state.zoom * 100)}%</span>
-        <button type="button" class="ctox-pane-icon" data-zoom="+" aria-label="Zoom in" title="Zoom in" ${state.zoom >= MAX_ZOOM ? 'disabled' : ''}>${actionIcon(state, 'add')}</button>
+        <button type="button" class="ctox-pane-icon" data-zoom="+" aria-label="${escapeAttr(t.zoomIn)}" title="${escapeAttr(t.zoomIn)}" ${state.zoom >= MAX_ZOOM ? 'disabled' : ''}>${actionIcon(state, 'add')}</button>
       </div>
       <div class="ctox-flow-canvas" data-flow-canvas>
         <div class="ctox-flow-canvas-inner" style="width:${FLOW_WIDTH * state.zoom}px;height:${viewBox.height * state.zoom}px;min-height:${viewBox.height * state.zoom}px">
@@ -2168,15 +2128,12 @@ function renderMain(state) {
     runHarnessControl(state, 'capacity', event.currentTarget.value);
   });
   main.querySelector('[data-webstack-toggle]')?.addEventListener('click', () => {
-    state.webStackPanelOpen = !state.webStackPanelOpen;
-    const panel = main.querySelector('[data-webstack-panel]');
-    if (panel) panel.hidden = !state.webStackPanelOpen;
-    main.querySelector('[data-webstack-toggle]')?.classList.toggle('is-active', state.webStackPanelOpen);
-    main.querySelector('[data-webstack-toggle]')?.setAttribute('aria-pressed', String(state.webStackPanelOpen));
-    main.querySelector('[data-webstack-toggle]')?.setAttribute('aria-expanded', String(state.webStackPanelOpen));
-    if (state.webStackPanelOpen) refreshWebStackPanel(state);
+    if (state.detailDrawer?.type === 'webstack') {
+      closeDetailDrawer(state);
+      return;
+    }
+    openWebStackDrawer(state);
   });
-  wireWebStackPanel(state, main);
   wireCrewHome(state, main);
   main.querySelector('[data-open-selected-task]')?.addEventListener('click', () => {
     if (selectedTask) selectTask(state, selectedTask.id, { drawer: true, center: false });
@@ -2277,7 +2234,7 @@ function timelinePanel(state, selectedTask, selectedNode, metrics) {
     const value = clampIndex(state.selectedStepIndex, state.model.timeline.length);
     const hasRange = max > 0;
     return `
-      <section class="ctox-timeline-panel ${hasRange ? '' : 'is-disabled'}" aria-label="Activity timeline" style="--timeline-progress:${escapeAttr(progressPercent(value, max))}%">
+      <section class="ctox-timeline-panel ${hasRange ? '' : 'is-disabled'}" aria-label="${escapeAttr(t.activityTimeline)}" style="--timeline-progress:${escapeAttr(progressPercent(value, max))}%">
         <div class="ctox-timeline-head">
           <div>
             <span class="ctox-pane-kicker">${escapeHtml(t.timeline)}</span>
@@ -2286,11 +2243,11 @@ function timelinePanel(state, selectedTask, selectedNode, metrics) {
           <strong>${escapeHtml(hasRange ? (selectedNode?.label || '') : t.timelineUnavailable)}</strong>
         </div>
         <div class="ctox-timeline-scrub">
-          <input aria-label="Select activity event" max="${max}" min="0" step="1" type="range" value="${value}" data-timeline-range ${hasRange ? '' : 'disabled aria-disabled="true"'} />
+          <input aria-label="${escapeAttr(t.selectActivityEvent)}" max="${max}" min="0" step="1" type="range" value="${value}" data-timeline-range ${hasRange ? '' : 'disabled aria-disabled="true"'} />
         </div>
         <div class="ctox-timeline-detail">
           <span>${escapeHtml(hasRange ? (selectedNode?.phase || '') : t.notLive)}</span>
-          <p>${escapeHtml(hasRange ? (selectedNode?.lines?.[0] || 'No detail is available for this event yet.') : t.timelineUnavailableDetail)}</p>
+          <p>${escapeHtml(hasRange ? (selectedNode?.lines?.[0] || t.noEventDetail) : t.timelineUnavailableDetail)}</p>
           <small>${escapeHtml(selectedNode ? metricsLabel(selectedNode, state.lang) : '')}</small>
         </div>
       </section>
@@ -2315,15 +2272,15 @@ function timelinePanel(state, selectedTask, selectedNode, metrics) {
       </div>
       <div class="ctox-timeline-scrub">
         <input aria-label="${escapeAttr(t.taskSteps)}" max="${max}" min="0" step="1" type="range" value="${activeStepIndex}" data-timeline-range data-task-timeline-range="true" ${hasRange ? '' : 'disabled aria-disabled="true"'} />
-        <div class="ctox-timeline-scale" role="list" ${hasRange ? '' : 'aria-disabled="true"'}>
+        <ul class="ctox-timeline-scale" ${hasRange ? '' : 'aria-disabled="true"'}>
           ${steps.map((step, index) => `
-            <button type="button" role="listitem" class="${index < activeStepIndex ? 'is-done' : ''} ${index === activeStepIndex ? 'is-current' : ''}" data-task-step-index="${index}" data-context-record-id="${escapeAttr(`${selectedTask.id}:${step.id || index}`)}" data-context-record-type="ctox_task_step" data-context-label="${escapeAttr(step.label)}" ${hasRange ? '' : 'disabled'}>
+            <li><button type="button" class="${index < activeStepIndex ? 'is-done' : ''} ${index === activeStepIndex ? 'is-current' : ''}" data-task-step-index="${index}" data-context-record-id="${escapeAttr(`${selectedTask.id}:${step.id || index}`)}" data-context-record-type="ctox_task_step" data-context-label="${escapeAttr(step.label)}" ${hasRange ? '' : 'disabled'}>
               <span>${String(index + 1).padStart(2, '0')}</span>
               <strong>${escapeHtml(step.label)}</strong>
               <small>${escapeHtml(stepMetaLabel(step, state))}</small>
-            </button>
+            </button></li>
           `).join('')}
-        </div>
+        </ul>
       </div>
       <div class="ctox-timeline-detail">
         <span>${escapeHtml(hasRange ? (current?.label || t.currentStep) : t.notLive)}</span>
@@ -2346,10 +2303,11 @@ function progressPercent(value, max) {
 }
 
 function flowSvg(model, selectedNode, visibleTrace, selectedTask, state, taskStepView = null, viewBox = flowViewBox(selectedTask, state)) {
+  const t = labels[state?.lang] || labels.de;
   const communicationOnly = isCommunicationFlow(selectedTask, state);
   const harnessOffsetY = reviewHarnessOffsetY(selectedTask, state);
   return `
-    <svg class="ctox-flow-diagram" viewBox="0 ${viewBox.y} ${FLOW_WIDTH} ${viewBox.height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="CTOX work flow diagram">
+    <svg class="ctox-flow-diagram" viewBox="0 ${viewBox.y} ${FLOW_WIDTH} ${viewBox.height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="${escapeAttr(t.flowDiagram)}">
       <defs>
         <marker id="ctox-flow-arrow" markerHeight="8" markerWidth="8" orient="auto" refX="7" refY="4">
           <path d="M0,0 L8,4 L0,8 Z"></path>
@@ -2358,13 +2316,13 @@ function flowSvg(model, selectedNode, visibleTrace, selectedTask, state, taskSte
       <g class="ctox-flow-lanes" aria-hidden="true">
         ${communicationOnly ? `
           <rect x="18" y="18" width="${FLOW_WIDTH - 36}" height="340" rx="16"></rect>
-          <text x="34" y="44">Founder communication state machine</text>
+          <text x="34" y="44">${escapeHtml(t.laneCommunication)}</text>
         ` : `
           <g transform="translate(0 ${harnessOffsetY})">
           <rect x="18" y="388" width="${FLOW_WIDTH - 36}" height="260" rx="16"></rect>
           <rect x="18" y="688" width="${FLOW_WIDTH - 36}" height="340" rx="16"></rect>
-          <text x="34" y="414">Review harness queue and execution</text>
-          <text x="34" y="714">Review harness evidence check</text>
+          <text x="34" y="414">${escapeHtml(t.laneQueue)}</text>
+          <text x="34" y="714">${escapeHtml(t.laneEvidence)}</text>
           </g>
         `}
       </g>
@@ -3119,6 +3077,10 @@ function syncDetailDrawer(state) {
     if (task) state.ctx.openLeftDrawer(taskDrawer(task, state));
     return;
   }
+  if (state.detailDrawer.type === 'webstack') {
+    state.ctx.openLeftDrawer(webStackDrawer(state));
+    return;
+  }
   if (state.detailDrawer.type === 'member') {
     const member = crewMemberById(state, state.detailDrawer.memberId);
     if (member && !drawerIsBusy()) state.ctx.openLeftDrawer(crewMemberDrawer(member, state));
@@ -3132,8 +3094,10 @@ function syncDetailDrawer(state) {
 }
 
 function closeDetailDrawer(state) {
+  const wasWebStack = state.detailDrawer?.type === 'webstack';
   state.detailDrawer = null;
   state.ctx.closeDrawers();
+  if (wasWebStack && state.model) renderMain(state);
 }
 
 function taskDrawer(task, state) {
@@ -3163,7 +3127,7 @@ function taskDrawer(task, state) {
         <h2>${escapeHtml(displayTitle)}</h2>
         <small>${escapeHtml(sourceLine)}</small>
       </div>
-      <button class="ctox-pane-icon ctox-drawer-close" type="button" data-close-ctox-drawer aria-label="Schließen" title="Schließen">${actionIcon(state, 'close')}</button>
+      <button class="ctox-pane-icon ctox-drawer-close" type="button" data-close-ctox-drawer aria-label="${escapeAttr(t.close)}" title="${escapeAttr(t.close)}">${actionIcon(state, 'close')}</button>
     </header>
     <section class="ctox-callout ${['blocked', 'failed'].includes(normalizeCommandStatus(task.routeStatus || task.status)) ? 'is-danger' : 'is-info'} ctox-task-status-strip">
       <div>
@@ -3189,13 +3153,11 @@ function taskDrawer(task, state) {
       <div class="ctox-card-body">
         <label class="ctox-task-edit-field">
           <span class="ctox-field-label">${escapeHtml(t.taskTitle)}</span>
-          <input class="ctox-input" type="text" name="${titleField.redacted ? 'titleDisplay' : 'title'}" value="${escapeAttr(titleField.text)}" ${canModifyCtoxApp(state) && !titleField.redacted ? '' : 'disabled'}>
-          ${titleField.redacted ? `<small>${escapeHtml(t.redactedTechnicalDetail)}</small>` : ''}
+          <input class="ctox-input" type="text" name="title" value="${escapeAttr(titleField.text)}" ${canModifyCtoxApp(state) ? '' : 'disabled'}>
         </label>
         <label class="ctox-task-edit-field">
           <span class="ctox-field-label">${escapeHtml(t.taskPrompt)}</span>
-          <textarea class="ctox-textarea" name="${promptField.redacted ? 'promptDisplay' : 'prompt'}" rows="4" ${canModifyCtoxApp(state) && !promptField.redacted ? '' : 'disabled'}>${escapeHtml(promptField.text)}</textarea>
-          ${promptField.redacted ? `<small>${escapeHtml(t.taskPromptRedacted)}</small>` : ''}
+          <textarea class="ctox-textarea" name="prompt" rows="4" ${canModifyCtoxApp(state) ? '' : 'disabled'}>${escapeHtml(promptField.text)}</textarea>
         </label>
         <label class="ctox-task-edit-field">
           <span class="ctox-field-label">${escapeHtml(t.priority)}</span>
@@ -3475,7 +3437,7 @@ function flowNodeDrawer(node, task, state) {
         <span class="ctox-pane-kicker">${escapeHtml(t.stationDetail)}</span>
         <h2>${escapeHtml(node.label)}</h2>
       </div>
-      <button class="ctox-pane-icon ctox-drawer-close" type="button" data-close-ctox-drawer aria-label="Schließen" title="Schließen">${actionIcon(state, 'close')}</button>
+      <button class="ctox-pane-icon ctox-drawer-close" type="button" data-close-ctox-drawer aria-label="${escapeAttr(t.close)}" title="${escapeAttr(t.close)}">${actionIcon(state, 'close')}</button>
     </header>
     <section class="ctox-card">
       <div class="ctox-card-body">
@@ -4232,7 +4194,8 @@ async function refreshWebStackPanel(state) {
       error: error.message || String(error),
     };
   }
-  renderMain(state);
+  if (state.disposed) return;
+  syncDetailDrawer(state);
 }
 
 async function verifyWebStackCredential(state, sourceId, secretName) {
@@ -5481,12 +5444,6 @@ function metricSubjectTask(state, selectedTask = null) {
   return null;
 }
 
-function taskOwnsCurrentHarnessMetrics(task, state) {
-  if (!task || !taskMatchesHarnessFlow(task, state)) return false;
-  const status = normalizeCommandStatus(task.routeStatus || task.status);
-  return status === 'running';
-}
-
 function isLiveMetricSubject(task, state) {
   if (!task || !state?.model?.activeTask) return false;
   return task.id === state.model.activeTask.id
@@ -5846,26 +5803,16 @@ function taskDisplayTitle(task, state) {
   });
 }
 
-function taskFieldDisplay(value, state) {
-  const text = String(value || '').trim();
-  const redacted = hasSensitiveUiLeak(text);
-  return {
-    redacted,
-    text: redacted
-      ? labels[state.lang]?.redactedTechnicalDetail || labels.en.redactedTechnicalDetail
-      : cleanUiCopy(text),
-  };
+// Operator text (title, prompt, summary) is shown as written. Secrets are not
+// projected by the server, and rewriting the operator's own words (the old
+// regex redaction, underscore/hyphen mangling) hid real content behind
+// "technical details hidden" without protecting anything.
+function taskFieldDisplay(value) {
+  return { redacted: false, text: String(value || '').trim() };
 }
 
-function taskPromptDisplay(task, state) {
-  const text = String(task?.prompt || task?.summary || '').trim();
-  const redacted = hasSensitiveUiLeak(text);
-  return {
-    redacted,
-    text: redacted
-      ? labels[state.lang]?.redactedTechnicalDetail || labels.en.redactedTechnicalDetail
-      : cleanUiCopy(text),
-  };
+function taskPromptDisplay(task) {
+  return { redacted: false, text: String(task?.prompt || task?.summary || '').trim() };
 }
 
 function taskDetailText(value, state) {
@@ -5876,29 +5823,7 @@ function safeTaskDisplayText(value, lang = 'de', options = {}) {
   const text = String(value || '').trim();
   const fallback = options.fallback || '';
   if (!text) return fallback;
-  if (hasSensitiveUiLeak(text)) {
-    return labels[lang]?.redactedTechnicalDetail || labels.en.redactedTechnicalDetail;
-  }
-  return clip(cleanUiCopy(text).replace(/\s+/g, ' ').trim(), options.max || 180) || fallback;
-}
-
-function hasSensitiveUiLeak(value) {
-  const text = String(value || '');
-  if (!text.trim()) return false;
-  const lower = text.toLowerCase();
-  return [
-    /```/,
-    /<\/?(script|style|html|body|pre|code|div|span|table|iframe)\b/i,
-    /(?:^|\n)\s*(?:import|export|function|class|const|let|var)\s+[A-Za-z_$]/,
-    /(?:^|\n)\s*(?:async\s+)?(?:function\s*)?\([^)]*\)\s*=>/,
-    /(?:^|\n)\s*[.#]?[A-Za-z0-9_-]+\s*\{[^}]*:[^}]*\}/,
-    /\b(?:TypeError|ReferenceError|SyntaxError|RangeError|Stack trace)\b/,
-    /\bat\s+.+:\d+:\d+\)?/,
-    /\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|secret|password|credential|authorization)\b/i,
-    /\bbearer\s+[A-Za-z0-9._~+/=-]{12,}/i,
-    /\b(?:web_stack|browser_context|frame_data|capture_script|secret_value_in_payload|ctox_runtime_settings)\b/i,
-  ].some((pattern) => pattern.test(text))
-    || (lower.includes('web stack') && /\b(secret|credential|capture|source|extract|frame|payload)\b/i.test(text));
+  return clip(text.replace(/\s+/g, ' ').trim(), options.max || 180) || fallback;
 }
 
 function cleanUiCopy(value = '') {
@@ -5929,22 +5854,11 @@ function itemTitle(item) {
   return item?.title || item?.thread || item?.name || 'Current work';
 }
 
-function itemStatus(item) {
-  return item?.status || 'unknown';
-}
-
 function itemSummary(item) {
   if ('summary' in item) return item.summary;
   if ('acceptance' in item) return item.acceptance;
   if ('promise' in item) return item.promise;
   return item.target || '';
-}
-
-function itemMeta(item) {
-  if ('model' in item) return `${item.model} · ${formatShortTimestamp(item.startedAt)}`;
-  if ('owner' in item) return `${item.owner} · ${displayPriority(item.priority)}`;
-  if ('recipient' in item) return `${item.recipient} · ${displayPriority(item.priority)}`;
-  return `${displayWorkSource(item.source || 'ctox')} · ${formatShortTimestamp(item.createdAt || new Date().toISOString())}`;
 }
 
 function formatShortTimestamp(value) {
@@ -6072,17 +5986,6 @@ function resultSummary(result) {
   if (result.record_id) return `${result.record_id} · ${result.definition_id || result.collection || 'business_records'}`;
   if (result.artifact_path) return result.artifact_path;
   return '';
-}
-
-function communicationPolicyInstruction(policy) {
-  if (policy === 'reviewed-all-external') return 'Set CTOX communication policy to require review for every external message. Confirm the effective setting in the harness/state store and report the proof path.';
-  if (policy === 'internal-only-autonomy') return 'Set CTOX communication policy so internal TUI/business-os instructions can proceed autonomously, while all owner-visible or external communication remains review-gated. Confirm the effective setting in the harness/state store and report the proof path.';
-  return 'Set CTOX communication policy to strict founder review: no founder or owner-visible mail/chat may be sent without draft, full thread context, recipient/CC validation, review approval, automatic reviewed-send, and persisted send proof. Confirm the effective setting in the harness/state store and report the proof path.';
-}
-
-function defaultComposeText(lang) {
-  if (lang === 'en') return 'Continue the most important open CTOX Business OS work. If code changes are needed, update the native Business OS module and keep the reusable template clean.';
-  return 'Führe die wichtigste offene CTOX Business OS Arbeit fort. Wenn Codeänderungen nötig sind, aktualisiere das native Business OS Modul und halte die wiederverwendbare Vorlage sauber.';
 }
 
 function parseMetadata(value) {

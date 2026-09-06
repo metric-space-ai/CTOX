@@ -543,7 +543,7 @@ test('Compact task rendering shows the four-stage live flow and session pins', (
   assert.match(markup, /data-pin-task-id="task-review"[^>]*aria-pressed="true"/);
   assert.match(markup, /data-context-record-id="task-review"/);
   assert.match(markup, /data-context-record-type="ctox_task"/);
-  assert.match(markup, /data-context-label="Reference grade CTOX console"/);
+  assert.match(markup, /data-context-label="Reference-grade CTOX console"/);
   assert.equal(state.pinnedTaskIds.has('task-review'), true);
 });
 
@@ -602,19 +602,19 @@ test('Web Stack refresh preserves projection-missing diagnostics', () => {
   assert.equal(friendlyWebStackStatus(webStack, labels.de), labels.de.webStackConnecting);
 });
 
-test('Task display copy redacts source code and Web Stack internals', () => {
+test('Task display copy is shown as written (no regex redaction, no underscore mangling)', () => {
+  // Slice 5: the operator's own words stay intact; secrets are never projected
+  // by the server, so the client has nothing to hide and must not rewrite.
   assert.equal(
-    safeTaskDisplayText('```js\nconst token = "secret";\n```', 'de'),
-    labels.de.redactedTechnicalDetail
+    safeTaskDisplayText('Fix src/core/harness_flow.rs for pi-sidecar', 'de'),
+    'Fix src/core/harness_flow.rs for pi-sidecar'
   );
   assert.equal(
-    safeTaskDisplayText('browser_context frame_data capture_script payload', 'en'),
-    labels.en.redactedTechnicalDetail
+    safeTaskDisplayText('```js\nconst token = "x";\n```', 'en'),
+    '```js const token = "x"; ```'
   );
-  assert.equal(
-    safeTaskDisplayText('Queue state is waiting for review', 'en'),
-    'Queue state is waiting for review'
-  );
+  assert.equal(safeTaskDisplayText('   ', 'en', { fallback: '–' }), '–');
+  assert.equal(safeTaskDisplayText('a'.repeat(400), 'en', { max: 20 }), `${'a'.repeat(19)}...`);
 });
 
 test('Queued work with missing flow projection is a critical harness health state', () => {

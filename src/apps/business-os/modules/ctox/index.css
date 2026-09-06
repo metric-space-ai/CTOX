@@ -705,7 +705,7 @@
    no gap-as-frame trick. */
 .ctox-metrics-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border-bottom: 1px solid var(--hairline);
 }
 
@@ -1361,8 +1361,14 @@
   grid-auto-flow: column;
   gap: 12px;
   overflow-x: auto;
+  margin: 0;
   padding: 0 0 2px;
+  list-style: none;
   scrollbar-width: thin;
+}
+
+.ctox-timeline-scale li {
+  display: contents;
 }
 
 .ctox-timeline-scale button {
@@ -2075,15 +2081,12 @@
   }
 
   .ctox-metrics-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   }
 
-  .ctox-metric-card:nth-child(3) {
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
-
-  .ctox-metric-card:nth-child(4) {
+  /* Five cards wrap freely here; a hairline above each row and between
+     neighbours keeps the strip a grid whatever the wrap position. */
+  .ctox-metric-card {
     border-top: 1px solid var(--line);
   }
 
