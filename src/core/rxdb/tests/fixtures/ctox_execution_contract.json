@@ -1,0 +1,142 @@
+{
+  "format": "ctox.sync.contract.v1",
+  "version": 1,
+  "constants": {
+    "CTOX_SYNC_AUTHORITY_PROTOCOL_VERSION": 5,
+    "CTOX_SYNC_IPC_PROTOCOL_VERSION": 1,
+    "CTOX_SYNC_IPC_MAX_FRAME_BYTES": 65536,
+    "CTOX_SYNC_IPC_DEADLINE_MILLIS": 10000
+  },
+
+  "types": {
+    "WorkerMembership": {
+      "nodeId": "u64",
+      "identity": "string",
+      "dataReplica": "bool",
+      "revoked": "bool"
+    },
+    "SyncIpcRequest": {
+      "version": "u32",
+      "requestId": "string",
+      "operation": "SyncIpcOperation"
+    },
+    "SyncIpcResponse": {
+      "version": "u32",
+      "requestId": "string",
+      "result": "SyncIpcResult"
+    },
+    "ExecutionSpec": {
+      "jobId": "string",
+      "sessionId": "string",
+      "scopeId": "string",
+      "harness": "string",
+      "harnessVersion": "string",
+      "modelRouteId": "string",
+      "gatewayAccountId": "string",
+      "modelId": "string",
+      "requiredCapabilities": "set:string"
+    },
+    "ExecutionOwnership": {
+      "nodeId": "u64",
+      "generation": "u64"
+    },
+    "CheckpointCopyReceipt": {
+      "version": "u32",
+      "nodeId": "u64",
+      "spec": "ExecutionSpec",
+      "ownership": "ExecutionOwnership",
+      "checkpointDigest": "string",
+      "sequence": "u64",
+      "signature": "string"
+    },
+    "ArtifactRef": {
+      "sha256": "string",
+      "sizeBytes": "u64"
+    },
+    "WorkspaceEntry": {
+      "path": "string",
+      "kind": "WorkspaceEntryKind",
+      "artifact": "ArtifactRef",
+      "executable": "bool"
+    },
+    "SessionManifest": {
+      "version": "u32",
+      "scopeId": "string",
+      "sessionId": "string",
+      "harness": "string",
+      "harnessVersion": "string",
+      "modelRouteId": "string",
+      "gatewayAccountId": "string",
+      "modelId": "string",
+      "requiredCapabilities": "set:string",
+      "credentialReferences": "set:string"
+    },
+    "CheckpointManifest": {
+      "version": "u32",
+      "session": "SessionManifest",
+      "sequence": "u64",
+      "baseCommit": "optional:string",
+      "history": "list:ArtifactRef",
+      "attachments": "list:ArtifactRef",
+      "workspace": "list:WorkspaceEntry",
+      "providerState": "list:WorkspaceEntry",
+      "pendingEffects": "list:PendingEffect"
+    },
+    "PendingEffect": {
+      "effectId": "string",
+      "idempotencyKey": "optional:string",
+      "description": "string"
+    },
+    "AppRelease": {
+      "appId": "string",
+      "version": "string",
+      "sha256": "string",
+      "schemaHash": "string"
+    },
+    "RuntimeManifest": {
+      "version": "u32",
+      "instanceId": "string",
+      "shellVersion": "string",
+      "shellSha256": "string",
+      "syncProtocolVersion": "u32",
+      "schemaHash": "string",
+      "nativeVersion": "string",
+      "apps": "list:AppRelease"
+    }
+  },
+  "unions": {
+    "AuthorityFailure": {
+      "notLeader": { "leader": "optional:u64" },
+      "unavailable": { "reason": "string" },
+      "rejected": { "reason": "string" }
+    },
+    "SyncIpcOperation": {
+      "hello": {},
+      "workerMembership": { "nodeId": "u64" },
+      "admitWorker": { "worker": "WorkerMembership" },
+      "revokeWorker": { "nodeId": "u64" },
+      "create": { "spec": "ExecutionSpec" },
+      "validate": { "jobId": "string", "ownership": "ExecutionOwnership" },
+      "beginEffect": { "jobId": "string", "ownership": "ExecutionOwnership", "effectId": "string" },
+      "completeEffect": { "jobId": "string", "ownership": "ExecutionOwnership", "effectId": "string" },
+      "stop": { "jobId": "string", "ownership": "ExecutionOwnership" }
+    },
+    "SyncIpcResult": {
+      "workerMembership": { "nodeId": "u64", "worker": "optional:WorkerMembership" },
+      "workerApplied": { "worker": "WorkerMembership" },
+      "workerReplayed": { "worker": "WorkerMembership" },
+      "ready": { "nodeId": "u64", "scopeId": "string", "protocolVersion": "u32" },
+      "authorized": { "spec": "ExecutionSpec", "ownership": "ExecutionOwnership" },
+      "applied": { "spec": "ExecutionSpec", "ownership": "ExecutionOwnership" },
+      "replayed": { "spec": "ExecutionSpec", "ownership": "ExecutionOwnership" },
+      "rejected": { "reason": "string" },
+      "unavailable": { "reason": "string" }
+    }
+  },
+  "enums": {
+    "WorkspaceEntryKind": [
+      "file",
+      "symlink"
+    ]
+  }
+}

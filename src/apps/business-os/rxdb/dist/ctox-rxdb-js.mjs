@@ -2,6 +2,11 @@
 
 // src/apps/business-os/rxdb/src/protocol-contract.generated.mjs
 var CTOX_RXDB_PROTOCOL = "ctox-rxdb-protocol-v1";
+var CTOX_PEER_ROLES = Object.freeze({
+  browser: "browser",
+  native: "ctox_instance",
+  worker: "workjet_executor"
+});
 var CTOX_PROTOCOL_PHASE = "rxdb-protocol-handshake";
 var CTOX_REQUIRED_PROTOCOL_CAPABILITIES = Object.freeze([
   "ctox-schema-hash-v1",

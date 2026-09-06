@@ -114,6 +114,7 @@ pub struct PeerWithResponse<P: Clone> {
 /// connect/disconnect/message/response streams and a send method.
 #[async_trait]
 pub trait WebRTCConnectionHandler: Send + Sync {
+    /// Equality identifies one connection lifetime, not a reusable signaling route.
     type Peer: Clone + Eq + std::hash::Hash + std::fmt::Debug + Send + Sync + 'static;
 
     fn connect_stream(&self) -> RxStream<Self::Peer>;
@@ -121,6 +122,12 @@ pub trait WebRTCConnectionHandler: Send + Sync {
     fn message_stream(&self) -> RxStream<PeerWithMessage<Self::Peer>>;
     fn response_stream(&self) -> RxStream<PeerWithResponse<Self::Peer>>;
     fn error_stream(&self) -> RxStream<RxError>;
+
+    /// Fixed by the local host before advertising the peer. Authentication and
+    /// collection authorization are independent of this declared runtime role.
+    fn local_peer_role(&self) -> super::NativePeerRole {
+        super::NativePeerRole::CtoxInstance
+    }
 
     async fn send(&self, peer: &Self::Peer, frame: WebRTCWireFrame) -> Result<(), RxError>;
 
@@ -158,6 +165,17 @@ pub trait WebRTCConnectionHandler: Send + Sync {
     /// Production handlers should override with the actual peer-id string.
     fn peer_identity(&self, peer: &Self::Peer) -> String {
         format!("{:?}", peer)
+    }
+
+    /// Cancellation/transfer key for this connection, separate from policy identity.
+    fn connection_identity(&self, peer: &Self::Peer) -> String {
+        self.peer_identity(peer)
+    }
+
+    /// Whether a captured handle still denotes a live connection. Transport
+    /// adapters with reusable routes must reject retired generations here.
+    fn is_peer_current(&self, _peer: &Self::Peer) -> bool {
+        true
     }
 
     /// Whether a collection is currently foreground/active for this peer.
@@ -246,7 +264,6 @@ pub trait WebRTCConnectionHandler: Send + Sync {
     fn document_fields_for_peer(&self, peer: &Self::Peer, collection: &str) -> Option<Vec<String>>;
 
     /// Optional predicate used by `masterChangesSince` responses.
-
     fn document_filter_for_peer(
         &self,
         _peer: &Self::Peer,
@@ -340,6 +357,24 @@ pub(crate) fn readable_query_fields(query: &Value, fields: &[String]) -> bool {
         })
 }
 
+/// Soft threshold above which the V1.5 dispatcher yields and waits before
+/// sending the next chunk. Matches typical WebRTC SCTP send-queue depth.
+pub const WEBRTC_BUFFERED_HIGH_WATER: usize = 1024 * 1024; // 1 MiB
+
+// ref: rxdb/src/plugins/replication-webrtc/webrtc-types.ts:42-44
+/// Factory type for connection handlers. Upstream is generic over a
+/// `SyncOptionsWebRTC` arg; we leave the argument shape to the concrete
+/// handler since the full options type depends on phase-6.
+pub type WebRTCConnectionHandlerCreator<H> = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<H>, RxError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+// `SyncOptionsWebRTC`, `RxWebRTCReplicationState`, `WebRTCPeerState` depend on
+// `RxReplicationState` from `plugins/replication/index.ts` and on `RxCollection`
+// from phase-6. They land when those are available.
+
 #[cfg(test)]
 mod field_policy_tests {
     use super::*;
@@ -388,22 +423,3 @@ mod field_policy_tests {
         }
     }
 }
-
-/// Soft threshold above which the V1.5 dispatcher yields and waits before
-
-/// sending the next chunk. Matches typical WebRTC SCTP send-queue depth.
-pub const WEBRTC_BUFFERED_HIGH_WATER: usize = 1024 * 1024; // 1 MiB
-
-// ref: rxdb/src/plugins/replication-webrtc/webrtc-types.ts:42-44
-/// Factory type for connection handlers. Upstream is generic over a
-/// `SyncOptionsWebRTC` arg; we leave the argument shape to the concrete
-/// handler since the full options type depends on phase-6.
-pub type WebRTCConnectionHandlerCreator<H> = Arc<
-    dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<H>, RxError>> + Send>>
-        + Send
-        + Sync,
->;
-
-// `SyncOptionsWebRTC`, `RxWebRTCReplicationState`, `WebRTCPeerState` depend on
-// `RxReplicationState` from `plugins/replication/index.ts` and on `RxCollection`
-// from phase-6. They land when those are available.
