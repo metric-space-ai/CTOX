@@ -4958,6 +4958,7 @@ export const __ctoxTestHooks = {
   taskColumnMarkup,
   taskListInner,
   renderTaskList,
+  renderMain,
   applyTaskSelection,
   webStackPanel,
   taskPipelineStage,

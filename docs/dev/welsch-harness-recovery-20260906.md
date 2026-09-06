@@ -88,3 +88,43 @@ The existing `requestTenantBusinessOsAsset` control-plane function subsequently
 returned the native `ctox.business-os-shell.v1` manifest with version
 0.1.46-beta.6. Thus the instance asset server and its supported SSH forwarding
 path expose beta.6; the remaining discrepancy is on the hosted/browser path.
+
+## Further diagnosis: document identity and narrow layout
+
+The native manifest response also carries
+`public, max-age=300, stale-while-revalidate=86400`. The inspected ctox.dev
+proxy in the older local checkout forwards successful native bodies and cache
+policy but masks generation conflicts as 502. The subsequent comparison with
+ctox.dev-main ccaec625edd6204cee9056303e196b3fd0ffe2dd found an additional
+generation-stripping retry after typed 409 responses: the proxy requests the
+active slot without the original query. This violates instance release
+authority and must be removed. These findings do not
+prove which hosted/browser cache caused the observed stale version label.
+New artifacts stamp version and source commit into the signed HTML inventory.
+The browser reads this document identity without a second manifest request.
+The native manifest policy is changed to `no-store`; a shell-only deployment
+does not deploy that native correction. Complete dependency-generation binding
+remains open as described in `docs/business-os-shell-releases.md`.
+
+The original narrow browser tab had 16 SVG nodes but a canvas of zero visible
+height. Therefore the earlier observation that the original tab recovered
+proved DOM recovery only, not usable rendering at that width. The main grid
+omitted an explicit progress row and its stacked narrow layout clipped content.
+The correction gives progress, canvas, timeline and footer explicit rows and
+allows the stacked view to scroll.
+
+The new component browser gate renders the real module and Shell V2 CSS with
+synthetic task data. Before the CSS correction it reproduced a 418-by-0 canvas
+at a viewport width of 430. Afterwards all five widths passed: 430, 630 and
+768 produced canvas heights of 279 px; 1000 and 1280 produced 311.984375 px.
+After integrating main e2f952320, all five widths passed again; the two wider
+canvases measured 322.21875 px with the updated shared Kit tokens.
+Every page contained 16 nodes, no page exceptions, a non-clipped node verified
+by hit testing, the stamped document identity and no manifest request.
+These checks are now a shell release gate. Artifact tests passed 16/16 and
+status tests 5/5. These are supporting checks; they do not replace production
+authentication, WebRTC replication, reload or performance acceptance.
+
+At this point these further corrections have not been deployed or accepted
+on Welsch. The full native Cargo check is still running. No live success or
+performance result from beta.5 is assigned to this new source.

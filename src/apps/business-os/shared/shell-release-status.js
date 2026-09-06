@@ -104,14 +104,13 @@ function render(root, detail) {
   root.querySelector('[data-shell-release-panel-action]').textContent = ACTION_COPY[state];
 }
 
-async function loadEmbeddedIdentity() {
-  const response = await fetch('./ctox-shell-manifest.json', { cache: 'no-store', credentials: 'same-origin' });
-  if (!response.ok) throw new Error(`Shell manifest unavailable (${response.status})`);
-  const manifest = await response.json();
-  if (manifest?.schema !== 'ctox.business-os-shell.v1') throw new Error('Unknown shell manifest');
-  const version = normalizeShellVersion(manifest.version);
-  if (!version) throw new Error('Invalid shell version');
-  return { version, channel: shellChannel(version), state: 'current' };
+export function readEmbeddedIdentity(documentRoot) {
+  const versions = documentRoot.querySelectorAll('meta[name="ctox-shell-version"]');
+  const commits = documentRoot.querySelectorAll('meta[name="ctox-shell-source-commit"]');
+  const version = versions.length === 1 ? normalizeShellVersion(versions[0].content) : '';
+  const sourceCommit = commits.length === 1 ? commits[0].content : '';
+  if (!version || !/^[0-9a-f]{40}$/.test(sourceCommit)) throw new Error('Missing or ambiguous shell document identity');
+  return { version, sourceCommit, channel: shellChannel(version), state: 'current' };
 }
 
 function start() {
@@ -146,13 +145,12 @@ function start() {
     lastDetail = event.detail;
     render(root, lastDetail);
   });
-  loadEmbeddedIdentity().then((identity) => {
-    lastDetail = identity;
-    render(root, lastDetail);
-  }).catch(() => {
+  try {
+    lastDetail = readEmbeddedIdentity(document);
+  } catch {
     lastDetail = { version: '', channel: 'recovery', state: 'recovery' };
-    render(root, lastDetail);
-  });
+  }
+  render(root, lastDetail);
 }
 
 if (typeof document !== 'undefined') start();
