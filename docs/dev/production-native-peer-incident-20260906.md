@@ -1,5 +1,52 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Beta13 read checks and repeated Word cache recovery
+
+On the current beta13 shell, the real authenticated browser again showed
+the CTOX Live Flow, five tasks, the flow diagram and token counts. The beta9
+CSV acceptance file painted its saved rows (12/42, 7/8, 19/50). XLSX X2 painted
+its saved edit marker and preserved unrelated values. These are actual
+read/reopen observations, not a new edit/save or full performance acceptance.
+
+The native peer reported running=true, replicationUp=true, fresh heartbeat,
+health.errorTotal=0. The last startup projection durations remained high:
+business_records 15,383 ms, knowledge_tables 21,237 ms and desktop_file_index
+7,322 ms. Command observation had only two samples, mean 7,503 ms and maximum
+9,704 ms; these are not the specified local-fixture p50. A browser screenshot
+taken 30 seconds after CSV selection and 48 seconds after XLSX selection
+confirmed rendering, but those sampling delays are not measured paint latency.
+
+A subsequent read-only audit found seven omitted document chunk rows, zero
+omitted spreadsheet chunk rows, and one currently selected document version
+still pointing its editor_blob_id at a damaged chunk. The original three
+regenerated editor pointers remained repaired; historical staged pointers
+still name damaged artifacts. The newly affected current Word version was
+doc_0d4889d0-fe96-453f-85b7-9f01a2f62eae_office_v3_RDwUEoRItd.
+Its canonical DOCX passed SHA256 and ZIP CRC verification: 1,188 bytes,
+52a6477fb766d1d4f54790edba8c7f34a7e0808ccd966c5dd397e1503200fc5f.
+
+Fresh SQLite backup API copies of both stores passed quick_check at
+/home/ctox/.local/state/ctox-incident-file-recovery-20260906T160847Z/.
+The authenticated command
+cmd_incident_20260906_reprepare_doc_0d4889d0_v3_authorized completed using
+the existing maintenance principal and unchanged permissions. The token
+remained in the subprocess pipe. No direct SQL repair was used. The real beta13 browser subsequently painted the saved, bold Word text from that current version.
+
+The separate release-mode native regression initially failed compilation
+because its required pi-sidecar bundle was absent. This was another build
+failure, not a failed assertion or passing test. Native activation remains
+unverified. The destructive native startup clamp is still in the running
+release; successful cache regeneration does not remove that root cause.
+
+A retry of the original immutable fbeca32b7 source is now isolated in
+ctox-file-preservation-debug0-fbeca32b7.service, invocation
+c52d5317229540a9b595e1e89d0681cb, using test-debug0.sh/test-debug0.log under
+the original test root. It reuses the built sidecar and Cargo dependencies,
+sets only profile.test.package.ctox.debug=0, removes the virtual-address limit,
+and retains MemoryMax=6 GiB, one CPU, Nice=10, one Cargo job and a one-hour
+runtime bound. The test assertions and source are unchanged. The separate
+release-mode unit was confirmed failed/inactive before this retry started.
+
 Status: partial recovery. Welsch boots and two repaired Word documents render.
 The native file-preservation fix is on main but not activated. Spreadsheets,
 full E2E and performance acceptance remain open.
