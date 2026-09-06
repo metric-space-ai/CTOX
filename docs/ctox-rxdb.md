@@ -1025,6 +1025,12 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
 buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The data-plane guard checks both
 values against each other and the shell build.
 
+Cancelled replication transfers must re-check their lifetime after asynchronous
+storage reads, dirty-marker updates, and transport responses. A retired state
+must not issue another write through its detached peer or advance checkpoints;
+the current state owns retry and acknowledgement. The cancelled-boundaries
+smoke covers these races independently from collection-handshake cancellation.
+
 App modules do **not** import the bundle directly — they receive the database
 handle from the shell facade (`setBusinessOsDatabaseContext`). The matching
 module's `businessOsDataSource.js` used to be a third importer; it moved to the

@@ -147,3 +147,62 @@ authenticated command/app latency. They are not a p50/p95 acceptance.
 Local full-daemon checking, the expanded native schema regression and the JS
 suite were still running at this checkpoint. No new pass result or production
 readiness is claimed from these pending commands.
+
+## Forward repair and independent browser check after 13:00 UTC
+
+The corrected native release `branch-main-20260906T120734Z` is active.
+The emergency executable override was removed after the forward activation.
+A subsequent read-only check observed PID 2460544, running=true,
+replicationUp=true, heartbeatFresh=true and errorTotal=0. SKF, Thesen and
+Miltonticket also reported running peers with fresh heartbeats and no health
+errors; their replicationUp=false without connected browsers is not an outage.
+
+A fresh authenticated Welsch page now identifies shell 0.1.46-beta.9.
+The original startup failure did not recur. An existing Word acceptance
+document painted its persisted text, and the CTOX task list, flow, progress
+and timeline rendered. No new task execution or document-save acceptance
+is implied by these read-only checks.
+
+Spreadsheets remains a failing user story: both the beta9 CSV acceptance
+record and an existing XLSX display "no saved version". The browser log
+instead records repeated WebRTC peer-reopen timeouts for spreadsheet_versions.
+Read-only SQLite inspection confirms that the CSV record's current_version_id
+points to an existing, non-deleted version. The UI must not turn a transport
+failure into an assertion that the user's saved file is missing.
+
+Two additional shell sync defects were reproduced independently:
+
+- The local tab coordinator used APP_BUILD alone. beta8 and beta9 share v340
+  despite different canonical DB bundles, allowing a corrected tab to follow
+  an older runtime. The coordinator key now includes RXDB_BUNDLE_URL from the
+  sole canonical loader, as well as the shell epoch.
+- In a follower tab, an ordinary startCollection overwrote an already acquired
+  direct bridge with a follower stub. The next forceDirect acquisition could
+  replace its still-active registration. Cached live bridges are now reused
+  before the follower branch. Actual role transitions still own demotion.
+
+Both regressions failed before the corresponding correction and pass after
+it. The acquisition test runs the real multi-tab coordinator and shell runtime
+with a simulated native transport; it is not production WebRTC E2E. The
+37-app static shell contract and all 37 geometry cases also passed.
+
+The coordinated source build identifier is now
+`20260906-shell-v2-sync-bridge-v341` in HTML, APP_BUILD, DB and sync loader
+imports. An actual public sync.js response at 13:18 UTC carried
+`cache-control: max-age=14400, must-revalidate`; reusing v340 would leave
+previously cached code eligible for four hours. This source fix is not an
+activation or production-readiness claim.
+
+Browser automation observed a warm Harness switch plus accessibility
+inspection in 23,012 ms and a Tables switch plus inspection in 7,951 ms.
+These wall-clock observations include automation/inspection overhead and
+must not be reported as app interaction latency, command p50 or boot p95.
+The performance acceptance remains open.
+
+A separate read-only data audit found three non-deleted document chunk rows
+containing omission markers (324,210 / 324,326 / 324,318 original encoded
+bytes). Each has a document reference but no live document-version reference.
+Their originals were not found in the two examined native record/chunk
+stores. No data repair or rollback was attempted; this is not evidence that
+a currently referenced document version has been lost. Blanket projection
+truncation and preservation of historical artifacts remain an open audit.

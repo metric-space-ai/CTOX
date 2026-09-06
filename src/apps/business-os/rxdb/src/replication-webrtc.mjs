@@ -1413,7 +1413,7 @@ class CtoxWebRtcReplicationState {
   // ----- pull / push (collection-tagged over the shared peer) -------------
 
   async pullFromRemotePeers() {
-    if (!this.pull) return;
+    if (!this.pull || this.cancelled) return;
     if (this.pullInProgressPromise) {
       this.pullAgainAfterCurrent = true;
       return this.pullInProgressPromise;
@@ -1490,6 +1490,7 @@ class CtoxWebRtcReplicationState {
     let checkpoint = this.pullCheckpointsByPeer.get(activePeerId) || null;
     while (!this.cancelled) {
       const response = await this.requestMasterChangesSince(activePeerId, checkpoint, batchSize);
+      if (this.cancelled) return;
       activePeerId = response.peerId || activePeerId;
       const result = response.result || {};
       const documents = Array.isArray(result?.documents) ? result.documents : [];
@@ -1497,7 +1498,9 @@ class CtoxWebRtcReplicationState {
         await this.collection.storageCollection.bulkWrite(documents, {
           replicationOrigin: this.replicationOriginForPeer(activePeerId),
         });
+        if (this.cancelled) return;
         await this.invalidateDemandCacheForRemoteWrite(documents);
+        if (this.cancelled) return;
       }
       checkpoint = result?.checkpoint || checkpoint;
       this.pullCheckpointsByPeer.set(activePeerId, checkpoint);
@@ -1550,7 +1553,7 @@ class CtoxWebRtcReplicationState {
   }
 
   async pushToRemotePeers() {
-    if (!this.push) return;
+    if (!this.push || this.cancelled) return;
     if (this.pushInProgressPromise) {
       // Re-run after the in-flight push: a local write that lands during the
       // masterWrite round-trip used to be coalesced into the running push and
@@ -1639,11 +1642,16 @@ class CtoxWebRtcReplicationState {
         batchSize,
         this.changedDocumentReadOptionsForPeer(peerId),
       );
+      // cancel() detaches this.shared immediately. A storage read or dirty
+      // marker can finish after that boundary; the retired state must neither
+      // dereference its now-null peer nor advance the replacement's checkpoint.
+      if (this.cancelled) return;
       const documents = Array.isArray(result?.documents) ? result.documents : [];
       this.recordLocalPushChangedSinceRead(result, documents);
       for (const document of documents) {
         const id = primaryValue(document, this.collection.schema.primaryPath);
         if (id) await this.demandSidecar?.markDirty?.(this.collection.name, id, true);
+        if (this.cancelled) return;
       }
       if (!documents.length) {
         const nextCheckpoint = result?.checkpoint || checkpoint;
@@ -1668,6 +1676,7 @@ class CtoxWebRtcReplicationState {
       }));
       let terminalRejection = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (this.cancelled) return;
         const masterWriteResult = await this.peer.request(
           peerId,
           'masterWrite',
@@ -1675,6 +1684,7 @@ class CtoxWebRtcReplicationState {
           this.requestTimeoutMsFor('masterWrite'),
           this.collection.name,
         );
+        if (this.cancelled) return;
         // SYNC-40: a TERMINAL authz/schema rejection arrives as a
         // replication-scope `ctoxError` VALUE (not a thrown transport error and
         // not a conflict array). Retrying it forever leaves a permanently
@@ -1715,6 +1725,7 @@ class CtoxWebRtcReplicationState {
         // default LWW retry keeps its local-wins semantics unchanged).
         rows = await this.absorbMasterStateIntoConflictRows(rows);
       }
+      if (this.cancelled) return;
       if (terminalRejection) {
         // Reconcile the denied batch: roll each still-pending local write back
         // to master + journal it as a conflict, then advance past the batch so
@@ -1722,6 +1733,7 @@ class CtoxWebRtcReplicationState {
         // (non-pushable), so re-reading from the same checkpoint will not
         // surface them again.
         await this.reconcileTerminalPushRejection(documents, peerId, terminalRejection);
+        if (this.cancelled) return;
         checkpoint = result?.checkpoint || checkpoint;
         this.pushCheckpointsByPeer.set(peerId, checkpoint);
         await this.persistCheckpointsForPeer(peerId);
@@ -1731,12 +1743,14 @@ class CtoxWebRtcReplicationState {
       if (rows.length) {
         rows = await this.absorbAuthoritativeCommandConflicts(rows, peerId);
       }
+      if (this.cancelled) return;
       if (rows.length) {
         throw new Error(`masterWrite conflicts remained for ${this.collection.name}`);
       }
       for (const document of documents) {
         const id = primaryValue(document, this.collection.schema.primaryPath);
         if (id) await this.demandSidecar?.markDirty?.(this.collection.name, id, false);
+        if (this.cancelled) return;
       }
       checkpoint = result?.checkpoint || checkpoint;
       this.pushCheckpointsByPeer.set(peerId, checkpoint);
