@@ -10207,7 +10207,7 @@ var CtoxWebRtcReplicationState = class {
   }
   // ----- pull / push (collection-tagged over the shared peer) -------------
   async pullFromRemotePeers() {
-    if (!this.pull) return;
+    if (!this.pull || this.cancelled) return;
     if (this.pullInProgressPromise) {
       this.pullAgainAfterCurrent = true;
       return this.pullInProgressPromise;
@@ -10275,6 +10275,7 @@ var CtoxWebRtcReplicationState = class {
     let checkpoint = this.pullCheckpointsByPeer.get(activePeerId) || null;
     while (!this.cancelled) {
       const response = await this.requestMasterChangesSince(activePeerId, checkpoint, batchSize);
+      if (this.cancelled) return;
       activePeerId = response.peerId || activePeerId;
       const result = response.result || {};
       const documents = Array.isArray(result?.documents) ? result.documents : [];
@@ -10282,7 +10283,9 @@ var CtoxWebRtcReplicationState = class {
         await this.collection.storageCollection.bulkWrite(documents, {
           replicationOrigin: this.replicationOriginForPeer(activePeerId)
         });
+        if (this.cancelled) return;
         await this.invalidateDemandCacheForRemoteWrite(documents);
+        if (this.cancelled) return;
       }
       checkpoint = result?.checkpoint || checkpoint;
       this.pullCheckpointsByPeer.set(activePeerId, checkpoint);
@@ -10320,7 +10323,7 @@ var CtoxWebRtcReplicationState = class {
     throw lastError;
   }
   async pushToRemotePeers() {
-    if (!this.push) return;
+    if (!this.push || this.cancelled) return;
     if (this.pushInProgressPromise) {
       this.pushAgainAfterCurrent = true;
       return this.pushInProgressPromise;
@@ -10393,11 +10396,13 @@ var CtoxWebRtcReplicationState = class {
         batchSize,
         this.changedDocumentReadOptionsForPeer(peerId)
       );
+      if (this.cancelled) return;
       const documents = Array.isArray(result?.documents) ? result.documents : [];
       this.recordLocalPushChangedSinceRead(result, documents);
       for (const document2 of documents) {
         const id = primaryValue(document2, this.collection.schema.primaryPath);
         if (id) await this.demandSidecar?.markDirty?.(this.collection.name, id, true);
+        if (this.cancelled) return;
       }
       if (!documents.length) {
         const nextCheckpoint = result?.checkpoint || checkpoint;
@@ -10418,6 +10423,7 @@ var CtoxWebRtcReplicationState = class {
       }));
       let terminalRejection = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (this.cancelled) return;
         const masterWriteResult = await this.peer.request(
           peerId,
           "masterWrite",
@@ -10425,6 +10431,7 @@ var CtoxWebRtcReplicationState = class {
           this.requestTimeoutMsFor("masterWrite"),
           this.collection.name
         );
+        if (this.cancelled) return;
         terminalRejection = terminalPushRejection(masterWriteResult);
         if (terminalRejection) {
           rows = [];
@@ -10455,8 +10462,10 @@ var CtoxWebRtcReplicationState = class {
         }
         rows = await this.absorbMasterStateIntoConflictRows(rows);
       }
+      if (this.cancelled) return;
       if (terminalRejection) {
         await this.reconcileTerminalPushRejection(documents, peerId, terminalRejection);
+        if (this.cancelled) return;
         checkpoint = result?.checkpoint || checkpoint;
         this.pushCheckpointsByPeer.set(peerId, checkpoint);
         await this.persistCheckpointsForPeer(peerId);
@@ -10466,12 +10475,14 @@ var CtoxWebRtcReplicationState = class {
       if (rows.length) {
         rows = await this.absorbAuthoritativeCommandConflicts(rows, peerId);
       }
+      if (this.cancelled) return;
       if (rows.length) {
         throw new Error(`masterWrite conflicts remained for ${this.collection.name}`);
       }
       for (const document2 of documents) {
         const id = primaryValue(document2, this.collection.schema.primaryPath);
         if (id) await this.demandSidecar?.markDirty?.(this.collection.name, id, false);
+        if (this.cancelled) return;
       }
       checkpoint = result?.checkpoint || checkpoint;
       this.pushCheckpointsByPeer.set(peerId, checkpoint);
