@@ -25,8 +25,49 @@ and retains the node, telemetry, progress and status assertions.
 - CTOX geometry: widths 1180, 1000 and 720, 3/3 passing.
 - Artifact, inventory and signature checks: 15/15 passing.
 
-Live deployment, authenticated reload, task selection and performance measurements
-are pending. Test execution durations are not application performance evidence.
-The observed Web Research `invalid_graph_contract` and spreadsheet
-`PEER_UNAVAILABLE` are separate unresolved findings. This repair is not a
+## Production verification
+
+Commit `4b31732237492df9219070a3aaa7bf2fd89c92bf` is on main. Release run
+`34018635068` passed, including the new rendering gate. Signed candidate
+`0.1.46-beta.5` was staged and activated on Welsch at 07:18:01 UTC, then the
+regular service was restarted. The instance reports current/healthy and no
+recovery shell. This shell release preserves the preceding Office change.
+
+The authenticated in-app browser displays the candidate version, 16 harness
+nodes, five real task records, timeline and connection status. All 20 measured
+task selections selected the requested record; each details drawer was closed
+before the next selection. Location highlighting pointed to model-failed for
+these failed historical tasks. A first invalid measurement attempted the next
+card while the preceding details drawer overlaid it; it is excluded from the
+20 completed interactions and retained as a test-procedure finding.
+
+The same profile was reloaded and again showed 16 nodes and five tasks. No new
+standortNodeId exception was observed. The original user tab also recovered.
+This is not a clean-profile authentication or worker-execution acceptance.
+
+### Observed performance
+
+Clock: automation-host wall time from before the browser click to the awaited
+DOM assertion. Includes browser-control round trips; it is not isolated render
+time, INP, or native command latency. Twenty verified selections, nearest-rank
+percentiles: p50 529 ms, p95 1562 ms, maximum 2847 ms.
+
+Samples in milliseconds:
+`375,475,517,765,1562,2847,916,769,427,428,403,414,414,486,529,742,711,738,987,653`.
+
+One authenticated reload took 26051 ms until the candidate version, 16 nodes
+and five tasks were observed. This includes a Page.getFrameTree observation
+timeout. It is an observed upper bound with instrumentation interference,
+not a statistically valid boot p95 or a measurement of critical collection
+readiness. The initial post-deployment reload also temporarily stopped answering
+DOM queries. These failures remain part of the acceptance evidence.
+
+### Open failures
+
+The spreadsheet still reports that its selected version cannot be loaded;
+Web Research previously reported invalid_graph_contract. The overall reload
+latency remains unresolved. Neither the local warm-command p50 target nor the
+critical-collection boot p95 target has been verified by this UI measurement.
+Native four-process admission, SSH/QR onboarding, real harness failover and the
+remaining architecture migration requirements remain open. There is no
 production-readiness claim for the Sync architecture or other apps.
