@@ -431,7 +431,12 @@ fn refresh_selected(
         project_status(root, &conn, writer, snapshot)?;
     }
     if flags & EVENTS != 0 {
-        if has_table(&conn, "crew_attempts")? && has_table(&conn, "ctox_harness_flow_events")? {
+        // The outbox also marks the lifecycle migration: PR-59 attempts do not
+        // yet have started_at. Their existing events can still be projected.
+        if has_table(&conn, "crew_attempts")?
+            && has_table(&conn, "crew_projection_tombstones")?
+            && has_table(&conn, "ctox_harness_flow_events")?
+        {
             crate::crew::repair_selection_events(root, &conn)?;
         }
         project_events(root, &conn, writer)?;

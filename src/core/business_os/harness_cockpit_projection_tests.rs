@@ -5,7 +5,11 @@ fn crew_maintenance_failure_and_missing_outbox_preserve_status_and_events() -> R
     crate::crew::ensure_schema(&conn)?;
     conn.execute("INSERT INTO communication_routing_state(message_key,route_status,updated_at) VALUES('task','leased',?1)", [Utc::now().to_rfc3339()])?;
     conn.execute("INSERT INTO ctox_harness_flow_events VALUES('visible','worker.phase','Working','','task',NULL,NULL,'{}',?1)", [Utc::now().to_rfc3339()])?;
-    conn.execute_batch("DROP TABLE crew_projection_tombstones;")?;
+    conn.execute_batch(
+        "DROP TABLE crew_projection_tombstones;
+        DROP INDEX idx_crew_attempt_unstarted;
+        ALTER TABLE crew_attempts DROP COLUMN started_at;",
+    )?;
     let mut writer = BusinessProjectionWriter::open(root.path())?;
     refresh_selected(
         root.path(),
