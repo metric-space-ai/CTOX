@@ -163,9 +163,9 @@ stays snappy; a module must not wait for sync to appear.
 
 ### 3.2 Shell integration
 
-**`shared/db.js` — `createBusinessDb({ name })`.** Imports the bundle from
-`../rxdb/dist/ctox-rxdb-js.mjs?v=<buster>` (timeout-guarded, with one
-cache-busted retry), runs an IndexedDB preflight probe, then
+**`shared/db.js` — `createBusinessDb({ name })`.** Imports the bundle through
+the canonical `shared/rxdb-runtime.js` loader and its single versioned URL,
+runs an IndexedDB preflight probe, then
 `createRxDatabase` with `getCtoxIndexedDbStorage()`. If the primary IndexedDB
 stays blocked, writes fail with typed `indexeddb_blocked`; the shell does not
 acknowledge writes into an alternate database that has no deterministic merge
@@ -270,6 +270,23 @@ cross-process JS↔Rust tests) and `examples/v15_scale_wire_loop.rs`, `tools/`
 `vendor/` (upstream snapshot), `PORTING.md` + `revisions/` (port ledger).
 
 ### 4.2 The native peer (`src/core/business_os/rxdb_peer.rs`)
+
+`run_native_peer` delegates transport bring-up and shutdown to
+`ctox_sync::native::NativeSyncSession` (`src/core/sync`). Business OS still owns
+its database, projections, commands and admission/read/write policies. The
+session subscribes before joining signaling, bounds bring-up, and shuts down
+its multiplexed pool before persistence closes. The Business OS host declares
+the generated `CtoxInstance` role explicitly.
+
+The same crate provides separate voter/worker execution attachments with
+pinned OpenRaft 0.9.25 authority over signed WebRTC control messages. These are
+not attached by the productive Business OS host yet. Replication master/fork
+election does not grant execution ownership. Transport callbacks carry a
+connection generation, so a delayed disconnect or transfer cancellation cannot
+remove its replacement. Field policy lookup is bound to that same generation.
+See the [native core contract](../src/core/sync/README.md) and
+[worker host integration status](dev/ctox-sync-worker-host-contract.md) for
+the tested boundaries and outstanding production onboarding.
 
 `spawn_native_peer` starts one supervised OS thread (`business-os-rxdb-peer`):
 
@@ -1197,8 +1214,8 @@ place; adding one without a written reason is a review finding.
 load and pass in isolation. Check the load average before diagnosing them as a
 regression.
 
-If `src/` of the browser runtime changed: rebuild dist + bump the three
-cache-busters first (§9), since most smokes import from `dist/`.
+If `src/` of the browser runtime changed: rebuild dist + bump the sole bundle
+cache-buster in `shared/rxdb-runtime.js` first (§10), since most smokes import from `dist/`.
 
 ---
 
