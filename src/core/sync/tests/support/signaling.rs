@@ -11,6 +11,7 @@ use tokio::{net::TcpListener, sync::mpsc, task::JoinHandle};
 use tokio_tungstenite::{accept_async, tungstenite::Message};
 
 type Members = Arc<Mutex<BTreeMap<String, mpsc::UnboundedSender<Message>>>>;
+type SignalCounts = Arc<Mutex<BTreeMap<(String, String, String), usize>>>;
 
 #[cfg(test)]
 pub(crate) fn route_ready(
@@ -28,6 +29,8 @@ pub(crate) struct SignalingFixture {
     members: Members,
     joins: tokio::sync::broadcast::Sender<String>,
     pub(crate) offers: Arc<Mutex<BTreeSet<(String, String)>>>,
+    // Counts only message kinds and endpoint IDs, never SDP/ICE credentials.
+    pub(crate) signals: SignalCounts,
 }
 impl Drop for SignalingFixture {
     fn drop(&mut self) {
@@ -49,6 +52,8 @@ impl SignalingFixture {
         let retained_joins = joins.clone();
         let offers: Arc<Mutex<BTreeSet<(String, String)>>> = Arc::default();
         let retained_offers = offers.clone();
+        let signals: SignalCounts = Arc::default();
+        let retained_signals = signals.clone();
         let task = tokio::spawn(async move {
             let roles: Arc<BTreeMap<_, _>> = Arc::new(
                 roles
@@ -67,6 +72,7 @@ impl SignalingFixture {
                 let roles = roles.clone();
                 let joins = joins.clone();
                 let offers = offers.clone();
+                let signals = signals.clone();
                 connections.spawn(async move {
                     let socket=accept_async(tcp).await.unwrap();let (mut writer,mut reader)=socket.split();
                     let (tx,mut rx)=mpsc::unbounded_channel();
@@ -88,6 +94,9 @@ impl SignalingFixture {
                                     },
                                     Some("signal")=>{
                                         assert_eq!(value["senderPeerId"],id);
+                                        let receiver = value["receiverPeerId"].as_str().unwrap();
+                                        let kind = value["data"]["type"].as_str().unwrap_or("candidate");
+                                        *signals.lock().unwrap().entry((id.clone(), receiver.into(), kind.into())).or_default() += 1;
                                         if value["data"]["type"] == "offer" {
                                             offers.lock().unwrap().insert((id.clone(), value["receiverPeerId"].as_str().unwrap().into()));
                                         }
@@ -116,6 +125,7 @@ impl SignalingFixture {
             members: retained_members,
             joins: retained_joins,
             offers: retained_offers,
+            signals: retained_signals,
         }
     }
 

@@ -35,7 +35,7 @@ where
     std::fs::create_dir_all(&storage)?;
     // Only IPC uses an ephemeral OS runtime directory. Long installation paths
     // do not dictate the Unix socket address or cause a network fallback.
-    let ipc = tempfile::Builder::new().prefix("cs-").tempdir()?;
+    let ipc = ctox_sync::local_host::private_ipc_directory()?;
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

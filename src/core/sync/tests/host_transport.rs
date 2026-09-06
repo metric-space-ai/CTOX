@@ -99,10 +99,10 @@ fn transport_limits_and_errors_do_not_expose_credentials() {
     assert!(default_transport.native_ice_servers()[0].urls.is_empty());
     let marker = "PRIVATE_CREDENTIAL_MUST_NOT_APPEAR";
     for value in [
-        serde_json::json!({"signalingUrls": marker}),
-        serde_json::json!({"signalingUrls":[marker]}),
-        serde_json::json!({"signalingUrls":[]}),
-        serde_json::json!({"signalingUrls":vec!["wss://signal.example?role=ctox_instance"; 9]}),
+        serde_json::json!({"signalingUrls": marker,"iceServers":[]}),
+        serde_json::json!({"signalingUrls":[marker],"iceServers":[]}),
+        serde_json::json!({"signalingUrls":[],"iceServers":[]}),
+        serde_json::json!({"signalingUrls":vec!["wss://signal.example?role=ctox_instance"; 9],"iceServers":[]}),
     ] {
         let error = HostTransport::parse(&value.to_string(), &config)
             .err()
@@ -112,6 +112,18 @@ fn transport_limits_and_errors_do_not_expose_credentials() {
     let value = serde_json::json!({"signalingUrls":["wss://signal.example?role=ctox_instance"], "iceServers":[{"urls":["turn:relay.example:3478"], "username":"user", "credential":marker}]});
     let transport = HostTransport::parse(&value.to_string(), &config).unwrap();
     assert_eq!(transport.native_ice_servers()[0].credential, marker);
+}
+#[cfg(unix)]
+#[test]
+fn temporary_ipc_directory_satisfies_native_private_directory_policy() {
+    use ctox_sync::local_host::{private_ipc_directory, HostDirectoryLock};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = private_ipc_directory().unwrap();
+    assert_eq!(
+        directory.path().metadata().unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    HostDirectoryLock::acquire(directory.path()).unwrap();
 }
 #[cfg(unix)]
 #[test]

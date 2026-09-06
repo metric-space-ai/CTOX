@@ -77,7 +77,14 @@ async fn start(binary: &Path, root: &Path) -> Result<(Child, PathBuf)> {
     let line = tokio::time::timeout(Duration::from_secs(20), lines.next_line())
         .await
         .map_err(|_| format!("listener publication timed out for {}", root.display()))??
-        .ok_or("host exited before listener publication")?;
+        .ok_or_else(|| {
+            let log = std::fs::read_to_string(root.join("host-stderr.log"))
+                .unwrap_or_else(|_| "fixture stderr unavailable".into());
+            format!(
+                "host exited before listener publication for {}: {log}",
+                root.display()
+            )
+        })?;
     let ready: Value = serde_json::from_str(&line)?;
     assert_eq!(ready["listener"], "active");
     let endpoint = PathBuf::from(
@@ -127,6 +134,34 @@ async fn ipc(
     })
     .await??)
 }
+async fn await_initial_quorum(endpoint: &Path) -> Result<()> {
+    // Listener publication does not imply a connected majority. Use the
+    // existing linearizable, nonmutating read before attempting enrollment.
+    let mut last = None;
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let response = ipc(
+                endpoint,
+                "startup-membership",
+                SyncIpcOperation::WorkerMembership { node_id: 4 },
+            )
+            .await?;
+            match response {
+                SyncIpcResult::WorkerMembership {
+                    node_id: 4,
+                    worker: None,
+                } => return Ok::<_, Box<dyn std::error::Error + Send + Sync>>(()),
+                SyncIpcResult::Unavailable { .. } => last = Some(response),
+                other => return Err(format!("unexpected initial membership: {other:?}").into()),
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .map_err(|_| format!("voter did not confirm startup quorum: {last:?}"))??;
+    Ok(())
+}
+
 fn bundle(root: &Path, binary: &Path) -> Result<()> {
     for directory in ["contracts", "src/apps/business-os", "bin"] {
         std::fs::create_dir_all(root.join(directory))?;
@@ -143,7 +178,9 @@ fn bundle(root: &Path, binary: &Path) -> Result<()> {
         root.join("src/apps/business-os/index.html"),
         "<!-- unused by native Sync CLI fixture -->",
     )?;
-    std::fs::hard_link(binary, root.join("bin/ctox"))?;
+    // The bundle marker references the tested artifact without mutating its
+    // inode/link count on every fixture creation and teardown.
+    std::os::unix::fs::symlink(binary, root.join("bin/ctox"))?;
     Ok(())
 }
 
@@ -305,6 +342,23 @@ pub async fn run() -> Result<()> {
     )
     .await?;
     assert!(matches!(before, SyncIpcResult::Unavailable { .. }));
+    await_initial_quorum(&hosts[0].1).await.inspect_err(|_| {
+        eprintln!("fixture SDP offers: {:?}", signal.offers.lock().unwrap());
+        eprintln!(
+            "fixture signal counts: {:?}",
+            signal.signals.lock().unwrap()
+        );
+        for id in 1..=4 {
+            if let Ok(log) =
+                std::fs::read_to_string(roots.path().join(id.to_string()).join("host-stderr.log"))
+            {
+                eprintln!(
+                    "fixture host {id}: {}",
+                    log.chars().take(16384).collect::<String>()
+                );
+            }
+        }
+    })?;
     let admission = ipc(
         &hosts[0].1,
         "admit",

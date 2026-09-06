@@ -22,6 +22,15 @@ use tokio::{
 
 const MAX_CONNECTIONS: usize = 32;
 
+/// Create the host-owned runtime directory with private rights at creation.
+/// tempfile's directory default follows umask and is commonly world-readable.
+pub fn private_ipc_directory() -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("cs-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+}
+
 pub struct LocalAuthorityHost {
     endpoint: PathBuf,
     stop: Option<oneshot::Sender<()>>,

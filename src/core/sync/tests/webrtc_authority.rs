@@ -467,6 +467,8 @@ async fn exercise_worker_session(reconnect: Option<u64>) {
         assert!(retained.worker_membership(4).await.is_err());
         let offers = signal.offers.lock().unwrap().clone();
         assert!(!offers.is_empty(), "fixture must observe the actual SDP offers");
+        assert!(signal.signals.lock().unwrap().keys().any(|(_, _, kind)| kind == "answer"),
+            "fixture must observe SDP answers as well as offers");
         assert!(offers.iter().all(|(sender, receiver)| sender < receiver),
             "every native edge must have only its lower-ID initiator: {offers:?}");
         assert!(
