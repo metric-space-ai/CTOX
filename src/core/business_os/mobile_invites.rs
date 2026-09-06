@@ -3,10 +3,10 @@
 
 use anyhow::Context;
 use base64::Engine;
-use qrcode::{render::svg, EcLevel, QrCode};
+use qrcode::{EcLevel, QrCode, render::svg};
 use ring::rand::SecureRandom;
-use rusqlite::{params, OptionalExtension};
-use serde_json::{json, Value};
+use rusqlite::{OptionalExtension, params};
+use serde_json::{Value, json};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -250,15 +250,14 @@ pub fn create(
     let invite_id = random_invite_id()?;
     let invite_id_hash = invite_hash(&invite_id);
     let user_id = format!("workjet-mobile-invite-{}", &invite_id_hash[..24]);
-    let (_capability_token, capability_expires_at_ms) =
-        super::store::issue_business_os_capability_token_for_managed_user_with_binding(
-            root,
-            &user_id,
-            "Workjet Mobile",
-            "user",
-            created_at_ms,
-            device_binding,
-        )?;
+    super::store::issue_business_os_capability_token_for_managed_user_with_binding(
+        root,
+        &user_id,
+        "Workjet Mobile",
+        "user",
+        created_at_ms,
+        device_binding,
+    )?;
     // This path also runs inside the native WebRTC peer. It must not call the
     // full sync status projection, which recursively inspects the active peer
     // and can hold the auxiliary response past the browser's RPC deadline.
@@ -342,7 +341,9 @@ pub fn create(
             // Compact one-time WebRTC bootstrap secret. CTOX persists only its
             // SHA-256 hash and binds it to the native device proof on first use.
             "capability_token": invite_id.clone(),
-            "capability_expires_at_ms": capability_expires_at_ms,
+            // The payload carries the bootstrap secret, not the separately
+            // issued user capability. Advertise the persisted invite deadline.
+            "capability_expires_at_ms": expires_at_ms,
             "user": {
                 "id": user_id,
                 "display_name": "Workjet Mobile",
@@ -770,12 +771,27 @@ mod tests {
         );
         assert!(invite.get("signaling_room_password").is_none());
         assert_eq!(invite["session"]["user"]["role"], "user");
-        assert!(created["pairingUri"]
-            .as_str()
-            .is_some_and(|value| value.starts_with("workjet://pair?payload=")));
-        assert!(created["qrSvg"]
-            .as_str()
-            .is_some_and(|value| value.contains("<svg") && value.contains("<path")));
+        let invite_expiry = chrono::DateTime::parse_from_rfc3339(
+            invite["expires_at"].as_str().expect("invite expiry"),
+        )?
+        .timestamp_millis();
+        assert_eq!(invite["session"]["capability_expires_at_ms"], invite_expiry);
+        let claims = super::claims_for_webrtc_invite_secret(root.path(), token, invite_expiry - 1)
+            .expect("unexpired bootstrap secret");
+        assert_eq!(claims.expires_at_ms, invite_expiry);
+        assert!(
+            super::claims_for_webrtc_invite_secret(root.path(), token, invite_expiry).is_none()
+        );
+        assert!(
+            created["pairingUri"]
+                .as_str()
+                .is_some_and(|value| value.starts_with("workjet://pair?payload="))
+        );
+        assert!(
+            created["qrSvg"]
+                .as_str()
+                .is_some_and(|value| value.contains("<svg") && value.contains("<path"))
+        );
         assert!(super::super::store::verify_capability_role(root.path(), token).is_none());
         assert!(
             super::super::store::verified_webrtc_capability_claims(root.path(), token).is_some()
