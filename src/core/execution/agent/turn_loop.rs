@@ -52,6 +52,8 @@ pub(crate) struct ChatTurnSessionOptions {
     pub(crate) force_isolated_session: bool,
     pub(crate) base_instructions: Option<String>,
     pub(crate) plain_prompt: bool,
+    /// Prepared once at the lease boundary; rendering performs no SQLite reads.
+    pub(crate) crew_soul_block: Option<String>,
     pub(crate) turn_timeout_secs_override: Option<u64>,
     pub(crate) required_initial_tool: Option<String>,
     /// App-authoring turns may write only their exact runtime module target.
@@ -855,6 +857,9 @@ where
     persist_lcm_message_with_retry(db_path, conversation_id, "user", prompt, &mut emit)
         .context("failed to persist user message into LCM")?;
     if options.plain_prompt {
+        let mut crew_prompt = prompt.to_string();
+        crate::crew::append_soul(&mut crew_prompt, options.crew_soul_block.as_deref());
+        let prompt = crew_prompt.as_str();
         emit("plain-prompt-context");
         let preflight_base_instructions = session
             .as_deref()
@@ -1007,6 +1012,7 @@ where
         &health,
         &mut emit,
     )?;
+    live_context::attach_crew_soul(&mut rendered_prompt, options.crew_soul_block.as_deref());
     emit(&format!(
         "context-selection rendered={} omitted={}",
         rendered_prompt.rendered_context_items, rendered_prompt.omitted_context_items
@@ -1125,6 +1131,7 @@ where
             &health,
             &mut emit,
         )?;
+        live_context::attach_crew_soul(&mut rendered_prompt, options.crew_soul_block.as_deref());
         emit(&format!(
             "context-selection rendered={} omitted={}",
             rendered_prompt.rendered_context_items, rendered_prompt.omitted_context_items

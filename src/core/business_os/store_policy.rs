@@ -186,6 +186,9 @@ pub(super) fn evaluate_policy_with_explicit_grants(
     if decision.allowed {
         return Ok(decision);
     }
+    if permission == BusinessOsPermission::CrewManage {
+        return Ok(decision);
+    }
     if active_permission_grant_allows(conn, actor, permission, scope)? {
         return Ok(policy::allow_decision(permission, scope));
     }

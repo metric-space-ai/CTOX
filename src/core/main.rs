@@ -23,6 +23,7 @@ mod communication;
 mod communication_store;
 mod context;
 mod core_state;
+mod crew;
 mod doc_stack;
 mod execution;
 mod export;
@@ -120,6 +121,8 @@ EVERYDAY
   ctox start                     start the persistent mission loop (systemd service)
   ctox stop [--force]            stop the mission loop
   ctox status                    show service status (JSON)
+  ctox crew list                 list durable crew members (read-only JSON)
+  ctox crew show <id>            show one crew profile (read-only JSON)
   ctox work-hours set 08:00 18:00
                                  restrict CTOX work loop to local hours
   ctox work-hours off            disable working-hours restriction
@@ -363,7 +366,7 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
             // Recovery / inspection commands — must work even when the
             // runtime DB is wedged.
             "upgrade" | "update" | "version" | "status" | "doctor" | "service" | "mailserver"
-            | "appsec" => {
+            | "appsec" | "crew" => {
                 return true;
             }
             // Agent-facing web-stack calls persist their evidence in the
@@ -462,7 +465,21 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
             print_help();
             Ok(())
         }
+        Some("crew") => {
+            let conn = rusqlite::Connection::open_with_flags(paths::core_db(&root), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let members = crew::members(&conn)?;
+            match args.get(1).map(String::as_str) {
+                Some("list") if args.len() == 2 => println!("{}", serde_json::to_string_pretty(&members)?),
+                Some("show") if args.len() == 3 => {
+                    let member = members.iter().find(|m|m.id==args[2]).context("crew member not found")?;
+                    println!("{}",serde_json::to_string_pretty(member)?);
+                }
+                _ => anyhow::bail!("usage: ctox crew list | ctox crew show <id>"),
+            }
+            Ok(())
+        }
         Some("source-status") => {
+
             let outcome = engine::source_layout_status(&root)?;
             println!("{}", serde_json::to_string_pretty(&outcome)?);
             Ok(())
@@ -5247,6 +5264,15 @@ mod tests {
                 !super::skips_cli_turn_ledger(&args),
                 "non-allowlisted command unexpectedly skipped the ledger: {args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn crew_inspection_skips_the_mutating_cli_ledger() {
+        for args in [vec!["crew", "list"], vec!["crew", "show", "crew-milo"]] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(super::skips_cli_turn_ledger(&args));
+            assert!(super::skips_cli_startup_db(&args));
         }
     }
 

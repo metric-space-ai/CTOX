@@ -52,7 +52,20 @@ impl BusinessProjectionWriter {
                 WHERE collection='ctox_runs' AND deleted=0;
              CREATE INDEX IF NOT EXISTS idx_cockpit_run_crew
                 ON business_records(json_extract(payload_json,'$.crew_member_id'), record_id)
-                WHERE collection='ctox_runs' AND deleted=0;",
+                WHERE collection='ctox_runs' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_crew_projection_member_state
+                ON business_records(json_extract(payload_json,'$.archived'),json_extract(payload_json,'$.state'),record_id)
+                WHERE collection='ctox_crew_members' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_crew_projection_learning_time
+                ON business_records(json_extract(payload_json,'$.member_id'),json_extract(payload_json,'$.created_at_ms'),record_id)
+                WHERE collection='ctox_crew_learnings' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_crew_projection_learning_confirmed
+                ON business_records(json_extract(payload_json,'$.member_id'),json_extract(payload_json,'$.confirmed_by_owner'),record_id)
+                WHERE collection='ctox_crew_learnings' AND deleted=0;
+             CREATE INDEX IF NOT EXISTS idx_crew_projection_updated
+                ON business_records(collection,json_extract(payload_json,'$.updated_at_ms'),record_id)
+                WHERE deleted=0 AND collection IN ('ctox_crew_members','ctox_crew_learnings');",
+
         )?;
         Ok(Self {
             inner: NativeProjectionWriter::open(root)?,
@@ -228,7 +241,11 @@ pub(crate) fn schedule_flow_refresh(root: &Path, kind: &str) {
         kind,
         "worker.plan_updated" | "worker.turn_started" | "cockpit.review"
     );
-    wake(root, EVENTS | if chat { CHAT } else { 0 });
+    let crew = matches!(kind, "crew_selected" | "crew.selected");
+    wake(
+        root,
+        EVENTS | if chat { CHAT } else { 0 } | if crew { STATUS | QUEUE } else { 0 },
+    );
 }
 pub(crate) fn schedule_runs_refresh(root: &Path) {
     wake(root, RUNS);
@@ -358,10 +375,16 @@ fn refresh_selected(
         project_status(root, &conn, writer, snapshot)?;
     }
     if flags & EVENTS != 0 {
+        if has_table(&conn, "crew_attempts")? && has_table(&conn, "ctox_harness_flow_events")? {
+            crate::crew::repair_selection_events(root, &conn)?;
+        }
         project_events(root, &conn, writer)?;
     }
     if flags & RUNS != 0 {
         project_runs(root, &conn, writer)?;
+    }
+    if has_table(&conn, "crew_members")? {
+        project_crew(root, &conn, writer)?;
     }
     if flags & CHAT != 0 && has_table(&conn, "ctox_harness_flow_events")? {
         super::chat::project(root, &conn)?;
@@ -463,6 +486,18 @@ fn project_status(
     let now = Utc::now().timestamp_millis();
     let capacity = crate::service::configure_queue_worker_capacity(root, None)?;
     let threshold = crate::service::queue_pressure_threshold();
+    let active_crew: Option<String> = if has_table(conn, "crew_members")? {
+        conn.query_row(
+            "SELECT crew_member_id FROM communication_routing_state
+         WHERE route_status='leased' AND crew_member_id IS NOT NULL
+         ORDER BY leased_at,message_key LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?
+    } else {
+        None
+    };
     writer.upsert_source_projection("ctox_harness_status","harness",now,json!({
         "id":"harness", "service_running":snapshot.service_running, "busy":snapshot.busy,
         "paused":pause.paused,"pause_reason":pause.reason,
@@ -471,7 +506,7 @@ fn project_status(
         "blocked_count":count("blocked"),"review_count":review_count,"failed_recent_count":failed_recent,
         "pressure_active":count("pending") >= threshold as i64,"pressure_threshold":threshold,
         "work_hours":crate::service::working_hours::snapshot(root),"active_task_ids":snapshot.active_task_ids,
-        "active_crew_member_id":null,"last_error":snapshot.last_error,"boot_id":snapshot.boot_id,"updated_at_ms":now
+        "active_crew_member_id":active_crew,"last_error":snapshot.last_error,"boot_id":snapshot.boot_id,"updated_at_ms":now
     }))?;
     Ok(())
 }
@@ -650,7 +685,14 @@ fn project_runs(
     loop {
         // A fixed page replaces the unbounded active-run UNION and COUNT limit.
         // The bounded recent set plus an indexed EXISTS retains every active run.
-        let mut statement = conn.prepare(
+        // Pending identity accounting is independent of the 500 visible-run cap.
+        // A long offline interval must not silently lose crew statistics.
+        let pending_crew = if has_table(conn, "crew_attempts")? {
+            "EXISTS(SELECT 1 FROM crew_attempts c WHERE c.attempt_id=f.attempt_id AND c.finalized_at IS NULL) OR"
+        } else {
+            ""
+        };
+        let mut statement = conn.prepare(&format!(
             "SELECT f.attempt_id,
                     (SELECT e.work_id FROM ctox_harness_flow_events e
                      WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
@@ -662,7 +704,7 @@ fn project_runs(
                        AND e.message_key IS NOT NULL ORDER BY e.created_at LIMIT 1)
              FROM worker_attempt_finalizations f
              WHERE f.attempt_id>?1 AND f.status!='finalizing'
-               AND (f.attempt_id IN (
+               AND ({pending_crew} f.attempt_id IN (
                         SELECT attempt_id FROM worker_attempt_finalizations
                         WHERE status!='finalizing'
                         ORDER BY COALESCE(terminal_at,updated_at) DESC, attempt_id DESC LIMIT 500)
@@ -671,8 +713,8 @@ fn project_runs(
                         JOIN communication_routing_state r ON r.message_key=e.message_key
                         WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
                           AND r.route_status NOT IN ('handled','failed','cancelled')))
-             ORDER BY f.attempt_id LIMIT ?2",
-        )?;
+             ORDER BY f.attempt_id LIMIT ?2"
+        ))?;
         let rows = statement
             .query_map(params![cursor, PROJECTION_PAGE_SIZE], |r| {
                 Ok((
@@ -719,15 +761,171 @@ fn project_runs(
             let review = review
                 .and_then(|r| serde_json::from_str::<Value>(&r).ok())
                 .unwrap_or(json!({"disposition":null,"hold_reason":null}));
+            let mut crew_member: Option<String> = None;
+            let mut retrospective: Option<String> = None;
+            if has_table(conn, "crew_attempts")? {
+                let pending: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM crew_attempts WHERE attempt_id=?1 AND finalized_at IS NULL)",
+                    [&id], |r|r.get(0),
+                )?;
+                if pending {
+                    let reply: String = conn.query_row(
+                    "SELECT substr(reply_text,1,1048577) FROM worker_attempt_finalizations WHERE attempt_id=?1",
+                    [&id],
+                    |r| r.get(0),
+                )?;
+                    let owner_feedback: Option<String> = if has_table(
+                        conn,
+                        "business_command_aggregates",
+                    )? {
+                        conn.query_row(
+                        "SELECT substr(COALESCE(json_extract(a.intent_json,'$.payload.owner_feedback'),
+                            json_extract(a.intent_json,'$.payload.prompt'),json_extract(a.intent_json,'$.payload.message')),1,16000)
+                         FROM business_command_task_links l JOIN business_command_aggregates a ON a.command_id=l.command_id
+                         WHERE l.task_id=?1 AND json_extract(a.intent_json,'$.native_authorization.allowed')=1
+                           AND json_extract(a.intent_json,'$.native_authorization.actor.trusted')=1
+                           AND json_extract(a.intent_json,'$.native_authorization.actor.role') IN ('chef','admin')
+                         ORDER BY l.created_at_ms DESC,l.command_id LIMIT 1",
+                        [task.as_deref()], |r|r.get(0),
+                    ).optional()?.flatten()
+                    } else {
+                        None
+                    };
+                    crate::crew::finalize_attempt(
+                        conn,
+                        &id,
+                        &status,
+                        match review.get("disposition").and_then(Value::as_str) {
+                            Some("approved") => Some(true),
+                            None | Some("none") => None,
+                            Some(_) => Some(false),
+                        },
+                        &finished,
+                        metrics.get("elapsed_ms").and_then(Value::as_i64),
+                        &reply,
+                        owner_feedback.as_deref(),
+                    )?;
+                }
+                if let Some((member, text)) = conn
+                    .query_row(
+                        "SELECT member_id,retrospective FROM crew_attempts WHERE attempt_id=?1",
+                        [&id],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+                    )
+                    .optional()?
+                {
+                    crew_member = Some(member);
+                    retrospective = text;
+                }
+            }
             writer.upsert_source_projection(
                 "ctox_runs", &id, finished_ms,
                 json!({
-                    "id":id,"task_id":task,"command_id":command_id,"work_id":work,"crew_member_id":null,
+                    "id":id,"task_id":task,"command_id":command_id,"work_id":work,"crew_member_id":crew_member,
                     "status":status,"agent_outcome":outcome,"started_at_ms":started_ms,"finished_at_ms":finished_ms,
                     "metrics":metrics,"review":review,"error_text":error,"resumable":resumable,
-                    "retrospective":null,"updated_at_ms":finished_ms
+                    "retrospective":retrospective,"updated_at_ms":finished_ms
                 }),
             )?;
+        }
+    }
+    Ok(())
+}
+
+fn project_crew(
+    root: &Path,
+    conn: &Connection,
+    writer: &mut BusinessProjectionWriter,
+) -> Result<()> {
+    let now = Utc::now().timestamp_millis();
+    let mut learning_ids = BTreeSet::new();
+    for member in crate::crew::members(conn)? {
+        if let Some(updated) =
+            required_projection_millis(root, "ctox_crew_members", &member.updated_at)
+        {
+            let active: Option<String> = conn
+                .query_row(
+                    "SELECT message_key FROM communication_routing_state
+             WHERE crew_member_id=?1 AND route_status='leased'
+             ORDER BY leased_at,message_key LIMIT 1",
+                    [&member.id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            let failed: bool = conn.query_row(
+                "SELECT COALESCE((SELECT succeeded=0 FROM crew_attempts WHERE member_id=?1
+             AND finalized_at IS NOT NULL ORDER BY finalized_at DESC,attempt_id DESC LIMIT 1),0)",
+                [&member.id],
+                |r| r.get(0),
+            )?;
+            let state = if active.is_some() {
+                "on_duty"
+            } else if failed {
+                "resting_after_failure"
+            } else {
+                "home"
+            };
+            writer.upsert_source_projection(
+                "ctox_crew_members",
+                &member.id,
+                updated,
+                json!({
+                    "id":member.id,"name":member.name,"shape":member.shape,"color":member.color,
+                    "archived":member.archived,"state":state,"active_task_id":active,
+                    "soul":member.soul,"specialties":member.specialties,"stats":member.stats,
+                    "updated_at_ms":updated
+                }),
+            )?;
+        }
+        crate::crew::retain_learnings(conn, &member.id)?;
+        let rows = conn.prepare(
+            "SELECT id,text,kind,scope_json,evidence_run_id,created_at,confirmed_by_owner,archived
+             FROM crew_member_learnings WHERE member_id=?1
+             ORDER BY confirmed_by_owner,created_at,id LIMIT 200",
+        )?.query_map([&member.id], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+            r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,String>(5)?,
+            r.get::<_,bool>(6)?,r.get::<_,bool>(7)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, text, kind, scope, run, created, confirmed, archived) in rows {
+            // A malformed timestamp is not a source deletion. Keep the last
+            // valid projection until the source can be repaired.
+            learning_ids.insert(id.clone());
+            let Some(created_ms) =
+                required_projection_millis(root, "ctox_crew_learnings", &created)
+            else {
+                continue;
+            };
+            let scope: Value = serde_json::from_str(&scope)?;
+            writer.upsert_source_projection(
+                "ctox_crew_learnings",
+                &id,
+                created_ms,
+                json!({
+                    "id":id,"member_id":member.id,"text":text,"kind":kind,"scope":scope,
+                    "evidence_run_id":run,"created_at_ms":created_ms,"confirmed_by_owner":confirmed,
+                    "archived":archived,"updated_at_ms":created_ms
+                }),
+            )?;
+        }
+    }
+    // Native source deletions (retention/Owner delete) become durable tombstones.
+    let store = store::open_store(root)?;
+    let mut cursor = String::new();
+    loop {
+        let ids = store
+            .prepare(
+                "SELECT record_id FROM business_records WHERE collection='ctox_crew_learnings'
+             AND deleted=0 AND record_id>?1 ORDER BY record_id LIMIT 128",
+            )?
+            .query_map([&cursor], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if ids.is_empty() {
+            break;
+        }
+        for id in ids {
+            cursor = id.clone();
+            if !learning_ids.contains(&id) {
+                writer.tombstone_source_projection("ctox_crew_learnings", &id, now)?;
+            }
         }
     }
     Ok(())

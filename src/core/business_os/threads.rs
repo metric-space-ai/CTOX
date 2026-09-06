@@ -235,6 +235,8 @@ pub(super) fn may_accept_peer_write(root: &Path, token: &str, collection: &str) 
 /// these have a browser write path (unlike e.g. `desktop_files`, which the
 /// desktop apps legitimately create and therefore stays writable).
 const NATIVE_PROJECTION_COLLECTIONS: &[&str] = &[
+    "ctox_crew_members",
+    "ctox_crew_learnings",
     "ctox_harness_events",
     "ctox_harness_status",
     "ctox_runs",

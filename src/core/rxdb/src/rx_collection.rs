@@ -1099,37 +1099,43 @@ pub(crate) mod test_support {
     }
 
     /// Build a standalone in-memory `RxCollection` with a fixed `{id, age}`
-    /// schema. Each call uses its own database token so collections are
-    /// independent (used to verify cross-collection isolation under multiplex).
+    /// schema. Each call owns an independent database. Multiplex fixtures use
+    /// test_collection_in_database to share identity without sharing records.
     pub(crate) async fn test_collection_named(name: &str) -> Arc<RxCollection> {
         let hash_function = Arc::new(SupportHashFunction);
-        let schema =
-            Arc::new(create_rx_schema(raw_schema(), hash_function.clone(), false).unwrap());
-        let storage = get_rx_storage_memory(());
-        let raw_storage_instance = storage
-            .create_storage_instance(
-                RxStorageInstanceCreationParams {
-                    database_instance_token: format!("db-token-{name}"),
-                    database_name: format!("db-{name}"),
-                    collection_name: name.to_string(),
-                    schema: schema.json_schema.clone(),
-                    options: HashMap::new(),
-                    multi_instance: false,
-                    dev_mode: false,
-                    password: None,
-                },
-                (),
-            )
-            .await
-            .unwrap();
         let database = RxDatabase::new(
             format!("db-{name}"),
             format!("db-token-{name}"),
             format!("storage-token-{name}"),
             false,
             hash_function,
-            storage,
+            get_rx_storage_memory(()),
         );
+        test_collection_in_database(name, database).await
+    }
+
+    /// Multiplex fixtures share identity while retaining independent collections.
+    pub(crate) async fn test_collection_in_database(
+        name: &str,
+        database: Arc<RxDatabase>,
+    ) -> Arc<RxCollection> {
+        let hash_function = database.hash_function.clone();
+        let schema =
+            Arc::new(create_rx_schema(raw_schema(), hash_function.clone(), false).unwrap());
+        let storage = database.storage.clone();
+        let raw_storage_instance = storage
+            .create_storage_instance(RxStorageInstanceCreationParams {
+                database_instance_token: database.token.clone(),
+                database_name: database.name.clone(),
+                collection_name: name.to_string(),
+                schema: schema.json_schema.clone(),
+                options: HashMap::new(),
+                multi_instance: false,
+                dev_mode: false,
+                password: None,
+            })
+            .await
+            .unwrap();
         let storage_instance = crate::rx_storage_helper::get_wrapped_storage_instance(
             Arc::clone(&database),
             raw_storage_instance,

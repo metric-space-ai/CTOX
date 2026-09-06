@@ -163,9 +163,9 @@ stays snappy; a module must not wait for sync to appear.
 
 ### 3.2 Shell integration
 
-**`shared/db.js` — `createBusinessDb({ name })`.** Imports the bundle from
-`../rxdb/dist/ctox-rxdb-js.mjs?v=<buster>` (timeout-guarded, with one
-cache-busted retry), runs an IndexedDB preflight probe, then
+**`shared/db.js` — `createBusinessDb({ name })`.** Imports the bundle through
+the canonical `shared/rxdb-runtime.js` loader and its single versioned URL,
+runs an IndexedDB preflight probe, then
 `createRxDatabase` with `getCtoxIndexedDbStorage()`. If the primary IndexedDB
 stays blocked, writes fail with typed `indexeddb_blocked`; the shell does not
 acknowledge writes into an alternate database that has no deterministic merge
@@ -270,6 +270,31 @@ cross-process JS↔Rust tests) and `examples/v15_scale_wire_loop.rs`, `tools/`
 `vendor/` (upstream snapshot), `PORTING.md` + `revisions/` (port ledger).
 
 ### 4.2 The native peer (`src/core/business_os/rxdb_peer.rs`)
+
+`run_native_peer` delegates transport bring-up and shutdown to
+`ctox_sync::native::NativeSyncSession` (`src/core/sync`). Business OS still owns
+its database, projections, commands and admission/read/write policies. The
+session subscribes before joining signaling, bounds bring-up, and shuts down
+its multiplexed pool before persistence closes. The Business OS host declares
+the generated `CtoxInstance` role explicitly.
+
+The host now passes `NativeSyncOptions.database` independently from its
+replicated collection set. A Workjet control peer or coordination-only voter
+may supply no collections. It explicitly advertises empty schema/checkpoint
+maps rather than inventing a Business OS record store. The existing pool creates
+master relays and fork states only for the collections advertised by both peers.
+All supplied collections must belong to the supplied database; a mismatch fails
+before the shared native session opens signaling.
+
+The same crate provides separate voter/worker execution attachments with
+pinned OpenRaft 0.9.25 authority over signed WebRTC control messages. These are
+not attached by the productive Business OS host yet. Replication master/fork
+election does not grant execution ownership. Transport callbacks carry a
+connection generation, so a delayed disconnect or transfer cancellation cannot
+remove its replacement. Field policy lookup is bound to that same generation.
+See the [native core contract](../src/core/sync/README.md) and
+[worker host integration status](dev/ctox-sync-worker-host-contract.md) for
+the tested boundaries and outstanding production onboarding.
 
 `spawn_native_peer` starts one supervised OS thread (`business-os-rxdb-peer`):
 
@@ -1008,6 +1033,50 @@ evidence. CI runs the provenance/dependency-audit asserts
 
 ---
 
+
+### Crew identity contracts (PR-2)
+
+The existing channel migration seeds four stable members in `crew_members` and
+adds `communication_routing_state.crew_member_id`. `crew_attempts` pins identity
+and finalization accounting to an attempt; `crew_member_learnings` is the durable
+learning source. These are additive Core changes, not browser version migrations.
+
+`ctox_crew_members` (version 0) exposes `id`, `name`, `shape`, `color`, `archived`,
+`state`, `active_task_id` and numeric `updated_at_ms` to every authenticated role.
+Only Admin/Chef and Founder receive `soul`, `specialties` and `stats`.
+`ctox_crew_learnings` (version 0) is readable only by Admin/Chef and Founder;
+its fields are `id`, `member_id`, `text`, `kind`, `scope`, `evidence_run_id`,
+`confirmed_by_owner`, `archived`, `created_at_ms`, `updated_at_ms`.
+The pump is the sole producer, and missing source rows become tombstones.
+Learnings are capped at 200 per member, evicting oldest unconfirmed rows first.
+Required/index timestamps are numeric; malformed sources are skipped and logged
+once, retaining the source for later repair.
+
+All direct writes to both collections are denied, including explicit grants and
+MCP writes. The same central policy prevents startup migration grants.
+The native peer carries a per-actor field allowlist: masterChangesSince,
+live changes and query-fetch all strip private member fields before serialization.
+Queries cannot predicate, sort or select an index on a hidden field. MCP get,
+query, search and related-record summaries use the same public field list.
+
+`CrewManage` is `ctox.crew.manage`, with record scope ID equal to the full command
+name. Admin/Chef may use `ctox.crew.member.create`, `ctox.crew.member.update`,
+`ctox.crew.learning.confirm`, `ctox.crew.learning.update`,
+`ctox.crew.learning.delete` and `ctox.crew.assign`. Founder may only confirm or
+update learnings. User is denied; a grant cannot widen this permission.
+Payload IDs are `member_id`, `learning_id` or `{task_id, member_id}` for assign.
+Member creation takes `{name, shape, color, soul, specialties?}`; update takes
+`{member_id, name?, soul?, specialties?, archived?}`. Learning update accepts
+`{learning_id, text?, archived?}`. Assign requires an unleased pending/blocked task.
+Controls reuse durable command receipts and write only whitelisted audit fields.
+
+The PR-1 fields `ctox_queue_tasks.crew_member_id`, `ctox_runs.crew_member_id` /
+`retrospective` and `ctox_harness_status.active_crew_member_id` now identify new
+crew attempts. Historical attempts without identity retain their existing nulls.
+The shared fixture is `src/core/rxdb/tests/fixtures/crew-identity.json`; native
+field-policy tests and browser schema/permission tests consume it. Module JSON,
+native schemas and both hash registries are regenerated before the pinned
+esbuild 0.28.0 bundle build; the sole bundle URL remains in `shared/rxdb-runtime.js`.
 ## 11. Test map
 
 ### 10.1 Browser suite (`src/apps/business-os/rxdb/tests/`)
@@ -1153,8 +1222,8 @@ place; adding one without a written reason is a review finding.
 load and pass in isolation. Check the load average before diagnosing them as a
 regression.
 
-If `src/` of the browser runtime changed: rebuild dist + bump the three
-cache-busters first (§9), since most smokes import from `dist/`.
+If `src/` of the browser runtime changed: rebuild dist + bump the sole bundle
+cache-buster in `shared/rxdb-runtime.js` first (§10), since most smokes import from `dist/`.
 
 ---
 
