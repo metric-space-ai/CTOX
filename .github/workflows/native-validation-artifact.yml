@@ -36,7 +36,7 @@ jobs:
         run: |
           mkdir -p "$RUNNER_TEMP/ctox-native-validation"
           cp "$CARGO_TARGET_DIR/debug/ctox" "$RUNNER_TEMP/ctox-native-validation/ctox"
-          "$RUNNER_TEMP/ctox-native-validation/ctox" --version
+          "$RUNNER_TEMP/ctox-native-validation/ctox" help
           git rev-parse HEAD > "$RUNNER_TEMP/ctox-native-validation/SOURCE_COMMIT"
           cd "$RUNNER_TEMP/ctox-native-validation"
           shasum -a 256 ctox > SHA256SUMS
