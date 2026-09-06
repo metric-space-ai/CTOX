@@ -304,6 +304,37 @@ These remain route probes, not authenticated app or performance acceptance.
 The beta9 CSV acceptance file still failed with Office RPC editor.open timeout
 in the real beta10 browser.
 
+## Isolated final-source native verification in progress
+
+The local test invocation was deliberately cancelled through its supervisor
+(exit 143 / child -15), after the final-source server run started. It did not
+execute the SQLite regression and is not a passing verification result.
+
+An immutable archive of main commit fbeca32b7 was uploaded and verified:
+SHA256 1d5762e5036b900a947994635192019a1b01a73ec87ff1b2453b05e89362b542.
+The separate source/test root on Welsch is
+`/home/ctox/.cache/ctox/file-preservation-fbeca32b7/`.
+The test unit is `ctox-file-preservation-test-fbeca32b7.service`,
+invocation 54a69f0fbf6540a1927f8a375e61df06. It builds the pinned sidecar and
+runs the exact native SQLite preservation regression. Source, Cargo target
+and temporary test databases are confined to this separate directory.
+`test.sh` and `test.log` retain the recipe and output.
+
+The unit has one CPU of quota, Nice=10, MemoryMax=6 GiB and a one-hour runtime
+bound; Cargo uses one build job and a 6 GiB virtual-address-space limit.
+These resource limits were read back from systemd. The run subsequently failed
+with Cargo exit 101 / rustc SIGABRT: `memory allocation of 27148 bytes failed`.
+The SQLite test did not execute; this is not a pass. The 6 GiB virtual-address
+limit was reached during compilation. Another isolated release-mode regression
+unit was already running when this result was inspected, so no duplicate retry
+was started. The production service has not been switched to the candidate by
+this task.
+
+The existing install rollback also needs explicit handling before activation:
+`rollback_to_previous_release` restores the pre-build database backup on
+service/unit refresh failures. An executable recovery must not rewind writes
+that occurred during a build. Do not invoke that path as an unchecked fallback.
+
 Native initial replication measurements after the restart included:
 desktop_file_index 39,324 ms, business_records 47,397 ms and knowledge_tables
 50,677 ms. SQLite recorded 12,519 statements, 155.417 s cumulative time and
