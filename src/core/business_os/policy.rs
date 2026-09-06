@@ -43,6 +43,7 @@ pub enum BusinessOsPermission {
     DataWrite,
     CtoxTaskCreate,
     CtoxTaskManage,
+    CrewManage,
     ExternalApprove,
     SupportRead,
     SupportTriage,
@@ -56,7 +57,7 @@ pub enum BusinessOsPermission {
     SupportAgentApply,
 }
 
-pub const BUSINESS_OS_PERMISSIONS: [BusinessOsPermission; 31] = [
+pub const BUSINESS_OS_PERMISSIONS: [BusinessOsPermission; 32] = [
     BusinessOsPermission::WorkspaceManage,
     BusinessOsPermission::WorkspaceBrandingManage,
     BusinessOsPermission::UsersManage,
@@ -77,6 +78,7 @@ pub const BUSINESS_OS_PERMISSIONS: [BusinessOsPermission; 31] = [
     BusinessOsPermission::DataWrite,
     BusinessOsPermission::CtoxTaskCreate,
     BusinessOsPermission::CtoxTaskManage,
+    BusinessOsPermission::CrewManage,
     BusinessOsPermission::ExternalApprove,
     BusinessOsPermission::SupportRead,
     BusinessOsPermission::SupportTriage,
@@ -117,6 +119,7 @@ impl BusinessOsPermission {
             Self::DataWrite => "data.write",
             Self::CtoxTaskCreate => "ctox.task.create",
             Self::CtoxTaskManage => "ctox.task.manage",
+            Self::CrewManage => "ctox.crew.manage",
             Self::ExternalApprove => "external.approve",
             Self::SupportRead => "support.read",
             Self::SupportTriage => "support.triage",
@@ -328,7 +331,11 @@ pub const ADMIN_ONLY_COLLECTIONS: &[&str] = &[
 pub fn is_cockpit_projection(collection: &str) -> bool {
     matches!(
         collection,
-        "ctox_harness_events" | "ctox_harness_status" | "ctox_runs"
+        "ctox_harness_events"
+            | "ctox_harness_status"
+            | "ctox_runs"
+            | "ctox_crew_members"
+            | "ctox_crew_learnings"
     )
 }
 
@@ -339,7 +346,8 @@ pub fn role_may_read_collection(role: BusinessOsRole, collection: &str) -> bool 
         BusinessOsRole::Chef | BusinessOsRole::Admin => true,
         BusinessOsRole::Founder => !ADMIN_ONLY_COLLECTIONS.contains(&collection),
         BusinessOsRole::User => {
-            !ADMIN_ONLY_COLLECTIONS.contains(&collection) && !is_cockpit_projection(collection)
+            !ADMIN_ONLY_COLLECTIONS.contains(&collection)
+                && (!is_cockpit_projection(collection) || collection == "ctox_crew_members")
         }
     }
 }
@@ -355,7 +363,9 @@ pub fn evaluate(
             BusinessOsPermission::DataRead | BusinessOsPermission::DataWrite
         )
     {
-        return if permission == BusinessOsPermission::DataRead && actor.role != BusinessOsRole::User
+        return if permission == BusinessOsPermission::DataRead
+            && (actor.role != BusinessOsRole::User
+                || scope.scope_id.as_deref() == Some("ctox_crew_members"))
         {
             PolicyDecision::allow(permission, scope)
         } else {
@@ -402,6 +412,15 @@ pub fn evaluate(
                 || (scope.scope_type == BusinessOsScopeType::Record && scope.owned_by_actor)
         }
         BusinessOsPermission::CtoxTaskCreate => true,
+        BusinessOsPermission::CrewManage => {
+            matches!(actor.role, BusinessOsRole::Chef | BusinessOsRole::Admin)
+                || (actor.role == BusinessOsRole::Founder
+                    && scope.scope_type == BusinessOsScopeType::Record
+                    && matches!(
+                        scope.scope_id.as_deref(),
+                        Some("ctox.crew.learning.confirm" | "ctox.crew.learning.update")
+                    ))
+        }
         BusinessOsPermission::CtoxTaskManage => {
             matches!(actor.role, BusinessOsRole::Chef | BusinessOsRole::Admin)
                 || scope.owned_by_actor

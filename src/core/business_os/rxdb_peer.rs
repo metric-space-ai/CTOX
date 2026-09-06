@@ -2834,7 +2834,27 @@ async fn run_native_peer(
         let document_read_authz: Option<DocumentReadAuthzHook> = {
             let doc_authz_root = root.clone();
             Some(std::sync::Arc::new(move |token: &str, collection: &str| {
-                super::threads::replication_document_filter(&doc_authz_root, token, collection)
+                rxdb::plugins::replication_webrtc::DocumentReadPolicy {
+                    filter: super::threads::replication_document_filter(
+                        &doc_authz_root,
+                        token,
+                        collection,
+                    ),
+                    fields: if collection == "ctox_crew_members"
+                        && !store::verify_webrtc_capability_actor(&doc_authz_root, token)
+                            .is_some_and(|(_, role)| {
+                                matches!(role.as_str(), "chef" | "admin" | "founder")
+                            }) {
+                        Some(
+                            crate::crew::PUBLIC_MEMBER_FIELDS
+                                .iter()
+                                .map(|field| field.to_string())
+                                .collect(),
+                        )
+                    } else {
+                        None
+                    },
+                }
             }))
         };
         let document_write_authz: Option<DocumentWriteAuthzHook> = {
@@ -9016,6 +9036,8 @@ fn business_record_projection_collections() -> Vec<String> {
                     | "ctox_runtime_settings"
                     | "ctox_harness_events"
                     | "ctox_harness_status"
+                    | "ctox_crew_members"
+                    | "ctox_crew_learnings"
                     | "ctox_runs"
                     | "desktop_files"
                     | "desktop_file_chunks"

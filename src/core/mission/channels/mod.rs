@@ -6185,7 +6185,7 @@ fn list_queue_tasks_from_conn(conn: &Connection, limit: usize) -> Result<Vec<Que
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6251,7 +6251,7 @@ fn list_queue_tasks_from_conn_with_statuses(
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6403,7 +6403,7 @@ pub(crate) fn load_queue_tasks_by_message_key_from_conn(
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
             FROM communication_messages m
             LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
             WHERE m.channel = ?1
@@ -6457,7 +6457,7 @@ fn load_queue_task_for_business_os_command_from_conn(
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0)
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6499,6 +6499,7 @@ fn map_queue_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueTaskView
     task.wait_entity_id = row.get(31)?;
     task.priority_time_credit_hours = row.get(32)?;
     task.attempt = row.get(33)?;
+    task.crew_member_id = row.get(34)?;
     Ok(task)
 }
 

@@ -5036,6 +5036,13 @@ struct PromptWorkerActivity {
     leases_released: bool,
     lease_heartbeat_stop: Arc<std::sync::atomic::AtomicBool>,
     lease_heartbeat: Option<thread::JoinHandle<()>>,
+    prepared_attempt: Option<anyhow::Result<PreparedCrewAttempt>>,
+}
+
+struct PreparedCrewAttempt {
+    attempt_id: String,
+    recoverable_attempt: Option<lcm::WorkerAttemptRecord>,
+    crew_soul_block: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5172,6 +5179,35 @@ impl PromptWorkerActivity {
             leases_released: false,
             lease_heartbeat_stop,
             lease_heartbeat,
+            // Snapshot identity during lease attachment; no cockpit reads are
+            // added to the harness turn or its progress callbacks.
+            prepared_attempt: Some((|| -> anyhow::Result<PreparedCrewAttempt> {
+                let recoverable_attempt = lcm::run_recoverable_worker_attempt(
+                    &crate::paths::core_db(root),
+                    &worker_attempt_work_key(job),
+                )?;
+                let attempt_id = recoverable_attempt
+                    .as_ref()
+                    .map(|attempt| attempt.attempt_id.clone())
+                    .unwrap_or_else(|| format!("worker-attempt:{}", uuid::Uuid::new_v4()));
+                // Execution conversations contain command suffixes for review
+                // isolation. Crew continuity uses the durable chat/thread key.
+                let crew_soul_block = crate::crew::prepare_attempt(
+                    root,
+                    &job.leased_message_keys,
+                    CHANNEL_ROUTER_LEASE_OWNER,
+                    &attempt_id,
+                    job.thread_key.as_deref(),
+                    &job.queue_task_metadata,
+                    job.suggested_skill.as_deref(),
+                    &job.prompt,
+                )?;
+                Ok(PreparedCrewAttempt {
+                    attempt_id,
+                    recoverable_attempt,
+                    crew_soul_block,
+                })
+            })()),
         }
     }
 
@@ -5975,15 +6011,20 @@ fn start_prompt_worker(
             let conversation_id =
                 turn_loop::conversation_id_for_thread_key(conversation_thread_key.as_deref());
             let attempt_work_key = worker_attempt_work_key(&job);
-            let recoverable_attempt =
-                lcm::run_recoverable_worker_attempt(&db_path, &attempt_work_key)?;
-            let attempt_id = recoverable_attempt
-                .as_ref()
-                .map(|attempt| attempt.attempt_id.clone())
-                .unwrap_or_else(|| format!("worker-attempt:{}", uuid::Uuid::new_v4()));
+            // Lease preparation errors surface only after the unchanged
+            // admission/redirect guards above. Execution consumes held data.
+            let PreparedCrewAttempt {
+                attempt_id,
+                recoverable_attempt,
+                crew_soul_block,
+            } = worker_activity
+                .prepared_attempt
+                .take()
+                .context("worker lease preparation was already consumed")??;
             // The Business OS command/evidence run and the worker finalization
             // share one durable attempt identity.
             let command_turn_id = attempt_id.clone();
+
             let research_attempt_started_at = current_epoch_secs();
             // Plan-step messages force a continuity refresh directly.
             // Internal-work closures (which the service performs after the
@@ -6024,7 +6065,8 @@ fn start_prompt_worker(
                  - Use at least one concise step. Keep completed steps first, exactly one current step in_progress, and later steps pending.\n\
                  - Work strictly in plan order and call update_plan after each completed step.\n\
                  - Before your final answer, call update_plan with every work step completed. CTOX will reject a completion claim while any step remains open.\n\
-                 - If discoveries change the work, publish the revised plan before continuing. CTOX retains the previous revision as evidence.\n",
+                 - If discoveries change the work, publish the revised plan before continuing. CTOX retains the previous revision as evidence.\n\
+                 - After the user-facing answer, you may append one fenced ctox-crew metadata block containing a JSON object with crew_retrospective: {retrospective: prose up to 300 characters, learnings: up to three objects {text: prose up to 400 characters, kind: insight|pitfall|preference, scope: {module?, command_type?, thread_key?}}}. Never include secrets, credentials, addresses or paths. An insight requires a successful reviewed attempt; a preference must quote actual Owner feedback. CTOX strips this reserved metadata block before showing or sending the answer; keep it outside the user-facing text. This metadata never substitutes for completion evidence or review.\n",
             );
             let execution_prompt = materialize_systematic_research_skill(&root, &job).and_then(
                 |systematic_research_skill_dir| {
@@ -6143,6 +6185,7 @@ fn start_prompt_worker(
                 },
             );
             let mut session_options = chat_turn_session_options_for_queue_job(&job);
+            session_options.crew_soul_block = crew_soul_block;
             let progress_error = Arc::new(Mutex::new(None::<String>));
             session_options.worker_attempt = Some(turn_loop::WorkerAttemptContext {
                 attempt_id: attempt_id.clone(),
@@ -6303,6 +6346,9 @@ fn start_prompt_worker(
                 attempt_work_key
             );
             lcm::run_ensure_worker_attempt_assistant_message(&db_path, &attempt_id)?;
+            // Preserve the full structured reply in the canonical attempt; only
+            // the user-facing answer enters review delivery and chat/outbound.
+            let result = result.map(|reply| crate::crew::public_reply_text(&reply));
 
             // Timeout continuation is deliberately post-finalization: first the
             // original attempt has a typed reply, a fresh artifact observation,
@@ -9621,7 +9667,7 @@ fn assurance_conversation_id_for_job(root: &Path, job: &QueuedPrompt) -> i64 {
 
 fn business_os_chat_execution_prompt(job: &QueuedPrompt) -> String {
     format!(
-        "{}\n\nBusiness OS chat execution rules:\n- Your final assistant message is shown verbatim to a non-technical business user inside a small chat bubble. Write it as a direct, concise answer addressed to that user.\n- Answer in the user's language (German unless the request is clearly in another language).\n- If the user asks you to create, export, save, or convert a file, write that file inside the current workspace root only. CTOX will publish every workspace file to Business OS Files after the task completes.\n- For created files, name each file in the final answer and tell the user it is available in Files. CSV exports are also published as editable records in Spreadsheets. Do not mention server-local absolute paths.\n- Do NOT include internal reasoning, chain-of-thought, planning notes, tool transcripts, command output, internal file paths, diffs, stack traces, raw JSON, or queue/command/task IDs. Do NOT paste source code or large data dumps unless the user explicitly asked for code — summarize the result in plain words instead.\n- Light Markdown is allowed (short paragraphs, **bold**, bullet lists, and fenced code blocks only when the user actually asked for code). Keep it brief.\n- Never write Business OS SQLite files or RxDB tables directly. If the canonical command context contains an explicit `writeback_contract`, fulfill only that bounded contract through the policy-gated Business OS MCP or an allowed typed Business OS command, then verify the readback. For mechanism=business_command and command_type=outbound.lead.research_writeback, call business_os.execute_writeback with record_id and payload (field_status and result); the server supplies the originating research_command_id. CLI, shell, terminal, SQLite and direct SQL cannot satisfy that contract. A failed tool result or missing successful receipt means the research task failed; retain the research artifacts. Without an explicit contract, do not mutate Business OS records.\n- Do not update queue rows, command rows, chat rows, or runtime status tables yourself.\n- Do not call `ctox queue complete`, `ctox queue release`, `ctox queue fail`, or equivalent direct SQL for this Business OS command.\n- You may inspect referenced files or readonly state when needed to answer accurately.\n- The CTOX service will persist your final answer back into the Business OS chat and acknowledge the queue item.",
+        "{}\n\nBusiness OS chat execution rules:\n- Your user-facing answer is shown to a non-technical business user inside a small chat bubble; CTOX removes the reserved ctox-crew metadata block first. Write it as a direct, concise answer addressed to that user.\n- Answer in the user's language (German unless the request is clearly in another language).\n- If the user asks you to create, export, save, or convert a file, write that file inside the current workspace root only. CTOX will publish every workspace file to Business OS Files after the task completes.\n- For created files, name each file in the final answer and tell the user it is available in Files. CSV exports are also published as editable records in Spreadsheets. Do not mention server-local absolute paths.\n- Do NOT include internal reasoning, chain-of-thought, planning notes, tool transcripts, command output, internal file paths, diffs, stack traces, raw JSON, or queue/command/task IDs. Do NOT paste source code or large data dumps unless the user explicitly asked for code — summarize the result in plain words instead.\n- Light Markdown is allowed (short paragraphs, **bold**, bullet lists, and fenced code blocks only when the user actually asked for code). Keep it brief.\n- Never write Business OS SQLite files or RxDB tables directly. If the canonical command context contains an explicit `writeback_contract`, fulfill only that bounded contract through the policy-gated Business OS MCP or an allowed typed Business OS command, then verify the readback. For mechanism=business_command and command_type=outbound.lead.research_writeback, call business_os.execute_writeback with record_id and payload (field_status and result); the server supplies the originating research_command_id. CLI, shell, terminal, SQLite and direct SQL cannot satisfy that contract. A failed tool result or missing successful receipt means the research task failed; retain the research artifacts. Without an explicit contract, do not mutate Business OS records.\n- Do not update queue rows, command rows, chat rows, or runtime status tables yourself.\n- Do not call `ctox queue complete`, `ctox queue release`, `ctox queue fail`, or equivalent direct SQL for this Business OS command.\n- You may inspect referenced files or readonly state when needed to answer accurately.\n- The CTOX service will persist your final answer back into the Business OS chat and acknowledge the queue item.",
         job.prompt
     )
 }
@@ -10816,6 +10862,7 @@ fn chat_turn_session_options_for_queue_job(
             additional_writable_roots: Vec::new(),
             additional_readable_roots: Vec::new(),
             worker_attempt: None,
+            crew_soul_block: None,
         };
     }
     if is_systematic_research_job(job) {
@@ -10838,6 +10885,7 @@ fn chat_turn_session_options_for_queue_job(
             additional_writable_roots: Vec::new(),
             additional_readable_roots: Vec::new(),
             worker_attempt: None,
+            crew_soul_block: None,
         };
     }
     if business_os_app_module_target_from_metadata(&job.queue_task_metadata).is_some() {
@@ -10853,6 +10901,7 @@ fn chat_turn_session_options_for_queue_job(
             additional_writable_roots: Vec::new(),
             additional_readable_roots: Vec::new(),
             worker_attempt: None,
+            crew_soul_block: None,
         };
     }
     turn_loop::ChatTurnSessionOptions {
@@ -43600,6 +43649,20 @@ Im Workspace muss synthesis/helper-run.json existieren."
         assert!(prompt.contains("available in Files"));
         assert!(prompt.contains("editable records in Spreadsheets"));
         assert!(prompt.contains("Do not mention server-local absolute paths"));
+        let original = prompt.clone();
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE communication_routing_state(message_key TEXT PRIMARY KEY,route_status TEXT,leased_at TEXT)").unwrap();
+        crate::crew::ensure_schema(&conn).unwrap();
+        let block = crate::crew::render_soul_block(&crate::crew::members(&conn).unwrap()[0], &[]);
+        let mut prompt = prompt;
+        crate::crew::append_soul(&mut prompt, Some(&block));
+        assert!(prompt.starts_with(&original));
+        assert!(prompt.ends_with(&block));
+        assert!(prompt.contains("Never write Business OS SQLite files or RxDB tables directly"));
+        assert!(prompt.contains(
+            "Do not update queue rows, command rows, chat rows, or runtime status tables yourself"
+        ));
+        assert!(crate::context::lcm::estimate_tokens(&block) <= 1200);
     }
 
     #[test]

@@ -1369,13 +1369,21 @@ where
                                         } else {
                                             None
                                         };
-                                        call_master_method(
+                                        let mut response = call_master_method(
                                             master.as_ref(),
                                             method,
                                             item.message.params.clone(),
                                             document_filter,
                                         )
-                                        .await
+                                        .await;
+                                        if let Some(fields) = handler_task.document_fields_for_peer(&item.peer, &target_name) {
+                                            if let Some(documents) = response.get_mut("documents").and_then(Value::as_array_mut) {
+                                                for document in documents {
+                                                    super::webrtc_types::retain_readable_fields(document, &fields);
+                                                }
+                                            }
+                                        }
+                                        response
                                     }
                                     None => replication_error_result(
                                         "RC_WEBRTC_PEER",

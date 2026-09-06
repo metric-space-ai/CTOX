@@ -9,6 +9,7 @@ mod browser_runtime;
 mod capability;
 mod command_plane;
 mod control_command_types;
+mod crew_commands;
 mod customer_apps;
 pub mod decision_hub;
 mod desktop_files;

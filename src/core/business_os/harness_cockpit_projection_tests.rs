@@ -203,6 +203,91 @@ fn native_cockpit_queries_use_the_declared_time_task_and_crew_indexes() -> Resul
 }
 
 #[test]
+fn crew_native_projection_indexes_and_payloads_are_bounded() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch("ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;")?;
+    crate::crew::ensure_schema(&conn)?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_crew(root.path(), &conn, &mut writer)?;
+    let member = record(root.path(), "ctox_crew_members", "crew-milo")?;
+    assert_eq!(member["name"], "Milo");
+    assert_eq!(member["state"], "home");
+    assert!(member["updated_at_ms"].is_number());
+    assert!(member["soul"].is_object());
+    let conn = store::open_store(root.path())?;
+    for (query,index) in [
+        ("SELECT record_id FROM business_records WHERE collection='ctox_crew_members' AND deleted=0 AND json_extract(payload_json,'$.archived')=0 ORDER BY json_extract(payload_json,'$.state'),record_id", "idx_crew_projection_member_state"),
+        ("SELECT record_id FROM business_records WHERE collection='ctox_crew_learnings' AND deleted=0 AND json_extract(payload_json,'$.member_id')='crew-milo' ORDER BY json_extract(payload_json,'$.created_at_ms'),record_id", "idx_crew_projection_learning_time"),
+        ("SELECT record_id FROM business_records WHERE collection='ctox_crew_learnings' AND deleted=0 AND json_extract(payload_json,'$.member_id')='crew-milo' ORDER BY json_extract(payload_json,'$.confirmed_by_owner'),record_id", "idx_crew_projection_learning_confirmed"),
+        ("SELECT record_id FROM business_records WHERE collection IN ('ctox_crew_members','ctox_crew_learnings') AND deleted=0 ORDER BY collection,json_extract(payload_json,'$.updated_at_ms'),record_id", "idx_crew_projection_updated"),
+    ] {
+        let plan=conn.prepare(&format!("EXPLAIN QUERY PLAN {query}"))?.query_map([],|r|r.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
+        assert!(plan.contains(index), "{plan}"); assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    }
+    Ok(())
+}
+
+#[test]
+fn crew_attempt_projects_timesheet_stats_and_learnings_once() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch(
+        "ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;
+        ALTER TABLE worker_attempt_finalizations ADD COLUMN reply_text TEXT NOT NULL DEFAULT '';",
+    )?;
+    crate::crew::ensure_schema(&conn)?;
+    conn.execute("INSERT INTO communication_routing_state(message_key,route_status,updated_at,crew_member_id) VALUES('task','leased','2026-09-05T12:00:00Z','crew-milo')", [])?;
+    conn.execute("INSERT INTO crew_attempts(attempt_id,task_id,member_id,selected_at) VALUES('attempt','task','crew-milo','2026-09-05T12:00:00Z')", [])?;
+    let reply = json!({"crew_retrospective":{"retrospective":"Schema geprüft.","learnings":[{"text":"Schema vor dem Import prüfen.","kind":"insight","scope":{}}]}}).to_string();
+    conn.execute("INSERT INTO worker_attempt_finalizations VALUES('attempt','work','succeeded','success','1788609600000','1788609660000','1788609660000',NULL,0,?1)", [&reply])?;
+    conn.execute("INSERT INTO ctox_harness_flow_events VALUES('event','worker.phase','Review','','task',NULL,1,?1,'2026-09-05T12:01:00Z')", [json!({"attempt_id":"attempt","review":{"disposition":"approved"}}).to_string()])?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    for _ in 0..2 {
+        project_runs(root.path(), &conn, &mut writer)?;
+        project_crew(root.path(), &conn, &mut writer)?;
+    }
+    let run = record(root.path(), "ctox_runs", "attempt")?;
+    assert_eq!(run["crew_member_id"], "crew-milo");
+    assert_eq!(run["retrospective"], "Schema geprüft.");
+    assert!(run["finished_at_ms"].is_number());
+    let member = record(root.path(), "ctox_crew_members", "crew-milo")?;
+    assert_eq!(member["state"], "on_duty");
+    assert_eq!(member["stats"]["tasks_total"], 1);
+    assert_eq!(member["stats"]["review_passed"], 1);
+    let learning: String = conn.query_row(
+        "SELECT id FROM crew_member_learnings WHERE member_id='crew-milo'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(
+        record(root.path(), "ctox_crew_learnings", &learning)?["confirmed_by_owner"],
+        false
+    );
+    conn.execute(
+        "UPDATE crew_member_learnings SET confirmed_by_owner=1 WHERE id=?1",
+        [&learning],
+    )?;
+    project_crew(root.path(), &conn, &mut writer)?;
+    assert_eq!(
+        record(root.path(), "ctox_crew_learnings", &learning)?["confirmed_by_owner"],
+        true
+    );
+    conn.execute("DELETE FROM crew_member_learnings WHERE id=?1", [&learning])?;
+    project_crew(root.path(), &conn, &mut writer)?;
+    let deleted: bool = store::open_store(root.path())?.query_row("SELECT deleted FROM business_records WHERE collection='ctox_crew_learnings' AND record_id=?1", [&learning], |r|r.get(0))?;
+    assert!(deleted);
+    conn.execute(
+        "UPDATE crew_members SET updated_at='broken' WHERE id='crew-pico'",
+        [],
+    )?;
+    conn.execute("INSERT INTO crew_member_learnings(id,member_id,text,normalized_text,kind,scope_json,evidence_run_id,created_at) VALUES('bad-time','crew-milo','Prüfen','prüfen','pitfall','{}','attempt','broken')", [])?;
+    project_crew(root.path(), &conn, &mut writer)?;
+    let count: i64 = store::open_store(root.path())?.query_row("SELECT COUNT(*) FROM business_records WHERE collection='ctox_crew_learnings' AND record_id='bad-time'", [], |r|r.get(0))?;
+    assert_eq!(count, 0);
+    assert!(record(root.path(), "ctox_crew_members", "crew-pico")?["updated_at_ms"].is_number());
+    Ok(())
+}
+
+#[test]
 fn keyset_pages_project_every_active_task_and_older_active_run() -> Result<()> {
     let (root, conn) = setup()?;
     for index in 0..PROJECTION_PAGE_SIZE + 1 {
