@@ -62,7 +62,10 @@ test('Missing authoritative task telemetry remains a safe empty state', () => {
   assert.equal(authoritativeTaskNodeId(null), '');
 });
 
-test('CTOX flow map places the same crew on waiting, working, and failed task nodes', () => {
+// Owner-Befund 04.09.2026 (siehe flowCrewSvg): die Karte zeigt nur den
+// gewaehlten Task und die tatsaechlich laufenden. Wartende und gescheiterte
+// Tasks erscheinen nur, wenn sie selbst ausgewaehlt sind.
+test('CTOX flow map shows only the selected task and the running crew', () => {
   const working = {
     id: 'task-working',
     commandId: 'cmd-working',
@@ -96,16 +99,20 @@ test('CTOX flow map places the same crew on waiting, working, and failed task no
     ]),
   };
   const html = flowCrewSvg(model, working, { lang: 'de' });
-  assert.equal((html.match(/ctox-flow-creature-slot/g) || []).length, 3);
+  assert.equal((html.match(/ctox-flow-creature-slot/g) || []).length, 1);
   assert.match(html, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
-  assert.match(html, /data-task-id="task-waiting"[^>]+data-creature-node-id="queued"/);
-  assert.match(html, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
+  assert.doesNotMatch(html, /data-task-id="task-waiting"/);
+  assert.doesNotMatch(html, /data-task-id="task-failed"/);
+  const failedSelected = flowCrewSvg(model, failed, { lang: 'de' });
+  assert.equal((failedSelected.match(/ctox-flow-creature-slot/g) || []).length, 2);
+  assert.match(failedSelected, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
+  assert.match(failedSelected, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
   assert.match(html, /is-working/);
   assert.match(html, /data-activity-turns="7"/);
   assert.match(html, /data-activity-kind="tool"/);
   assert.match(html, /--ctox-progress-angle:216deg/);
-  assert.match(html, /is-sleeping/);
-  assert.match(html, /is-failed/);
+  assert.doesNotMatch(html, /is-sleeping/);
+  assert.match(failedSelected, /is-failed/);
   assert.equal(taskCrewNodeId(working, model), 'running');
   assert.equal(taskCrewStatus(working), 'running');
   assert.equal(taskCrewStatus(waiting), 'queued');

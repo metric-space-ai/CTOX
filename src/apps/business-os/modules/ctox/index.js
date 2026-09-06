@@ -2,6 +2,7 @@ import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
 import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260831-crew-telemetry-v332';
+import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 
 const FLOW_WIDTH = 1760;
 const FLOW_HEIGHT = 1050;
@@ -64,6 +65,27 @@ const labels = {
     taskResumed: 'Folgeauftrag angelegt.',
     taskDeleted: 'Task gelöscht.',
     taskActionFailed: 'Aktion fehlgeschlagen.',
+    cancelTask: "Abbrechen",
+    blockTask: "Blockieren",
+    releaseTask: "Freigeben",
+    retryTask: "Wiederholen",
+    assignTask: "Zuweisen",
+    assignChoose: "Mitglied wählen",
+    cancelReasonDefault: "Vom Owner abgebrochen",
+    blockReasonDefault: "Vom Owner blockiert",
+    pauseReasonDefault: "Vom Owner pausiert",
+    controlApplied: "Übernommen.",
+    harnessRunning: "Läuft",
+    harnessPaused: "Pausiert",
+    harnessStopped: "Gestoppt",
+    onDuty: "im Einsatz",
+    capacity: "Kapazität",
+    countWaiting: "warten",
+    countWorking: "im Einsatz",
+    countBlocked: "blockiert",
+    pressureActive: "Druck aktiv",
+    pauseHarness: "Queue pausieren",
+    resumeHarness: "Queue fortsetzen",
     holdTechnical: "technischer Grund",
     holdMissingReviewEvidence: "Review-Beleg fehlt",
     holdMissingArtifact: "Artefakt fehlt",
@@ -278,6 +300,27 @@ const labels = {
     taskResumed: 'Follow-up task queued.',
     taskDeleted: 'Task deleted.',
     taskActionFailed: 'Action failed.',
+    cancelTask: "Cancel",
+    blockTask: "Block",
+    releaseTask: "Release",
+    retryTask: "Retry",
+    assignTask: "Assign",
+    assignChoose: "Choose member",
+    cancelReasonDefault: "Cancelled by owner",
+    blockReasonDefault: "Blocked by owner",
+    pauseReasonDefault: "Paused by owner",
+    controlApplied: "Applied.",
+    harnessRunning: "Running",
+    harnessPaused: "Paused",
+    harnessStopped: "Stopped",
+    onDuty: "on duty",
+    capacity: "Capacity",
+    countWaiting: "waiting",
+    countWorking: "on duty",
+    countBlocked: "blocked",
+    pressureActive: "pressure active",
+    pauseHarness: "Pause queue",
+    resumeHarness: "Resume queue",
     holdTechnical: "technical reason",
     holdMissingReviewEvidence: "review evidence missing",
     holdMissingArtifact: "artifact missing",
@@ -660,15 +703,17 @@ async function loadCtoxMessages(lang) {
 }
 
 async function renderFromLocalCache(state) {
-  const [commands, queueTasks, bugReports, webStack, crewMembers] = await Promise.all([
+  const [commands, queueTasks, bugReports, webStack, crewMembers, harnessStatus] = await Promise.all([
     loadLocalCommands(state.ctx).catch(() => []),
     loadLocalQueueTasks(state.ctx).catch(() => []),
     loadLocalBugReports(state.ctx).catch(() => []),
     loadLocalWebStackOverview(state.ctx).catch((error) => ({ ok: false, error: error.message || String(error) })),
     loadLocalCrewMembers(state.ctx).catch(() => []),
+    loadLocalHarnessStatus(state.ctx).catch(() => null),
   ]);
   if (state.disposed) return;
   state.crewMembers = crewMembers;
+  state.harnessStatus = harnessStatus;
   state.webStack = {
     loading: false,
     error: webStack?.ok ? '' : (webStack?.error || 'Web Stack status unavailable'),
@@ -687,7 +732,7 @@ async function renderFromLocalCache(state) {
 }
 
 function wireLocalRealtime(state) {
-  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports', 'ctox_crew_members'];
+  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports', 'ctox_crew_members', 'ctox_harness_status'];
   let renderTimer = null;
   const scheduleRender = () => {
     if (state.disposed || state.refreshInFlight) return;
@@ -718,15 +763,17 @@ async function refresh(state) {
   if (state.disposed || state.refreshInFlight) return;
   state.refreshInFlight = true;
   try {
-    const [commands, queueTasks, bugReports, webStack, harnessFlow, crewMembers] = await Promise.all([
+    const [commands, queueTasks, bugReports, webStack, harnessFlow, crewMembers, harnessStatus] = await Promise.all([
       loadLocalCommands(state.ctx).catch(() => []),
       loadLocalQueueTasks(state.ctx).catch(() => []),
       loadLocalBugReports(state.ctx).catch(() => []),
       loadLocalWebStackOverview(state.ctx).catch((error) => ({ ok: false, error: error.message || String(error) })),
       loadHarnessFlowSnapshot(state.ctx).catch(() => emptyHarnessFlow('harness_flow_unavailable')),
       loadLocalCrewMembers(state.ctx).catch(() => []),
+      loadLocalHarnessStatus(state.ctx).catch(() => null),
     ]);
     state.crewMembers = crewMembers;
+    state.harnessStatus = harnessStatus;
     state.webStack = {
       loading: false,
       error: webStack?.ok ? '' : (webStack?.error || 'Web Stack status unavailable'),
@@ -1551,6 +1598,7 @@ function actionIcon(state, name) {
     refresh: 'M20 12a8 8 0 1 1-2.3-5.6M20 4v4h-4',
     open: 'M14 5h5v5M19 5l-8 8M11 5H5v14h14v-6',
     play: 'M8 5.5v13l10-6.5-10-6.5Z',
+    pause: 'M8 5v14M16 5v14',
     trash: 'M5 7h14M10 7V5h4v2M8 7l1 13h6l1-13M10.5 11v5M13.5 11v5',
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name] || paths.open}"></path></svg>`;
@@ -1950,8 +1998,10 @@ function renderMain(state) {
         <div class="ctox-pane-titles">
           <span class="ctox-pane-kicker">${escapeHtml(t.liveFlow)}</span>
           <h2 class="ctox-pane-title">${escapeHtml(t.doingNow)}</h2>
+          ${harnessStatusText(state) ? `<small class="ctox-harness-status-line" data-harness-status>${escapeHtml(harnessStatusText(state))}</small>` : ''}
         </div>
         <div class="ctox-pane-actions">
+          ${harnessControlsMarkup(state)}
           <button type="button" class="ctox-pane-icon ${state.webStackPanelOpen ? 'is-active' : ''}" data-webstack-toggle aria-pressed="${state.webStackPanelOpen}" aria-expanded="${state.webStackPanelOpen}" aria-label="${escapeAttr(t.webStack)}" title="${escapeAttr(t.webStack)}">${webStackIcon()}</button>
           ${selectedTask ? `<button type="button" class="ctox-pane-icon" data-open-selected-task aria-label="${escapeAttr(t.openTaskDetail)}" title="${escapeAttr(t.openTaskDetail)}">${actionIcon(state, 'open')}</button>` : ''}
         </div>
@@ -1982,6 +2032,12 @@ function renderMain(state) {
     <footer class="ctox-harness-footer" data-harness-health-tooltip>${escapeHtml(selectedTask ? taskDisplayTitle(selectedTask, state) : t.flowFooterEmpty)} · ${escapeHtml(flowSource.mode)} · ${escapeHtml(flowSource.status)}${live ? ` · ${escapeHtml(t.live)}` : ''}</footer>
   `;
   restoreFlowViewport(state, previousViewport);
+  main.querySelector('[data-harness-pause]')?.addEventListener('click', () => {
+    runHarnessControl(state, 'pause', !state.harnessStatus?.paused);
+  });
+  main.querySelector('[data-harness-capacity]')?.addEventListener('change', (event) => {
+    runHarnessControl(state, 'capacity', event.currentTarget.value);
+  });
   main.querySelector('[data-webstack-toggle]')?.addEventListener('click', () => {
     state.webStackPanelOpen = !state.webStackPanelOpen;
     const panel = main.querySelector('[data-webstack-panel]');
@@ -2963,6 +3019,7 @@ function taskDrawer(task, state) {
       ${taskReasonText(task, state) ? `<p class="ctox-task-reason-line">${escapeHtml(taskReasonText(task, state))}</p>` : ''}
       ${taskLeaseLineMarkup(task, state)}
       ${taskLiveStatusMarkup(task, state)}
+      ${taskControlsMarkup(task, state)}
     </section>
     <form class="ctox-card ctox-task-edit" data-ctox-task-edit>
       <header>
@@ -3041,6 +3098,15 @@ function taskDrawer(task, state) {
   });
   body.querySelector('[data-ctox-task-resume]')?.addEventListener('click', async () => {
     await resumeCtoxTaskFromDrawer(state, task, body);
+  });
+  body.querySelectorAll('[data-ctox-task-control]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      await runTaskControl(state, task, button.dataset.ctoxTaskControl, body);
+    });
+  });
+  body.querySelector('[data-ctox-task-assign]')?.addEventListener('change', async (event) => {
+    const memberId = String(event.currentTarget.value || '');
+    if (memberId) await runTaskControl(state, task, 'assign', body, { memberId });
   });
   body.querySelectorAll('[data-drawer-task-step]').forEach((button) => {
     button.addEventListener('click', () => {
@@ -4101,6 +4167,155 @@ async function loadLocalCrewMembers(ctx) {
 function crewMemberById(state, memberId) {
   if (!memberId) return null;
   return (state?.crewMembers || []).find((member) => member.id === memberId) || null;
+}
+
+async function loadLocalHarnessStatus(ctx) {
+  const collection = ctoxCollection(ctx, 'ctox_harness_status');
+  if (!collection) return null;
+  const doc = await collection.findOne({ selector: { id: 'harness' } }).exec();
+  return doc ? doc.toJSON() : null;
+}
+
+function mayManageTask(state, task) {
+  const scopeId = nativeTaskId(task) || task?.id || '';
+  return canUseBusinessPermission({
+    session: state.ctx?.session,
+    governance: state.ctx?.governance,
+    permission: BusinessOsPermissions.CtoxTaskManage,
+    scopeType: 'task',
+    scopeId,
+  });
+}
+
+function mayManageWorkspace(state) {
+  return canUseBusinessPermission({
+    session: state.ctx?.session,
+    governance: state.ctx?.governance,
+    permission: BusinessOsPermissions.CtoxTaskManage,
+    scopeType: 'workspace',
+  });
+}
+
+function mayAssignCrew(state) {
+  return canUseBusinessPermission({
+    session: state.ctx?.session,
+    governance: state.ctx?.governance,
+    permission: BusinessOsPermissions.CrewManage,
+    scopeType: 'record',
+    scopeId: 'ctox.crew.assign',
+  });
+}
+
+// Which controls a task offers, derived from the durable routing state only.
+// leased/running: cancel (through the originating command). pending: block,
+// assign. failed/blocked: release, retry. Nothing else, nothing invented.
+function taskControlSpec(task, state) {
+  const status = normalizeCommandStatus(task.routeStatus || task.status);
+  const controls = [];
+  const taskManage = mayManageTask(state, task);
+  if (status === 'running') {
+    if (task.commandId && taskManage) controls.push('cancel');
+  } else if (status === 'queued') {
+    if (taskManage) controls.push('block');
+    if (mayAssignCrew(state) && (state.crewMembers || []).length) controls.push('assign');
+  } else if (status === 'blocked') {
+    if (taskManage) controls.push('release', 'retry');
+  } else if (status === 'failed') {
+    if (taskManage) controls.push('retry');
+  }
+  return controls;
+}
+
+function taskControlsMarkup(task, state) {
+  const t = labels[state.lang];
+  const spec = taskControlSpec(task, state);
+  if (!spec.length) return '';
+  const buttons = spec.map((control) => {
+    if (control === 'assign') {
+      const options = (state.crewMembers || []).map((member) => `<option value="${escapeAttr(member.id)}">${escapeHtml(member.name)}</option>`).join('');
+      return `<label class="ctox-task-control-assign"><span class="ctox-field-label">${escapeHtml(t.assignTask)}</span><select class="ctox-select" data-ctox-task-assign><option value="">${escapeHtml(t.assignChoose)}</option>${options}</select></label>`;
+    }
+    const label = { cancel: t.cancelTask, block: t.blockTask, release: t.releaseTask, retry: t.retryTask }[control];
+    const danger = control === 'cancel' || control === 'block';
+    return `<button type="button" class="ctox-button ${danger ? 'is-danger' : 'is-primary'}" data-ctox-task-control="${control}">${escapeHtml(label)}</button>`;
+  }).join('');
+  return `<div class="ctox-task-controls" data-ctox-task-controls>${buttons}<small data-ctox-task-control-status></small></div>`;
+}
+
+async function runTaskControl(state, task, control, body, extra = {}) {
+  const t = labels[state.lang];
+  const status = body.querySelector('[data-ctox-task-control-status]');
+  const buttons = body.querySelectorAll('[data-ctox-task-control], [data-ctox-task-assign]');
+  const taskId = nativeTaskId(task);
+  buttons.forEach((el) => el.setAttribute('disabled', 'disabled'));
+  if (status) status.textContent = '';
+  try {
+    if (control === 'cancel') {
+      if (!state.ctx?.commandBus?.cancel) throw new Error('RxDB command bus is not available');
+      await state.ctx.commandBus.cancel(task.commandId, { reason: t.cancelReasonDefault, until: 'accepted' });
+    } else if (control === 'block') {
+      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.queue.block', payload: { task_id: taskId, reason: t.blockReasonDefault }, commandPath: 'ctox_queue_block' });
+    } else if (control === 'release') {
+      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.queue.release', payload: { task_id: taskId }, commandPath: 'ctox_queue_release' });
+    } else if (control === 'retry') {
+      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.queue.retry', payload: { task_id: taskId }, commandPath: 'ctox_queue_retry' });
+    } else if (control === 'assign') {
+      if (!extra.memberId) return;
+      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.crew.assign', payload: { task_id: taskId, member_id: extra.memberId }, commandPath: 'ctox_crew_assign' });
+    }
+    if (status) status.textContent = t.controlApplied;
+    refresh(state).catch(() => {});
+  } catch (error) {
+    if (status) status.textContent = humanTaskActionError(error, t);
+  } finally {
+    buttons.forEach((el) => el.removeAttribute('disabled'));
+  }
+}
+
+function harnessStatusText(state) {
+  const t = labels[state.lang];
+  const h = state.harnessStatus;
+  if (!h) return '';
+  const bits = [];
+  if (!h.service_running) bits.push(t.harnessStopped);
+  else if (h.paused) bits.push(h.pause_reason ? `${t.harnessPaused} · ${h.pause_reason}` : t.harnessPaused);
+  else bits.push(t.harnessRunning);
+  const active = crewMemberName(state, h.active_crew_member_id);
+  if (active) bits.push(`${active} ${t.onDuty}`);
+  if (Number.isFinite(Number(h.worker_capacity))) bits.push(`${t.capacity} ${h.worker_capacity}`);
+  const counts = [];
+  if (Number(h.pending_count) > 0) counts.push(`${h.pending_count} ${t.countWaiting}`);
+  if (Number(h.leased_count) > 0) counts.push(`${h.leased_count} ${t.countWorking}`);
+  if (Number(h.blocked_count) > 0) counts.push(`${h.blocked_count} ${t.countBlocked}`);
+  if (counts.length) bits.push(counts.join(' · '));
+  if (h.pressure_active) bits.push(t.pressureActive);
+  if (h.last_error) bits.push(String(h.last_error).slice(0, 80));
+  return bits.join(' · ');
+}
+
+function harnessControlsMarkup(state) {
+  const t = labels[state.lang];
+  const h = state.harnessStatus;
+  if (!h || !mayManageWorkspace(state)) return '';
+  const paused = Boolean(h.paused);
+  const capacity = Number(h.worker_capacity) || 1;
+  return `
+    <button type="button" class="ctox-pane-icon ${paused ? 'is-active' : ''}" data-harness-pause aria-pressed="${paused}" aria-label="${escapeAttr(paused ? t.resumeHarness : t.pauseHarness)}" title="${escapeAttr(paused ? t.resumeHarness : t.pauseHarness)}">${actionIcon(state, paused ? 'play' : 'pause')}</button>
+    <label class="ctox-harness-capacity" title="${escapeAttr(t.capacity)}"><span class="ctox-field-label">${escapeHtml(t.capacity)}</span><select class="ctox-select" data-harness-capacity aria-label="${escapeAttr(t.capacity)}">${[1,2,3,4,5,6,7,8].map((n) => `<option value="${n}" ${n === capacity ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`;
+}
+
+async function runHarnessControl(state, control, value) {
+  const t = labels[state.lang];
+  try {
+    if (control === 'pause') {
+      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.queue.pause', payload: { task_id: '', paused: Boolean(value), reason: value ? t.pauseReasonDefault : '' }, commandPath: 'ctox_queue_pause' });
+    } else if (control === 'capacity') {
+      await dispatchCtoxTaskMutation(state, { commandType: 'ctox.queue.capacity', payload: { task_id: '', workers: Number(value) }, commandPath: 'ctox_queue_capacity' });
+    }
+    refresh(state).catch(() => {});
+  } catch (error) {
+    state.ctx?.notifications?.show?.({ title: t.taskActionFailed, message: humanTaskActionError(error, t), tone: 'danger', time: 6000 });
+  }
 }
 
 function ctoxCollection(ctx, collectionName) {

@@ -1478,6 +1478,72 @@
   min-width: 0;
 }
 
+/* Task controls (slice 2): sit under the status strip, same rhythm as the edit form. */
+.ctox-task-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ctox-task-controls .ctox-button {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-controls .ctox-button.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+  background: transparent;
+}
+.ctox-task-controls .ctox-button.is-danger:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.ctox-task-control-assign {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctox-task-control-assign .ctox-field-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-controls [data-ctox-task-control-status] {
+  flex: 1 1 100%;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-controls [data-ctox-task-control-status]:empty {
+  display: none;
+}
+.ctox-harness-status-line {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctox-harness-capacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctox-harness-capacity .ctox-field-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-harness-capacity .ctox-select {
+  min-height: 28px;
+  padding: 0 6px;
+}
+.ctox-pane-icon[data-harness-pause].is-active {
+  color: var(--warning, #d9a441);
+}
+
 .ctox-task-status-strip small {
   overflow: hidden;
   color: var(--muted);
