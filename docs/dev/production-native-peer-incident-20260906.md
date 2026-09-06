@@ -1,5 +1,42 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Combined candidate regression and native latency diagnosis
+
+The safety candidate in
+/home/ctox/.cache/ctox/office-file-preservation-validation.o18IsS passed
+two automatic-recovery tests and sixteen Pi tests, but its file-preservation
+test failed at 17:07:17 UTC with an omission marker replacing 327,682 bytes.
+
+The candidate's rxdb_peer.rs and rxdb_peer_demand_files.rs hashes still match
+the previously passing source. Its store.rs instead hashes to
+9881b8442f499475317dea34f436f00273cce059d99e005979d9a382bc1df48f.
+The reviewed diff adds the intended Pi source conflict checks but also removes
+RxdbCollectionWriter.demand_file_storage, its constructor assignment and three
+forwarding arguments, and restores the unconditional payload clamp. Those
+removals undo the main file-preservation fix. The failed combined candidate
+is not covered by the earlier passing result. No activation by this task
+followed that failure.
+
+A bounded native-only status-command diagnostic has raw evidence at
+beweise/raw/native-ipc-welsch-20260906.json. It used the existing authenticated
+command path and timing probe on the old running native release, during
+concurrent isolated compilation. Twenty-three complete timing samples yielded
+IPC p50 1,931.6 ms / p95 2,692.8 ms, handler p50 1,272 ms and projection
+p50 8 ms. The batch deadline interrupted the next client wait; its durable
+command ID was subsequently confirmed completed without replay. This is an
+incomplete diagnostic batch, not a thirty-sample browser/WebRTC or local
+fixture acceptance.
+
+The existing full browser fixture is
+src/core/rxdb/tools/browser_rust_smoke.js with
+SMOKE_MODE=command-roundtrip-timing-browser-to-rust and SMOKE_PAGE_PATH=/index.html.
+It already emits thirty samples with seven timing marks and a stage report.
+Its pinned Playwright 1.60.0 dependency and Chromium headless shell have been
+prepared in the owned isolated test root. No production browser profile is
+used. The test source was advanced from the immutable fbeca32b7 archive to
+main f70b1b5a7 via an exact Git patch with SHA256
+37b004367c6cdb9bcea47db72427d1efc995c3e5c1fe6427b0e56218cf39b65f.
+
 ## Native file-preservation test result
 
 The release-mode retry completed successfully at 16:22:28 UTC. Its journal
