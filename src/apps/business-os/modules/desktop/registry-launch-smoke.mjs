@@ -167,7 +167,7 @@ assert.ok(
 
 for (const requiredSnippet of [
   'isLaunchableModule',
-  'normalizeDesktopAppItem',
+  '.map((item) => normalizeItem(item, moduleKind(item)))',
   'uniqueCatalogItems',
   'openDesktopApp',
 ]) {

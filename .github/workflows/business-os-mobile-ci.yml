@@ -174,13 +174,20 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: "Nexus 9"
+          avd-name: ctox-tablet-landscape
           disable-animations: true
+          pre-emulator-launch-script: |
+            config="$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
+            test -f "$config"
+            sed -i '/^hw.initialOrientation[[:space:]]*=/d' "$config"
+            echo 'hw.initialOrientation=landscape' >> "$config"
           script: |
             adb install -r src/apps/business-os-mobile/android/app/build/outputs/apk/debug/app-debug.apk
             adb shell wm user-rotation lock 1
             adb shell wm fixed-to-user-rotation enabled
             adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity > "$RUNNER_TEMP/android-tablet-launch.txt"
             cat "$RUNNER_TEMP/android-tablet-launch.txt" && grep -q '^Status: ok' "$RUNNER_TEMP/android-tablet-launch.txt"
+            adb shell dumpsys window displays > "$RUNNER_TEMP/android-tablet-display.txt"
             sleep 2
             adb exec-out screencap -p > "$RUNNER_TEMP/android-tablet-4x3.png"
       - name: Verify tablet screenshot geometry
@@ -201,6 +208,7 @@ jobs:
           path: |
             ${{ runner.temp }}/android-*.png
             ${{ runner.temp }}/android-*-launch.txt
+            ${{ runner.temp }}/android-tablet-display.txt
           if-no-files-found: warn
       - name: Package checksums and manifests
         run: |

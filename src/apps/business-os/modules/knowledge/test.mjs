@@ -516,12 +516,12 @@ test('presentation follows compact Business OS knowledge contract', async () => 
   // pane's tabs + second-level switcher are the only navigation into a group.
   assert.doesNotMatch(css, /bundle-caret|knowledge-bundle-items/);
   assert.match(css, /\.bundle-meta\s*\{/);
-  assert.match(css, /\.ctox-column-resizer::before[\s\S]*?left:\s*50%;[\s\S]*?top:\s*50%/);
-  assert.match(css, /@container business-app-window \(max-width:\s*559px\)/);
+  assert.match(css, /\.ctox-column-resizer::before[\s\S]*?left:\s*50%;[\s\S]*?top:\s*0;[\s\S]*?height:\s*100%/);
+  assert.match(css, /@container business-app-window \(max-width:\s*768px\)/);
   assert.match(css, /\.knowledge-app-overlay\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?inset:\s*0/);
   assert.match(js, /function openKnowledgeOverlay/);
   assert.doesNotMatch(js, /state\.ctx\.open(?:Left|Right|Bottom)Drawer/);
-  assert.match(js, /knowledge-detail-empty/);
+  assert.match(js, /copy\.detailEmptyHint/);
   assert.equal(manifest.layout.min_width, 360);
   assert.equal(manifest.presentation.minimum_size.width, 360);
 });
