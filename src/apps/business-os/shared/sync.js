@@ -24,7 +24,7 @@ import {
   normalizeCollectionReadinessState,
 } from './sync-contract.js?v=20260903-shell-v2-crew-bar-v338';
 import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260903-shell-v2-crew-bar-v338';
-import { loadRxdbRuntime } from './rxdb-runtime.js?v=20260906-shell-v2-ctox-kit-v340';
+import { loadRxdbRuntime, RXDB_BUNDLE_URL } from './rxdb-runtime.js?v=20260906-shell-v2-sync-bridge-v341';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
@@ -34,7 +34,7 @@ const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
 // those builds made the new tab follow the old, failed bridge forever. The
 // release epoch isolates only the local BroadcastChannel/Web Lock; both builds
 // still replicate through the same server-authoritative WebRTC room.
-const MULTI_TAB_COORDINATOR_EPOCH = '20260906-shell-v2-ctox-kit-v340';
+const MULTI_TAB_COORDINATOR_EPOCH = '20260906-shell-v2-sync-bridge-v341';
 const CTOX_BROWSER_CAPABILITIES = [
   'ctox-control-plane-v1',
   'ctox-role-bound-signaling-v1',
@@ -754,24 +754,6 @@ export function createSyncRuntime({
       activeCollections.add(collection);
       scheduleUnregisteredCollectionSweep();
       publishResourceBudget();
-      if (coordinator && !coordinator.isLeader() && options.forceDirect !== true) {
-        const follower = createFollowerBridge(
-          collection,
-          coordinator.snapshot(),
-          coordinator,
-          () => flushFollowerDirectly(collection),
-        );
-        bridges.set(collection, Promise.resolve(follower));
-        publishResourceBudget();
-        recordCollection(collection, {
-          status: 'follower',
-          connectionStatus: 'follower',
-          multiTab: coordinator.snapshot(),
-          lastError: null,
-          reconnectingSince: null,
-        });
-        return follower;
-      }
       if (suspendedCollections.has(collection)) {
         recordCollection(collection, {
           status: 'paused',
@@ -830,6 +812,28 @@ export function createSyncRuntime({
           });
           return currentBridge;
         }
+      }
+      // An ordinary acquisition must reuse a direct bridge already serving
+      // native requests in a follower tab. Overwriting it with a follower
+      // stub loses its owner; the next forceDirect call replaces and cancels
+      // the live collection registration. Role changes own actual demotion.
+      if (coordinator && !coordinator.isLeader() && options.forceDirect !== true) {
+        const follower = createFollowerBridge(
+          collection,
+          coordinator.snapshot(),
+          coordinator,
+          () => flushFollowerDirectly(collection),
+        );
+        bridges.set(collection, Promise.resolve(follower));
+        publishResourceBudget();
+        recordCollection(collection, {
+          status: 'follower',
+          connectionStatus: 'follower',
+          multiTab: coordinator.snapshot(),
+          lastError: null,
+          reconnectingSince: null,
+        });
+        return follower;
       }
       recordCollection(collection, { status: 'starting' });
       const startLane = collectionStartLaneCursor % collectionStartLanes.length;
@@ -3164,7 +3168,9 @@ export const __ctoxSyncTestHooks = {
 };
 
 function multiTabCoordinatorRoom(room) {
-  return `${String(room || '').trim()}|release=${MULTI_TAB_COORDINATOR_EPOCH}`;
+  // Shell packs can update the DB bundle without changing APP_BUILD. Use the
+  // canonical loader identity so such a tab never follows an older DB runtime.
+  return `${String(room || '').trim()}|release=${MULTI_TAB_COORDINATOR_EPOCH}|db=${RXDB_BUNDLE_URL}`;
 }
 
 function replicationIoMessageFor(code) {
