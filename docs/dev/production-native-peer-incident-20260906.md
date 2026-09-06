@@ -122,3 +122,28 @@ workjet_computers schema conflict through the approved migration path, remove
 the temporary service override, and test actual Documents/Spreadsheets/Harness
 flows with persistence and timings. The original shell-generation work remains
 unfinished and must not be deployed during this recovery.
+
+## Follow-up at 12:18 UTC
+
+The daemon union integration is on main in `3fffd9f0a`; merge `3a4d45bf7`
+preserves the independent full-property-contract regression and additional
+projection coverage. The unfinished shell-generation draft is not included.
+
+The first union forward build failed on three remaining daemon consumers.
+The subsequent `ctox-office-native-projection-upgrade-20260906.service` is
+still running (PID 2451497). Welsch remains on the recovered service
+(PID 2449549); its peer reports running=true, replicationUp=true,
+heartbeatFresh=true and errorTotal=0. This is not evidence that the corrected
+release has been activated. Browser update maintenance still blocks app writes
+during the build. Harness task list, painted flow, progress and timeline were
+verified again; Documents and Spreadsheets are not accepted.
+
+All four public entrypoints returned HTTP 200 in three requests each.
+[Raw entrypoint timings](beweise/raw/production-entrypoint-timings-20260906.json)
+record TTFB from 0.266132 to 2.943577 seconds. These unauthenticated HTTP
+measurements exclude WebRTC bootstrap, critical-collection readiness and
+authenticated command/app latency. They are not a p50/p95 acceptance.
+
+Local full-daemon checking, the expanded native schema regression and the JS
+suite were still running at this checkpoint. No new pass result or production
+readiness is claimed from these pending commands.
