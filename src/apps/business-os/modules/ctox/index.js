@@ -2160,8 +2160,6 @@ function progressPercent(value, max) {
 }
 
 function flowSvg(model, selectedNode, visibleTrace, selectedTask, state, taskStepView = null, viewBox = flowViewBox(selectedTask, state)) {
-  // Resolve the marker where it is rendered, including the idle/no-task case.
-  const standortNodeId = selectedTask ? (taskCrewNodeId(selectedTask, model) || '') : '';
   const communicationOnly = isCommunicationFlow(selectedTask, state);
   const harnessOffsetY = reviewHarnessOffsetY(selectedTask, state);
   // Wo steht der ausgewaehlte Task GERADE im Loop? Dieser Knoten wird markiert,
