@@ -8,9 +8,10 @@ pub(crate) fn ensure_selection_event_index(conn: &Connection) -> Result<()> {
         [], |r| r.get(0),
     )?;
     if !exists {
-        // Initialize the independent ledger during migration, not on the hot
-        // per-event writer path. Existing event emissions gain no extra reads.
-        crate::service::harness_flow::ensure_event_schema(conn)?;
+        // The flow ledger is independently and lazily initialized. Creating it
+        // during queue schema setup would activate unrelated pump paths before
+        // any worker starts. Admission installs the index before its first event.
+        return Ok(());
     }
     let indexed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_crew_selection_event_attempt')",

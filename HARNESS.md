@@ -773,8 +773,10 @@ Warnereignis `crew_selection_unavailable` und `ctox_harness_status.last_error`
 machen die Ursache sichtbar; gleiche Ursachen werden nur einmal je Prozess/Root
 geloggt. Korrupte einzelne Profile werden bei der Auswahl übersprungen.
 
-Die Migration installiert den eindeutigen Auswahlereignis-Index; historische
-Duplikate behalten die älteste Zeile. Im 60-Sekunden-Wartungslauf entfernt der
+Die Migration installiert den eindeutigen Auswahlereignis-Index in vorhandenen
+Flow-Ledgern; historische Duplikate behalten die älteste Zeile. Ein noch fehlendes
+Ledger wird erst bei Bedarf angelegt und vor dem ersten zugelassenen Crew-Attempt
+indiziert. Im 60-Sekunden-Wartungslauf entfernt der
 Pump nie gestartete Waisen nach der 15-Minuten-Lease-TTL, schützt noch geleaste
 Tasks und bewahrt 500 jüngste
 finalisierte Crew-Attempts plus alle Attempts nichtterminaler Tasks. Löschungen

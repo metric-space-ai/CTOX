@@ -22,6 +22,40 @@ fn leased() -> Result<(tempfile::TempDir, Connection, String)> {
 }
 
 #[test]
+fn crew_migration_keeps_flow_ledger_lazy_until_admission() -> Result<()> {
+    let (root, conn, task) = leased()?;
+    assert!(!conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ctox_harness_flow_events')",
+        [],
+        |r| r.get::<_, bool>(0)
+    )?);
+    prepare_attempt(
+        root.path(),
+        &[task],
+        "fixture",
+        "admitted",
+        None,
+        &json!({}),
+        None,
+        "Inspect",
+    )?;
+    assert!(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='idx_crew_selection_event_attempt')",
+        [],
+        |r| r.get::<_, bool>(0)
+    )?);
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM ctox_harness_flow_events WHERE event_kind='crew_selected'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        1
+    );
+    Ok(())
+}
+
+#[test]
 fn crew_unavailable_continues_without_retry_or_identity_and_warns_once() -> Result<()> {
     let (root, conn, task) = leased()?;
     conn.execute("UPDATE crew_members SET archived=1", [])?;
@@ -223,7 +257,7 @@ fn crew_retention_is_bounded_preserves_active_and_explains_indexes() -> Result<(
 #[test]
 fn crew_migration_repairs_duplicate_selection_events_before_unique_index() -> Result<()> {
     let conn = super::tests::fixture();
-    conn.execute_batch("DROP TABLE ctox_harness_flow_events;
+    conn.execute_batch("DROP TABLE IF EXISTS ctox_harness_flow_events;
         CREATE TABLE ctox_harness_flow_events(event_id TEXT PRIMARY KEY,event_kind TEXT,metadata_json TEXT,created_at TEXT);
         INSERT INTO ctox_harness_flow_events VALUES('old','crew_selected','{\"attempt_id\":\"a\"}','2025');
         INSERT INTO ctox_harness_flow_events VALUES('new','crew_selected','{\"attempt_id\":\"a\"}','2026');")?;

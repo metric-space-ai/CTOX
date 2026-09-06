@@ -1051,7 +1051,9 @@ ordinary admission/status wakes. It removes at most 128 completed attempts and
 keeping the newest 500 finalized attempts plus nonterminal tasks. A durable
 internal `crew_projection_tombstones` outbox retries orphan-event tombstones.
 The migration removes duplicate selection events in bounded delete batches
-before building its unique index, preserving the oldest event.
+before building its unique index, preserving the oldest event. A missing flow
+ledger stays lazy; admission initializes and indexes it before the first crew
+selection event, outside the per-progress emission path.
 
 The field-policy matrix is unchanged. Wire and MCP use the central role parser,
 including owner/business_os_admin aliases. Master-write conflict arrays are

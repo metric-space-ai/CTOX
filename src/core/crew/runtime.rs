@@ -112,6 +112,11 @@ pub(crate) fn prepare_attempt(
     };
     let conn = Connection::open(crate::paths::core_db(root))?;
     conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())?;
+    // New ledgers remain lazy until admitted work. Existing ledgers were already
+    // deduplicated/indexed by the migration; this also covers a ledger initialized
+    // independently since then. No extra reads are added to progress emissions.
+    crate::service::harness_flow::ensure_event_schema(&conn)?;
+    ensure_selection_event_index(&conn)?;
     let tx = conn.unchecked_transaction()?;
     let existing: Option<String> = tx
         .query_row(
