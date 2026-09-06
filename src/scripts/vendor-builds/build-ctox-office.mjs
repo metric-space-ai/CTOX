@@ -127,12 +127,40 @@ else if (reusedUpstreamRoot) {
   )));
 }
 if (upstreamBuildRoot || reusedUpstreamRoot) {
+  upstreamStaticInputs = await stageWhiteHeaderIcons(upstreamStaticInputs);
   await extendUpstreamStartupBudget();
   await embedOfficeEntryDocuments();
   upstreamStaticInputs = await Promise.all(upstreamStaticInputs.map(async (input) => ({
     ...input,
     sha256: await fileSha256(path.join(outputRoot, input.staged_path)),
   })));
+}
+
+async function stageWhiteHeaderIcons(inputs) {
+  const stagedInputs = [...inputs];
+  for (const kind of ['document', 'spreadsheet']) {
+    const relative = `web-apps/apps/common/main/resources/img/header/icon-${kind}`;
+    const sourcePath = `upstream/${relative}.svg`;
+    const stagedPath = `upstream/${relative}-white.svg`;
+    const source = await readFile(path.join(outputRoot, sourcePath), 'utf8');
+    // These theme variants are referenced by upstream CSS but omitted from its
+    // generic deploy. Preserve the pinned icon geometry and transparent paths.
+    if (!/fill="#[0-9a-f]{6}"/i.test(source)) {
+      throw new Error(`Pinned Office header icon has no recognized solid fill: ${sourcePath}`);
+    }
+    await writeFile(path.join(outputRoot, stagedPath), source.replaceAll(/fill="#[0-9a-f]{6}"/gi, 'fill="#ffffff"'));
+    const input = {
+      path: `${relative}-white.svg`,
+      staged_path: stagedPath,
+      derived_from: sourcePath,
+      transformation: 'solid-svg-fills-to-white-v1',
+      sha256: await fileSha256(path.join(outputRoot, stagedPath)),
+    };
+    const existing = stagedInputs.findIndex((entry) => entry.staged_path === stagedPath);
+    if (existing < 0) stagedInputs.push(input);
+    else stagedInputs[existing] = input;
+  }
+  return stagedInputs;
 }
 
 async function embedOfficeEntryDocuments() {
