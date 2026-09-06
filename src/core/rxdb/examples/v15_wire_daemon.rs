@@ -76,6 +76,10 @@ struct StdoutHandler {
 
 #[async_trait]
 impl WebRTCConnectionHandler for StdoutHandler {
+    // Isolated conformance transport, without a Business OS actor or private data.
+    fn document_fields_for_peer(&self, _: &Self::Peer, _: &str) -> Option<Vec<String>> {
+        None
+    }
     type Peer = DaemonPeer;
     fn connect_stream(&self) -> RxStream<Self::Peer> {
         RxSubject::<Self::Peer>::new().subscribe()

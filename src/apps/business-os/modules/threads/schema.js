@@ -193,6 +193,7 @@ export const migrationStrategies = {
   ctox_queue_tasks: {
     1: (oldDoc) => oldDoc,
     2: (oldDoc) => oldDoc,
+    3: (oldDoc) => oldDoc,
   },
   user_threads: {
     1: (oldDoc) => oldDoc,

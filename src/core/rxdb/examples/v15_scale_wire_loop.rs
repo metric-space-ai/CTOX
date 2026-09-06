@@ -69,6 +69,10 @@ struct CountingHandler {
 
 #[async_trait]
 impl WebRTCConnectionHandler for CountingHandler {
+    // Synthetic scale fixture has no private document fields.
+    fn document_fields_for_peer(&self, _: &Self::Peer, _: &str) -> Option<Vec<String>> {
+        None
+    }
     type Peer = MockPeer;
     fn connect_stream(&self) -> RxStream<Self::Peer> {
         RxSubject::<Self::Peer>::new().subscribe()

@@ -259,15 +259,9 @@ pub trait WebRTCConnectionHandler: Send + Sync {
         Some(change)
     }
 
-    /// Optional field allowlist. Query selectors/sorts must not observe hidden
+    /// Explicit field allowlist. Query selectors/sorts must not observe hidden
     /// fields, and outgoing documents must be projected before serialization.
-    fn document_fields_for_peer(
-        &self,
-        _peer: &Self::Peer,
-        _collection: &str,
-    ) -> Option<Vec<String>> {
-        None
-    }
+    fn document_fields_for_peer(&self, peer: &Self::Peer, collection: &str) -> Option<Vec<String>>;
 
     /// Optional predicate used by `masterChangesSince` responses.
     fn document_filter_for_peer(
@@ -310,6 +304,21 @@ pub(crate) fn retain_readable_fields(document: &mut Value, fields: &[String]) {
             fields.contains(key)
                 || matches!(key.as_str(), "_rev" | "_meta" | "_deleted" | "_attachments")
         });
+    }
+}
+
+/// masterChangesSince wraps documents; masterWrite returns bare conflict rows.
+/// Apply the same authenticated field policy to both serialization shapes.
+pub(crate) fn mask_master_response(response: &mut Value, fields: &[String]) {
+    let documents = if response.is_array() {
+        response.as_array_mut()
+    } else {
+        response.get_mut("documents").and_then(Value::as_array_mut)
+    };
+    if let Some(documents) = documents {
+        for document in documents {
+            retain_readable_fields(document, fields);
+        }
     }
 }
 
@@ -369,6 +378,24 @@ pub type WebRTCConnectionHandlerCreator<H> = Arc<
 #[cfg(test)]
 mod field_policy_tests {
     use super::*;
+    #[test]
+    fn crew_master_write_conflicts_and_master_changes_share_field_mask() {
+        let fixture: Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/crew-identity.json"))
+                .unwrap();
+        let fields: Vec<String> = serde_json::from_value(fixture["public_fields"].clone()).unwrap();
+        let member = fixture["member"].clone();
+        let mut conflicts = serde_json::json!([member]);
+        let mut changes = serde_json::json!({"documents":[member],"checkpoint":{"id":"kept"}});
+        mask_master_response(&mut conflicts, &fields);
+        mask_master_response(&mut changes, &fields);
+        assert_eq!(conflicts, changes["documents"]);
+        assert_eq!(changes["checkpoint"]["id"], "kept");
+        assert_eq!(conflicts[0]["name"], "Milo");
+        for field in ["soul", "specialties", "stats"] {
+            assert!(conflicts[0].get(field).is_none());
+        }
+    }
     #[test]
     fn crew_fixture_masks_private_fields_and_rejects_query_oracles() {
         let fixture: Value =

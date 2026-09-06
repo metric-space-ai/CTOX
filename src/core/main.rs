@@ -473,7 +473,11 @@ fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         Some("crew") => {
-            let conn = rusqlite::Connection::open_with_flags(paths::core_db(&root), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let conn = rusqlite::Connection::open_with_flags(paths::core_db(&root), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .context("Crew database is not readable yet; start CTOX once to initialize it (WAL readers also require access to its shared-memory directory)")?;
+            conn.busy_timeout(persistence::sqlite_busy_timeout_duration())?;
+            let initialized: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='crew_members')", [], |r| r.get(0))?;
+            anyhow::ensure!(initialized, "Crew has not been initialized yet; start CTOX once to create the crew tables");
             let members = crew::members(&conn)?;
             match args.get(1).map(String::as_str) {
                 Some("list") if args.len() == 2 => println!("{}", serde_json::to_string_pretty(&members)?),
