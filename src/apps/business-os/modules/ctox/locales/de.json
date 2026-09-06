@@ -124,5 +124,15 @@
   "pipelineWorking": "Arbeit",
   "pipelineReview": "Review",
   "pipelineDone": "Fertig",
-  "flowFooterEmpty": "Kein Task ausgewählt"
+  "flowFooterEmpty": "Kein Task ausgewählt",
+  "creature_sleeping": "Zu Hause",
+  "creature_queued": "In der Warteschlange",
+  "creature_waking": "Wird wach",
+  "creature_thinking": "Denkt nach",
+  "creature_tooling": "Arbeitet mit Werkzeug",
+  "creature_reviewing": "Prüft",
+  "creature_waiting": "Wartet",
+  "creature_failed": "Gescheitert",
+  "creature_done": "Fertig",
+  "creatureGallery": "Die Crew in Bewegung"
 }

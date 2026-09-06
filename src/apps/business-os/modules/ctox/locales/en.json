@@ -124,5 +124,15 @@
   "pipelineWorking": "Working",
   "pipelineReview": "Review",
   "pipelineDone": "Done",
-  "flowFooterEmpty": "No task selected"
+  "flowFooterEmpty": "No task selected",
+  "creature_sleeping": "At home",
+  "creature_queued": "Queued",
+  "creature_waking": "Waking up",
+  "creature_thinking": "Thinking",
+  "creature_tooling": "Using a tool",
+  "creature_reviewing": "Reviewing",
+  "creature_waiting": "Waiting",
+  "creature_failed": "Failed",
+  "creature_done": "Done",
+  "creatureGallery": "The crew in motion"
 }

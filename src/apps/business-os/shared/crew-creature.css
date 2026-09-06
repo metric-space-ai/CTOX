@@ -1,0 +1,31 @@
+.crew-creature { display:inline-flex; width:var(--crew-size,88px); height:var(--crew-size,88px); flex:none; color:var(--text-primary,#263344); }
+.crew-creature--fab { --crew-size:28px; }
+.crew-creature--dock { --crew-size:44px; }
+.crew-creature--home { --crew-size:104px; }
+.crew-creature--workplace { --crew-size:180px; }
+.crew-creature svg { width:100%; height:100%; overflow:visible; }
+.crew-creature__body { fill:var(--crew-color); transform-origin:32px 57px; }
+.crew-creature__face,.crew-creature__signal { fill:none; stroke:currentColor; stroke-width:2.5; stroke-linecap:round; stroke-linejoin:round; }
+.crew-creature__face { transform-origin:32px 36px; }
+.crew-creature__signal { stroke-width:1.8; }
+.crew-creature.is-sleeping .crew-creature__body { animation:crew-breathe 4s ease-in-out infinite; }
+.crew-creature.is-queued .crew-creature__face { animation:crew-queue 5s ease-in-out infinite; }
+.crew-creature.is-waking .crew-creature__body { animation:crew-wake .8s ease-out both; }
+.crew-creature.is-thinking .crew-creature__face { animation:crew-look 3s ease-in-out infinite; }
+.crew-creature.is-tooling .crew-creature__body { animation:crew-work .7s ease-in-out infinite; }
+.crew-creature.is-reviewing .crew-creature__face { animation:crew-review 2.6s ease-in-out infinite; }
+.crew-creature.is-waiting .crew-creature__signal { transform-origin:55px 16px; animation:crew-hourglass 6s ease-in-out infinite; }
+.crew-creature.is-failed .crew-creature__body { animation:crew-fail .65s ease-out both; }
+.crew-creature.is-done .crew-creature__body { animation:crew-done .65s ease-out both; }
+@keyframes crew-queue { 0%,80%,100% { transform:translateY(2px); } 90% { transform:translate(2px,2px); } }
+@keyframes crew-fail { from { transform:translateY(0); } to { transform:translateY(5px) scaleY(.9); } }
+@keyframes crew-breathe { 50% { transform:scale(1.025,.97); } }
+@keyframes crew-wake { 0% { transform:scale(1.07,.86); } 65% { transform:scale(.97,1.05); } }
+@keyframes crew-look { 30%,55% { transform:translate(2px,-2px) rotate(-5deg); } }
+@keyframes crew-work { 50% { transform:translateY(-3px) rotate(3deg) scale(.97,1.03); } }
+@keyframes crew-review { 40%,60% { transform:translateX(-3px); } }
+@keyframes crew-hourglass { 0%,75% { transform:rotate(0); } 90%,100% { transform:rotate(180deg); } }
+@keyframes crew-done { 40% { transform:translateY(-5px) scale(.98,1.02); } }
+@media (prefers-reduced-motion:reduce) {
+  .crew-creature * { animation:none !important; transition:none !important; }
+}
