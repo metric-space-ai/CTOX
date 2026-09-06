@@ -11,6 +11,7 @@ const DEFAULT_ZOOM = 1;
 const MIN_ZOOM = 0.72;
 const MAX_ZOOM = 1.8;
 const HARNESS_REFRESH_MS = 4000;
+const LOCAL_COLLECTION_LIMIT = 120;
 const LOCAL_RENDER_DEBOUNCE_MS = 80;
 const HARNESS_STALL_GRACE_MS = 90 * 1000;
 const HARNESS_WAITING_STATUSES = new Set(['queued', 'pending', 'accepted']);
@@ -63,6 +64,30 @@ const labels = {
     taskResumed: 'Folgeauftrag angelegt.',
     taskDeleted: 'Task gelöscht.',
     taskActionFailed: 'Aktion fehlgeschlagen.',
+    holdTechnical: "technischer Grund",
+    holdMissingReviewEvidence: "Review-Beleg fehlt",
+    holdMissingArtifact: "Artefakt fehlt",
+    holdWaitingExternal: "wartet auf extern",
+    holdAbortedByOwner: "vom Owner abgebrochen",
+    holdOther: "blockiert",
+    failureRetryable: "wiederholbar",
+    failureTerminal: "endgültig",
+    failedWord: "Gescheitert",
+    blockedWord: "Blockiert",
+    waitsFor: "wartet auf",
+    retryAt: "Wiederholung um",
+    retryPending: "Wiederholung steht aus",
+    attemptOne: "Versuch",
+    attemptMany: "Versuche",
+    attemptLabel: "Versuch",
+    worksSince: "arbeitet seit",
+    worksOn: "arbeitet daran",
+    leasedSince: "übernommen um",
+    leasedWord: "übernommen",
+    assignedTo: "zugewiesen an",
+    crewMember: "Crew-Mitglied",
+    leaseOwner: "Lease",
+    until: "bis",
     chefAdminOnly: 'Nur Chef oder Admin dürfen Tasks ändern.',
     currentStep: 'Aktuelle Station',
     source: 'Quelle',
@@ -253,6 +278,30 @@ const labels = {
     taskResumed: 'Follow-up task queued.',
     taskDeleted: 'Task deleted.',
     taskActionFailed: 'Action failed.',
+    holdTechnical: "technical reason",
+    holdMissingReviewEvidence: "review evidence missing",
+    holdMissingArtifact: "artifact missing",
+    holdWaitingExternal: "waiting for external input",
+    holdAbortedByOwner: "aborted by owner",
+    holdOther: "blocked",
+    failureRetryable: "retryable",
+    failureTerminal: "final",
+    failedWord: "Failed",
+    blockedWord: "Blocked",
+    waitsFor: "waits for",
+    retryAt: "retry at",
+    retryPending: "retry pending",
+    attemptOne: "attempt",
+    attemptMany: "attempts",
+    attemptLabel: "Attempt",
+    worksSince: "working since",
+    worksOn: "is working on it",
+    leasedSince: "picked up at",
+    leasedWord: "picked up",
+    assignedTo: "assigned to",
+    crewMember: "Crew member",
+    leaseOwner: "Lease",
+    until: "until",
     chefAdminOnly: 'Only chef or admin can change tasks.',
     currentStep: 'Current station',
     source: 'Source',
@@ -611,13 +660,15 @@ async function loadCtoxMessages(lang) {
 }
 
 async function renderFromLocalCache(state) {
-  const [commands, queueTasks, bugReports, webStack] = await Promise.all([
+  const [commands, queueTasks, bugReports, webStack, crewMembers] = await Promise.all([
     loadLocalCommands(state.ctx).catch(() => []),
     loadLocalQueueTasks(state.ctx).catch(() => []),
     loadLocalBugReports(state.ctx).catch(() => []),
     loadLocalWebStackOverview(state.ctx).catch((error) => ({ ok: false, error: error.message || String(error) })),
+    loadLocalCrewMembers(state.ctx).catch(() => []),
   ]);
   if (state.disposed) return;
+  state.crewMembers = crewMembers;
   state.webStack = {
     loading: false,
     error: webStack?.ok ? '' : (webStack?.error || 'Web Stack status unavailable'),
@@ -636,7 +687,7 @@ async function renderFromLocalCache(state) {
 }
 
 function wireLocalRealtime(state) {
-  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports'];
+  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports', 'ctox_crew_members'];
   let renderTimer = null;
   const scheduleRender = () => {
     if (state.disposed || state.refreshInFlight) return;
@@ -667,13 +718,15 @@ async function refresh(state) {
   if (state.disposed || state.refreshInFlight) return;
   state.refreshInFlight = true;
   try {
-    const [commands, queueTasks, bugReports, webStack, harnessFlow] = await Promise.all([
+    const [commands, queueTasks, bugReports, webStack, harnessFlow, crewMembers] = await Promise.all([
       loadLocalCommands(state.ctx).catch(() => []),
       loadLocalQueueTasks(state.ctx).catch(() => []),
       loadLocalBugReports(state.ctx).catch(() => []),
       loadLocalWebStackOverview(state.ctx).catch((error) => ({ ok: false, error: error.message || String(error) })),
       loadHarnessFlowSnapshot(state.ctx).catch(() => emptyHarnessFlow('harness_flow_unavailable')),
+      loadLocalCrewMembers(state.ctx).catch(() => []),
     ]);
+    state.crewMembers = crewMembers;
     state.webStack = {
       loading: false,
       error: webStack?.ok ? '' : (webStack?.error || 'Web Stack status unavailable'),
@@ -1347,12 +1400,14 @@ function taskCardMarkup(task, state) {
   const problem = ['blocked', 'failed', 'cancelled'].includes(normalizeCommandStatus(task.routeStatus || task.status));
   const detail = [source, changed].filter(Boolean)
     .map((value) => `<span>${escapeHtml(value)}</span>`).join('');
+  const reason = taskReasonText(task, state);
   return `
     <article class="ctox-list-item ctox-task-card ${selected ? 'is-selected' : ''} ${pinned ? 'is-pinned' : ''}"
       data-task-id="${escapeAttr(task.id)}" data-context-record-id="${escapeAttr(task.id)}" data-context-record-type="ctox_task" data-context-label="${escapeAttr(title)}">
       <button type="button" class="ctox-task-selector" data-select-task-id="${escapeAttr(task.id)}" aria-label="${escapeAttr(`${t.openTaskDetail}: ${title}`)}">
         <strong>${escapeHtml(title)}</strong>
         <small class="ctox-task-meta">${status ? `<span class="ctox-task-meta-status ${problem ? 'is-problem' : ''}">${escapeHtml(status)}</span>` : ''}${detail}</small>
+        ${reason ? `<small class="ctox-task-reason ${problem ? 'is-problem' : ''}">${escapeHtml(reason)}</small>` : ''}
         ${taskPipelineMarkup(task, state)}
       </button>
       <div class="ctox-task-actions">
@@ -2900,11 +2955,13 @@ function taskDrawer(task, state) {
       </div>
       <button class="ctox-pane-icon ctox-drawer-close" type="button" data-close-ctox-drawer aria-label="Schließen" title="Schließen">${actionIcon(state, 'close')}</button>
     </header>
-    <section class="ctox-callout is-info ctox-task-status-strip">
+    <section class="ctox-callout ${['blocked', 'failed'].includes(normalizeCommandStatus(task.routeStatus || task.status)) ? 'is-danger' : 'is-info'} ctox-task-status-strip">
       <div>
-        <strong class="ctox-badge ${statusBadgeVariant(statusClass(task.status))}">${escapeHtml(displayStatus(task.status, state.lang))}</strong>
+        <strong class="ctox-badge ${statusBadgeVariant(statusClass(task.routeStatus || task.status))}">${escapeHtml(displayStatus(task.routeStatus || task.status, state.lang))}</strong>
         ${target ? `<small>${escapeHtml(target)}</small>` : ''}
       </div>
+      ${taskReasonText(task, state) ? `<p class="ctox-task-reason-line">${escapeHtml(taskReasonText(task, state))}</p>` : ''}
+      ${taskLeaseLineMarkup(task, state)}
       ${taskLiveStatusMarkup(task, state)}
     </section>
     <form class="ctox-card ctox-task-edit" data-ctox-task-edit>
@@ -2991,6 +3048,18 @@ function taskDrawer(task, state) {
     });
   });
   return body;
+}
+
+function taskLeaseLineMarkup(task, state) {
+  const t = labels[state.lang];
+  const bits = [];
+  const memberName = crewMemberName(state, task.crewMemberId);
+  if (memberName) bits.push(`${t.crewMember}: ${memberName}`);
+  else if (task.crewAssignedMemberId && crewMemberName(state, task.crewAssignedMemberId)) bits.push(`${t.assignedTo} ${crewMemberName(state, task.crewAssignedMemberId)}`);
+  if (task.leaseOwner) bits.push(`${t.leaseOwner}: ${task.leaseOwner}${task.leaseExpiresAt ? ` (${t.until} ${formatClockTime(task.leaseExpiresAt)})` : ''}`);
+  if (Number.isFinite(task.attempt) && task.attempt > 0) bits.push(`${t.attemptLabel} ${task.attempt}`);
+  if (!bits.length) return '';
+  return `<small class="ctox-task-lease-line">${bits.map((bit) => `<span>${escapeHtml(bit)}</span>`).join('')}</small>`;
 }
 
 function canResumeCtoxTask(task) {
@@ -3509,6 +3578,23 @@ function mergeBundleWithCommands(bundle, commands, queueTasks = [], bugReports =
     executionProgress: normalizeExecutionProgress(doc.execution_progress || doc.executionProgress),
     leasedAt: doc.leased_at || '',
     ackedAt: doc.acked_at || '',
+    // Durable routing truth (PR #58/#59/#61): who holds the lease, why the task
+    // waits, when it retries, how it failed, and which crew member is bound.
+    leaseOwner: doc.lease_owner || '',
+    leaseWorkerId: doc.lease_worker_id || '',
+    leaseExpiresAt: doc.lease_expires_at || '',
+    firstPendingAt: doc.first_pending_at || '',
+    attempt: Number.isFinite(Number(doc.attempt)) ? Number(doc.attempt) : null,
+    failureClass: doc.failure_class || '',
+    failureAttemptCount: Number.isFinite(Number(doc.failure_attempt_count)) ? Number(doc.failure_attempt_count) : 0,
+    retryNotBefore: doc.retry_not_before || '',
+    holdReason: doc.hold_reason || '',
+    waitEntityType: doc.wait_entity_type || '',
+    waitEntityId: doc.wait_entity_id || '',
+    statusNote: doc.status_note || '',
+    error: doc.error || '',
+    crewMemberId: doc.crew_member_id || '',
+    crewAssignedMemberId: doc.crew_assigned_member_id || '',
     updatedAtMs: Number.isFinite(Number(doc.updated_at_ms)) ? Number(doc.updated_at_ms) : null,
     createdAt: new Date(doc.updated_at_ms || Date.now()).toISOString(),
     updatedAt: new Date(doc.updated_at_ms || Date.now()).toISOString(),
@@ -3554,9 +3640,13 @@ function commandTaskFromProjection(doc, runtimeByTaskId, runtimeByCommandId) {
   const extractArtifact = isLegacyBrowserExtractCommand(doc)
     ? browserExtractArtifactFromCommand(doc)
     : null;
-  const status = lifecycle
-    ? authoritativeTaskStatus(doc)
-    : normalizeCommandStatus(doc.status);
+  // The durable routing state is the truth (a failed/blocked/cancelled queue
+  // task must never count as "working" because the command lifecycle still
+  // says running) — Befund "Arbeitet (4)" bei vier Fehlern, 05.09.2026.
+  const routingTruth = normalizeCommandStatus(queueTask?.routeStatus || '');
+  const status = HARNESS_PROBLEM_TERMINAL_STATUSES.has(routingTruth)
+    ? routingTruth
+    : (lifecycle ? authoritativeTaskStatus(doc) : normalizeCommandStatus(doc.status));
   const taskId = executionTaskId || queueTask?.taskId || '';
   return {
     ...(queueTask || {}),
@@ -3573,11 +3663,13 @@ function commandTaskFromProjection(doc, runtimeByTaskId, runtimeByCommandId) {
     channel: inferInboundChannel(doc),
     priority: doc.payload?.priority || queueTask?.priority || 'normal',
     status,
-    routeStatus: lifecycle
-      ? (String(doc.execution_phase) === 'terminal'
-        ? String(doc.terminal_status || doc.status || 'terminal')
-        : String(doc.execution_phase))
-      : (doc.task_status || doc.status || ''),
+    routeStatus: HARNESS_PROBLEM_TERMINAL_STATUSES.has(routingTruth)
+      ? String(queueTask?.routeStatus || routingTruth)
+      : (lifecycle
+        ? (String(doc.execution_phase) === 'terminal'
+          ? String(doc.terminal_status || doc.status || 'terminal')
+          : String(doc.execution_phase))
+        : (doc.task_status || doc.status || '')),
     executionPhase: lifecycle ? String(doc.execution_phase) : '',
     execution_phase: lifecycle ? String(doc.execution_phase) : '',
     terminalStatus: lifecycle ? String(doc.terminal_status || 'none') : '',
@@ -3983,13 +4075,32 @@ async function requestWebStackAuthAssist(state, source) {
 async function loadLocalCollection(ctx, collectionName) {
   const collection = ctoxCollection(ctx, collectionName);
   if (!collection) return [];
-  const query = collection.find();
-  const previewQuery = typeof query?.limit === 'function' ? query.limit(200) : query;
-  const localDocs = await previewQuery.exec();
-  return localDocs
-    .map((doc) => doc.toJSON())
-    .sort((left, right) => (right.updated_at_ms || 0) - (left.updated_at_ms || 0))
-    .slice(0, 20);
+  // Newest first, bounded at the query (never "first 200 by primary key, then
+  // keep 20" — that hid the newest work on busy workspaces, Befund 05.09.2026).
+  let localDocs;
+  try {
+    localDocs = await collection.find({
+      selector: { updated_at_ms: { $gt: 0 } },
+      sort: [{ updated_at_ms: 'desc' }],
+      limit: LOCAL_COLLECTION_LIMIT,
+    }).exec();
+  } catch {
+    const fallback = await collection.find().limit(LOCAL_COLLECTION_LIMIT).exec();
+    localDocs = fallback.sort((left, right) => (right.updated_at_ms || 0) - (left.updated_at_ms || 0));
+  }
+  return localDocs.map((doc) => doc.toJSON());
+}
+
+async function loadLocalCrewMembers(ctx) {
+  const collection = ctoxCollection(ctx, 'ctox_crew_members');
+  if (!collection) return [];
+  const docs = await collection.find({ selector: { archived: false }, limit: 64 }).exec();
+  return docs.map((doc) => doc.toJSON());
+}
+
+function crewMemberById(state, memberId) {
+  if (!memberId) return null;
+  return (state?.crewMembers || []).find((member) => member.id === memberId) || null;
 }
 
 function ctoxCollection(ctx, collectionName) {
@@ -4734,6 +4845,78 @@ function displayPathLike(value) {
 function displayPriority(priority) {
   const labelsByPriority = { urgent: 'Urgent', high: 'High', normal: 'Normal', low: 'Low' };
   return labelsByPriority[priority] || displayStatus(priority, 'en');
+}
+
+const HOLD_REASON_KEYS = {
+  technical: 'holdTechnical',
+  missing_review_evidence: 'holdMissingReviewEvidence',
+  missing_artifact: 'holdMissingArtifact',
+  waiting_external: 'holdWaitingExternal',
+  aborted_by_owner: 'holdAbortedByOwner',
+};
+
+function displayHoldReason(reason, state) {
+  const t = labels[state.lang];
+  const raw = String(reason || '').trim();
+  if (!raw) return '';
+  const value = raw.toLowerCase().replace(/^technical:\s*/, 'technical');
+  const key = HOLD_REASON_KEYS[value] || HOLD_REASON_KEYS[value.split(':')[0]];
+  if (key && t[key]) return t[key];
+  return t.holdOther || raw.replace(/[_-]+/g, ' ');
+}
+
+function displayFailureClass(failureClass, state) {
+  const t = labels[state.lang];
+  const value = String(failureClass || '').trim().toLowerCase();
+  if (!value) return '';
+  if (value === 'retryable') return t.failureRetryable;
+  if (value === 'terminal') return t.failureTerminal;
+  return value.replace(/[_-]+/g, ' ');
+}
+
+function formatClockTime(value) {
+  const date = value ? new Date(value) : null;
+  if (!date || Number.isNaN(date.getTime())) return '';
+  return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+function crewMemberName(state, memberId) {
+  const member = crewMemberById(state, memberId);
+  return member?.name || '';
+}
+
+// One sentence of truth per task: why it waits, when it retries, how it
+// failed, who holds it. Built only from durable routing fields — never from
+// guesses — and empty when there is nothing worth saying.
+function taskReasonText(task, state) {
+  const t = labels[state.lang];
+  const status = normalizeCommandStatus(task.routeStatus || task.status);
+  const parts = [];
+  const retryAt = formatClockTime(task.retryNotBefore);
+  const attempts = Number(task.failureAttemptCount || 0);
+  if (status === 'failed') {
+    const klass = displayFailureClass(task.failureClass, state);
+    parts.push(klass ? `${t.failedWord} · ${klass}` : t.failedWord);
+    if (attempts) parts.push(`${attempts} ${attempts === 1 ? t.attemptOne : t.attemptMany}`);
+  } else if (status === 'blocked') {
+    const reason = displayHoldReason(task.holdReason, state);
+    parts.push(reason ? `${t.blockedWord} · ${reason}` : t.blockedWord);
+    if (task.waitEntityId) parts.push(`${t.waitsFor} ${task.waitEntityType ? `${task.waitEntityType} ` : ''}${task.waitEntityId}`);
+  } else if (task.retryNotBefore && new Date(task.retryNotBefore).getTime() > Date.now()) {
+    parts.push(retryAt ? `${t.retryAt} ${retryAt}` : t.retryPending);
+    if (attempts) parts.push(`${attempts} ${attempts === 1 ? t.attemptOne : t.attemptMany}`);
+  } else if (status === 'running') {
+    const name = crewMemberName(state, task.crewMemberId);
+    const since = formatClockTime(task.leasedAt);
+    if (name) parts.push(since ? `${name} ${t.worksSince} ${since}` : `${name} ${t.worksOn}`);
+    else if (task.leaseOwner) parts.push(since ? `${t.leasedSince} ${since}` : t.leasedWord);
+  } else if (status === 'queued') {
+    const assigned = crewMemberName(state, task.crewAssignedMemberId);
+    if (assigned) parts.push(`${t.assignedTo} ${assigned}`);
+  }
+  const note = String(task.statusNote || task.error || '').trim();
+  if (note && (status === 'failed' || status === 'blocked')) parts.push(note.length > 140 ? `${note.slice(0, 137)}…` : note);
+  return parts.join(' · ');
 }
 
 function displayStatus(status, lang = 'de') {

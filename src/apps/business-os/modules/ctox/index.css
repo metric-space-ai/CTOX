@@ -359,6 +359,22 @@
   min-width: 0;
 }
 
+/* One sentence of routing truth under the meta line (why it waits, when it
+   retries, who works on it). Inherits the meta typography; problem tone only
+   for failed/blocked. */
+.ctox-task-reason {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted, inherit);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-reason.is-problem { color: var(--danger, inherit); }
+.ctox-task-reason-line { margin: 6px 0 0; font-size: var(--fs-sm, 13px); }
+.ctox-task-lease-line { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; color: var(--muted, inherit); }
+
 .ctox-task-meta > span {
   min-width: 0;
   overflow: hidden;
