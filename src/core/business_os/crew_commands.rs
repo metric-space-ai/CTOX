@@ -92,8 +92,9 @@ pub(super) fn control(
                         .contains(&color),
                     "color is not a CREW_COLOR"
                 );
-                let soul: Soul =
+                let mut soul: Soul =
                     serde_json::from_value(p.get("soul").cloned().context("soul is required")?)?;
+                soul.normalize();
                 soul.validate()?;
                 let specialties = specialties(p.get("specialties").cloned().unwrap_or(json!({})))?;
                 let count: i64 =
@@ -117,6 +118,7 @@ pub(super) fn control(
                 }
                 if let Some(soul) = p.get("soul") {
                     member.soul = serde_json::from_value(soul.clone())?;
+                    member.soul.normalize();
                     member.soul.validate()?;
                 }
                 if let Some(value) = p.get("specialties") {
@@ -137,7 +139,7 @@ pub(super) fn control(
                     |r| r.get(0),
                 )?;
                 ensure!(exists, "active member not found");
-                let changed=tx.execute("UPDATE communication_routing_state SET crew_member_id=?2,updated_at=?3
+                let changed=tx.execute("UPDATE communication_routing_state SET crew_assigned_member_id=?2,updated_at=?3
                 WHERE message_key=?1 AND route_status IN ('pending','blocked') AND lease_owner IS NULL",params![task,member,now])?;
                 ensure!(
                     changed == 1,
@@ -169,9 +171,10 @@ pub(super) fn control(
                     }
                     _ => {
                         if let Some(value) = p.get("text") {
-                            let value = value.as_str().context("text must be a string")?;
-                            ensure!(crew::safe_prose(value, 400), "invalid learning text");
-                            tx.execute("UPDATE crew_member_learnings SET text=?2,normalized_text=?3 WHERE id=?1",params![id,value.trim(),crew::normalized(value)])?;
+                            let value =
+                                crew::prose_line(value.as_str().context("text must be a string")?);
+                            ensure!(crew::safe_prose(&value, 400), "invalid learning text");
+                            tx.execute("UPDATE crew_member_learnings SET text=?2,normalized_text=?3 WHERE id=?1",params![id,value,crew::normalized(&value)])?;
                         }
                         if let Some(archived) = p.get("archived") {
                             tx.execute(
@@ -189,6 +192,12 @@ pub(super) fn control(
             _ => anyhow::bail!("unsupported crew command"),
         };
         tx.commit()?;
+        if command.command_type == "ctox.crew.assign" {
+            crate::mission::channels::refresh_queue_assignment_projection(
+                root,
+                text(p, "task_id")?,
+            )?;
+        }
         super::harness_cockpit::refresh_after_finalization(&crate::paths::core_db(root));
         Ok(json!({"ok":true,"result":result}))
     })();

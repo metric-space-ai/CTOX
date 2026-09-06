@@ -71,7 +71,7 @@ export const collections = {
     additionalProperties: true
   },
   ctox_queue_tasks: {
-    version: 2,
+    version: 3,
     primaryKey: 'id',
     type: 'object',
     properties: {
@@ -96,6 +96,7 @@ export const collections = {
       priority_time_credit_hours: { type: 'number' },
       attempt: { type: 'number' },
       crew_member_id: { type: 'string' },
+      crew_assigned_member_id: { type: 'string' },
       execution_progress: { type: 'object', additionalProperties: true },
       updated_at_ms: { type: 'number' }
     },
@@ -717,7 +718,8 @@ export const migrationStrategies = {
   },
   ctox_queue_tasks: {
     1: (oldDoc) => oldDoc,
-    2: (oldDoc) => oldDoc
+    2: (oldDoc) => oldDoc,
+    3: (oldDoc) => oldDoc
   },
   ctox_runs: {
     1: (oldDoc) => oldDoc

@@ -10797,6 +10797,9 @@ pub(crate) struct BusinessProjectionWriter {
 }
 
 impl BusinessProjectionWriter {
+    pub(crate) fn source_connection(&self) -> &Connection {
+        &self.conn
+    }
     /// A missing collection is deferred delivery, not an acknowledgement.
     pub(crate) fn delivered_to_rxdb(&self, collection: &str) -> bool {
         matches!(self.rxdb_writers.writers.get(collection), Some(Some(_)))

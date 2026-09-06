@@ -867,6 +867,7 @@ pub(super) fn enrich_queue_projection_payload(
         ("wait_entity_type", &task.wait_entity_type),
         ("wait_entity_id", &task.wait_entity_id),
         ("crew_member_id", &task.crew_member_id),
+        ("crew_assigned_member_id", &task.crew_assigned_member_id),
     ] {
         object.insert(key.to_string(), serde_json::json!(value));
     }
@@ -1474,6 +1475,7 @@ pub(crate) mod tests {
             priority_time_credit_hours: 0,
             attempt: 0,
             crew_member_id: None,
+            crew_assigned_member_id: None,
         };
 
         let success_with_old_wording =

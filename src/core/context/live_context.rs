@@ -225,16 +225,15 @@ pub fn render_runtime_prompt(
     })
 }
 
-/// Resolve the crew placeholder only after the full runtime and execution context.
-/// Identity is prepared at the lease boundary, never read from ambient thread state.
+/// Append crew context only after the full runtime and execution rules.
+/// Identity is prepared after admission, never read from ambient thread state.
 pub(crate) fn attach_crew_soul(prompt: &mut RenderedRuntimePrompt, block: Option<&str>) {
     // Identity cannot make an otherwise empty task invocable.
     if prompt.latest_user_prompt.trim().is_empty() {
         return;
     }
     if let Some(block) = block {
-        let template = "\n\n{{CREW_SOUL_BLOCK}}";
-        let block = template.replace("{{CREW_SOUL_BLOCK}}", block);
+        let block = format!("\n\n{block}");
         // The execution rules are carried in the user task. Keep identity after
         // those rules as well as after the system/CTO context on the actual wire.
         prompt.latest_user_prompt.push_str(&block);

@@ -99,7 +99,7 @@ fn crew_controls_enforce_roles_even_with_explicit_grants_and_replay_receipts() -
                             .contains("unleased pending or blocked task"),
                         "{denied:#}"
                     );
-                    let assigned: String = core.query_row("SELECT crew_member_id FROM communication_routing_state WHERE message_key=?1", [&task.message_key], |r|r.get(0))?;
+                    let assigned: String = core.query_row("SELECT crew_assigned_member_id FROM communication_routing_state WHERE message_key=?1", [&task.message_key], |r|r.get(0))?;
                     assert_eq!(assigned, "crew-milo", "an active slice keeps its member");
                 }
             } else {
