@@ -1,5 +1,20 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Native file-preservation test result
+
+The release-mode retry completed successfully at 16:22:28 UTC. Its journal
+records exactly one test passed, zero failed/ignored, 3,201 filtered, in
+0.02 seconds after a 7m20s build. It exercised the real root test binary
+/home/ctox/.cache/ctox/build-office-20260906/release/deps/ctox-b76f227b4caead72.
+The three changed native files in the tested main576 source exactly match the
+immutable fbeca32b7 archive by SHA256:
+- rxdb_peer.rs: 16711dbc104109229ab66dbbbe1f63ad3a8a611da0e74d6aff202d0c452fbb41
+- rxdb_peer_demand_files.rs: c3d1040367ff7af4b3ec0d8fd5acf93aed8dd50eda1371c6490b263fd9a861e7
+- store.rs: 549054acffb3e6ed3a2c922fd62f9cc421e5e548500a31951dca813ecce8fd06
+The peak was 8.3 GiB; this explains why the separate 6 GiB attempt could not
+finish compilation. The successful assertion is a file-store restart test,
+not production activation or the complete user-story/performance matrix.
+
 ## Beta13 read checks and repeated Word cache recovery
 
 On the current beta13 shell, the real authenticated browser again showed
@@ -45,11 +60,18 @@ the original test root. It reuses the built sidecar and Cargo dependencies,
 sets only profile.test.package.ctox.debug=0, removes the virtual-address limit,
 and retains MemoryMax=6 GiB, one CPU, Nice=10, one Cargo job and a one-hour
 runtime bound. The test assertions and source are unchanged. The separate
-release-mode unit was confirmed failed/inactive before this retry started.
+release-mode unit was confirmed failed/inactive before this retry started. The debug0 retry subsequently hit its physical MemoryMax limit (systemd Result=oom-kill, ExecMainStatus=15), before any test result. No higher-limit duplicate was started: production ctox-real alone held approximately 10.4 GiB RSS (10.3 GiB anonymous) and another release-mode test was using several GiB. Both aborted own attempts remain non-passing verification.
 
-Status: partial recovery. Welsch boots and two repaired Word documents render.
-The native file-preservation fix is on main but not activated. Spreadsheets,
-full E2E and performance acceptance remain open.
+Status: partial recovery. Welsch boots; the real beta13 browser renders the
+Harness flow and the checked Word, CSV and XLSX contents. The native storage
+regression passes, but its production activation remains outstanding.
+Full edit/save/restart E2E, historical artifact recovery and performance
+acceptance remain open. A separate fresh pre-activation backup at
+/home/ctox/.local/state/ctox-incident-pre-native-20260906T162646Z/ passed
+quick_check for both stores. Its file-chunk-manifest.json records data hashes
+for 1,057 chunks across desktop files, Word and spreadsheets, including the
+seven previously omitted Word chunks. This provides a comparison baseline;
+it is not a claim that activation or post-activation verification occurred.
 
 ## Routing mitigation already active
 
