@@ -71,6 +71,19 @@ impl JsonSchemaType {
         }
     }
 
+    /// Projection defaults prefer explicit nullability, otherwise the first
+    /// declared type. This does not change the serialized union ordering.
+    pub fn default_type(&self) -> Option<&str> {
+        match self {
+            Self::Single(value) => Some(value),
+            Self::Multiple(values) => values
+                .iter()
+                .find(|value| value.as_str() == "null")
+                .or_else(|| values.first())
+                .map(String::as_str),
+        }
+    }
+
     pub fn matches_value(&self, value: &Value) -> bool {
         (value.is_null() && self.includes("null"))
             || (value.is_string() && self.includes("string"))
@@ -242,6 +255,7 @@ mod schema_type_tests {
         assert!(!declared.matches_value(&json!(false)));
         assert!(!declared.matches_value(&json!({})));
         assert_eq!(declared.single_type(), None);
+        assert_eq!(declared.default_type(), Some("null"));
         assert!(serde_json::from_value::<JsonSchema>(json!({"type": ["string", 7]})).is_err());
     }
 

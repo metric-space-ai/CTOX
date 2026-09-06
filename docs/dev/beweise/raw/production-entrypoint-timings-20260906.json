@@ -1,0 +1,102 @@
+{
+  "measuredAtUtc": "2026-09-06T12:05:09Z",
+  "scope": "Unauthenticated HTTP entrypoint timing only; excludes WebRTC sync, authenticated app workflows and command performance. Three samples are not a p95 acceptance.",
+  "rows": [
+    {
+      "host": "welsch.ctox.dev",
+      "sample": 1,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 0.593343,
+      "totalSeconds": 0.641337
+    },
+    {
+      "host": "welsch.ctox.dev",
+      "sample": 2,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 0.266132,
+      "totalSeconds": 0.285335
+    },
+    {
+      "host": "welsch.ctox.dev",
+      "sample": 3,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 0.860868,
+      "totalSeconds": 0.864671
+    },
+    {
+      "host": "skf.ctox.dev",
+      "sample": 1,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 0.590671,
+      "totalSeconds": 0.591139
+    },
+    {
+      "host": "skf.ctox.dev",
+      "sample": 2,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 0.65584,
+      "totalSeconds": 0.672485
+    },
+    {
+      "host": "skf.ctox.dev",
+      "sample": 3,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 1.166811,
+      "totalSeconds": 1.168152
+    },
+    {
+      "host": "thesen.ctox.dev",
+      "sample": 1,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 1.607337,
+      "totalSeconds": 1.610141
+    },
+    {
+      "host": "thesen.ctox.dev",
+      "sample": 2,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 1.161547,
+      "totalSeconds": 1.161881
+    },
+    {
+      "host": "thesen.ctox.dev",
+      "sample": 3,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 0.373887,
+      "totalSeconds": 0.381556
+    },
+    {
+      "host": "miltonticket.ctox.dev",
+      "sample": 1,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 1.241237,
+      "totalSeconds": 1.249202
+    },
+    {
+      "host": "miltonticket.ctox.dev",
+      "sample": 2,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 1.47168,
+      "totalSeconds": 1.47208
+    },
+    {
+      "host": "miltonticket.ctox.dev",
+      "sample": 3,
+      "exit": 0,
+      "status": "200",
+      "ttfbSeconds": 2.943577,
+      "totalSeconds": 2.943884
+    }
+  ]
+}

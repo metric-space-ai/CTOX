@@ -30,9 +30,21 @@ The browser consequently retained maintenance write protection. This disproves
 the updater's process-running-only success criterion.
 
 The relevant Rust fragment models JsonSchema.type as Option<String>, while
-JSON Schema permits type unions represented as arrays. The exact offending
-collection has not yet been isolated in this incident. Do not normalize away
+JSON Schema permits type unions represented as arrays. The failing packaged
+field was subsequently isolated as `ctox_crew_members.active_task_id`, whose
+contract is `["string", "null"]`. An independent regression using every packaged
+Business OS schema reproduced the panic before the fix. Do not normalize away
 the union or weaken validation merely to suppress the panic.
+
+Main commit `01fe390c7` adds native union representation and validation. Its
+crate-level success did not establish daemon compatibility: Welsch's subsequent
+`ctox-office-native-union-upgrade-20260906.service` build failed with three E0599
+errors at the remaining `Option<JsonSchemaType>::as_deref` consumers in the
+Business OS projection layer. The build failure prevented activation of that
+candidate. Its recovery script restored the prior service executable without
+restoring database snapshots. Projection normalization and repair/tombstone
+defaults must explicitly handle unions, and the entire CTOX binary must pass
+compilation before another activation. Native-crate tests alone miss this boundary.
 
 ## Data-preserving emergency service fallback
 
@@ -110,3 +122,28 @@ workjet_computers schema conflict through the approved migration path, remove
 the temporary service override, and test actual Documents/Spreadsheets/Harness
 flows with persistence and timings. The original shell-generation work remains
 unfinished and must not be deployed during this recovery.
+
+## Follow-up at 12:18 UTC
+
+The daemon union integration is on main in `3fffd9f0a`; merge `3a4d45bf7`
+preserves the independent full-property-contract regression and additional
+projection coverage. The unfinished shell-generation draft is not included.
+
+The first union forward build failed on three remaining daemon consumers.
+The subsequent `ctox-office-native-projection-upgrade-20260906.service` is
+still running (PID 2451497). Welsch remains on the recovered service
+(PID 2449549); its peer reports running=true, replicationUp=true,
+heartbeatFresh=true and errorTotal=0. This is not evidence that the corrected
+release has been activated. Browser update maintenance still blocks app writes
+during the build. Harness task list, painted flow, progress and timeline were
+verified again; Documents and Spreadsheets are not accepted.
+
+All four public entrypoints returned HTTP 200 in three requests each.
+[Raw entrypoint timings](beweise/raw/production-entrypoint-timings-20260906.json)
+record TTFB from 0.266132 to 2.943577 seconds. These unauthenticated HTTP
+measurements exclude WebRTC bootstrap, critical-collection readiness and
+authenticated command/app latency. They are not a p50/p95 acceptance.
+
+Local full-daemon checking, the expanded native schema regression and the JS
+suite were still running at this checkpoint. No new pass result or production
+readiness is claimed from these pending commands.
