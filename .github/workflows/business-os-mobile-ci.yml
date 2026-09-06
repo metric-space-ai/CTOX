@@ -177,10 +177,9 @@ jobs:
           avd-name: ctox-tablet-landscape
           disable-animations: true
           pre-emulator-launch-script: |
-            config="$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
-            test -f "$config"
-            sed -i '/^hw.initialOrientation[[:space:]]*=/d' "$config"
-            echo 'hw.initialOrientation=landscape' >> "$config"
+            test -f "$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
+            sed -i '/^hw.initialOrientation[[:space:]]*=/d' "$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
+            echo 'hw.initialOrientation=landscape' >> "$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
           script: |
             adb install -r src/apps/business-os-mobile/android/app/build/outputs/apk/debug/app-debug.apk
             adb shell wm user-rotation lock 1
