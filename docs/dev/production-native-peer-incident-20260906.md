@@ -1,5 +1,62 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Final native checks and deployed data preservation
+
+The final native source also removes the silent archived-tree fallback and
+propagates a selected slot's verification failure. Its server source SHA256 is
+`5f10a2b1ae9de07c78088df8d3831a87b851c164bee1e359c5344f532a2e5332`.
+The isolated `native-shell-final-tests.log` records **45 passing native tests**,
+including three real-store resolver regressions, all signed-slot tests, credential
+tuple checks, file preservation, safe updater recovery and Pi-sidecar tests.
+The earlier 30-command browser result below predates this final resolver change;
+a final optimized browser run remains required.
+
+The complete JS suite passed **119/119, zero skipped**, using the real wire
+daemon and Playwright browser binaries. The first attempt's eight failures
+were missing rustfmt/browser executable paths; the corrected full run is
+`ctox-sync-native-shell-js-suite-v2-20260906.service`,
+invocation `97cdb4452e3b42829dab99385830ff64`.
+
+Production switched to `branch-main-490f1ab80-20260906` before the shell change.
+At 18:53:56 UTC a read-only SQLite snapshot comparison against
+`ctox-incident-pre-native-20260906T162646Z/file-chunk-manifest.json` found all
+**1,057 baseline payloads unchanged** (988 desktop, 40 document, 29 spreadsheet).
+No baseline row disappeared, became tombstoned or was newly omitted.
+Seven historical document payloads were already omitted and remain unresolved.
+This verifies preservation during that update; it does not restore those bytes
+or certify browser editing. A fresh production browser still showed an empty
+workspace while the maintenance/readiness path was under separate diagnosis.
+
+## Verified signed-slot before/after comparison
+
+The corrected runners validate the complete CTOX test-root markers and assert
+`currentSlot` in that exact root's database before launching the native server.
+
+- Old control: `ctox-sync-browser-timing-old-control-20260906.service`,
+  invocation `bfadee8ee9de4d5cb1487c6473e0138e`, verified
+  `0.1.46-beta.13` active in `browser-timing-old-control-20260906`.
+  The server reported serving that signed slot, then returned HTTP 500 for
+  `command-bus.js` and `sync-contract.js`; the browser fixture exited 1.
+- Candidate: `ctox-sync-browser-timing-candidate-v2-20260906.service`,
+  invocation `0d506454c65a4e838154bfbf29533bda`, the same signed release in
+  `browser-timing-candidate-v2-20260906`. The fixture exited 0 after thirty
+  complete Browser/WebRTC/native/browser commands, with no missing assets,
+  failed requests, asset response errors or cache repairs.
+
+The candidate native binary SHA256 is
+`f530560fd2b5d883197f9cf7c47a07f707f862ee421f76a9102d415cf93e7c15`.
+Its source patch from the recorded f70 baseline has SHA256
+`55a8a587bb1d9894bd37f053674725caf5eb891e262ec6ba0f55eb6579d60c3c`.
+It is an isolated unoptimized development build, not a production release.
+Its measured end-to-end p50 was **322.5 ms**, p95 **371.75 ms**: the functional
+flow passes, but the under-300-ms p50 acceptance is not met. The optimized
+release and deployed instance still require their own measurements.
+Raw seven-mark samples and the complete stage report are retained at
+`beweise/raw/shell-native-candidate-debug-roundtrip-marks.json` and
+`beweise/raw/shell-native-candidate-debug-stage-report.json`.
+Cross-process corrected stage estimates are diagnostic; the total above uses
+the browser's own start and terminal-observation timestamps.
+
 ## Fresh-browser shell boot regression
 
 The unchanged canonical browser/native command fixture was run twice against

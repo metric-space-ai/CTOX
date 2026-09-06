@@ -6348,7 +6348,13 @@ function moduleBasePath(mod) {
     .split('?')[0]
     .split('#')[0];
   const slash = entry.lastIndexOf('/');
-  return slash >= 0 ? entry.slice(0, slash) : `modules/${mod.id}`;
+  const base = slash >= 0 ? entry.slice(0, slash) : `modules/${mod.id}`;
+  // Installed apps belong to the instance, outside the immutable shell tree.
+  // Keep this relative to app.js so imports, fetches and styles share one base.
+  return base.startsWith('installed-modules/')
+    && new URL(import.meta.url).pathname.startsWith('/business-os/_shell/')
+    ? `../../${base}`
+    : base;
 }
 
 function documentsWorkspaceAppId() {

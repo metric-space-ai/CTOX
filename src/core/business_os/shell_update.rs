@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::{Component, Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use uuid::Uuid;
 
 const CHANNEL_URL: &str = "https://github.com/metric-space-ai/ctox/releases/download/business-os-shell-channel-stable/business-os-shell-stable.json";
@@ -35,7 +35,8 @@ const REQUIRED_SHELL_FILES: &[&str] = &[
     "standard-app-bundle.json",
     "shared/shell-release-status.js",
 ];
-static VERIFIED_SHELL_ROOTS: OnceLock<Mutex<BTreeMap<(PathBuf, String), PathBuf>>> =
+type VerifiedReleaseCell = Arc<Mutex<Option<Arc<super::shell_assets::VerifiedRelease>>>>;
+static VERIFIED_RELEASES: OnceLock<Mutex<BTreeMap<(PathBuf, String), VerifiedReleaseCell>>> =
     OnceLock::new();
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -271,6 +272,9 @@ fn version_tuple(version: &str) -> Result<(u64, u64, u64)> {
 }
 
 fn compatible(manifest: &ReleaseManifest) -> Result<bool> {
+    if manifest.payload.compatibility.shell_protocol != "workjet.business-os-shell.v1" {
+        return Ok(false);
+    }
     let current = version_tuple(env!("CARGO_PKG_VERSION"))?;
     let minimum = version_tuple(&manifest.payload.compatibility.ctox_min_version)?;
     let maximum = manifest
@@ -655,26 +659,90 @@ pub(super) fn verified_shell_root_for_build(
     else {
         return Ok(None);
     };
-    let cache = VERIFIED_SHELL_ROOTS.get_or_init(|| Mutex::new(BTreeMap::new()));
-    let cache_key = (root.to_path_buf(), build.clone());
-    if let Some(cached) = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&cache_key)
-        .cloned()
-    {
-        return Ok(Some((build, cached)));
-    }
     let slot = path
         .file_name()
         .and_then(|name| name.to_str())
         .context("shell slot path has no valid version")?;
-    verify_slot(&path, Some(slot))?;
-    cache
+    Ok(verified_release(root, slot)?.map(|release| (build, release.root.clone())))
+}
+
+/// Only a selected signed slot can establish an immutable document base.
+/// Source/recovery trees cannot claim the identity of an installed release.
+pub(super) fn verified_release_for_root(
+    root: &Path,
+    app_root: &Path,
+) -> Result<Option<Arc<super::shell_assets::VerifiedRelease>>> {
+    if app_root.parent() != Some(slots_root(root).as_path()) {
+        return Ok(None);
+    }
+    let version = app_root
+        .file_name()
+        .and_then(|value| value.to_str())
+        .context("shell slot has no release version")?;
+    verified_release(root, version)
+}
+
+/// Resolve a signed version independently of the mutable current/previous pointer.
+/// All retained slots remain addressable. Only successful admission is cached;
+/// bytes are checked against that admitted inventory on every immutable read.
+pub(super) fn verified_release(
+    root: &Path,
+    version: &str,
+) -> Result<Option<Arc<super::shell_assets::VerifiedRelease>>> {
+    super::shell_assets::validate_version(version)?;
+    let path = slots_root(root).join(version);
+    let metadata = match fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "invalid shell release directory"
+    );
+    let cache = VERIFIED_RELEASES.get_or_init(|| Mutex::new(BTreeMap::new()));
+    let cell = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(cache_key, path.clone());
-    Ok(Some((build, path)))
+        .entry((root.to_path_buf(), version.to_owned()))
+        .or_insert_with(|| Arc::new(Mutex::new(None)))
+        .clone();
+    // Single admission per version without blocking unrelated instance/releases.
+    let mut admitted = cell.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(release) = admitted.as_ref() {
+        return Ok(Some(Arc::clone(release)));
+    }
+    let manifest = verify_slot(&path, Some(version))?;
+    let mut files: BTreeMap<_, _> = manifest
+        .payload
+        .files
+        .iter()
+        .map(|file| {
+            (
+                file.path.clone(),
+                super::shell_assets::InventoryFile {
+                    size: file.size,
+                    sha256: file.sha256.clone(),
+                },
+            )
+        })
+        .collect();
+    files.insert(
+        "ctox-shell-manifest.json".to_owned(),
+        super::shell_assets::InventoryFile {
+            size: fs::metadata(path.join("ctox-shell-manifest.json"))?.len(),
+            sha256: manifest.payload.provenance.embedded_manifest_sha256.clone(),
+        },
+    );
+    let release = Arc::new(super::shell_assets::VerifiedRelease::admitted(
+        &path,
+        manifest.payload.version,
+        manifest.payload.source_commit,
+        manifest.payload.artifact.sha256,
+        files,
+    )?);
+    *admitted = Some(Arc::clone(&release));
+    Ok(Some(release))
 }
 
 fn public_status(state: &ShellUpdateState, administrable: bool) -> serde_json::Value {
@@ -822,8 +890,12 @@ fn stage_inner(root: &Path, version: Option<&str>) -> Result<ShellUpdateState> {
     )?;
     let slot = slots.join(&manifest.payload.version);
     if slot.exists() {
-        verify_slot(&slot, Some(&manifest.payload.version))?;
+        let existing = verify_slot(&slot, Some(&manifest.payload.version))?;
         fs::remove_dir_all(&staging)?;
+        anyhow::ensure!(
+            existing.payload.artifact.sha256 == manifest.payload.artifact.sha256,
+            "a shell release version cannot be reused for different artifact bytes"
+        );
     } else {
         fs::rename(&staging, &slot)?;
     }
@@ -937,7 +1009,7 @@ mod tests {
                     workjet_max_version: None,
                     ctox_min_version: ctox_min_version.to_owned(),
                     ctox_max_version: ctox_max_version.map(str::to_owned),
-                    shell_protocol: "ctox-business-os-shell-v2".to_owned(),
+                    shell_protocol: "workjet.business-os-shell.v1".to_owned(),
                 },
                 files: REQUIRED_SHELL_FILES
                     .iter()
@@ -1076,6 +1148,9 @@ mod tests {
 
     #[test]
     fn compatibility_honours_minimum_and_maximum_ctox_versions() -> Result<()> {
+        let mut unknown = sample_manifest("0.0.0", None, "shell-current-2026-08");
+        unknown.payload.compatibility.shell_protocol = "future.unsupported.protocol".to_owned();
+        assert!(!compatible(&unknown)?);
         assert!(compatible(&sample_manifest(
             "0.0.0",
             None,
