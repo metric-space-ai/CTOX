@@ -5079,8 +5079,9 @@ fn assert_no_crew_admission_evidence(conn: &rusqlite::Connection) {
 fn prepare_admitted_worker_attempt(root: &Path, job: &QueuedPrompt) -> Result<PreparedCrewAttempt> {
     // LCM evidence is mandatory: a read failure must not create a fresh attempt
     // that could repeat already completed effects. It still reaches the existing
-    // recoverable-finalization path. Only optional Crew preparation is fail-open;
-    // this change does not claim to recover an unavailable/corrupt LCM store.
+    // recoverable-finalization path, which retains the durable lease until its
+    // TTL expires. Recovery then retries the lookup without duplicating the
+    // attempt. Only optional Crew preparation is fail-open.
     let recoverable_attempt = lcm::run_recoverable_worker_attempt(
         &crate::paths::core_db(root),
         &worker_attempt_work_key(job),
@@ -5104,6 +5105,42 @@ fn prepare_admitted_worker_attempt(root: &Path, job: &QueuedPrompt) -> Result<Pr
         recoverable_attempt,
         crew_soul_block,
     })
+}
+
+fn finish_recoverable_worker_error(
+    state: &Arc<Mutex<SharedState>>,
+    job: &QueuedPrompt,
+    worker_activity: &mut PromptWorkerActivity,
+    finalization_err: &anyhow::Error,
+) {
+    // Release only in-memory ownership. The durable lease remains until expiry:
+    // neither Drop nor the next dispatch may turn an LCM read error into an
+    // immediate re-lease or a terminal failure of an unreadable attempt.
+    let mut shared = lock_shared_state(state);
+    shared.busy = false;
+    shared.current_goal_preview = None;
+    shared.active_source_label = None;
+    shared.last_completed_at = Some(now_iso_string());
+    shared.last_progress_epoch_secs = current_epoch_secs();
+    shared.last_reply_chars = None;
+    shared.last_error = Some(format!(
+        "Worker finalization remains recoverable: {}",
+        clip_text(&finalization_err.to_string(), 300)
+    ));
+    worker_activity.release_leased_keys_locked(&mut shared);
+    push_event_locked(
+        &mut shared,
+        format!(
+            "{} durable worker finalization failed and remains recoverable: {}",
+            job.source_label,
+            clip_text(&finalization_err.to_string(), 220)
+        ),
+    );
+    eprintln!(
+        "ctox prompt worker end source={} finalization-error={}",
+        job.source_label,
+        turn_loop::summarize_runtime_error(&finalization_err.to_string())
+    );
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8721,31 +8758,7 @@ fn start_prompt_worker(
             // marker (when already written) must stay recoverable and own the
             // replay. Stale-lease recovery can hand the same logical work back to
             // this attempt without a second model invocation.
-            let mut shared = lock_shared_state(&state);
-            shared.busy = false;
-            shared.current_goal_preview = None;
-            shared.active_source_label = None;
-            shared.last_completed_at = Some(now_iso_string());
-            shared.last_progress_epoch_secs = current_epoch_secs();
-            shared.last_reply_chars = None;
-            shared.last_error = Some(format!(
-                "Worker finalization remains recoverable: {}",
-                clip_text(&finalization_err.to_string(), 300)
-            ));
-            worker_activity.release_leased_keys_locked(&mut shared);
-            push_event_locked(
-                &mut shared,
-                format!(
-                    "{} durable worker finalization failed and remains recoverable: {}",
-                    job.source_label,
-                    clip_text(&finalization_err.to_string(), 220)
-                ),
-            );
-            eprintln!(
-                "ctox prompt worker end source={} finalization-error={}",
-                job.source_label,
-                turn_loop::summarize_runtime_error(&finalization_err.to_string())
-            );
+            finish_recoverable_worker_error(&state, &job, &mut worker_activity, finalization_err);
         }
         if panic_outcome.is_err() {
             let mut next_prompt = None;
@@ -33894,6 +33907,217 @@ Business OS command:
 
         assert_eq!(updated, 0);
         assert_eq!(route_status_for(&root, &task.message_key), "leased");
+    }
+
+    #[test]
+    fn lcm_read_error_keeps_lease_until_one_recovery_of_original_attempt() -> anyhow::Result<()> {
+        let root = temp_root("lcm-read-error-recovery");
+        let accepted = crate::business_os::store::record_command(
+            &root,
+            crate::business_os::store::BusinessCommand {
+                origin: crate::business_os::store::CommandOrigin::TrustedLocal,
+                id: Some("lcm-read-error-recovery".into()),
+                module: "ctox".into(),
+                command_type: "business_os.chat.task".into(),
+                record_id: Some("ctox".into()),
+                payload: json!({"title":"Recover saved result","prompt":"Use the existing durable result"}),
+                client_context: json!({"source":"test"}),
+            },
+        )?;
+        let task = channels::load_queue_task(&root, &accepted.task_id.unwrap())?.unwrap();
+        channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)?;
+        for phase in ["leased", "running"] {
+            channels::transition_business_command_for_task(
+                &root,
+                &task.message_key,
+                phase,
+                None,
+                None,
+                None,
+                "fixture initial attempt",
+            )?;
+        }
+        let job = QueuedPrompt {
+            queue_task_metadata: task.metadata.clone(),
+            prompt: task.prompt.clone(),
+            goal: task.title.clone(),
+            preview: task.title.clone(),
+            source_label: "queue".into(),
+            suggested_skill: None,
+            leased_message_keys: vec![task.message_key.clone()],
+            leased_ticket_event_keys: vec![],
+            thread_key: Some(task.thread_key.clone()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+        let db_path = crate::paths::core_db(&root);
+        let engine = LcmEngine::open(&db_path, LcmConfig::default())?;
+        engine.begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+            attempt_id: "existing-lcm-attempt",
+            work_key: &worker_attempt_work_key(&job),
+            conversation_id: 7404,
+            source_label: "queue",
+            agent_outcome: lcm::AgentOutcome::Success,
+            reply_text: "Already executed; replay only the saved result",
+            error_text: None,
+        })?;
+        let conn = rusqlite::Connection::open(&db_path)?;
+        let original_outcome: String = conn.query_row(
+            "SELECT agent_outcome FROM worker_attempt_finalizations WHERE attempt_id=?1",
+            ["existing-lcm-attempt"],
+            |r| r.get(0),
+        )?;
+        // A real SQLite row-decoding failure, without mocking the LCM lookup.
+        conn.execute(
+            "UPDATE worker_attempt_finalizations SET agent_outcome='unreadable-fixture' WHERE attempt_id=?1",
+            ["existing-lcm-attempt"],
+        )?;
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        track_leased_keys_locked(
+            &mut lock_shared_state(&state),
+            &job.leased_message_keys,
+            &[],
+        );
+        let mut activity = PromptWorkerActivity::start(&root, &state, &job);
+        let error = match prepare_admitted_worker_attempt(&root, &job) {
+            Ok(_) => panic!("unreadable LCM evidence must prevent a new worker attempt"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("invalid worker attempt outcome"));
+        // The same production handler used by start_prompt_worker's recoverable arm.
+        finish_recoverable_worker_error(&state, &job, &mut activity, &error);
+        drop(activity);
+        assert_no_crew_admission_evidence(&conn);
+        {
+            let shared = lock_shared_state(&state);
+            assert!(shared.pending_prompts.is_empty());
+            assert!(shared.active_worker_lease_keys.is_empty());
+            assert_eq!(shared.worker_active_count, 0);
+            assert!(shared
+                .last_error
+                .as_deref()
+                .unwrap()
+                .contains("recoverable"));
+        }
+        assert_eq!(route_status_for(&root, &task.message_key), "leased");
+        for _ in 0..3 {
+            let sweep = channels::release_stale_queue_task_leases(
+                &root,
+                CHANNEL_ROUTER_LEASE_OWNER,
+                &std::collections::HashSet::new(),
+            )?;
+            assert!(sweep.released.is_empty());
+            assert!(sweep.failures.is_empty());
+            assert!(channels::lease_queue_task(
+                &root,
+                &task.message_key,
+                CHANNEL_ROUTER_LEASE_OWNER
+            )
+            .is_err());
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT attempt FROM communication_routing_state WHERE message_key=?1",
+                [&task.message_key],
+                |r| r.get::<_, i64>(0)
+            )?,
+            1
+        );
+
+        // Repair the source and advance only the persisted lease clock. One
+        // ordinary expiry sweep makes the durable task pending, idempotently.
+        conn.execute(
+            "UPDATE worker_attempt_finalizations SET agent_outcome=?1 WHERE attempt_id=?2",
+            params![original_outcome, "existing-lcm-attempt"],
+        )?;
+        conn.execute("UPDATE communication_routing_state SET lease_expires_at='2000-01-01T00:00:00Z' WHERE message_key=?1", [&task.message_key])?;
+        let sweep = channels::release_stale_queue_task_leases(
+            &root,
+            CHANNEL_ROUTER_LEASE_OWNER,
+            &std::collections::HashSet::new(),
+        )
+        .context("recover expired lease after LCM repair")?;
+        assert_eq!(sweep.released, job.leased_message_keys);
+        assert!(sweep.failures.is_empty());
+        assert!(channels::release_stale_queue_task_leases(
+            &root,
+            CHANNEL_ROUTER_LEASE_OWNER,
+            &std::collections::HashSet::new()
+        )?
+        .released
+        .is_empty());
+        channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
+            .context("lease the single LCM recovery retry")?;
+        let retry = prepare_admitted_worker_attempt(&root, &job)
+            .context("prepare the original LCM attempt after repair")?;
+        assert_eq!(retry.attempt_id, "existing-lcm-attempt");
+        let recovered = retry
+            .recoverable_attempt
+            .expect("reuse prior durable attempt");
+        assert_eq!(
+            result_from_worker_attempt(&recovered)?,
+            "Already executed; replay only the saved result"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM worker_attempt_finalizations",
+                [],
+                |r| r.get::<_, i64>(0)
+            )?,
+            1
+        );
+        let counters: (i64, i64) = conn.query_row("SELECT attempt,failure_attempt_count FROM communication_routing_state WHERE message_key=?1", [&task.message_key], |r|Ok((r.get(0)?,r.get(1)?)))?;
+        assert_eq!(counters, (2, 0), "one retry, no invented worker failure");
+        for phase in ["leased", "running"] {
+            channels::transition_business_command_for_task(
+                &root,
+                &task.message_key,
+                phase,
+                None,
+                None,
+                None,
+                "fixture recovery of saved result",
+            )?;
+        }
+        channels::persist_business_command_worker_result(
+            &root,
+            &task.message_key,
+            &recovered.reply_text,
+        )?;
+        channels::record_business_command_review(
+            &root,
+            &task.message_key,
+            "passed",
+            "passed",
+            &json!({"fixture":true}),
+        )?;
+        assert!(
+            crate::business_os::store::complete_business_command_from_queue_reply(
+                &root,
+                &task.message_key,
+                &recovered.reply_text,
+            )?
+            .is_some()
+        );
+        assert_eq!(
+            channels::ack_leased_messages_for_attempt(
+                &root,
+                &retry.attempt_id,
+                &job.leased_message_keys,
+                "handled",
+                None
+            )
+            .context("acknowledge the saved LCM attempt result")?,
+            1
+        );
+        assert_eq!(route_status_for(&root, &task.message_key), "handled");
+        assert!(
+            channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
+                .is_err()
+        );
+        Ok(())
     }
 
     #[test]

@@ -325,11 +325,11 @@ fn crew_prose_normalizes_injection_and_rejects_credential_and_path_patterns() {
         "Schlüssel im Store verwalten",
         "Task-Liste prüfen",
         "Antwort < 2 s, Durchsatz > 5",
-        "mail@example.org",
     ] {
         assert!(safe_prose(text, 400), "{text}");
     }
     for text in [
+        "mail@example.org",
         "AKIA123456789",
         "ghp_example",
         "eyJhbGciOi",
@@ -350,6 +350,14 @@ fn crew_prose_normalizes_injection_and_rejects_credential_and_path_patterns() {
     ] {
         assert!(!safe_prose(text, 400), "{text}");
     }
+    r.retrospective = "Kontakt: mail@example.org".into();
+    assert!(r.validate(false, None).is_err());
+    r.retrospective = "Kontakt über den vorgesehenen Kanal halten".into();
+    r.learnings = serde_json::from_value(json!([{
+        "text": "Kontakt: mail@example.org", "kind": "pitfall", "scope": {}
+    }]))
+    .unwrap();
+    assert!(r.validate(false, None).is_err());
 }
 
 #[test]

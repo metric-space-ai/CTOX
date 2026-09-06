@@ -776,7 +776,12 @@ je Prozess/Root geloggt. Der Pump stellt die Diagnose nach Neustart aus dem
 dauerhaften Flow-Ledger wieder her. Korrupte einzelne Profile werden bei der
 Auswahl übersprungen. Die Pflichtbelege aus LCM bleiben dagegen fail-closed:
 Ein Fehler beim Lesen wiederaufnehmbarer Attempts läuft weiter durch den
-bestehenden Recoverable-Pfad; diese Änderung behebt keine LCM-Verfügbarkeit.
+bestehenden Recoverable-Pfad. Dieser gibt nur die In-Memory-Besitzmarkierung
+frei; die dauerhafte Lease bleibt bis zum Ablauf ihrer TTL bestehen. Der
+normale Stale-Lease-Sweep stellt den Task danach einmal auf pending. Nach
+Reparatur des Lesefehlers wird derselbe gespeicherte Attempt samt Ergebnis
+wiederaufgenommen, ohne einen neuen Modellversuch zu erfinden. Ein dauerhaft
+defekter LCM-Store bleibt ein Verfügbarkeitsfehler und wird damit nicht repariert.
 
 Die Migration installiert den eindeutigen Auswahlereignis-Index in vorhandenen
 Flow-Ledgern; historische Duplikate behalten die älteste Zeile. Ein noch fehlendes
@@ -792,6 +797,8 @@ Der Soul-Block wird deterministisch aus fünf Achsen, Charakter, Stimme und
 Statistik gerendert. Höchstens acht bestätigte und zwei ausdrücklich unbestätigte,
 zum Scope passende Learnings werden angefügt. Unbestätigte Learnings ohne Scope
 werden nie injiziert; gesetzte Modul-/Command-/Thread-Scopes müssen jeweils passen.
+E-Mail-Adressen bleiben in Learnings und Rückblicken verboten, ebenso wie
+Geheimnisse und Dateipfade; reine Erwähnungen wie `@Milo` bleiben zulässig.
 Zeilenumbrüche und Mehrfach-Whitespace werden zu einzelnen Leerzeichen normalisiert. Der Block ist auf 4.000 UTF-8-Bytes
 begrenzt, steht auf dem tatsächlichen Prompt-Pfad nach dem CTO-Systemkontext und
 den Ausführungsregeln und verleiht keine zusätzlichen Befugnisse.

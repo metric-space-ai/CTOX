@@ -390,7 +390,7 @@ pub(crate) fn safe_prose(text: &str, limit: usize) -> bool {
     let lower = prose.to_lowercase();
     static SENSITIVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let sensitive = SENSITIVE.get_or_init(|| regex::Regex::new(
-        r"(?i)(?:/users/|/home/|/tmp/|/var/|[a-z]:\\|~/|\./|(?:^|\s)/[\w.-]+|\\+[\w.-]+\\[\w.-]+|\b[\w.-]+(?:/[\w.-]+)+\.[a-z0-9]+\b|\b(?:AKIA|ghp_|eyJ|sk-)|\b[\w-]*key[\w-]*\s*=)"
+        r"(?i)(?:/users/|/home/|/tmp/|/var/|[a-z]:\\|~/|\./|(?:^|\s)/[\w.-]+|\\+[\w.-]+\\[\w.-]+|\b[\w.-]+(?:/[\w.-]+)+\.[a-z0-9]+\b|\b(?:AKIA|ghp_|eyJ|sk-)|\b[\w-]*key[\w-]*\s*=|[\w.+-]+@[\w.-]+\.[a-z]{2,})"
     ).expect("constant crew prose pattern"));
     !text.trim().is_empty()
         && text.chars().count() <= limit
