@@ -106,6 +106,8 @@ export async function mount(ctx) {
     runbooks: [],
     selectedId: '',
     selectedVersion: null,
+    versionLoad: null,
+    disposed: false,
     editorHandle: null,
     spreadsheetContainer: null,
     renderSerial: 0,
@@ -194,6 +196,7 @@ export async function mount(ctx) {
 
   return () => {
     disposed = true;
+    state.disposed = true;
     window.removeEventListener('beforeunload', onBeforeUnload);
     unregisterCloseGuard?.();
     state.contextMenuCleanup?.();
@@ -352,7 +355,7 @@ function spreadsheetDraftProtected(state) {
   const handle = state.editorHandle;
   return handle?.kind === 'ctox-spreadsheets'
     && handle.recordId === state.selectedId
-    && Boolean(state.dirty || handle.saving);
+    && Boolean(state.dirty || state.saving || handle.saving);
 }
 
 async function saveSpreadsheetBeforeLeaving(state) {
@@ -389,9 +392,10 @@ async function refreshSpreadsheetsFromLocal(state, changed = null, isActive = ()
   if ((all || changed.has('spreadsheets') || changed.has('spreadsheet_versions') || changed.has('spreadsheet_blob_chunks'))
     && state.selectedId && !spreadsheetDraftProtected(state)
     && state.selectedVersion?.id !== selectedRecord(state)?.current_version_id) {
-    const version = await loadSelectedVersion(state);
+    const load = currentSpreadsheetVersionLoad(state);
+    const version = load?.status === 'error' ? null : await loadSelectedVersion(state, isActive);
     if (!isActive()) return;
-    if (version) await renderCenter(state);
+    if (version || currentSpreadsheetVersionLoad(state)?.status === 'error') await renderCenter(state);
   }
   if (!isActive()) return;
   renderLeft(state);
@@ -951,45 +955,74 @@ async function withSpreadsheetVersionTimeout(promise, ms, message) {
 }
 
 function isTransientSpreadsheetVersionReadError(error) {
-  if (error?.code === 'spreadsheet_version_read_timeout') return true;
+  const code = String(error?.code || '').toLowerCase();
   const message = String(error?.message || error || '').toLowerCase();
-  return message.includes('webrtc replication cancelled')
+  const diagnostic = `${code} ${message}`;
+  // Permission, schema and integrity failures must never become reconnects,
+  // even when a wrapped diagnostic also contains transport timeout wording.
+  if (/(permission|forbidden|unauthori[sz]ed|authentication|authorization|access.denied|schema|integrity|sha256|checksum|validation)/.test(diagnostic)) return false;
+  return code === 'spreadsheet_version_read_timeout'
+    || code === 'webrtc_peer_reopen_timeout'
+    || (/\bwebrtc\b/.test(diagnostic) && /\bpeer\b/.test(message)
+      && /(re.?open|open)/.test(message) && /(timeout|timed out|time out)/.test(message))
+    || message.includes('webrtc replication cancelled')
     || message.includes('query_cancelled')
     || message.includes('replication-cancel')
     || message.includes('database connection is closing')
     || (message.includes('idbdatabase') && message.includes('closing'));
 }
 
-async function resolveSpreadsheetVersionLocalFirst(readLocal, recover) {
-  try {
-    const doc = await readLocal(4500);
-    if (doc) return doc;
-  } catch (error) {
-    if (!isTransientSpreadsheetVersionReadError(error)) throw error;
+async function resolveSpreadsheetVersionLocalFirst(readLocal, recover, { isCurrent = () => true } = {}) {
+  // At most two recoveries, including failed bridge bring-up. A successful
+  // recovered read returning null establishes absence; transport failure does not.
+  for (let round = 0; round <= 2; round += 1) {
+    if (!isCurrent()) return null;
+    if (round > 0) {
+      try {
+        await recover();
+      } catch (error) {
+        if (!isCurrent()) return null;
+        if (!isTransientSpreadsheetVersionReadError(error) || round === 2) throw error;
+        continue;
+      }
+      if (!isCurrent()) return null;
+    }
+    try {
+      const doc = await readLocal(round === 0 ? 4500 : 60000);
+      if (!isCurrent()) return null;
+      if (doc) return doc;
+      if (round > 0) return null;
+    } catch (error) {
+      if (!isCurrent()) return null;
+      if (!isTransientSpreadsheetVersionReadError(error) || round === 2) throw error;
+    }
   }
-  await recover();
-  return readLocal(60000);
+  return null;
 }
 
-async function awaitSpreadsheetVersionReplication(ctx) {
+async function awaitSpreadsheetVersionReplication(ctx, isCurrent = () => true) {
+  if (!isCurrent()) return;
   if (typeof ctx?.sync?.startCollection !== 'function') return;
   const message = ctx.t?.('spreadsheetVersionReplicationTimeout') || 'spreadsheet_version_replication_timeout';
-  let bridge = await withTimeout(
+  let bridge = await withSpreadsheetVersionTimeout(
     ctx.sync.startCollection('spreadsheet_versions', { forceDirect: true }),
     60000,
     message,
   );
+  if (!isCurrent()) return;
   if (bridge?.ready) {
     const ready = typeof bridge.ready === 'function' ? bridge.ready() : bridge.ready;
-    bridge = (await withTimeout(ready, 60000, message)) || bridge;
+    bridge = (await withSpreadsheetVersionTimeout(ready, 60000, message)) || bridge;
+    if (!isCurrent()) return;
   }
   const state = bridge?.state || bridge;
   if (typeof state?.waitForOpenPeerId === 'function') {
-    await withTimeout(state.waitForOpenPeerId(60000), 60000, message);
+    await withSpreadsheetVersionTimeout(state.waitForOpenPeerId(60000), 60000, message);
   }
 }
 
-async function loadSelectedVersion(state) {
+async function loadSelectedVersion(state, isActive = () => true) {
+  if (state.disposed || !isActive()) return null;
   if (spreadsheetDraftProtected(state)) return null;
   const record = selectedRecord(state);
   if (!record) {
@@ -1005,7 +1038,10 @@ async function loadSelectedVersion(state) {
   const selectedVersion = state.selectedVersion;
   const selectedVersionId = selectedVersion?.id;
   const versionId = record.current_version_id;
-  const isCurrent = () => state.selectedId === selection
+  const load = { selection, versionId, status: 'loading', error: null };
+  state.versionLoad = load;
+  const isCurrent = () => !state.disposed && isActive()
+    && state.versionLoad === load && state.selectedId === selection
     && state.editorHandle === handle && handle?.activity === activity
     && state.selectedVersion === selectedVersion && state.selectedVersion?.id === selectedVersionId
     && selectedRecord(state)?.current_version_id === versionId
@@ -1035,9 +1071,10 @@ async function loadSelectedVersion(state) {
         doc = fallback[0] || null;
       }
       return doc || null;
-    }, () => awaitSpreadsheetVersionReplication(state.ctx));
+    }, () => awaitSpreadsheetVersionReplication(state.ctx, isCurrent), { isCurrent });
     if (!isCurrent()) return null;
     if (!doc) {
+      load.status = 'missing';
       if (handle?.recordId !== selection) {
         state.selectedVersion = null;
         state.dirty = false;
@@ -1046,17 +1083,24 @@ async function loadSelectedVersion(state) {
       return null;
     }
     state.selectedVersion = doc.toJSON();
+    load.status = 'ready';
     state.dirty = false;
     state.saving = false;
     return state.selectedVersion;
   } catch (err) {
+    if (!isCurrent()) return null;
+    load.status = 'error';
+    load.error = err;
     console.warn('[spreadsheets] loadSelectedVersion failed gracefully', err);
-    if (isCurrent() && handle?.recordId !== selection) {
+    if (handle?.recordId !== selection) {
       state.selectedVersion = null;
       state.dirty = false;
       state.saving = false;
     }
     return null;
+  } finally {
+    // Superseded reads must not leave a permanent loading state behind.
+    if (load.status === 'loading' && state.versionLoad === load) state.versionLoad = null;
   }
 }
 
@@ -1407,14 +1451,23 @@ function visibleSpreadsheets(state) {
   return result;
 }
 
+function currentSpreadsheetVersionLoad(state) {
+  const load = state.versionLoad;
+  const record = selectedRecord(state);
+  return !state.disposed && record && load?.selection === state.selectedId
+    && load.versionId === record.current_version_id ? load : null;
+}
+
 async function renderCenter(state) {
-  if (!state.ctx.host.isConnected) return;
+  if (state.disposed || !state.ctx.host.isConnected) return;
   const record = selectedRecord(state);
   const shell = state.ctx.host.querySelector('[data-spreadsheets-editor]');
   if (!shell) return;
   const handle = state.editorHandle;
+  const load = currentSpreadsheetVersionLoad(state);
   if (record && handle?.kind === 'ctox-spreadsheets' && handle.recordId === record.id
-    && (spreadsheetDraftProtected(state) || handle.versionId === state.selectedVersion?.id)) {
+    && (spreadsheetDraftProtected(state)
+      || ((!load || load.status === 'ready') && handle.versionId === state.selectedVersion?.id))) {
     return handle;
   }
   if (handle?.kind === 'ctox-spreadsheets') {
@@ -1456,6 +1509,8 @@ async function renderCenter(state) {
   }
   const badge = head.querySelector('[data-spreadsheets-dirty-indicator]');
   if (badge) {
+    // A save status is meaningful only after a version has actually loaded.
+    badge.hidden = !state.selectedVersion || Boolean(load && load.status !== 'ready');
     badge.classList.toggle('is-dirty', state.dirty);
     badge.classList.toggle('is-saving', state.saving);
     badge.querySelector('[data-spreadsheets-dirty-label]').textContent = saveLabel;
@@ -1479,7 +1534,27 @@ async function renderCenter(state) {
     canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('unsupportedSpreadsheetFormat', 'Nicht unterstütztes Tabellenformat.'))}</strong><span>${escapeHtml(state.t('supportedSpreadsheetFormats', 'Bitte XLSX, CSV oder TSV verwenden.'))}</span></div>`;
     return;
   }
-  if (!state.selectedVersion) {
+  if (load?.status === 'loading' || (!load && !state.selectedVersion)) return;
+  if (load?.status === 'error') {
+    canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('editorLoadFailed', 'Editor konnte nicht geladen werden:'))}</strong><span>${escapeHtml(load.error?.message || load.error)}</span></div>`;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.setAttribute('data-spreadsheets-retry-version', '');
+    retry.textContent = state.t('retry', 'Erneut versuchen');
+    retry.addEventListener('click', async () => {
+      if (currentSpreadsheetVersionLoad(state) !== load || spreadsheetDraftProtected(state)) return;
+      retry.disabled = true;
+      const pending = loadSelectedVersion(state);
+      const attempt = state.versionLoad;
+      await renderCenter(state);
+      await pending;
+      if (currentSpreadsheetVersionLoad(state) === attempt && attempt.status !== 'loading'
+        && !spreadsheetDraftProtected(state)) await renderCenter(state);
+    });
+    canvas.firstElementChild.append(retry);
+    return;
+  }
+  if (load?.status === 'missing' || !state.selectedVersion) {
     canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('noSavedVersionFound', 'Zu dieser Tabelle wurde keine gespeicherte Version gefunden.'))}</strong></div>`;
     return;
   }
@@ -2379,6 +2454,9 @@ export const __spreadsheetsTestHooks = {
   isTransientSpreadsheetVersionReadError,
   resolveSpreadsheetVersionLocalFirst,
   awaitSpreadsheetVersionReplication,
+  loadSelectedVersion,
+  currentSpreadsheetVersionLoad,
+  renderCenter,
   ensureSpreadsheetRuntimeReady,
   openSpreadsheetFile,
   hasActiveListFilters,
