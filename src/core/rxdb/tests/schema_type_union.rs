@@ -66,3 +66,31 @@ fn mixed_type_indexes_return_an_error_instead_of_panicking() {
     assert!(get_index_meta(&schema(), &["active_task_id".to_owned()]).is_err());
     assert!(get_index_meta(&schema(), &["id".to_owned()]).is_ok());
 }
+
+#[test]
+fn packaged_property_contracts_round_trip_without_rewriting_business_schemas() {
+    let contracts: serde_json::Value = serde_json::from_str(include_str!(
+        "../../business_os/business_os_schema_contract.json"
+    ))
+    .unwrap();
+    for (name, value) in contracts.as_object().unwrap() {
+        let mut normalized = value.clone();
+        if let Some(indexes) = normalized
+            .get_mut("indexes")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            for index in indexes {
+                if let Some(field) = index.as_str() {
+                    *index = json!([field]);
+                }
+            }
+        }
+        let schema: RxJsonSchema = serde_json::from_value(normalized)
+            .unwrap_or_else(|error| panic!("native schema parser rejected {name}: {error}"));
+        assert_eq!(
+            serde_json::to_value(schema).unwrap()["properties"],
+            value["properties"],
+            "property contract changed for {name}"
+        );
+    }
+}

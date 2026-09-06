@@ -30,9 +30,21 @@ The browser consequently retained maintenance write protection. This disproves
 the updater's process-running-only success criterion.
 
 The relevant Rust fragment models JsonSchema.type as Option<String>, while
-JSON Schema permits type unions represented as arrays. The exact offending
-collection has not yet been isolated in this incident. Do not normalize away
+JSON Schema permits type unions represented as arrays. The failing packaged
+field was subsequently isolated as `ctox_crew_members.active_task_id`, whose
+contract is `["string", "null"]`. An independent regression using every packaged
+Business OS schema reproduced the panic before the fix. Do not normalize away
 the union or weaken validation merely to suppress the panic.
+
+Main commit `01fe390c7` adds native union representation and validation. Its
+crate-level success did not establish daemon compatibility: Welsch's subsequent
+`ctox-office-native-union-upgrade-20260906.service` build failed with three E0599
+errors at the remaining `Option<JsonSchemaType>::as_deref` consumers in the
+Business OS projection layer. The build failure prevented activation of that
+candidate. Its recovery script restored the prior service executable without
+restoring database snapshots. Projection normalization and repair/tombstone
+defaults must explicitly handle unions, and the entire CTOX binary must pass
+compilation before another activation. Native-crate tests alone miss this boundary.
 
 ## Data-preserving emergency service fallback
 
