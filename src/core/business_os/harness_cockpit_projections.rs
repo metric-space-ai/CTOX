@@ -134,6 +134,8 @@ const EVENTS: u8 = 2;
 const RUNS: u8 = 4;
 const QUEUE: u8 = 8;
 const CHAT: u8 = 16;
+// Core-ledger retention belongs to the periodic pump sweep, not admission wakes.
+const MAINTENANCE: u8 = 32;
 const ALL: u8 = STATUS | EVENTS | RUNS | QUEUE | CHAT;
 
 fn pump() -> Option<&'static Pump> {
@@ -163,10 +165,10 @@ fn pump() -> Option<&'static Pump> {
                     }
                     if Instant::now() >= next_sweep {
                         for root in &roots {
-                            dirty.insert(root.clone(), ALL);
+                            dirty.insert(root.clone(), ALL | MAINTENANCE);
                         }
                         for root in snapshots.lock().unwrap_or_else(|e| e.into_inner()).keys() {
-                            dirty.insert(root.clone(), ALL);
+                            dirty.insert(root.clone(), ALL | MAINTENANCE);
                         }
                         next_sweep = Instant::now() + Duration::from_secs(60);
                     }
@@ -175,7 +177,7 @@ fn pump() -> Option<&'static Pump> {
                             continue;
                         }
                         if roots.insert(root.clone()) {
-                            flags = ALL;
+                            flags |= ALL;
                         }
                         let snapshot = snapshots
                             .lock()
@@ -377,7 +379,7 @@ fn refresh_selected(
     if !has_table(&conn, "communication_routing_state")? {
         return Ok(());
     }
-    if flags & (STATUS | QUEUE) != 0 && has_table(&conn, "crew_attempts")? {
+    if flags & MAINTENANCE != 0 && has_table(&conn, "crew_attempts")? {
         crate::crew::retain_attempts(&conn, Utc::now().timestamp_millis())?;
         let ids = conn
             .prepare("SELECT event_id FROM crew_projection_tombstones ORDER BY event_id LIMIT 128")?

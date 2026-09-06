@@ -774,8 +774,9 @@ machen die Ursache sichtbar; gleiche Ursachen werden nur einmal je Prozess/Root
 geloggt. Korrupte einzelne Profile werden bei der Auswahl übersprungen.
 
 Die Migration installiert den eindeutigen Auswahlereignis-Index; historische
-Duplikate behalten die älteste Zeile. Der Pump entfernt nie gestartete Waisen
-nach der 15-Minuten-Lease-TTL, schützt noch geleaste Tasks und bewahrt 500 jüngste
+Duplikate behalten die älteste Zeile. Im 60-Sekunden-Wartungslauf entfernt der
+Pump nie gestartete Waisen nach der 15-Minuten-Lease-TTL, schützt noch geleaste
+Tasks und bewahrt 500 jüngste
 finalisierte Crew-Attempts plus alle Attempts nichtterminaler Tasks. Löschungen
 alter Schein-Start-Ereignisse werden über eine kleine dauerhafte Tombstone-Outbox
 wiederholbar in die Projektion übertragen.

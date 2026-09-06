@@ -1,4 +1,35 @@
 #[test]
+fn crew_attempt_retention_runs_only_on_periodic_maintenance() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch("ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;")?;
+    crate::crew::ensure_schema(&conn)?;
+    conn.execute(
+        "INSERT INTO crew_attempts(attempt_id,task_id,member_id,selected_at)
+        VALUES('orphan','closed','crew-milo','2020-01-01T00:00:00Z')",
+        [],
+    )?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    refresh_selected(root.path(), &WorkerSnapshot::default(), &mut writer, QUEUE)?;
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM crew_attempts", [], |r| r
+            .get::<_, i64>(0))?,
+        1
+    );
+    refresh_selected(
+        root.path(),
+        &WorkerSnapshot::default(),
+        &mut writer,
+        QUEUE | MAINTENANCE,
+    )?;
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM crew_attempts", [], |r| r
+            .get::<_, i64>(0))?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
 fn crew_events_only_wake_does_not_read_crew_tables() -> Result<()> {
     let (root, conn) = setup()?;
     conn.execute_batch("CREATE TABLE crew_members(id TEXT);")?;

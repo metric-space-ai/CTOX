@@ -1044,8 +1044,10 @@ latest failed attempt; active work takes precedence.
 Crew projection runs are gated by STATUS/QUEUE wakes. Source member timestamps
 and derived active/resting state suppress unchanged work; learning insert,
 update and delete triggers advance the member timestamp monotonically. Native
-projection writes reuse the existing writer connection. Retention removes at
-most 128 completed attempts and 128 expired never-started attempts per pass,
+projection writes reuse the existing writer connection. Core attempt retention
+runs only on the pump's 60-second maintenance sweep, keeping its writes off
+ordinary admission/status wakes. It removes at most 128 completed attempts and
+128 expired never-started attempts per pass,
 keeping the newest 500 finalized attempts plus nonterminal tasks. A durable
 internal `crew_projection_tombstones` outbox retries orphan-event tombstones.
 The migration removes duplicate selection events in bounded delete batches
