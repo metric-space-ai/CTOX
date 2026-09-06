@@ -235,13 +235,27 @@ async fn exercise_worker_session(reconnect: bool) {
         let mut sessions = BTreeMap::new();
         let mut nodes = BTreeMap::new();
         let mut databases = Vec::new();
+        let mut peer_errors = BTreeMap::new();
         for id in 1..=4 {
-            let (directory, database, mut options) = native_fixture::options(
-                signal.url.clone(),
-                "authority-fixture",
-                &format!("session-{id}"),
-            )
-            .await;
+            // The coordination vote and Workjet worker never create Business OS
+            // collections. Voters 1/2 retain real data for the denial assertion.
+            let (directory, database, mut options) = if id >= 3 {
+                native_fixture::control_options(signal.url.clone(), "authority-fixture", &format!("session-{id}")).await
+            } else {
+                native_fixture::options(signal.url.clone(), "authority-fixture", &format!("session-{id}")).await
+            };
+            if id == 1 {
+                let mut extra = database.add_collections(std::collections::HashMap::from([
+                    ("extra_records".into(), rxdb::rx_database::RxCollectionCreator {
+                        schema: options.collections[0].schema.as_ref().unwrap().json_schema.clone(),
+                        conflict_handler: None,
+                        options: Default::default(),
+                    })
+                ])).await.unwrap();
+                // Different representatives on the one-/two-collection pair
+                // must not prevent room admission or compare unrelated schemas.
+                options.collections.insert(0, extra.remove("extra_records").unwrap());
+            }
             options.peer_role = if id == 4 {
                 NativePeerRole::WorkjetExecutor
             } else {
@@ -266,6 +280,11 @@ async fn exercise_worker_session(reconnect: bool) {
                 }
             });
             let mut session = NativeSyncSession::start(options).await.unwrap();
+            peer_errors.insert(id, session.pool().error_subject.subscribe());
+            if id >= 3 {
+                assert!(database.collections.lock().is_empty());
+                assert!(session.pool().collections().is_empty());
+            }
             if id != 4 {
                 let group = session
                     .attach_execution(
@@ -289,7 +308,21 @@ async fn exercise_worker_session(reconnect: bool) {
             databases.push((directory, database));
         }
         for node in nodes.values() {
-            node.wait_for_leader(Duration::from_secs(15)).await.unwrap();
+            node.wait_for_leader(Duration::from_secs(15)).await.unwrap_or_else(|error| {
+                let states: Vec<_> = peer_errors.iter_mut().map(|(id, stream)| {
+                    let mut errors = Vec::new();
+                    for _ in 0..20 {
+                        match futures::FutureExt::now_or_never(stream.next()) {
+                            Some(Some(error)) => errors.push(error.to_string()),
+                            _ => break,
+                        }
+                    }
+                    json!({"id": id, "errors": errors,
+                        "frames": sessions[id].pool().connection_handler.frame_transport_status_json(),
+                        "ready": routes.values().map(|route| (route, route_ready(sessions[id].pool(), route))).collect::<BTreeMap<_,_>>()})
+                }).collect();
+                panic!("{error}; native room admission: {states:?}");
+            });
         }
         let worker_options = || WorkerExecutionOptions {
             member: member.clone(),
@@ -604,6 +637,7 @@ async fn three_native_peers_commit_over_real_webrtc_without_http_data() {
             handler.set_collection_authz(options.admission.collection_read);
             handler.set_collection_write_authz(options.admission.collection_write);
             let pool = replicate_web_rtc_multi_with_validators(
+                options.database,
                 options.collections,
                 handler,
                 Some(Arc::new(move |connection| {
@@ -1026,7 +1060,10 @@ async fn exercise_native_session_group(scenario: NativeGroupScenario) {
             });
         sessions[&1]
             .pool()
-            .collection
+            .collections()
+            .into_iter()
+            .find(|collection| collection.name == "records")
+            .unwrap()
             .insert(json!({"id":"private-business-record"}))
             .await
             .unwrap();

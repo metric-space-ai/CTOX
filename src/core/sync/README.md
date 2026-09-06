@@ -8,10 +8,20 @@ deployable replacement daemon. Business records still replicate through RxDB.
 ## Responsibilities
 
 - `native.rs`: shared native transport lifecycle, now called by the Business OS
-  peer. The host supplies collections, a fresh signaling-URL provider and its
+  peer. The host supplies an explicit database identity, zero or more collections,
+  a fresh signaling-URL provider and its
   admission/read/write predicates. The session owns signaling, the native
   handler and one multiplexed pool; the host owns its database and business
-  workers. Failed admission, timeout and cancelled startup close the connection.
+  workers. All supplied collections must belong to that database; invalid
+  ownership is rejected before signaling starts. Coordination-only voters and
+  Workjet control peers require no dummy Business OS collection. Their handshake
+  advertises explicit empty schema/checkpoint maps and a null representative
+  collection. Single-collection peers also advertise their complete maps.
+  Modern peers compare schema entries by collection name, so different local
+  collection counts or representatives do not invalidate room admission.
+  Data peers register replication only for the advertised intersection;
+  a missing schema proof remains distinct from an explicitly empty set.
+  Failed admission, timeout and cancelled startup close the connection.
   Signaling receivers and pool subscribers are installed before joining the
   room, so an immediate native offer cannot arrive ahead of their consumers.
   `NativeSyncOptions.peer_role` selects the explicit native runtime role from

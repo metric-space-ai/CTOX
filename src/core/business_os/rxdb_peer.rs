@@ -2873,6 +2873,7 @@ async fn run_native_peer(
         let bringup =
             ctox_sync::native::NativeSyncSession::start(ctox_sync::native::NativeSyncOptions {
                 peer_role: ctox_sync::native::NativePeerRole::CtoxInstance,
+                database: Arc::clone(&database),
                 collections: collection_list,
                 signaling_urls: multi_signaling_url_provider,
                 room: topic,

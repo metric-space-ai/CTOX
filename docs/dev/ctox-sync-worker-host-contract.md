@@ -35,6 +35,22 @@ Session nicht. Auf Mobile läuft der Node-IPC-Aufruf auf dem autorisierten
 Ausführungs-/Admin-Host; die mobile Oberfläche kann keinen entfernten Unix-
 Socket direkt öffnen. Der produktive Weg zu diesem Host ist noch anzuschließen.
 
+## Native Identität ohne Business-OS-Daten
+
+`NativeSyncOptions.database` ist die explizite, vom Host gehaltene RxDB-Identität.
+`collections` darf leer sein; vorhandene Collections müssen zu genau dieser
+Datenbank gehören. Diese Datenbankidentität ersetzt keinen signierten
+Geräteschlüssel. Der Host muss für einen Worker oder eine reine
+Koordinationsstimme keine künstliche Business-OS-Collection erzeugen.
+Ein leerer Peer meldet im bestehenden Protokoll `collection: null` und explizite
+leere `collectionSchemas`-/`collectionCheckpoints`-Objekte. Auf Daten-Peers
+entstehen nur für gemeinsam angebotene Collections Replikationszustände.
+Eine fehlende Schema-Antwort erhält dadurch keine zusätzliche Berechtigung.
+
+Diese Trennung liefert keine produktive Netzwerk-Konfiguration, keinen
+Signaling-Grant und keinen Aufnahmebeleg. Der Host muss weiterhin seine
+persistierte Identität und die drei geprüften Voter bereitstellen.
+
 ## Operationen und genaue Bedeutung
 
 Jede Anfrage enthält `{ version, requestId, operation }`. `version` ist

@@ -7,6 +7,62 @@ noch aktiv. Ihre Entfernung gehört ausdrücklich zur Abnahme.
 
 ## Aktueller Abnahmestand
 
+### Native Worker ohne Business-OS-Collections
+
+Der gemeinsame NativeSync-Lifecycle erhält die Datenbankidentität jetzt explizit
+über `NativeSyncOptions.database`. Eine leere replizierte Collection-Menge ist
+gültig; fremde Datenbankzuordnungen werden vor dem Signaling-Aufbau abgewiesen.
+Das alte repräsentative `RxWebRTCReplicationPool.collection`-Feld ist entfernt,
+seine Aufrufer wählen die benannte Collection aus der öffentlichen Collection-Liste.
+
+Reine Kontroll-Peers melden `collection: null` und ausdrücklich leere
+Schema-/Checkpoint-Maps über den bestehenden Wire-Vertrag. Eine ausgelassene
+Schema-Map eines schemafähigen Peers bleibt ein Fehler. Beide RxDB-Wahlrichtungen
+registrieren nur für vom anderen Peer angebotene Collections Replikation:
+keine Master-Streams oder Fork-Writer gegen einen reinen Kontroll-Peer.
+Auch die frühere Ausnahme für höchstens eine Collection entfällt: Sie ließ
+Schema-/Checkpoint-Maps weg und wurde vom datenlosen Koordinator korrekt als
+ungültiger moderner Handshake abgewiesen. Moderne Peers vergleichen ihre
+Schemas über die benannten Map-Einträge, unabhängig von ihrer jeweiligen
+repräsentativen Collection. Die Fristen bleiben unverändert.
+Die Workjet-/Reconnect-Fixture verwendet jetzt den Verbund 2/1/0/0 Collections
+mit absichtlich unterschiedlichen Vertretern der beiden Daten-Peers.
+Sie erzeugt für Worker und Koordinationsstimme
+keine Business-Collections; ihre beiden Daten-Peers behalten die vorhandene
+Collection für den Test auf verweigerte Business-Datenzugriffe.
+
+Der neue vollständige native Lauf besteht **422/422**: 389 Unit-Tests,
+31 Conformance-Tests, Error-Guard und Idle-Budget, ohne ignorierte Tests.
+Beleg: `control-only-mixed-native.json`. Drei anfängliche Fehler lagen in
+den Fixtures: getrennte Datenbanken im Multiplex-Aufbau, fehlender interner
+Store beim Versuch, eine zweite Collection anzulegen, und die fehlende
+gegenseitige Admission im neuen Mock. Der gemeinsame Collection-Testhelfer
+verwendet jetzt eine explizit geteilte Datenbank; die Kontroll-Fixture bestätigt
+ihre Admission. Die bestehenden Isolations- und Sicherheitsassertions bleiben
+erhalten. Der zwischenzeitliche Compilerfehler im Testhelfer wurde behoben.
+Die vollständige Sync-Suite besteht anschließend **56/56**, einschließlich
+**8/8 echter WebRTC-Szenarien** (15,10 Sekunden), 9 Lifecycle-Tests und allen
+11 Cluster-Fällen. Aufnahme und Reconnect prüfen dabei den Verbund 2/1/0/0. Beleg:
+`control-only-mixed-sync.json`. Der zuvor reproduzierte Leader-Timeout des
+datenlosen Koordinators ist damit nach Entfernung der Single-Collection-
+Ausnahme behoben; dafür wurde keine Frist erhöht. Das ist getrennt von den
+historischen Last-/Storage-Timeouts der vorherigen Main-Integration.
+
+Beide Crates bestehen Clippy über alle Targets mit `-D warnings`;
+die abschließende Korrektur ersetzt ausschließlich einen unnötigen Arc-Clone
+im Test durch eine Slice-Referenz. Alle Formatprüfungen und die fünf generierten
+Verträge bestehen. Der frisch gebaute Wire-Daemon besteht mit der vollständigen
+JS-/Browser-Suite **116/116**, ohne Skips (`control-only-js-wire.log`).
+`cargo check --locked --bin ctox` mit dem bisherigen Dev-Profil besteht in
+56,38 Sekunden; der Root-Bestand meldet weiterhin 484 Warnungen.
+Belege: `control-only-native-clippy-final.json`, `control-only-sync-clippy.json`,
+`control-only-wire-build.json` und `control-only-root-check.json` unter
+`/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/`.
+Diese Funktionsprüfungen ersetzen keine WAN-, Harness- oder Performance-Abnahme.
+
+Dieser Kernschritt liefert weiterhin keinen produktiven Signaling-Grant,
+keine persistierte Host-Konfiguration und keine SSH-/QR-Produktabnahme.
+
 ### Integration auf GitHub-main
 
 Der anschließend veröffentlichte Crew-Commit `b0e24d470` (#59) ist in den

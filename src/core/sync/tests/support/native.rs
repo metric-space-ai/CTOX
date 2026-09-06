@@ -18,6 +18,23 @@ pub async fn options(
     room: &str,
     session: &str,
 ) -> (tempfile::TempDir, Arc<RxDatabase>, NativeSyncOptions) {
+    build_options(url, room, session, true).await
+}
+
+pub async fn control_options(
+    url: String,
+    room: &str,
+    session: &str,
+) -> (tempfile::TempDir, Arc<RxDatabase>, NativeSyncOptions) {
+    build_options(url, room, session, false).await
+}
+
+async fn build_options(
+    url: String,
+    room: &str,
+    session: &str,
+    with_records: bool,
+) -> (tempfile::TempDir, Arc<RxDatabase>, NativeSyncOptions) {
     let directory = tempfile::tempdir().unwrap();
     let database = create_rx_database(RxDatabaseCreator {
         name: format!(
@@ -38,23 +55,28 @@ pub async fn options(
     })
     .await
     .unwrap();
-    let collections = database
-        .add_collections(HashMap::from([(
-            "records".into(),
-            RxCollectionCreator {
-                schema: serde_json::from_value(
-                    json!({"version":0,"primaryKey":"id","type":"object",
+    let collections = if with_records {
+        database
+            .add_collections(HashMap::from([(
+                "records".into(),
+                RxCollectionCreator {
+                    schema: serde_json::from_value(
+                        json!({"version":0,"primaryKey":"id","type":"object",
             "properties":{"id":{"type":"string","maxLength":64}},"required":["id"]}),
-                )
-                .unwrap(),
-                conflict_handler: None,
-                options: HashMap::new(),
-            },
-        )]))
-        .await
-        .unwrap();
+                    )
+                    .unwrap(),
+                    conflict_handler: None,
+                    options: HashMap::new(),
+                },
+            )]))
+            .await
+            .unwrap()
+    } else {
+        HashMap::new()
+    };
     let options = NativeSyncOptions {
         peer_role: ctox_sync::native::NativePeerRole::CtoxInstance,
+        database: Arc::clone(&database),
         collections: collections.into_values().collect(),
         signaling_urls: Arc::new(move || vec![url.clone()]),
         room: room.into(),

@@ -8,6 +8,7 @@ use rxdb::{
         WebRTCPeerSessionValidator, WebRTCRsConfig, WebRTCRsConnectionHandler,
     },
     rx_collection::RxCollection,
+    rx_database::RxDatabase,
 };
 use std::{io, panic::AssertUnwindSafe, sync::Arc, time::Duration};
 
@@ -30,6 +31,8 @@ pub struct NativeAdmission {
 
 pub struct NativeSyncOptions {
     pub peer_role: NativePeerRole,
+    /// Host-owned identity/persistence, independent from the replicated set.
+    pub database: Arc<RxDatabase>,
     pub collections: Vec<Arc<RxCollection>>,
     /// Called again by the existing signaling reconnect supervisor.
     pub signaling_urls: SignalingUrls,
@@ -117,19 +120,13 @@ impl Drop for Resources {
 
 impl NativeSyncSession {
     pub async fn start(options: NativeSyncOptions) -> io::Result<Self> {
-        let Some(first) = options.collections.first() else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "native sync requires collections",
-            ));
-        };
         if options.room.trim().is_empty()
             || options.peer_session_id.trim().is_empty()
             || options.bringup_timeout.is_zero()
             || options
                 .collections
                 .iter()
-                .any(|c| !Arc::ptr_eq(&c.database, &first.database))
+                .any(|c| !Arc::ptr_eq(&c.database, &options.database))
         {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -165,6 +162,7 @@ impl NativeSyncSession {
                 // Preserve the existing 20/20 batch sizes and 5-second retry tuning.
                 resources.pool = Some(
                     replicate_web_rtc_multi_with_validators(
+                        options.database,
                         options.collections,
                         handler,
                         Some(Arc::new(move |connection| {

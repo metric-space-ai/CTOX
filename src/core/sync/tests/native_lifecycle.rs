@@ -20,6 +20,13 @@ impl HashFunction for Hash {
 }
 
 async fn options(url: String) -> (tempfile::TempDir, Arc<RxDatabase>, NativeSyncOptions) {
+    options_with_records(url, true).await
+}
+
+async fn options_with_records(
+    url: String,
+    with_records: bool,
+) -> (tempfile::TempDir, Arc<RxDatabase>, NativeSyncOptions) {
     let directory = tempfile::tempdir().unwrap();
     let database = create_rx_database(RxDatabaseCreator {
         name: format!(
@@ -40,23 +47,28 @@ async fn options(url: String) -> (tempfile::TempDir, Arc<RxDatabase>, NativeSync
     })
     .await
     .unwrap();
-    let collections = database
-        .add_collections(HashMap::from([(
-            "records".into(),
-            RxCollectionCreator {
-                schema: serde_json::from_value(json!({
-                    "version":0,"primaryKey":"id","type":"object",
-                    "properties":{"id":{"type":"string","maxLength":64}},"required":["id"]
-                }))
-                .unwrap(),
-                conflict_handler: None,
-                options: HashMap::new(),
-            },
-        )]))
-        .await
-        .unwrap();
+    let collections = if with_records {
+        database
+            .add_collections(HashMap::from([(
+                "records".into(),
+                RxCollectionCreator {
+                    schema: serde_json::from_value(json!({
+                        "version":0,"primaryKey":"id","type":"object",
+                        "properties":{"id":{"type":"string","maxLength":64}},"required":["id"]
+                    }))
+                    .unwrap(),
+                    conflict_handler: None,
+                    options: HashMap::new(),
+                },
+            )]))
+            .await
+            .unwrap()
+    } else {
+        HashMap::new()
+    };
     let options = NativeSyncOptions {
         peer_role: ctox_sync::native::NativePeerRole::CtoxInstance,
+        database: Arc::clone(&database),
         collections: collections.into_values().collect(),
         signaling_urls: Arc::new(move || vec![url.clone()]),
         room: "native-lifecycle".into(),
@@ -195,6 +207,7 @@ async fn prepared_native_handler_receives_the_first_signal_at_room_admission() {
     ));
     let mut errors = handler.error_stream();
     let pool = replicate_web_rtc_multi_with_validators(
+        options.database,
         options.collections,
         handler,
         Some(Arc::new(move |connection| {
@@ -272,16 +285,50 @@ async fn session_shutdown_closes_pool_but_preserves_host_database() {
     let (_directory, database, options) = options(signal.url.clone()).await;
     let session = NativeSyncSession::start(options).await.unwrap();
     let pool = session.pool().clone();
-    assert_eq!(pool.collection.name, "records");
+    let collection = pool
+        .collections()
+        .into_iter()
+        .find(|collection| collection.name == "records")
+        .unwrap();
     session.shutdown().await;
     signal.assert_closed().await;
     assert!(pool.canceled.load(std::sync::atomic::Ordering::SeqCst));
     // The transport does not own or close host persistence.
-    pool.collection
+    collection
         .insert(json!({"id":"written-after-transport-stop"}))
         .await
         .unwrap();
     database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn control_only_session_preserves_host_database_without_creating_collections() {
+    let mut signal = Signal::start(Admission::Accept).await;
+    let (_directory, database, options) = options_with_records(signal.url.clone(), false).await;
+    let session = NativeSyncSession::start(options).await.unwrap();
+    let pool = session.pool().clone();
+    assert!(pool.collections().is_empty());
+    assert!(database.collections.lock().is_empty());
+    session.shutdown().await;
+    signal.assert_closed().await;
+    assert!(pool.canceled.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!database.closed());
+    database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn foreign_database_is_rejected_before_signaling() {
+    let (_first_root, first_db, mut first) = options("unused".into()).await;
+    let (_other_root, other_db, _) = options_with_records("unused".into(), false).await;
+    first.database = other_db.clone();
+    first.signaling_urls = Arc::new(|| panic!("invalid collection owner reached signaling"));
+    let error = NativeSyncSession::start(first)
+        .await
+        .err()
+        .expect("foreign collection rejected");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    first_db.close().await.unwrap();
+    other_db.close().await.unwrap();
 }
 
 #[tokio::test]

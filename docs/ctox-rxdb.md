@@ -278,6 +278,14 @@ session subscribes before joining signaling, bounds bring-up, and shuts down
 its multiplexed pool before persistence closes. The Business OS host declares
 the generated `CtoxInstance` role explicitly.
 
+The host now passes `NativeSyncOptions.database` independently from its
+replicated collection set. A Workjet control peer or coordination-only voter
+may supply no collections. It explicitly advertises empty schema/checkpoint
+maps rather than inventing a Business OS record store. The existing pool creates
+master relays and fork states only for the collections advertised by both peers.
+All supplied collections must belong to the supplied database; a mismatch fails
+before the shared native session opens signaling.
+
 The same crate provides separate voter/worker execution attachments with
 pinned OpenRaft 0.9.25 authority over signed WebRTC control messages. These are
 not attached by the productive Business OS host yet. Replication master/fork
