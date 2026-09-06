@@ -56,10 +56,15 @@ deployable replacement daemon. Business records still replicate through RxDB.
 - `native_execution.rs`: `NativeSyncSession::attach_execution` attaches one
   configured authority group to the session's actual replication pool. It checks
   room, local signing identity and routing configuration, registers the signed
-  control receiver and connects only configured native peers. The session stops
+  control receiver and discovers native candidates admitted to the room. The session stops
   the group before closing transport. Membership never changes host data-access
-  predicates. Discovery accepts configured signaling routes advertised as
-  `ctox_instance` or `workjet_executor`; a role alone never adds a trusted key.
+  predicates. Discovery probes signaling routes advertised as `ctox_instance`
+  or `workjet_executor`; a role alone never adds a trusted key. The native-only
+  `ctox.sync.authority.route.v1` method reuses the signed envelope, with distinct
+  request/reply kinds. Fresh nonce, scope, recipient and the current signaling
+  address bind the proof. Only the three pinned voter keys may update routing;
+  the connection must still be the same admitted lifetime after verification.
+  A route proof neither invokes Raft nor grants membership or execution.
   Authority control waits for reciprocal protocol/token admission;
   receiving an inbound probe alone is insufficient. Production provisioning and
   executor/gateway enforcement are still required.
@@ -73,10 +78,12 @@ deployable replacement daemon. Business records still replicate through RxDB.
   implemented local listener reject attachment explicitly.
   `NativeSyncSession::attach_worker` now owns a `NativeExecutionWorker` using
   this same generic `NativeExecutionHost` supervisor. Worker options contain a
-  confirmed identity pin and three voter routes, with no Raft store path.
+  confirmed identity pin and exactly three voters, with no Raft store path.
+  Route maps are optional startup hints; an empty map uses authenticated discovery.
   Exactly one voter or worker attachment may occupy a native session. Workers
-  initiate toward their voters regardless of signaling-ID ordering; voter pairs
-  retain their lower-ID-only rule. Role, room, route and local-key checks precede
+  and voters use one rule: the lower signaling ID alone initiates. The former
+  worker-only override is removed now that both ends discover candidates.
+  Role, room, route and local-key checks precede
   activation. Admission and business collection gates remain host-owned.
   A local signaling reconnect keeps the signing identity, membership and IPC
   endpoint. Discovery reads the current signaling ID for each initiator decision
@@ -88,7 +95,7 @@ deployable replacement daemon. Business records still replicate through RxDB.
   replay, revocation, denied business reads and retained-handle shutdown. The
   worker has the greatest signaling ID and opens no Raft store. This is a native
   control-path acceptance, not a completed coding-agent turn. Product onboarding,
-  automatic discovery of changed voter routes and harness supervision remain open.
+  signaling grants and harness supervision remain open.
 - `authority/store.rs`: SQLite Raft log, vote, state machine and snapshots.
   Receipts and state changes commit atomically. A duplicate command returns
   `Replayed`; it never grants permission to perform another external effect.

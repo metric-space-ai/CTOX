@@ -51,6 +51,15 @@ Diese Trennung liefert keine produktive Netzwerk-Konfiguration, keinen
 Signaling-Grant und keinen Aufnahmebeleg. Der Host muss weiterhin seine
 persistierte Identität und die drei geprüften Voter bereitstellen.
 
+Die Signaling-Adressen dieser Voter sind keine dauerhafte Konfiguration mehr:
+`routes` darf als leerer Starthinweis übergeben werden. Der native Host prüft
+einen frischen, signierten Adressnachweis gegen die drei konfigurierten Schlüssel,
+den Scope, die Anfrage-Nonce und die aktuelle Verbindung. Nach einem Wechsel
+der Signaling-Adresse ersetzt dieser Nachweis die Route. Er bestätigt weder
+Mitgliedschaft noch Quorum oder Ausführbarkeit. Der versionierte native
+Kontrollaufruf `ctox.sync.authority.route.v1` verwendet den vorhandenen signierten
+Envelope mit eigenen Request-/Reply-Kennungen; er ist keine Workjet-IPC-Operation.
+
 ## Operationen und genaue Bedeutung
 
 Jede Anfrage enthält `{ version, requestId, operation }`. `version` ist

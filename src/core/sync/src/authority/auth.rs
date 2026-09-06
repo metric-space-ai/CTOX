@@ -1,4 +1,6 @@
 //! Bind execution-control requests and replies to configured peer keys and fresh request nonces.
+#[cfg(all(feature = "webrtc", unix))]
+pub(crate) mod route;
 #[cfg(test)]
 #[path = "auth_tests.rs"]
 mod tests;

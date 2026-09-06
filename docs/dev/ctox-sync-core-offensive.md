@@ -7,6 +7,80 @@ noch aktiv. Ihre Entfernung gehört ausdrücklich zur Abnahme.
 
 ## Aktueller Abnahmestand
 
+### Wiedererkennung von Votern nach Adresswechsel
+
+Bei der Prüfung des produktiven Host-Anschlusses zeigte sich eine notwendige
+Vorarbeit: `ExecutionGroupOptions.routes` und `WorkerExecutionOptions.routes`
+verlangten drei feste Signaling-Adressen. Der bestehende Reconnect übernahm nur
+die geänderte lokale Adresse, aktualisierte aber die Routen zu anderen Votern
+nicht. Diese Adressen als dauerhafte Host-Konfiguration zu speichern hätte
+einen Neustartfehler festgeschrieben.
+
+Die Route-Map ist jetzt ein optionaler Starthinweis. Native Peers im selben
+admittierten Raum werden über `ctox.sync.authority.route.v1` geprüft. Dieser
+native Kontrollaufruf verwendet den vorhandenen signierten Envelope mit eigenen
+Request-/Reply-Kennungen und bindet Scope, Empfänger, frische Nonce und aktuelle
+Signaling-Adresse. Eine Route wird erst nach einem gültigen Nachweis eines der
+drei konfigurierten Voter-Schlüssel ersetzt; die Verbindung muss nach der Antwort
+noch dieselbe und weiterhin admittiert sein. Worker-Schlüssel dürfen damit keine
+Voter-Route übernehmen. Der Nachweis ruft keine fachliche Operation auf und
+vergibt weder Mitgliedschaft noch Ausführungsberechtigung.
+
+Die bisherige Pflicht zu vollständigen Adress-Maps und die ausschließlich daran
+gebundene Discovery sind ersetzt. Auch die eigene ereignisbasierte Liste offener
+Verbindungen entfällt: Beim späten Anhängen eines Workers fehlten darin bereits
+geöffnete Kanäle. Die Discovery liest ihre aktuellen Verbindungen aus dem
+Transport-Handler; Ereignisse wecken nur die Verarbeitung.
+
+Da beide nativen Hosts jetzt Kandidaten entdecken, ist die frühere einseitige
+Worker-Initiierung entfernt (`connect_worker_to_authority_peer` samt internem
+Boolean-Sonderpfad). Voter und Worker verwenden dieselbe Regel: Nur die kleinere
+Signaling-ID erzeugt ein Angebot. Der allgemeine native Browser-Responder bleibt
+passiv. Die WebRTC-Fixture erfasst die tatsächlichen SDP-Angebote und prüft diese
+Richtung zusätzlich zu den bisherigen Aufnahme-, Widerrufs- und Datengrenzen.
+
+Es gibt weiterhin genau drei Voter. Bestätigte
+Konfiguration, produktive Signaling-Grants, Anschluss an den CTOX-Service und
+SSH-/QR-Abnahme sind damit noch nicht erledigt.
+
+Die beiden neuen Signatur-/Replay-Prüfungen bestehen mit allen bisherigen
+Kern-Unit-Tests (19/19, `voter-route-unit.json`). Der zusätzliche echte
+WebRTC-Test besteht in 19,82 Sekunden (`voter-route-single-initiator.json`):
+Start ohne Routen, Voter 3 unter neuer Adresse, anschließend Voter 2 stoppen.
+Die wiederhergestellte Verbindung ist damit für die Mehrheit nötig. Der
+bestehende Worker-Auftrag bleibt autorisiert; Wiederholung, Widerruf und
+verweigerte Business-Datenzugriffe werden weiterhin geprüft. Der Test erfasst
+auch die tatsächlichen SDP-Angebote und fordert die gemeinsame Initiator-Regel.
+Die vollständige native RxDB-Suite besteht **422/422**: 389 Unit-Tests
+(46,62 s), 31 Conformance-Tests, Error-Guard und Idle-Budget (8,59 s), ohne Skips.
+Beleg: `voter-route-native.json`. Der Build benötigte auf dem gemeinsamen
+externen Volume 4 Minuten 9 Sekunden; dies ist keine App-Laufzeitmessung.
+Die vollständige Sync-Suite besteht **59/59**, ohne Skips: 19 Unit-, 11 Cluster-,
+5 Checkpoint-, 1 Effect-, 2 IPC-, 9 Lifecycle-, 1 Store-Conformance-,
+9 echte WebRTC-, 1 Membership- und 1 Workjet-Identitäts-Test. Die neun
+WebRTC-Szenarien benötigen zusammen 17,37 Sekunden; Build 1 Minute.
+Beleg: `voter-route-sync.json`. Die unveränderten Fristen bleiben erhalten.
+Beide Crates bestehen Clippy über alle Targets mit `-D warnings`
+(`voter-route-native-clippy.json`, 33,05 s; `voter-route-sync-clippy.json`,
+52,38 s). Die Formatprüfungen und die fünf generierten Verträge sind konsistent.
+Der aktuelle Wire-Daemon ist gebaut (`voter-route-wire-build.json`, 42,65 s).
+Die Browser-/Wire-Suite besteht mit `--require-wire-daemon` **116/116**, ohne
+Skips (`voter-route-js-wire.log`); Cross-Process-Wire 2,73 s, File-Fetch 1,89 s.
+`cargo check --locked --bin ctox` mit dem bisherigen Dev-Profil besteht in
+4 Minuten 21 Sekunden; unverändert 484 Bestandswarnungen, davon 478 im
+CTOX-Binary. Belege: `voter-route-root-check.json` und
+`voter-route-root-check.log`. Alle genannten Belege liegen unter
+`/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/`.
+Diese Prüfungen zertifizieren weder WAN-Betrieb noch produktive SSH-/QR-Aufnahme,
+Harness-Wiederaufnahme oder die noch ausstehende Runtime-Migration.
+
+Zwischenläufe bleiben im Nachweisverzeichnis erhalten: ein Borrow-Konflikt im
+neuen Fixture, fehlende Worker-Routen beim späten Attachment und ein nicht
+admittierter neuer Voter-Kanal vor Entfernung des Initiator-Sonderpfads. Eine
+zwischenzeitlich fehlgeschlagene Admission-Assertion lieferte noch keinen
+Receipt-Wert; ihre Diagnostik wurde ergänzt und die Assertion beibehalten.
+Sie wird nicht ohne weiteren Nachweis einem bestimmten Fehler zugeordnet.
+
 ### Native Worker ohne Business-OS-Collections
 
 Der gemeinsame NativeSync-Lifecycle erhält die Datenbankidentität jetzt explizit

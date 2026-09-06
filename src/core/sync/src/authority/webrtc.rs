@@ -6,6 +6,8 @@ use super::{
     node::AuthorityNode,
 };
 use async_trait::async_trait;
+#[cfg(unix)]
+use rxdb::plugins::replication_webrtc::SignalingClient;
 use rxdb::plugins::replication_webrtc::{
     send_message_and_await_answer, RxWebRTCReplicationPool, WebRTCConnectionHandler, WebRTCMessage,
     WebRTCRsConnectionHandler,
@@ -60,22 +62,37 @@ impl WebRtcControlChannel {
             .insert(identity.into(), peer);
         Ok(())
     }
-}
-#[async_trait]
-impl ControlChannel for WebRtcControlChannel {
-    async fn request(&self, target_identity: &str, envelope: Value) -> io::Result<Value> {
-        let peer = self
-            .routes
-            .read()
-            .map_err(|_| io::Error::other("control route lock poisoned"))?
-            .get(target_identity)
-            .cloned()
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotConnected,
-                    "control peer has no live WebRTC route",
-                )
-            })?;
+    /// Probe one admitted connection. Only a fresh proof from a configured key
+    /// updates routing; scope, nonce and the signaling lifetime are bound.
+    #[cfg(unix)]
+    pub(crate) async fn discover_route(
+        &self,
+        key: &SigningIdentity,
+        scope: &str,
+        route: &str,
+    ) -> io::Result<()> {
+        let pool = self
+            .pool
+            .upgrade()
+            .ok_or_else(|| io::Error::other("authority pool stopped"))?;
+        let connection = pool
+            .connection_handler
+            .connection_for_peer(route)
+            .ok_or_else(|| io::Error::other("authority route disconnected"))?;
+        let probe = auth::route::RouteProbe::new(key, scope, route)?;
+        let reply = self
+            .request_route(route, auth::route::METHOD, probe.request())
+            .await?;
+        let identity = probe.verify(reply, &self.allowed)?;
+        if pool.connection_handler.connection_for_peer(route).as_ref() != Some(&connection)
+            || !pool.is_peer_ready_for_control(&connection)
+        {
+            return Err(io::Error::other("authority route changed during discovery"));
+        }
+        self.set_route(&identity, route.into())
+    }
+
+    async fn request_route(&self, route: &str, method: &str, envelope: Value) -> io::Result<Value> {
         let pool = self.pool.upgrade().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotConnected,
@@ -86,7 +103,7 @@ impl ControlChannel for WebRtcControlChannel {
         // Resolve it anew, then bind the entire request to that one lifetime.
         let peer = pool
             .connection_handler
-            .connection_for_peer(&peer)
+            .connection_for_peer(route)
             .ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::NotConnected,
@@ -105,8 +122,8 @@ impl ControlChannel for WebRtcControlChannel {
             .filter(|n| n.len() == 32 && n.bytes().all(|b| b.is_ascii_hexdigit()))
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing control nonce"))?;
         let request = WebRTCMessage {
-            id: format!("{CONTROL_METHOD}:{nonce}"),
-            method: CONTROL_METHOD.into(),
+            id: format!("{method}:{nonce}"),
+            method: method.into(),
             params: vec![envelope],
             collection: None,
         };
@@ -127,6 +144,68 @@ impl ControlChannel for WebRtcControlChannel {
         }
         Ok(response.result)
     }
+}
+#[async_trait]
+impl ControlChannel for WebRtcControlChannel {
+    async fn request(&self, target_identity: &str, envelope: Value) -> io::Result<Value> {
+        let route = self
+            .routes
+            .read()
+            .map_err(|_| io::Error::other("control route lock poisoned"))?
+            .get(target_identity)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotConnected,
+                    "control peer has no live WebRTC route",
+                )
+            })?;
+        self.request_route(&route, CONTROL_METHOD, envelope).await
+    }
+}
+
+/// Public identity proof only. Room admission still applies; no collection,
+/// member or execution permission is conferred by this method.
+#[cfg(unix)]
+pub(crate) fn register_route_receiver<A: super::client::ExecutionAuthority + 'static>(
+    pool: &RxWebRTCReplicationPool<WebRTCRsConnectionHandler>,
+    signaling: &Arc<SignalingClient>,
+    identity: Arc<SigningIdentity>,
+    scope: String,
+    node: &Arc<A>,
+) -> io::Result<()> {
+    // Attachment constructors pin the key; this method only proves possession.
+    if node.scope_id() != scope {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "route receiver does not match authority scope",
+        ));
+    }
+    let node = Arc::downgrade(node);
+    let signaling = Arc::downgrade(signaling);
+    pool.register_auxiliary_request_handler(
+        auth::route::METHOD,
+        Arc::new(move |_, _, mut params| {
+            let identity = identity.clone();
+            let scope = scope.clone();
+            let node = node.clone();
+            let signaling = signaling.clone();
+            Box::pin(async move {
+                if params.len() != 1 || node.upgrade().is_none() {
+                    return Err(
+                        "route discovery requires one challenge and a running authority".into(),
+                    );
+                }
+                let route = signaling
+                    .upgrade()
+                    .and_then(|s| s.own_peer_id())
+                    .ok_or_else(|| "authority signaling is disconnected".to_owned())?;
+                auth::route::receive(&identity, &scope, &route, params.remove(0))
+                    .map_err(|error| error.to_string())
+            })
+        }),
+    )
+    .map_err(|error| io::Error::other(error.to_string()))
 }
 /// Install once during the host-owned pool lifecycle. The pool's room admission
 /// still applies; the signed envelope then enforces the narrower voting group.
