@@ -125,6 +125,51 @@ These checks are now a shell release gate. Artifact tests passed 16/16 and
 status tests 5/5. These are supporting checks; they do not replace production
 authentication, WebRTC replication, reload or performance acceptance.
 
-At this point these further corrections have not been deployed or accepted
-on Welsch. The full native Cargo check is still running. No live success or
-performance result from beta.5 is assigned to this new source.
+The full native Cargo check subsequently passed with warnings; this is compile
+evidence, not execution of the new Rust tests or native runtime deployment.
+No live success or performance result from beta.5 is assigned to this source.
+
+## Rejected proxy cutover and production rollback
+
+ctox.dev f1e160b removed the generation-stripping retry and preserved native
+409 responses. Thirteen local HTTP integration cases, type checking and the
+shell/data-plane guards passed. Vercel first blocked the commit because its
+author address was not linked to GitHub. Documentation-only follow-up a3f10c2
+used the same GitHub identity as the previous successful deployment and
+deployed successfully. This did not establish compatibility for existing
+browser documents whose requested generation was no longer available.
+
+A newly opened browser tab loaded beta.8 from source
+87daa431b1604bfcca364a1eb1a851e90da1874d with stamped document identity,
+16 nodes and a painted Harness node. Its canvas height was 265.7109375 px.
+A single CTOX-focus click took 7058 ms including browser-control overhead;
+that duration excludes the subsequent DOM observation. Startup logs also
+reported three layout-operation timeouts of 1500 ms. The first late observation
+of readiness was not a valid boot-time measurement. A direct asset-conflict
+navigation was blocked by the browser tool and supplied no live 409 evidence.
+
+The operator then supplied a real failed-start screenshot. The accessible
+browser tab was a different existing session and did not show that screen.
+`getFriendlyErrorMessage` uses the displayed CTOX-DB wording for any matching
+dynamic-import failure; the screenshot alone does not identify a missing DB
+archive. The exact underlying exception was requested. The cutover was not
+adequately verified and was rejected.
+
+Production was immediately rolled back to the prior deployment
+dpl_7Cvc8DeqVjkokApXfEYTzbkjpfP2 / source ccaec625edd6204cee9056303e196b3fd0ffe2dd.
+Vercel confirmed the rollback and inspection of the actual ctox.dev alias
+confirmed that READY deployment. ctox.dev main 63eb444 restores the exact
+previous proxy/helper/guard files so a subsequent automatic deployment cannot
+re-enable the rejected change. The CTOX beta.8 slot was not rolled back.
+
+One fresh authenticated browser start after rollback showed no startup error,
+beta.8 document identity and the Welsch workspace. Observations in milliseconds:
+6907 (no nodes), 8865 (no nodes), 9917 (no nodes), 11698 (workspace title),
+14048 (no nodes), 17067 (16 nodes). These are browser-control observations,
+not native command latency or a boot p95. Recovery of the operator's already
+failed browser context and the exact import failure are still unconfirmed.
+
+Do not repeat this production cutover until the complete pinned dependency
+graph, including CTOX DB and existing browser contexts, has passed an end-to-end
+upgrade test with measured performance. The architectural defect remains open;
+the rollback is incident mitigation, not acceptance of the legacy fallback.

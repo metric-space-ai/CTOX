@@ -1,5 +1,6 @@
 import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { createCoalescedRefresh } from '../../office-engine/src/coalesced-refresh.mjs';
 import { autoWirePaneGrammar } from '../../shared/pane-grammar.js';
 import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
 
@@ -298,22 +299,16 @@ function wireModule(state) {
 
 function wireLocalRealtime(state) {
   const collections = ['spreadsheets', 'spreadsheet_versions', 'spreadsheet_runbooks', 'spreadsheet_blob_chunks'];
-  let timer = null;
-  const schedule = () => {
-    if (timer) return;
-    timer = window.setTimeout(() => {
-      timer = null;
-      refreshSpreadsheetsFromLocal(state).catch((error) => {
-        console.warn('[spreadsheets] local realtime render failed', error);
-      });
-    }, SPREADSHEET_RENDER_DEBOUNCE_MS);
-  };
+  const refresh = createCoalescedRefresh({
+    delayMs: SPREADSHEET_RENDER_DEBOUNCE_MS,
+    refresh: (changed, isActive) => refreshSpreadsheetsFromLocal(state, changed, isActive),
+    onError: (error) => console.warn('[spreadsheets] local realtime render failed', error),
+  });
   const subscriptions = collections
-    .map((collectionName) => spreadsheetCollection(state.ctx, collectionName)?.$?.subscribe?.(schedule) || null)
+    .map((collectionName) => spreadsheetCollection(state.ctx, collectionName)?.$?.subscribe?.(() => refresh.notify(collectionName)) || null)
     .filter(Boolean);
   return () => {
-    if (timer) window.clearTimeout(timer);
-    timer = null;
+    refresh.dispose();
     for (const sub of subscriptions) {
       try { sub.unsubscribe?.(); } catch {}
     }
@@ -377,20 +372,28 @@ async function saveSpreadsheetBeforeLeaving(state) {
   return true;
 }
 
-async function refreshSpreadsheetsFromLocal(state) {
+async function refreshSpreadsheetsFromLocal(state, changed = null, isActive = () => true) {
+  if (!isActive()) return;
+  const all = changed === null;
   try {
     await Promise.all([
-      refreshRunbooks(state).catch((err) => console.warn('[spreadsheets] background refreshRunbooks failed', err)),
-      refreshSpreadsheets(state).catch((err) => console.warn('[spreadsheets] background refreshSpreadsheets failed', err)),
+      (all || changed.has('spreadsheet_runbooks'))
+        ? refreshRunbooks(state).catch((err) => console.warn('[spreadsheets] background refreshRunbooks failed', err)) : null,
+      (all || changed.has('spreadsheets'))
+        ? refreshSpreadsheets(state).catch((err) => console.warn('[spreadsheets] background refreshSpreadsheets failed', err)) : null,
     ]);
   } catch (error) {
     console.warn('[spreadsheets] background refresh from local failed', error);
   }
-  if (state.selectedId && !spreadsheetDraftProtected(state)
+  if (!isActive()) return;
+  if ((all || changed.has('spreadsheets') || changed.has('spreadsheet_versions') || changed.has('spreadsheet_blob_chunks'))
+    && state.selectedId && !spreadsheetDraftProtected(state)
     && state.selectedVersion?.id !== selectedRecord(state)?.current_version_id) {
     const version = await loadSelectedVersion(state);
+    if (!isActive()) return;
     if (version) await renderCenter(state);
   }
+  if (!isActive()) return;
   renderLeft(state);
   renderRight(state);
 }
@@ -2370,6 +2373,8 @@ async function withTimeout(promise, ms, message) {
 }
 
 export const __spreadsheetsTestHooks = {
+  wireLocalRealtime,
+  refreshSpreadsheetsFromLocal,
   withSpreadsheetVersionTimeout,
   isTransientSpreadsheetVersionReadError,
   resolveSpreadsheetVersionLocalFirst,

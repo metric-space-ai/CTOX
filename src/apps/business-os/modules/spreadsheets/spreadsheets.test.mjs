@@ -19,6 +19,32 @@ const { __spreadsheetsTestHooks: hooks } = await import(
   `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
 );
 
+test('spreadsheet chunk refresh does not re-query the file library or runbooks', async () => {
+  const queried = [];
+  const state = { spreadsheets: [], selectedId: '', ctx: {
+    host: { querySelector: () => null },
+    db: { collection(name) { queried.push(name); return { find: () => ({ exec: async () => [] }) }; } },
+  } };
+  await hooks.refreshSpreadsheetsFromLocal(state, new Set(['spreadsheet_blob_chunks']));
+  assert.deepEqual(queried, []);
+  await hooks.refreshSpreadsheetsFromLocal(state, new Set(['spreadsheets']));
+  assert.deepEqual(queried, ['spreadsheets']);
+});
+
+test('spreadsheet background refresh does not render after disposal during a read', async () => {
+  let active = true;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const state = { spreadsheets: [], selectedId: '', ctx: {
+    host: { querySelector: () => assert.fail('disposed app must not render') },
+    db: { collection() { return { find: () => ({ exec: () => held }) }; } },
+  } };
+  const pending = hooks.refreshSpreadsheetsFromLocal(state, new Set(['spreadsheets']), () => active);
+  active = false;
+  release([]);
+  await pending;
+});
+
 test('spreadsheet version reads return locally without starting replication', async () => {
   const version = { id: 'local' };
   assert.equal(await hooks.resolveSpreadsheetVersionLocalFirst(async timeoutMs => {

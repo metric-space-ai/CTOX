@@ -52,13 +52,11 @@ pub fn get_index_meta(schema: &RxJsonSchema, index: &[String]) -> RxResult<Vec<I
         let ty = schema_part
             .schema_type
             .as_ref()
-            .and_then(|kind| kind.as_single_type())
+            .and_then(|declared| declared.single_type())
             .ok_or_else(|| {
                 new_rx_error(
                     "UTL6",
-                    Some(serde_json::json!({
-                        "message": format!("index field must declare a single type: {field_name}")
-                    })),
+                    Some(serde_json::json!({ "message": format!("index requires a single type: {field_name}") })),
                 )
             })?
             .to_owned();
@@ -160,7 +158,7 @@ pub fn get_index_string_length(schema: &RxJsonSchema, index: &[String]) -> RxRes
             .schema_part
             .schema_type
             .as_ref()
-            .and_then(|kind| kind.as_single_type())
+            .and_then(|declared| declared.single_type())
             .unwrap_or("");
         match ty {
             "string" => length += props.schema_part.max_length.unwrap_or(0) as usize,
@@ -223,7 +221,7 @@ pub fn get_start_index_string_from_lower_bound(
         let ty = schema_part
             .schema_type
             .as_ref()
-            .and_then(|kind| kind.as_single_type())
+            .and_then(|declared| declared.single_type())
             .unwrap_or("");
         match ty {
             "string" => {
@@ -287,7 +285,7 @@ pub fn get_start_index_string_from_upper_bound(
         let ty = schema_part
             .schema_type
             .as_ref()
-            .and_then(|kind| kind.as_single_type())
+            .and_then(|declared| declared.single_type())
             .unwrap_or("");
         match ty {
             "string" => {

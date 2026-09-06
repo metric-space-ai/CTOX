@@ -54,6 +54,23 @@ Abhängigkeitskette und einen Browsertest mit Aktivierung während des Ladens.
 App-Katalog und installierte Apps behalten ihre eigenen Resolver. ctox.dev
 darf bei fehlenden Assets keine Ersatz-Shell auswählen.
 
+Der [native Browser-Wechseltest vom 2026-09-06](dev/shell-generation-native-reproduction-20260906.md)
+reproduziert eine weitere Lücke ohne ctox.dev: zehn alte Testdokumente laden
+nach dem Wechsel über den echten nativen HTTP-Server das neue RxDB-Bundle.
+Der Test bleibt rot, bis die Generation erhalten bleibt. Seine genaue
+Binärprovenienz, begrenzte Reichweite, Einzelmessungen und die noch fehlende
+Prüfung signierter Slots sind im Befund dokumentiert.
+
+### Produktionsrücknahme und weiterer Native-Ausfall
+
+Die Entfernung des Proxy-Fallbacks wurde wegen eines realen Startfehlers mit
+ctox.dev-main `63eb444` zurückgenommen. Die Rücknahme bleibt aktiv, bis die
+vollständige Bindung der Abhängigkeiten geprüft ist. Der
+[Incident-Bericht vom 2026-09-06](dev/production-native-peer-incident-20260906.md)
+dokumentiert außerdem den späteren nativen Schema-Absturz, die vorübergehende
+Rückstellung ausschließlich des Dienstprogramms und die weiterhin offenen
+Office-/Schema-Fehler. Die Instanzen gelten dadurch nicht als produktionsreif.
+
 ## Vertrauenskette
 
 Der Release-Workflow baut ein deterministisches USTAR/Gzip-Artefakt, prüft den

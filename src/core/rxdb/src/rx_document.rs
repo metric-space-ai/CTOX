@@ -260,11 +260,11 @@ impl RxDocument {
             )
         })?;
 
-        if schema_obj
-            .schema_type
-            .as_ref()
-            .is_some_and(|kind| kind.contains("array"))
-            && value.is_array()
+        if value.is_array()
+            && schema_obj
+                .schema_type
+                .as_ref()
+                .is_some_and(|declared| declared.includes("array"))
         {
             let ids: Vec<String> = value
                 .as_array()

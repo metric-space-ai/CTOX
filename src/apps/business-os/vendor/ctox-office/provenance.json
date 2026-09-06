@@ -58,6 +58,10 @@
       "sha256": "d22ae7245bb3d57709a4fa26a88576f5bde335eba176fa3128dc1b9c5b529b87"
     },
     {
+      "path": "src/apps/business-os/office-engine/src/coalesced-refresh.mjs",
+      "sha256": "4275e79304bc88d7f459f0afef4230f06177f90026e67a37318969672f9fd848"
+    },
+    {
       "path": "src/apps/business-os/office-engine/src/document.mjs",
       "sha256": "eb28b5edff18ceb2357f64c21cbdb706d087c6e8514bf94beb93d795a7be9108"
     },
@@ -3928,6 +3932,20 @@
       "path": "web-apps/vendor/xregexp/xregexp-all-min.js",
       "staged_path": "upstream/web-apps/vendor/xregexp/xregexp-all-min.js",
       "sha256": "ad8b04fd8e59beabc616851cd6a820784884c68bb1ea75993e694b21344bd136"
+    },
+    {
+      "path": "web-apps/apps/common/main/resources/img/header/icon-document-white.svg",
+      "staged_path": "upstream/web-apps/apps/common/main/resources/img/header/icon-document-white.svg",
+      "derived_from": "upstream/web-apps/apps/common/main/resources/img/header/icon-document.svg",
+      "transformation": "solid-svg-fills-to-white-v1",
+      "sha256": "2afad3afba3d832813c62a1eb9c133ff321e3ae67a817c73e86ba44dfd9e38c0"
+    },
+    {
+      "path": "web-apps/apps/common/main/resources/img/header/icon-spreadsheet-white.svg",
+      "staged_path": "upstream/web-apps/apps/common/main/resources/img/header/icon-spreadsheet-white.svg",
+      "derived_from": "upstream/web-apps/apps/common/main/resources/img/header/icon-spreadsheet.svg",
+      "transformation": "solid-svg-fills-to-white-v1",
+      "sha256": "ae9fed50e25aff4c7f7d7e32d979e41eaf08676109a434c3878d7d6ec3191564"
     }
   ],
   "outputs": [
@@ -7421,9 +7439,19 @@
       "sha256": "29a8929a2bc7586e9753d71ae1aca8adacde73a80834ab00881fddaab8e4b957"
     },
     {
+      "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/common/main/resources/img/header/icon-document-white.svg",
+      "bytes": 304,
+      "sha256": "2afad3afba3d832813c62a1eb9c133ff321e3ae67a817c73e86ba44dfd9e38c0"
+    },
+    {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/common/main/resources/img/header/icon-document.svg",
       "bytes": 304,
       "sha256": "5b091e7211cfd3d67a98c9149da623574e84adf1beb1d500d7ac9c4cc4a417e6"
+    },
+    {
+      "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/common/main/resources/img/header/icon-spreadsheet-white.svg",
+      "bytes": 317,
+      "sha256": "ae9fed50e25aff4c7f7d7e32d979e41eaf08676109a434c3878d7d6ec3191564"
     },
     {
       "path": "src/apps/business-os/vendor/ctox-office/upstream/web-apps/apps/common/main/resources/img/header/icon-spreadsheet.svg",

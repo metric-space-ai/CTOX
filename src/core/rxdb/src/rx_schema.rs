@@ -255,13 +255,16 @@ pub fn validate_write_document(
             continue;
         }
         match obj.get(req) {
+            None => return Err(format!("required field '{req}' is missing")),
             Some(Value::Null)
-                if json_schema
+                if !json_schema
                     .properties
                     .get(req)
                     .and_then(|prop| prop.schema_type.as_ref())
-                    .is_some_and(|kind| kind.contains("null")) => {}
-            None | Some(Value::Null) => return Err(format!("required field '{req}' is missing")),
+                    .is_some_and(|declared| declared.includes("null")) =>
+            {
+                return Err(format!("required field '{req}' is missing"));
+            }
             _ => {}
         }
     }
@@ -277,12 +280,13 @@ pub fn validate_write_document(
         let Some(declared) = prop.schema_type.as_ref() else {
             continue;
         };
-        if !declared.accepts(value) {
+        let type_ok = declared.matches_value(value);
+        if !type_ok {
             return Err(format!(
                 "field '{name}' has wrong type (expected {declared:?})"
             ));
         }
-        if declared.contains("string") {
+        if value.is_string() {
             if let (Some(max), Some(s)) = (prop.max_length, value.as_str()) {
                 if s.len() as u64 > max {
                     return Err(format!("field '{name}' exceeds maxLength {max}"));

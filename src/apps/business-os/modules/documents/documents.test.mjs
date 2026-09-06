@@ -21,6 +21,46 @@ async function importBrowserBundle(relativePath) {
 
 const { __documentsTestHooks: hooks } = await importBrowserBundle('./index.js');
 
+test('document chunk refresh does not re-query the file library, runbooks or Knowledge', async () => {
+  const queried = [];
+  const state = { documents: [], selectedId: '', ctx: {
+    host: { querySelector: () => null },
+    db: { collection(name) { queried.push(name); return { find: () => ({ exec: async () => [] }) }; } },
+  } };
+  await hooks.refreshDocumentsFromLocal(state, new Set(['document_blob_chunks']));
+  assert.deepEqual(queried, []);
+  await hooks.refreshDocumentsFromLocal(state, new Set(['documents']));
+  assert.deepEqual(queried, ['documents']);
+});
+
+test('Knowledge refresh reads only changed collections and preserves other cached context', async () => {
+  const queried = [];
+  const items = [{ id: 'cached-item' }];
+  const runbooks = [{ id: 'cached-runbook' }];
+  const state = { knowledgeItems: items, knowledgeRunbooks: runbooks, knowledgeTables: [{ id: 'old' }], ctx: {
+    db: { collection(name) { queried.push(name); return { find: () => ({ exec: async () => [] }) }; } },
+  } };
+  await hooks.refreshKnowledge(state, new Set(['knowledge_tables']));
+  assert.deepEqual(queried, ['knowledge_tables']);
+  assert.equal(state.knowledgeItems, items);
+  assert.equal(state.knowledgeRunbooks, runbooks);
+  assert.deepEqual(state.knowledgeTables, []);
+});
+
+test('document background refresh does not render after disposal during its read', async () => {
+  let active = true;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const state = { documents: [], selectedId: '', ctx: {
+    host: { querySelector: () => assert.fail('disposed app must not render') },
+    db: { collection() { return { find: () => ({ exec: () => held }) }; } },
+  } };
+  const pending = hooks.refreshDocumentsFromLocal(state, new Set(['documents']), () => active);
+  active = false;
+  release([]);
+  await pending;
+});
+
 test('document records without is_deleted are active', () => {
   assert.equal(hooks.isActiveDocumentRecord({ id: 'doc_1' }), true);
   assert.equal(hooks.isActiveDocumentRecord({ id: 'doc_1', is_deleted: false }), true);

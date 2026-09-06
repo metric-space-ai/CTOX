@@ -1363,6 +1363,22 @@ test('document edit/save differential uses measured geometry and the CTOX Docume
   assert.doesNotMatch(runtime, /fetch\([^\n]*downloadas/);
 });
 
+test('both editor themes include provenance-tracked white header icons', async () => {
+  const root = new URL('../vendor/ctox-office/', import.meta.url);
+  const provenance = JSON.parse(await readFile(new URL('provenance.json', root), 'utf8'));
+  for (const kind of ['document', 'spreadsheet']) {
+    const prefix = `upstream/web-apps/apps/common/main/resources/img/header/icon-${kind}`;
+    const source = await readFile(new URL(`${prefix}.svg`, root), 'utf8');
+    const white = await readFile(new URL(`${prefix}-white.svg`, root), 'utf8');
+    assert.equal(white, source.replaceAll(/fill="#[0-9a-f]{6}"/gi, 'fill="#ffffff"'));
+    assert.match(white, /fill="#ffffff"/);
+    const input = provenance.upstream_static_inputs.find((entry) => entry.staged_path === `${prefix}-white.svg`);
+    assert.equal(input?.derived_from, `${prefix}.svg`);
+    assert.equal(input?.transformation, 'solid-svg-fills-to-white-v1');
+    assert.equal(input?.sha256, createHash('sha256').update(white).digest('hex'));
+  }
+});
+
 test('document undo/clipboard differential uses CTOX Documents and complete font closure', async () => {
   const harness = await readFile(new URL('./oracle/ctox-document-undo-clipboard-keyboard.html', import.meta.url), 'utf8');
   const flow = await readFile(new URL('./oracle/flows/document.undo-clipboard-keyboard.playwright.js', import.meta.url), 'utf8');

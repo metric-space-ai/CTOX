@@ -71,7 +71,7 @@ pub fn get_query_plan(
             let is_boolean = schema_part
                 .schema_type
                 .as_ref()
-                .and_then(|kind| kind.as_single_type())
+                .and_then(|declared| declared.single_type())
                 == Some("boolean");
             let has_eq = value.get("$eq").is_some();
             if is_boolean && has_eq {

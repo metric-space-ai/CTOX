@@ -34,46 +34,18 @@ impl PrimaryKey {
     }
 }
 
-// ref: rxdb/src/types/rx-schema.d.ts:8,42
-/// Keep scalar and union declarations distinct so schema hashes preserve the
-/// browser contract, including nullable fields such as active_task_id.
+/// JSON Schema permits either one type or a union of types. Keep the original
+/// representation when serializing: schema hashes must not discard nullability.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(untagged)]
 pub enum JsonSchemaType {
     Single(String),
-    Union(Vec<String>),
+    Multiple(Vec<String>),
 }
 
-impl JsonSchemaType {
-    pub fn as_single_type(&self) -> Option<&str> {
-        match self {
-            Self::Single(kind) => Some(kind),
-            Self::Union(_) => None,
-        }
-    }
-
-    pub fn contains(&self, kind: &str) -> bool {
-        match self {
-            Self::Single(declared) => declared == kind,
-            Self::Union(declared) => declared.iter().any(|item| item == kind),
-        }
-    }
-
-    pub fn accepts(&self, value: &Value) -> bool {
-        let matches = |kind: &str| match kind {
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => value.is_i64() || value.is_u64(),
-            "boolean" => value.is_boolean(),
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            "null" => value.is_null(),
-            _ => true, // Preserve the existing policy for extension types.
-        };
-        match self {
-            Self::Single(kind) => matches(kind),
-            Self::Union(kinds) => kinds.iter().any(|kind| matches(kind)),
-        }
+impl From<String> for JsonSchemaType {
+    fn from(value: String) -> Self {
+        Self::Single(value)
     }
 }
 
@@ -83,9 +55,30 @@ impl From<&str> for JsonSchemaType {
     }
 }
 
-impl From<String> for JsonSchemaType {
-    fn from(value: String) -> Self {
-        Self::Single(value)
+impl JsonSchemaType {
+    /// Only a single declared type is safe for homogeneous index optimizations.
+    pub fn single_type(&self) -> Option<&str> {
+        match self {
+            Self::Single(value) => Some(value),
+            Self::Multiple(_) => None,
+        }
+    }
+
+    pub fn includes(&self, name: &str) -> bool {
+        match self {
+            Self::Single(value) => value == name,
+            Self::Multiple(values) => values.iter().any(|value| value == name),
+        }
+    }
+
+    pub fn matches_value(&self, value: &Value) -> bool {
+        (value.is_null() && self.includes("null"))
+            || (value.is_string() && self.includes("string"))
+            || (value.is_number() && self.includes("number"))
+            || ((value.is_i64() || value.is_u64()) && self.includes("integer"))
+            || (value.is_boolean() && self.includes("boolean"))
+            || (value.is_object() && self.includes("object"))
+            || (value.is_array() && self.includes("array"))
     }
 }
 
@@ -222,5 +215,68 @@ where
         }
         Some(number) => serializer.serialize_f64(*number),
         None => serializer.serialize_none(),
+    }
+}
+
+#[cfg(test)]
+mod schema_type_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn union_types_round_trip_without_losing_nullability() {
+        for declared in [
+            json!("string"),
+            json!(["string", "null"]),
+            json!(["integer", "boolean"]),
+        ] {
+            let fragment: JsonSchema = serde_json::from_value(json!({"type": declared})).unwrap();
+            assert_eq!(serde_json::to_value(&fragment).unwrap()["type"], declared);
+        }
+        let nullable: JsonSchema =
+            serde_json::from_value(json!({"type": ["string", "null"]})).unwrap();
+        let declared = nullable.schema_type.unwrap();
+        assert!(declared.matches_value(&json!("task-a")));
+        assert!(declared.matches_value(&Value::Null));
+        assert!(!declared.matches_value(&json!(42)));
+        assert!(!declared.matches_value(&json!(false)));
+        assert!(!declared.matches_value(&json!({})));
+        assert_eq!(declared.single_type(), None);
+        assert!(serde_json::from_value::<JsonSchema>(json!({"type": ["string", 7]})).is_err());
+    }
+
+    #[test]
+    fn every_packaged_business_os_schema_deserializes_and_retains_types() {
+        let contract: HashMap<String, Value> = serde_json::from_str(include_str!(
+            "../../../business_os/business_os_schema_contract.json"
+        ))
+        .unwrap();
+        assert!(!contract.is_empty());
+        fn verify_types(expected: &Value, actual: &Value) {
+            if let Some(declared) = expected.get("type") {
+                assert_eq!(actual.get("type"), Some(declared));
+            }
+            if let Some(properties) = expected.get("properties").and_then(Value::as_object) {
+                for (name, property) in properties {
+                    verify_types(property, &actual["properties"][name]);
+                }
+            }
+            if let Some(items) = expected.get("items") {
+                verify_types(items, &actual["items"]);
+            }
+        }
+        for (name, mut original) in contract {
+            // The native Business OS entry point supports both index notations.
+            if let Some(indexes) = original.get_mut("indexes").and_then(Value::as_array_mut) {
+                for index in indexes {
+                    if index.is_string() {
+                        *index = json!([index.clone()]);
+                    }
+                }
+            }
+            let parsed: RxJsonSchema = serde_json::from_value(original.clone())
+                .unwrap_or_else(|error| panic!("packaged schema {name}: {error}"));
+            verify_types(&original, &serde_json::to_value(parsed).unwrap());
+        }
     }
 }

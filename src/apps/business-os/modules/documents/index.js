@@ -1,6 +1,7 @@
 import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { preserveScrollDuring } from '../../shared/stable-dom.js';
+import { createCoalescedRefresh } from '../../office-engine/src/coalesced-refresh.mjs';
 import { autoWirePaneGrammar } from '../../shared/pane-grammar.js';
 import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
 
@@ -719,22 +720,22 @@ async function dispatchDocumentsContextChat(state, context, message, mode = 'dat
 
 function wireLocalRealtime(state) {
   const collections = ['documents', 'document_versions', 'document_runbooks', 'document_blob_chunks', 'knowledge_items', 'knowledge_runbooks', 'knowledge_tables'];
-  let timer = null;
-  const schedule = () => {
-    if (timer) return;
-    timer = window.setTimeout(() => {
-      timer = null;
-      refreshDocumentsFromLocal(state).catch((error) => {
-        console.warn('[documents] local realtime render failed', error);
-      });
-    }, DOCUMENT_RENDER_DEBOUNCE_MS);
-  };
+  let disposed = false;
+  const refresh = createCoalescedRefresh({
+    delayMs: DOCUMENT_RENDER_DEBOUNCE_MS,
+    refresh: (changed, isActive) => refreshDocumentsFromLocal(state, changed, isActive),
+    onError: (error) => {
+      console.warn('[documents] local realtime render failed', error);
+    },
+  });
   const subscriptions = collections
-    .map((collectionName) => documentCollection(state.ctx, collectionName)?.$?.subscribe?.(schedule) || null)
+    .map((collectionName) => documentCollection(state.ctx, collectionName)?.$?.subscribe?.(() => {
+      if (!disposed) refresh.notify(collectionName);
+    }) || null)
     .filter(Boolean);
   return () => {
-    if (timer) window.clearTimeout(timer);
-    timer = null;
+    disposed = true;
+    refresh.dispose();
     for (const sub of subscriptions) {
       try { sub.unsubscribe?.(); } catch {}
     }
@@ -745,20 +746,27 @@ function documentCollection(ctx, collectionName) {
   return ctx?.db?.collection?.(collectionName) || null;
 }
 
-async function refreshDocumentsFromLocal(state) {
+async function refreshDocumentsFromLocal(state, changed = null, isActive = () => true) {
+  if (!isActive()) return;
+  const all = changed === null;
   await Promise.all([
-    refreshRunbooks(state),
-    refreshKnowledge(state),
-    refreshDocuments(state),
+    (all || changed.has('document_runbooks')) ? refreshRunbooks(state) : null,
+    (all || ['knowledge_items', 'knowledge_runbooks', 'knowledge_tables'].some((name) => changed.has(name)))
+      ? refreshKnowledge(state, changed) : null,
+    (all || changed.has('documents')) ? refreshDocuments(state) : null,
   ]);
+  if (!isActive()) return;
   let selectedVersionLoaded = false;
-  const expectedSelectedVersionId = state.requestedVersionDocumentId === state.selectedId
-    ? state.requestedVersionId
-    : selectedRecord(state)?.current_version_id;
-  if (state.selectedId && !ctoxDocumentsDraftProtected(state)
-      && state.selectedVersion?.id !== expectedSelectedVersionId) {
-    selectedVersionLoaded = Boolean(await loadSelectedVersion(state).catch(() => null));
+  if (all || ['documents', 'document_versions', 'document_blob_chunks'].some((name) => changed.has(name))) {
+    const expectedSelectedVersionId = state.requestedVersionDocumentId === state.selectedId
+      ? state.requestedVersionId
+      : selectedRecord(state)?.current_version_id;
+    if (state.selectedId && !ctoxDocumentsDraftProtected(state)
+        && state.selectedVersion?.id !== expectedSelectedVersionId) {
+      selectedVersionLoaded = Boolean(await loadSelectedVersion(state).catch(() => null));
+    }
   }
+  if (!isActive()) return;
   renderLeft(state);
   renderRight(state);
   renderDocumentStrip(state);
@@ -804,18 +812,24 @@ async function refreshRunbooks(state) {
   state.runbooks = mergeDocumentRunbooks(storedRunbooks);
 }
 
-async function refreshKnowledge(state) {
+async function refreshKnowledge(state, changed = null) {
   const read = async (name) => {
     const collection = documentCollection(state.ctx, name);
     if (!collection) return [];
     const docs = await collection.find({ sort: [{ updated_at_ms: 'desc' }] }).exec();
     return docs.map((doc) => normalizeKnowledgeRecord(typeof doc.toJSON === 'function' ? doc.toJSON() : doc));
   };
-  [state.knowledgeItems, state.knowledgeRunbooks, state.knowledgeTables] = await Promise.all([
-    read('knowledge_items'),
-    read('knowledge_runbooks'),
-    read('knowledge_tables').then(mergeKnowledgeTableReferences),
-  ]);
+  const collections = [
+    ['knowledge_items', 'knowledgeItems'],
+    ['knowledge_runbooks', 'knowledgeRunbooks'],
+    ['knowledge_tables', 'knowledgeTables'],
+  ].filter(([name]) => changed === null || changed.has(name));
+  const results = await Promise.all(collections.map(([name]) => (
+    name === 'knowledge_tables' ? read(name).then(mergeKnowledgeTableReferences) : read(name)
+  )));
+  collections.forEach(([, field], index) => {
+    state[field] = results[index];
+  });
 }
 
 async function createMarkdownDocument(state, input = {}) {
@@ -4594,6 +4608,9 @@ function ensureSuperDocStyles() {
 }
 
 export const __documentsTestHooks = {
+  wireLocalRealtime,
+  refreshDocumentsFromLocal,
+  refreshKnowledge,
   withDocumentVersionTimeout,
   awaitDocumentVersionReplication,
   documentKnowledgeLink,

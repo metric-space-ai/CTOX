@@ -465,6 +465,13 @@ observe a disconnect and rebuild cleanly, instead of parking half-dead.
 
 ### 5.4 Per-collection replication
 
+Replacing a browser collection registration invalidates the previous catch-up
+generation and starts a fresh one against the already authenticated room.
+A replacement is not another room reference. The retired state's cancellation
+is owner-checked: delayed cleanup may not unregister its successor or close the
+successor's shared connection. The replacement-registration and unregister-
+invalidation regression tests pin both directions of this lifecycle boundary.
+
 - **Master path (native, normally):** one master-change relay task per
   collection per peer, emitting `masterChangeStream$:{collection}` responses
   — but only while that collection is in the peer's active set
