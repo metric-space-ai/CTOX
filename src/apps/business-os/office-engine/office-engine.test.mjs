@@ -1244,6 +1244,7 @@ test('CTOX Spreadsheets comparison config matches the pinned Oracle view contrac
     help: false,
     plugins: false,
     macros: false,
+    autosave: false,
     compactHeader: true,
     toolbarHideFileName: true,
     compactToolbar: false,
