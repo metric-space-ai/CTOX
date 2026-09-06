@@ -5967,7 +5967,11 @@ fn projection_normalized_value_for_schema_field(
             ProjectionValueNormalization::Remove
         }
     };
-    match property.schema_type.as_deref() {
+    match property
+        .schema_type
+        .as_ref()
+        .and_then(|kind| kind.as_single_type())
+    {
         Some("number") => {
             if value.is_number() {
                 ProjectionValueNormalization::Keep
@@ -6123,7 +6127,11 @@ fn projection_default_value_for_field(
     if field.ends_with("_at_ms") || field == "createdAt" {
         return Value::from(timestamp_default);
     }
-    match property.schema_type.as_deref() {
+    match property
+        .schema_type
+        .as_ref()
+        .and_then(|kind| kind.as_single_type())
+    {
         Some("array") => Value::Array(Vec::new()),
         Some("boolean") => Value::Bool(false),
         Some("integer") | Some("number") => Value::from(0),
@@ -6239,7 +6247,11 @@ fn projection_tombstone_required_default(schema: &RxJsonSchema, field: &str) -> 
     if let Some(default) = &property.default {
         return default.clone();
     }
-    match property.schema_type.as_deref() {
+    match property
+        .schema_type
+        .as_ref()
+        .and_then(|kind| kind.as_single_type())
+    {
         Some("boolean") => Value::Bool(false),
         Some("number") | Some("integer") => Value::from(0),
         Some("array") => Value::Array(Vec::new()),
