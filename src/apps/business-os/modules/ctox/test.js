@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import { build } from 'esbuild';
+import './tests/data-state.test.mjs';
 
 async function importBrowserBundle(relativePath) {
   const bundledModule = await build({
