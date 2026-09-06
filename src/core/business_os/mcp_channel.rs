@@ -1730,7 +1730,9 @@ fn crew_read_is_public(
     anyhow::ensure!(decision.allowed, "crew collection read denied");
     let actor = resolved_mcp_actor_context(root, context)?;
     Ok(collection == "ctox_crew_members"
-        && !super::policy::role_sees_private_crew_fields(actor.get("role").and_then(Value::as_str).unwrap_or("user")))
+        && !super::policy::role_sees_private_crew_fields(
+            actor.get("role").and_then(Value::as_str).unwrap_or("user"),
+        ))
 }
 
 pub fn query_records(
