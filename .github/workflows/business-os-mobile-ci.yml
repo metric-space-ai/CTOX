@@ -177,8 +177,8 @@ jobs:
           disable-animations: true
           script: |
             adb install -r src/apps/business-os-mobile/android/app/build/outputs/apk/debug/app-debug.apk
-            adb shell settings put system accelerometer_rotation 0
-            adb shell settings put system user_rotation 1
+            adb shell wm user-rotation lock 1
+            adb shell wm fixed-to-user-rotation enabled
             adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity > "$RUNNER_TEMP/android-tablet-launch.txt"
             cat "$RUNNER_TEMP/android-tablet-launch.txt" && grep -q '^Status: ok' "$RUNNER_TEMP/android-tablet-launch.txt"
             sleep 2
