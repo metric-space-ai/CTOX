@@ -1,5 +1,29 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Subsequent live follow-up: beta15 and remaining UI latency
+
+A separate Office rollout activated signed beta15 at
+2026-09-06T22:16:10.982981761Z, keeping native aece8a4f unchanged.
+Read-only shell status confirmed active beta15, phase=current, health=healthy,
+administrable=true, recoveryShell=false. After navigating only this task's
+test tab, a screenshot confirmed beta15 and the rendered CTOX Harness flow,
+task list, timeline and token metrics.
+
+This is not an all-app acceptance: Browser automation encountered CDP
+dispatch/Runtime.evaluate timeouts while opening apps. A CTOX navigation
+that reported a timeout subsequently appeared completed in the screenshot.
+An earlier unscoped close selector was also ambiguous across six windows;
+no successful close was claimed. The Tickets navigation succeeded but showed
+a continuing sync message. Read-only native inspection found all twelve
+ticket projection collections empty, so zero visible tickets alone is not
+evidence of lost records.
+
+The operator machine simultaneously showed a Codex renderer at 119.8% CPU
+and several other busy applications/build processes. That snapshot does not
+identify the test tab's process or establish the cause of the delay.
+End-to-end UI responsiveness, cold boot, and the Office flows therefore remain
+open. No process was killed, store changed, or timeout weakened to claim a pass.
+
 ## Production rollout completed: native aece8a4f and signed beta14
 
 Current checkpoint: 2026-09-06 22:14 UTC. The authentication failure and
