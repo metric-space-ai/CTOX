@@ -1,6 +1,8 @@
 # Production incident: native peer recovery, 2026-09-06
 
-Status at 11:14 UTC: partial recovery; not a production-readiness acceptance.
+Status: partial recovery. Welsch boots and two repaired Word documents render.
+The native file-preservation fix is on main but not activated. Spreadsheets,
+full E2E and performance acceptance remain open.
 
 ## Routing mitigation already active
 
@@ -261,7 +263,9 @@ This is a successful read/recovery check, not edit/save or performance acceptanc
 The same audit found two more current document editor caches with omission
 markers and verified canonical hashes: doc_0d1190f0-d6e1-482a-844c-754331fcf528
 and doc_25e4549b-c56a-4660-a829-8dab4805cf76. Their authenticated prepare
-commands also completed. Their browser rendering is not yet certified.
+commands also completed. The W3 document subsequently painted its saved
+"Greppy browser readiness W3" text in the real browser. The third document's
+rendering was not confirmed before the dedicated test tab was closed.
 Historical staged_editor_blob_id references still retain the damaged artifacts;
 regenerating a current editor cache does not recover every historical artifact.
 Three older spreadsheets had no canonical chunk rows in the inspected RxDB
@@ -276,6 +280,29 @@ remain open. The local build machine was severely overloaded during verification
 (load average 120.01, 0.49% CPU idle, 13 GiB compressed memory at 14:43 UTC);
 browser automation wall times on this machine cannot serve as isolated
 production-performance acceptance.
+
+The correction is on main in 88b4af3f8, merged with the subsequent retired-
+transfer and complete runtime-import-chain corrections in 812dd5a5d.
+The merged data-plane guard and retired-transfer boundary checks pass.
+CI run 34040775617 passed the Linux ARM native compile check. The aggregate
+run is not green: the Linux x86 job stops at the Explorer module-local
+contextmenu freeze guard; Desktop dependency audits stop at xmldom/fast-uri
+advisories. No guard or audit was weakened.
+
+The root SQLite preservation regression was still compiling on the overloaded
+local host. Its first invocation started before the built-in registry lookup
+optimization and the main merge; it cannot certify the final tree on its own.
+Adding the regression as an explicit Linux ARM CI execution step was rejected
+by GitHub because the available OAuth credential lacks workflow scope. That
+unpublished workflow change was withdrawn; the existing CI remains unchanged.
+The native preservation regression still needs a completed local run against
+the final source. No native rollout has followed this source change.
+
+Latest public route probes returned HTTP 200 for Welsch, SKF, Thesen and
+Miltonticket (individual TTFB 0.358, 0.313, 0.952 and 0.909 seconds respectively).
+These remain route probes, not authenticated app or performance acceptance.
+The beta9 CSV acceptance file still failed with Office RPC editor.open timeout
+in the real beta10 browser.
 
 Native initial replication measurements after the restart included:
 desktop_file_index 39,324 ms, business_records 47,397 ms and knowledge_tables
