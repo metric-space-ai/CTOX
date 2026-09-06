@@ -1,5 +1,69 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Production rollout completed: native aece8a4f and signed beta14
+
+Current checkpoint: 2026-09-06 22:14 UTC. The authentication failure and
+not-yet-deployed statements below describe earlier phases and are superseded
+by this section.
+
+All runtime fixes were merged and pushed to main at
+`aece8a4f28999885b4fe788f2c3bf4559a4bcf38`. Signed release
+`business-os-shell-v0.1.46-beta.14` was built from that exact commit by
+GitHub Actions run `34059620173`. The managed source archive was independently
+checked against all 9,820 Git blobs and executable modes.
+
+The safe managed updater completed successfully (exit 0) in 26m26s:
+`ctox-sync-welsch-native-aece8a4f-update-20260906.service`,
+invocation `6526028848594260993f923a39c46614`.
+Welsch now runs `branch-main-aece8a4f-20260906`; the deployed binary SHA256 is
+`d2832ec31e002a8fec46390f68384921e34f8d6c6ad38bedc22505e3eb2f2e9e`.
+This managed rebuild is distinct from the isolated optimized test binary
+`580887fe…`; do not conflate their binary hashes or performance results.
+The previous `branch-main-490f1ab80-20260906` release is retained.
+
+Beta14 activation and the service restart succeeded through
+`ctox-sync-welsch-beta14-activate-20260907.service`,
+invocation `6bb49d2265e14b53b16dd54748389d35`.
+At the checkpoint, shell status reported active beta14, healthy, administrable,
+and no recovery shell. A separately prepared beta15 was desired/ready; this
+report does not claim to have activated that subsequent release.
+Native peer status reported running=true, replicationUp=true, fresh heartbeat,
+and errorTotal=0.
+
+A fresh SQLite backup of all three stores passed quick_check before this
+update. The postflight at 22:13:58 UTC compared all 1,059 baseline chunk payloads
+under a read-only transaction: 988 desktop, 42 document, 29 spreadsheet.
+Every payload hash and deletion state was unchanged; none disappeared or became
+newly omitted. Seven historically omitted document chunks remain unresolved.
+This verifies preservation during this rollout, not recovery of those bytes.
+
+In the real signed-in browser test tab, the shell visibly displayed beta14.
+Opening CTOX rendered the Harness task list, flow diagram, timeline, and token
+metrics. Existing tasks still displayed error states. This confirms restored
+rendering, not successful new task execution. The user's original tab was
+preserved. Spreadsheet loading/reopening remains a separate unresolved flow
+at this checkpoint; the next scoped fix is handled separately.
+
+The final isolated signed-beta14 Browser/WebRTC/native/browser test completed
+30 commands with p50 **250 ms**, p95 **290.55 ms**, min 206 ms, max 292 ms.
+No missing assets, request failures, cache repair or startup reload occurred.
+Unit `ctox-sync-shell-beta14-browser-20260906.service`, invocation
+`b2d4c0a5fd124a0f887f7553d065ca67`, exit 0.
+The warm fixture passes. Critical-collection boot p95, managed-production
+command latency, fleet-wide instances, desktop/mobile, and complete Office
+editing/reopening are not certified by this result.
+
+Evidence:
+- `beweise/raw/shell-native-beta14-roundtrip-marks.json`
+- `beweise/raw/shell-native-beta14-stage-report.json`
+- `beweise/raw/main-shell-aece8a4f-source-report.json`
+- `beweise/raw/welsch-shell-beta14-pre-backup.json`
+- `beweise/raw/welsch-beta14-postflight.json`
+
+The shell artifact package check now also runs the actual-helper browser asset
+routing regression (commit `04affc635`); 16 artifact checks and all six browser
+cases passed. No production behavior was changed by that CI wiring.
+
 ## Final root-path and app-asset regressions
 
 The follow-up fixes `/business-os/`: its empty relative path previously skipped
