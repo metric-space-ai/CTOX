@@ -22,6 +22,13 @@ const { __ctoxTestHooks: hooks } = await importBrowserBundle('./index.js');
 
 const {
   aggregateFlowMetrics,
+  aggregateRunMetrics,
+  changeConcernsSelectedTask,
+  flowForSelectedTask,
+  harnessFlowFromEvents,
+  liveActivityFromEvents,
+  reconcileSelection,
+  withLiveActivity,
   authoritativeTaskNodeId,
   authoritativeTaskStatus,
   applyTaskSelection,
@@ -892,4 +899,92 @@ test('Single-event timeline is diagnostic and disabled', () => {
   assert.equal(progressPercent(0, 0), 100);
   assert.equal(clampMetric(999, 0, 10), 10);
   assert.equal(formatRelativeAge(30_000, 'de'), 'unter 1 Min.');
+});
+
+// --- Scheibe 3: Live-Daten des gewaehlten Tasks --------------------------------
+
+test('Projected harness events rebuild a ledger-shaped flow for the selected task', () => {
+  const task = { id: 'queue-task-1', taskId: 'task-1', commandId: 'cmd-1', status: 'running', routeStatus: 'running' };
+  const events = [
+    { id: 'e1', task_id: 'task-1', kind: 'phase', title: 'turn started', created_at_ms: 1000 },
+    { id: 'e2', task_id: 'task-1', kind: 'tool_started', title: 'read', tool_name: 'read_file', tool_type: 'function', call_id: 'c1', created_at_ms: 2000 },
+    { id: 'e3', task_id: 'task-1', kind: 'token_usage', title: 'usage', usage: { input: 1200, output: 300, reasoning: 40, total: 1500 }, created_at_ms: 3000 },
+    { id: 'e4', task_id: 'task-1', kind: 'token_usage', title: 'usage', usage: { input: 2400, output: 500, reasoning: 90, total: 2900 }, created_at_ms: 4000 },
+    { id: 'e5', task_id: 'task-1', kind: 'crew_selected', title: 'selected: Milo', created_at_ms: 5000 },
+  ];
+  const flow = harnessFlowFromEvents(task, events);
+  assert.equal(flow.ok, true);
+  assert.equal(flow.flow.source.message_key, 'task-1');
+  assert.equal(flow.flow.ledger_events.length, 5);
+  assert.equal(flow.flow.ledger_events[1].event_kind, 'worker.tool_started');
+  assert.equal(JSON.parse(flow.flow.ledger_events[1].metadata_json).tool.name, 'read_file');
+  assert.equal(JSON.parse(flow.flow.ledger_events[3].metadata_json).metrics_mode, 'cumulative');
+  // Cumulative usage takes the maximum, never the sum.
+  const metrics = aggregateFlowMetrics(flow);
+  assert.equal(metrics.inputTokens, 2400);
+  assert.equal(metrics.outputTokens, 500);
+  assert.equal(eventToNodeId(flow.flow.ledger_events[4].event_kind, flow.flow.ledger_events[4].title), null);
+  assert.equal(harnessFlowFromEvents(task, []), null);
+});
+
+test('Live activity from events refreshes only a newer plan and keeps its steps', () => {
+  const events = [
+    { kind: 'thinking', created_at_ms: 10 },
+    { kind: 'tool_started', created_at_ms: 20 },
+    { kind: 'tool_completed', created_at_ms: 30 },
+    { kind: 'thinking', created_at_ms: 40 },
+  ];
+  assert.deepEqual(liveActivityFromEvents(events), { total: 3, thinking: 2, tools: 1, last_kind: 'thinking', updated_at_ms: 40 });
+  const plan = { phase: 'working', percent: 50, steps: [{ position: 1, label: 'A', status: 'in_progress' }], activity_turns: { total: 1, thinking: 1, tools: 0, last_kind: 'thinking' }, updated_at_ms: 5 };
+  const task = { id: 'queue-task-1', taskId: 'task-1', executionProgress: plan };
+  const live = { key: 'task-1', events, runs: [] };
+  const fresh = withLiveActivity(task, live);
+  assert.equal(fresh.executionProgress.activity_turns.total, 3);
+  assert.equal(fresh.executionProgress.updated_at_ms, 40);
+  assert.equal(fresh.executionProgress.steps.length, 1);
+  // Older events never overwrite a newer plan; a foreign key never applies.
+  assert.equal(withLiveActivity({ ...task, executionProgress: { ...plan, updated_at_ms: 99 } }, live).executionProgress.updated_at_ms, 99);
+  assert.equal(withLiveActivity(task, { ...live, key: 'other' }), task);
+});
+
+test('Run metrics sum finished attempts and ignore unknown values', () => {
+  assert.equal(aggregateRunMetrics([]), null);
+  const runs = [
+    { metrics: { input_tokens: 100, output_tokens: 20, tool_calls: 3, thinking_turns: 2, elapsed_ms: 4000 } },
+    { metrics: { input_tokens: 50, output_tokens: null, tool_calls: 1, thinking_turns: null, elapsed_ms: 2500 } },
+  ];
+  assert.deepEqual(aggregateRunMetrics(runs), { inputTokens: 150, outputTokens: 20, toolCalls: 4, thinkingTurns: 2, seconds: 7 });
+});
+
+test('Selected task never borrows another task\'s flow', () => {
+  const blob = { ok: true, mode: 'ctox_core', flow: { source: { message_key: 'task-other', work_id: null }, ledger_events: [], blocks: [] } };
+  const own = harnessFlowFromEvents({ id: 'queue-task-1', taskId: 'task-1' }, [{ id: 'e1', kind: 'thinking', created_at_ms: 1 }]);
+  const tasks = [{ id: 'queue-task-1', taskId: 'task-1', commandId: 'cmd-1', status: 'queued', routeStatus: 'queued' }];
+  const state = { blobFlow: blob, selectedLive: { key: 'task-1', events: [], runs: [], flow: own }, selectedTaskId: 'queue-task-1', model: { tasks } };
+  assert.equal(flowForSelectedTask(state), own);
+  state.selectedLive = null;
+  assert.equal(flowForSelectedTask(state).ok, false);
+  state.blobFlow = { ...blob, flow: { ...blob.flow, source: { message_key: 'task-1', work_id: null } } };
+  assert.equal(flowForSelectedTask(state), state.blobFlow);
+  // Change events for other tasks do not trigger a rebuild; unknown shapes do.
+  assert.equal(changeConcernsSelectedTask(state, { documentData: { task_id: 'task-1' } }), true);
+  assert.equal(changeConcernsSelectedTask(state, { documentData: { task_id: 'task-9', command_id: 'cmd-9' } }), false);
+  assert.equal(changeConcernsSelectedTask(state, { documentData: { command_id: 'cmd-1' } }), true);
+  assert.equal(changeConcernsSelectedTask(state, 'opaque'), true);
+});
+
+test('A deep-linked task is consumed once it is on screen', () => {
+  const tasks = [
+    { id: 'queue-task-a', taskId: 'task-a', commandId: 'cmd-a', status: 'queued', routeStatus: 'queued' },
+    { id: 'queue-task-b', taskId: 'task-b', commandId: 'cmd-b', status: 'queued', routeStatus: 'queued' },
+  ];
+  const state = { model: { tasks, timeline: [], nodeMap: new Map() }, focusTask: { taskId: 'task-b', commandId: '' }, focusTaskConsumed: false, selectedTaskId: null, selectedStepIndex: 0, userNavigatedTimeline: false };
+  reconcileSelection(state);
+  assert.equal(state.selectedTaskId, 'queue-task-b');
+  assert.equal(state.focusTaskConsumed, true);
+  // After consumption the operator's own choice survives the next data render.
+  state.focusTask = null;
+  state.selectedTaskId = 'queue-task-a';
+  reconcileSelection(state);
+  assert.equal(state.selectedTaskId, 'queue-task-a');
 });

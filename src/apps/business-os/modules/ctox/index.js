@@ -11,7 +11,7 @@ const NODE_HEIGHT = 76;
 const DEFAULT_ZOOM = 1;
 const MIN_ZOOM = 0.72;
 const MAX_ZOOM = 1.8;
-const HARNESS_REFRESH_MS = 4000;
+const HARNESS_EVENT_LIMIT = 200;
 const LOCAL_COLLECTION_LIMIT = 120;
 const LOCAL_RENDER_DEBOUNCE_MS = 80;
 const HARNESS_STALL_GRACE_MS = 90 * 1000;
@@ -635,8 +635,18 @@ export async function mount(ctx) {
     // measurably running. Only a finite anchor may drive the live clock.
     liveAnchorMs: null,
     liveTicker: null,
-    refreshTimer: null,
     localSubscriptionCleanup: null,
+    interactionGuardCleanup: null,
+    // Selected task's own projections (events, runs) and the server flow blob.
+    selectedLive: null,
+    blobFlow: null,
+    bundle: null,
+    mainInteracting: false,
+    timelineScrubbing: false,
+    mainRenderPending: false,
+    rerenderAfterRefresh: false,
+    focusTaskConsumed: false,
+    realtimeCollectionCount: 0,
     readinessCleanup: null,
     refreshInFlight: false,
     disposed: false,
@@ -665,18 +675,13 @@ export async function mount(ctx) {
     startLiveTicker(state);
     state.localSubscriptionCleanup = wireLocalRealtime(state);
     state.readinessCleanup = wireTaskSourceReadiness(state);
+    state.interactionGuardCleanup = wireMainInteractionGuard(state);
     // A cold RxDB/WebRTC lease must not block the OS window from becoming
     // operable. Hydrate in the background while the compact loading workspace is
-    // already visible, then let the normal refresh interval take over.
-    state.refreshInFlight = true;
-    void renderFromLocalCache(state)
-      .catch((error) => {
-        if (!state.disposed) console.warn('[ctox] initial local render failed', error);
-      })
-      .finally(() => {
-        state.refreshInFlight = false;
-      });
-    state.refreshTimer = window.setInterval(() => refresh(state), HARNESS_REFRESH_MS);
+    // already visible; from then on RxDB change subscriptions drive every render.
+    void renderFromLocalCache(state).catch((error) => {
+      if (!state.disposed) console.warn('[ctox] initial local render failed', error);
+    });
   } catch (error) {
     // Keep the markup host and a usable teardown. The shell recovery dialog is
     // worse than a loading/partial harness for transient wiring failures.
@@ -688,8 +693,8 @@ export async function mount(ctx) {
   return () => {
     state.disposed = true;
     window.clearInterval(state.liveTicker);
-    window.clearInterval(state.refreshTimer);
     try { state.localSubscriptionCleanup?.(); } catch {}
+    try { state.interactionGuardCleanup?.(); } catch {}
     try { state.readinessCleanup?.(); } catch {}
     try { state.layoutResizeCleanup?.(); } catch {}
     if (harness) delete harness.__ctoxState;
@@ -703,11 +708,36 @@ async function loadCtoxMessages(lang) {
 }
 
 async function renderFromLocalCache(state) {
-  const [commands, queueTasks, bugReports, webStack, crewMembers, harnessStatus] = await Promise.all([
+  if (state.disposed) return;
+  if (state.refreshInFlight) {
+    state.rerenderAfterRefresh = true;
+    return;
+  }
+  state.refreshInFlight = true;
+  try {
+    await hydrateFromLocal(state);
+  } finally {
+    state.refreshInFlight = false;
+  }
+  if (state.rerenderAfterRefresh && !state.disposed) {
+    state.rerenderAfterRefresh = false;
+    window.setTimeout(() => {
+      renderFromLocalCache(state).catch((error) => {
+        if (!state.disposed) console.warn('[ctox] follow-up render failed', error);
+      });
+    }, LOCAL_RENDER_DEBOUNCE_MS);
+  }
+}
+
+// One load path. Every collection is a bounded RxDB read; there is no HTTP
+// fallback and no poll loop — subscriptions (wireLocalRealtime) call this.
+async function hydrateFromLocal(state) {
+  const [commands, queueTasks, bugReports, webStack, blobFlow, crewMembers, harnessStatus] = await Promise.all([
     loadLocalCommands(state.ctx).catch(() => []),
     loadLocalQueueTasks(state.ctx).catch(() => []),
     loadLocalBugReports(state.ctx).catch(() => []),
     loadLocalWebStackOverview(state.ctx).catch((error) => ({ ok: false, error: error.message || String(error) })),
+    loadHarnessFlowSnapshot(state.ctx).catch(() => emptyHarnessFlow('harness_flow_unavailable')),
     loadLocalCrewMembers(state.ctx).catch(() => []),
     loadLocalHarnessStatus(state.ctx).catch(() => null),
   ]);
@@ -720,22 +750,52 @@ async function renderFromLocalCache(state) {
     notice: state.webStack?.notice || '',
     data: webStack?.ok ? webStack : state.webStack?.data,
   };
-  state.flow = await loadHarnessFlowSnapshot(state.ctx).catch(() => emptyHarnessFlow('harness_flow_unavailable'));
-  if (state.disposed) return;
-  const bundle = mergeBundleWithCommands(ctoxSeed, commands, queueTasks, bugReports);
-  state.model = buildHarnessModel(bundle, state.flow, state.lang);
-  state.harnessHealth = deriveHarnessHealth(state);
-  state.focusTask = readFocusTask();
+  state.blobFlow = blobFlow?.ok ? blobFlow : emptyHarnessFlow('rxdb_flow_projection_unavailable');
+  state.bundle = mergeBundleWithCommands(ctoxSeed, commands, queueTasks, bugReports);
+  // First pass with the server blob decides the selection; the second pass
+  // swaps in the selected task's own event stream when the blob is not about it.
+  state.flow = state.blobFlow;
+  state.model = buildHarnessModel(state.bundle, state.flow, state.lang);
+  state.focusTask = state.focusTaskConsumed ? null : readFocusTask();
   reconcileSelection(state);
+  const selected = getSelectedTask(state);
+  const key = taskLiveKey(selected);
+  const live = key ? await loadSelectedTaskLive(state.ctx, selected) : { key: '', events: [], runs: [], flow: null };
+  if (state.disposed) return;
+  state.selectedLive = live;
+  applyLiveFlow(state);
+  state.harnessHealth = deriveHarnessHealth(state);
+  state.runtimeStatus = state.ctx?.sync?.mode === 'webrtc'
+    ? displayFlowMode('rxdb-webrtc')
+    : (state.ctx?.sync?.config?.native_rxdb_peer_reason || 'native CTOX RxDB peer is not available');
   render(state);
   syncDetailDrawer(state);
 }
 
+// Kept for callers that want an explicit re-read after a command (controls).
+async function refresh(state) {
+  return renderFromLocalCache(state);
+}
+
+function changeConcernsSelectedTask(state, change) {
+  const doc = change?.documentData || change?.document || change?.doc || null;
+  if (!doc || typeof doc !== 'object') return true; // unknown shape: stay safe, debounce coalesces
+  const task = getSelectedTask(state);
+  const key = taskLiveKey(task);
+  if (!key) return false;
+  return doc.task_id === key || (Boolean(doc.command_id) && doc.command_id === task?.commandId);
+}
+
 function wireLocalRealtime(state) {
-  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports', 'ctox_crew_members', 'ctox_harness_status'];
+  const collectionsToWatch = ['business_commands', 'ctox_runtime_settings', 'ctox_queue_tasks', 'ctox_bug_reports', 'ctox_crew_members', 'ctox_harness_status', 'ctox_runs', 'ctox_harness_events'];
+  const selectedTaskOnly = new Set(['ctox_runs', 'ctox_harness_events']);
   let renderTimer = null;
   const scheduleRender = () => {
-    if (state.disposed || state.refreshInFlight) return;
+    if (state.disposed) return;
+    if (state.refreshInFlight) {
+      state.rerenderAfterRefresh = true;
+      return;
+    }
     if (renderTimer) return;
     renderTimer = window.setTimeout(() => {
       renderTimer = null;
@@ -747,9 +807,14 @@ function wireLocalRealtime(state) {
   const subscriptions = collectionsToWatch
     .map((collectionName) => {
       const collection = ctoxCollection(state.ctx, collectionName);
-      return collection?.$?.subscribe?.(scheduleRender) || null;
+      if (!collection?.$?.subscribe) return null;
+      return collection.$.subscribe((change) => {
+        if (selectedTaskOnly.has(collectionName) && !changeConcernsSelectedTask(state, change)) return;
+        scheduleRender();
+      }) || null;
     })
     .filter(Boolean);
+  state.realtimeCollectionCount = subscriptions.length;
   return () => {
     if (renderTimer) window.clearTimeout(renderTimer);
     renderTimer = null;
@@ -757,45 +822,6 @@ function wireLocalRealtime(state) {
       try { sub.unsubscribe?.(); } catch {}
     }
   };
-}
-
-async function refresh(state) {
-  if (state.disposed || state.refreshInFlight) return;
-  state.refreshInFlight = true;
-  try {
-    const [commands, queueTasks, bugReports, webStack, harnessFlow, crewMembers, harnessStatus] = await Promise.all([
-      loadLocalCommands(state.ctx).catch(() => []),
-      loadLocalQueueTasks(state.ctx).catch(() => []),
-      loadLocalBugReports(state.ctx).catch(() => []),
-      loadLocalWebStackOverview(state.ctx).catch((error) => ({ ok: false, error: error.message || String(error) })),
-      loadHarnessFlowSnapshot(state.ctx).catch(() => emptyHarnessFlow('harness_flow_unavailable')),
-      loadLocalCrewMembers(state.ctx).catch(() => []),
-      loadLocalHarnessStatus(state.ctx).catch(() => null),
-    ]);
-    state.crewMembers = crewMembers;
-    state.harnessStatus = harnessStatus;
-    state.webStack = {
-      loading: false,
-      error: webStack?.ok ? '' : (webStack?.error || 'Web Stack status unavailable'),
-      notice: state.webStack?.notice || '',
-      data: webStack?.ok ? webStack : state.webStack?.data,
-    };
-    const nextFlow = harnessFlow?.ok ? harnessFlow : emptyHarnessFlow('rxdb_flow_projection_unavailable');
-    if (state.disposed) return;
-    const bundle = mergeBundleWithCommands(ctoxSeed, commands, queueTasks, bugReports);
-    state.flow = nextFlow;
-    state.model = buildHarnessModel(bundle, nextFlow, state.lang);
-    state.harnessHealth = deriveHarnessHealth(state);
-    state.focusTask = readFocusTask();
-    reconcileSelection(state);
-    state.runtimeStatus = state.ctx?.sync?.mode === 'webrtc'
-      ? displayFlowMode('rxdb-webrtc')
-      : (state.ctx?.sync?.config?.native_rxdb_peer_reason || 'native CTOX RxDB peer is not available');
-    render(state);
-    syncDetailDrawer(state);
-  } finally {
-    state.refreshInFlight = false;
-  }
 }
 
 function renderLoading(state) {
@@ -828,7 +854,12 @@ function render(state) {
   // the header/filterbar/search input — the operator never moves), then the
   // flow canvas / drawer as before.
   renderTaskList(state);
-  renderMain(state);
+  if (mainIsBusy(state)) {
+    state.mainRenderPending = true;
+  } else {
+    state.mainRenderPending = false;
+    renderMain(state);
+  }
   syncHarnessHealthUiState(state);
   // renderMain() has just recomputed state.liveAnchorMs from the persisted
   // telemetry, so arm or disarm the clock to match what is actually running.
@@ -1321,7 +1352,13 @@ function wireTaskSourceReadiness(state) {
       const unsubscribe = subscribe.call(state.ctx.sync, name, () => {
         if (state.disposed) return;
         try {
-          renderTaskList(state);
+          // Collections that were missing at mount now exist: subscribe again
+          // (no poll loop backs this up any more) and hydrate once.
+          try { state.localSubscriptionCleanup?.(); } catch {}
+          state.localSubscriptionCleanup = wireLocalRealtime(state);
+          renderFromLocalCache(state).catch((error) => {
+            if (!state.disposed) console.warn('[ctox] readiness hydrate failed', error);
+          });
         } catch (error) {
           if (!state.disposed) console.warn('[ctox] readiness re-render failed', error);
         }
@@ -2059,16 +2096,7 @@ function renderMain(state) {
       zoomFlowFromControl(state, action);
     });
   });
-  main.querySelectorAll('[data-timeline-step]').forEach((button) => {
-    button.addEventListener('click', () => {
-      setTimelineStep(state, Number(button.dataset.timelineStep), { center: true });
-    });
-  });
-  main.querySelectorAll('[data-task-step-index]').forEach((button) => {
-    button.addEventListener('click', () => {
-      setTaskTimelineStep(state, Number(button.dataset.taskStepIndex), { center: true });
-    });
-  });
+  wireTimelineStepButtons(state, main);
   main.querySelectorAll('[data-task-id]').forEach((button) => {
     button.addEventListener('click', () => {
       selectTask(state, button.dataset.taskId, { drawer: true, center: true });
@@ -2082,14 +2110,16 @@ function renderMain(state) {
     }
   });
   main.querySelector('[data-timeline-range]')?.addEventListener('input', (event) => {
+    // While the pointer holds the slider, the input must not be replaced.
+    const light = Boolean(state.timelineScrubbing);
     if (event.target.dataset.taskTimelineRange === 'true') {
-      setTaskTimelineStep(state, Number(event.target.value), { center: true });
+      setTaskTimelineStep(state, Number(event.target.value), { center: !light, light });
       return;
     }
     const mappedSteps = event.target.dataset.timelineRangeSteps
       ? event.target.dataset.timelineRangeSteps.split(',').map((value) => Number(value))
       : null;
-    setTimelineStep(state, mappedSteps?.[Number(event.target.value)] ?? Number(event.target.value), { center: true });
+    setTimelineStep(state, mappedSteps?.[Number(event.target.value)] ?? Number(event.target.value), { center: !light, light });
   });
   main.querySelectorAll('[data-node-id]').forEach((node) => {
     node.addEventListener('click', () => {
@@ -2585,10 +2615,11 @@ function flowCrewSvg(model, selectedTask, state) {
     // "wo steckt er im Loop" ohne Suchen beantwortet.
     if (selected) state.crewStandortNodeId = node.id;
     const title = `${taskDisplayTitle(task, state)} · ${task.id}`;
+    const liveTask = withLiveActivity(task, state?.selectedLive);
     const creature = crewCreatureHtml({
-      ...task,
+      ...liveTask,
       crewKey: task.commandId || task.command_id || task.taskId || task.task_id || task.id,
-      executionProgress: task.executionProgress || task.execution_progress,
+      executionProgress: liveTask.executionProgress || liveTask.execution_progress,
     }, status, 'map');
     return `
       <foreignObject class="ctox-flow-creature-slot ${selected ? 'is-selected' : ''}" x="${x}" y="${y}" width="48" height="48"
@@ -2857,6 +2888,12 @@ function reconcileSelection(state) {
   const previousTaskId = state.selectedTaskId;
   const previousStepIndex = state.selectedStepIndex;
   state.selectedTaskId = resolveSelectedTaskId(state.model, state.focusTask, state.selectedTaskId);
+  // A deep link is a one-time request: once the task is on screen the operator
+  // may select anything else, and a later mount must not jump back to it.
+  if (state.focusTask && !state.focusTaskConsumed && isFocusedTask(getSelectedTask(state), state.focusTask)) {
+    state.focusTaskConsumed = true;
+    clearPersistedFocusTask();
+  }
   if (state.selectedNodeId && !state.model?.nodeMap?.has?.(state.selectedNodeId)) state.selectedNodeId = '';
   const selectedTaskChanged = previousTaskId !== state.selectedTaskId;
   if (state.userNavigatedTimeline && !selectedTaskChanged && Number.isFinite(previousStepIndex)) {
@@ -2919,15 +2956,23 @@ function selectTask(state, taskId, options = {}) {
   // Selection is an in-place class flip across the existing task rows (no list
   // rebuild); the flow canvas / drawer may re-render on selection.
   applyTaskSelection(state);
+  applyLiveFlow(state);
   renderMain(state);
   if (options.center !== false) centerSelectedNode(state);
   syncDetailDrawer(state);
+  void refreshSelectedTaskLive(state).catch((error) => {
+    if (!state.disposed) console.warn('[ctox] selected task live load failed', error);
+  });
 }
 
 function setTimelineStep(state, nextIndex, options = {}) {
   state.selectedNodeId = '';
   state.selectedStepIndex = clampIndex(nextIndex, state.model?.timeline?.length || 1);
   state.userNavigatedTimeline = true;
+  if (options.light) {
+    patchTimelinePanel(state);
+    return;
+  }
   renderMain(state);
   if (options.center) centerSelectedNode(state);
   syncDetailDrawer(state);
@@ -2940,6 +2985,10 @@ function setTaskTimelineStep(state, nextIndex, options = {}) {
   state.selectedNodeId = '';
   state.selectedTaskStepIndex = clampMetric(nextIndex, 0, Math.max(steps.length - 1, 0));
   state.userNavigatedTimeline = true;
+  if (options.light) {
+    patchTimelinePanel(state);
+    return;
+  }
   renderMain(state);
   if (options.center) centerSelectedNode(state);
   syncDetailDrawer(state);
@@ -3917,6 +3966,7 @@ function persistFocusTask(focusTask) {
 }
 
 function readFocusTaskFromHash() {
+  if (typeof location === 'undefined') return null;
   const query = String(location.hash || '').split('?')[1] || '';
   if (!query) return null;
   const params = new URLSearchParams(query);
@@ -4176,6 +4226,331 @@ async function loadLocalHarnessStatus(ctx) {
   return doc ? doc.toJSON() : null;
 }
 
+// --- Live data of the selected task (slice 3) -------------------------------
+// The flow canvas, the creature impulse and the metric strip follow the durable
+// per-task projections (`ctox_harness_events`, `ctox_runs`) instead of the one
+// global `runtime_settings.harness_flow` blob, which only ever described the task
+// the server last looked at. The blob stays a richer superset when it matches.
+
+function taskLiveKey(task) {
+  if (!task) return '';
+  return nativeTaskId(task) || String(task.commandId || task.id || '');
+}
+
+async function findLocalDocs(collection, selector, limit, sortField = 'updated_at_ms', direction = 'desc') {
+  try {
+    const docs = await collection.find({ selector, sort: [{ [sortField]: direction }], limit }).exec();
+    return docs.map((doc) => doc.toJSON());
+  } catch {
+    const docs = await collection.find({ selector, limit }).exec();
+    const rows = docs.map((doc) => doc.toJSON());
+    rows.sort((a, b) => (Number(b?.[sortField]) || 0) - (Number(a?.[sortField]) || 0));
+    return direction === 'desc' ? rows : rows.reverse();
+  }
+}
+
+async function loadLocalHarnessEvents(ctx, task) {
+  const collection = ctoxCollection(ctx, 'ctox_harness_events');
+  const taskId = nativeTaskId(task);
+  if (!collection || !taskId) return [];
+  let rows = await findLocalDocs(collection, { task_id: taskId }, HARNESS_EVENT_LIMIT);
+  if (!rows.length && task?.commandId) {
+    rows = await findLocalDocs(collection, { command_id: task.commandId }, HARNESS_EVENT_LIMIT);
+  }
+  // Newest 200 from the store, handed on oldest first.
+  return rows.reverse();
+}
+
+async function loadLocalRunsForTask(ctx, task) {
+  const collection = ctoxCollection(ctx, 'ctox_runs');
+  const taskId = nativeTaskId(task);
+  if (!collection || !taskId) return [];
+  return findLocalDocs(collection, { task_id: taskId }, 32);
+}
+
+async function loadSelectedTaskLive(ctx, task) {
+  const key = taskLiveKey(task);
+  if (!key) return { key: '', events: [], runs: [], flow: null };
+  const [events, runs] = await Promise.all([
+    loadLocalHarnessEvents(ctx, task).catch(() => []),
+    loadLocalRunsForTask(ctx, task).catch(() => []),
+  ]);
+  return { key, events, runs, flow: harnessFlowFromEvents(task, events) };
+}
+
+const HARNESS_EVENT_LEDGER_KINDS = {
+  tool_started: 'worker.tool_started',
+  tool_completed: 'worker.tool_completed',
+  thinking: 'worker.thinking',
+  plan_updated: 'worker.plan_updated',
+  token_usage: 'worker.token_usage',
+  turn_completed: 'worker.turn_completed',
+  phase: 'worker.phase',
+  crew_selected: 'crew.selected',
+  crew_selection_unavailable: 'crew.selection_unavailable',
+};
+
+function hasFiniteValue(value) {
+  return value !== null && value !== undefined && Number.isFinite(Number(value));
+}
+
+// Projected events carry the same facts as the ledger rows the server used to
+// build `harness_flow`; this rebuilds the ledger shape so the existing readers
+// (observedPathFromFlow, observedDetailsFromFlow, aggregateFlowMetrics) work
+// unchanged. Token usage events are cumulative per attempt (direct_session).
+function harnessFlowFromEvents(task, events) {
+  if (!Array.isArray(events) || !events.length) return null;
+  const ledger = events.map((event) => {
+    const metadata = {};
+    if (event.tool_name || event.tool_type) {
+      metadata.tool = { name: event.tool_name || '', type: event.tool_type || '', call_id: event.call_id || '', success: event.success ?? null };
+    }
+    const usage = event.usage || {};
+    if ([usage.input, usage.output, usage.total].some(hasFiniteValue)) {
+      metadata.usage = {
+        input_tokens: hasFiniteValue(usage.input) ? Number(usage.input) : null,
+        output_tokens: hasFiniteValue(usage.output) ? Number(usage.output) : null,
+        reasoning_output_tokens: hasFiniteValue(usage.reasoning) ? Number(usage.reasoning) : null,
+        total_tokens: hasFiniteValue(usage.total) ? Number(usage.total) : null,
+      };
+      if (event.kind === 'token_usage') metadata.metrics_mode = 'cumulative';
+    }
+    if (hasFiniteValue(event.runtime_seconds)) metadata.runtime = { seconds: Number(event.runtime_seconds) };
+    if (hasFiniteValue(event.attempt)) metadata.attempt = Number(event.attempt);
+    if (hasFiniteValue(event.step_position)) metadata.step_position = Number(event.step_position);
+    return {
+      event_id: String(event.id || ''),
+      event_kind: HARNESS_EVENT_LEDGER_KINDS[event.kind] || `worker.${event.kind || 'phase'}`,
+      title: String(event.title || ''),
+      body_text: '',
+      created_at: new Date(Number(event.created_at_ms) || 0).toISOString(),
+      metadata_json: JSON.stringify(metadata),
+    };
+  });
+  return {
+    ok: true,
+    mode: 'rxdb-webrtc',
+    error: '',
+    ascii: '',
+    flow: {
+      schema_version: 1,
+      source: { message_key: nativeTaskId(task), work_id: null, source_kind: 'ctox_harness_events' },
+      ledger_events: ledger,
+      blocks: [],
+    },
+  };
+}
+
+function liveActivityFromEvents(events) {
+  if (!Array.isArray(events) || !events.length) return null;
+  let thinking = 0;
+  let tools = 0;
+  let lastKind = '';
+  let updatedAtMs = 0;
+  for (const event of events) {
+    if (event.kind === 'thinking') { thinking += 1; lastKind = 'thinking'; }
+    else if (event.kind === 'tool_started') { tools += 1; lastKind = 'tool'; }
+    else if (event.kind === 'tool_completed') { lastKind = 'tool'; }
+    updatedAtMs = Math.max(updatedAtMs, Number(event.created_at_ms) || 0);
+  }
+  return { total: thinking + tools, thinking, tools, last_kind: lastKind, updated_at_ms: updatedAtMs };
+}
+
+// The creature impulse (syncCrewProceduralMotion) reads activity turns from the
+// execution progress. When the event stream is newer than the projected plan,
+// the plan keeps its steps and takes the fresher activity counters.
+function withLiveActivity(task, live) {
+  if (!task || !live || live.key !== taskLiveKey(task)) return task;
+  const activity = liveActivityFromEvents(live.events);
+  if (!activity) return task;
+  const raw = task.execution_progress || task.executionProgress;
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.steps) || !raw.steps.length) return task;
+  const current = Number(raw.updated_at_ms ?? raw.updatedAtMs) || 0;
+  if (current >= activity.updated_at_ms) return task;
+  const merged = {
+    ...raw,
+    activity_turns: { total: activity.total, thinking: activity.thinking, tools: activity.tools, last_kind: activity.last_kind },
+    updated_at_ms: activity.updated_at_ms,
+  };
+  return { ...task, execution_progress: merged, executionProgress: merged };
+}
+
+function aggregateRunMetrics(runs) {
+  if (!Array.isArray(runs) || !runs.length) return null;
+  const sum = (key) => {
+    let total = null;
+    for (const run of runs) {
+      const value = run?.metrics?.[key];
+      if (!hasFiniteValue(value)) continue;
+      total = (total || 0) + Number(value);
+    }
+    return total;
+  };
+  const elapsed = sum('elapsed_ms');
+  return {
+    inputTokens: sum('input_tokens'),
+    outputTokens: sum('output_tokens'),
+    toolCalls: sum('tool_calls'),
+    thinkingTurns: sum('thinking_turns'),
+    seconds: elapsed === null ? null : Math.round(elapsed / 1000),
+  };
+}
+
+// Which flow describes the selected task: the server blob when it is about this
+// task, otherwise the task's own event stream, otherwise nothing (never another
+// task's flow).
+function flowForSelectedTask(state) {
+  const task = getSelectedTask(state);
+  const blob = state.blobFlow || emptyHarnessFlow();
+  if (!task) return blob;
+  if (flowMatchesTask(blob, task)) return blob;
+  const live = state.selectedLive;
+  if (live?.flow && live.key === taskLiveKey(task)) return live.flow;
+  return emptyHarnessFlow('no_task_flow');
+}
+
+function applyLiveFlow(state) {
+  if (!state.bundle) return false;
+  const flow = flowForSelectedTask(state);
+  if (flow === state.flow) return false;
+  state.flow = flow;
+  state.model = buildHarnessModel(state.bundle, flow, state.lang);
+  reconcileSelection(state);
+  return true;
+}
+
+async function refreshSelectedTaskLive(state) {
+  const task = getSelectedTask(state);
+  const key = taskLiveKey(task);
+  if (!key || state.selectedLive?.key === key) return;
+  const live = await loadSelectedTaskLive(state.ctx, task);
+  if (state.disposed || taskLiveKey(getSelectedTask(state)) !== key) return;
+  state.selectedLive = live;
+  applyLiveFlow(state);
+  if (mainIsBusy(state)) state.mainRenderPending = true;
+  else renderMain(state);
+  syncLiveTicker(state);
+  syncDetailDrawer(state);
+}
+
+// --- Render deferral while the operator is interacting -----------------------
+// Data-driven renders rebuild the main pane. While a pointer is down on the
+// timeline slider or the canvas, or an input inside the pane has focus, the
+// rebuild waits; it runs as soon as the interaction ends.
+
+function mainIsBusy(state) {
+  if (state.mainInteracting) return true;
+  const main = state.ctx?.host?.querySelector?.('[data-ctox-main]');
+  const active = typeof document !== 'undefined' ? document.activeElement : null;
+  if (!main || !active || !main.contains(active)) return false;
+  return ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName);
+}
+
+function flushPendingMainRender(state) {
+  if (!state.mainRenderPending || state.disposed || mainIsBusy(state)) return;
+  state.mainRenderPending = false;
+  renderMain(state);
+  syncLiveTicker(state);
+  syncDetailDrawer(state);
+}
+
+function wireMainInteractionGuard(state) {
+  const main = state.ctx?.host?.querySelector?.('[data-ctox-main]');
+  if (!main) return () => {};
+  const begin = (event) => {
+    const target = event.target?.closest?.('[data-timeline-range],[data-flow-canvas]');
+    if (!target) return;
+    state.mainInteracting = true;
+    state.timelineScrubbing = target.matches('[data-timeline-range]');
+  };
+  const end = () => {
+    if (!state.mainInteracting) return;
+    state.mainInteracting = false;
+    const scrubbed = state.timelineScrubbing;
+    state.timelineScrubbing = false;
+    if (scrubbed) {
+      // The slider moved through light patches; settle with a full pane render.
+      state.mainRenderPending = false;
+      renderMain(state);
+      centerSelectedNode(state);
+      syncLiveTicker(state);
+      syncDetailDrawer(state);
+      return;
+    }
+    flushPendingMainRender(state);
+  };
+  const blur = () => {
+    window.setTimeout(() => flushPendingMainRender(state), 0);
+  };
+  main.addEventListener('pointerdown', begin);
+  main.addEventListener('focusout', blur);
+  window.addEventListener('pointerup', end);
+  window.addEventListener('pointercancel', end);
+  return () => {
+    main.removeEventListener('pointerdown', begin);
+    main.removeEventListener('focusout', blur);
+    window.removeEventListener('pointerup', end);
+    window.removeEventListener('pointercancel', end);
+  };
+}
+
+// While the slider is being dragged the range input must survive; only the
+// parts around it are re-rendered from the same markup function.
+function patchTimelinePanel(state) {
+  const main = state.ctx?.host?.querySelector?.('[data-ctox-main]');
+  const panel = main?.querySelector('.ctox-timeline-panel');
+  if (!panel) {
+    renderMain(state);
+    return;
+  }
+  const model = state.model;
+  const selectedTask = getSelectedTask(state);
+  const timelineIndex = clampIndex(state.selectedStepIndex, model.timeline.length);
+  const taskStepView = selectedTask ? selectedTaskStepView(selectedTask, state) : null;
+  const selectedNode = taskStepView
+    ? taskStepView.node
+    : model.timeline[timelineIndex] || model.nodes.find((node) => node.id === model.activeNodeId) || model.nodes[0];
+  const metricSubject = metricSubjectTask(state, selectedTask);
+  const metrics = metricSubject ? taskTelemetry(metricSubject, state) : emptyTelemetry();
+  const template = document.createElement('template');
+  template.innerHTML = timelinePanel(state, selectedTask, selectedNode, metrics).trim();
+  const next = template.content.firstElementChild;
+  if (!next) return;
+  panel.setAttribute('style', next.getAttribute('style') || '');
+  panel.className = next.className;
+  for (const selector of ['.ctox-timeline-head', '.ctox-timeline-scale', '.ctox-timeline-detail']) {
+    const from = next.querySelector(selector);
+    const to = panel.querySelector(selector);
+    if (from && to) to.innerHTML = from.innerHTML;
+  }
+  const range = panel.querySelector('[data-timeline-range]');
+  const nextRange = next.querySelector('[data-timeline-range]');
+  if (range && nextRange) {
+    range.max = nextRange.max;
+    if (range.value !== nextRange.value) range.value = nextRange.value;
+  }
+  wireTimelineStepButtons(state, panel);
+}
+
+function wireTimelineStepButtons(state, root) {
+  root.querySelectorAll('[data-timeline-step]').forEach((button) => {
+    button.addEventListener('click', () => {
+      setTimelineStep(state, Number(button.dataset.timelineStep), { center: true });
+    });
+  });
+  root.querySelectorAll('[data-task-step-index]').forEach((button) => {
+    button.addEventListener('click', () => {
+      setTaskTimelineStep(state, Number(button.dataset.taskStepIndex), { center: true });
+    });
+  });
+}
+
+function clearPersistedFocusTask() {
+  try {
+    sessionStorage.removeItem('ctox.businessOs.focusTask');
+  } catch {}
+}
+
 function mayManageTask(state, task) {
   const scopeId = nativeTaskId(task) || task?.id || '';
   return canUseBusinessPermission({
@@ -4381,6 +4756,7 @@ function wireShellMessages(state) {
     const focusTask = persistFocusTask(event.detail);
     if (!focusTask) return;
     state.focusTask = focusTask;
+    state.focusTaskConsumed = false;
     state.focusTaskOpenDrawer = focusTask.openDrawer;
     if (!state.model) return;
     reconcileSelection(state);
@@ -4722,22 +5098,28 @@ function taskTelemetry(task, state) {
   const progress = taskExecutionProgress(task);
   const flowMatches = Boolean(task) && taskMatchesHarnessFlow(task, state);
   const flowMetrics = flowMatches ? aggregateFlowMetrics(state?.flow) : emptyMetrics();
+  // Finished attempts are measured in `ctox_runs`; a working attempt streams
+  // through the flow. A settled task therefore reads its runs, a live one the flow.
+  const runMetrics = task && state?.selectedLive && state.selectedLive.key === taskLiveKey(task)
+    ? aggregateRunMetrics(state.selectedLive.runs)
+    : null;
   const startedAtMs = executionStartedAtMs(task);
   const updatedAtMs = Number.isFinite(Number(task?.updatedAtMs))
     ? Number(task.updatedAtMs)
     : (progress?.updatedAtMs ?? null);
-  let seconds = flowMetrics.seconds;
+  const live = executionProgressIsWorking(progress) && Number.isFinite(startedAtMs);
+  let seconds = live ? flowMetrics.seconds : (runMetrics?.seconds ?? flowMetrics.seconds);
   if (seconds === null && Number.isFinite(startedAtMs) && Number.isFinite(updatedAtMs) && updatedAtMs >= startedAtMs) {
     seconds = Math.round((updatedAtMs - startedAtMs) / 1000);
   }
-  const live = executionProgressIsWorking(progress) && Number.isFinite(startedAtMs);
+  const pick = (liveValue, settledValue) => (live ? (liveValue ?? settledValue ?? null) : (settledValue ?? liveValue ?? null));
   return {
-    inputTokens: flowMetrics.inputTokens,
-    outputTokens: flowMetrics.outputTokens,
+    inputTokens: pick(flowMetrics.inputTokens, runMetrics?.inputTokens),
+    outputTokens: pick(flowMetrics.outputTokens, runMetrics?.outputTokens),
     // `activity_turns.tools` is the deduplicated durable count and outranks the
-    // audit stream; fall back to the flow only when no plan has been persisted.
-    toolCalls: progress?.toolTurns ?? flowMetrics.toolCalls,
-    thinkingTurns: progress?.thinkingTurns ?? null,
+    // audit stream; fall back to the runs, then the flow, when no plan exists.
+    toolCalls: progress?.toolTurns ?? pick(flowMetrics.toolCalls, runMetrics?.toolCalls),
+    thinkingTurns: progress?.thinkingTurns ?? runMetrics?.thinkingTurns ?? null,
     seconds,
     percent: progress?.percent ?? null,
     completedSteps: progress?.completedSteps ?? null,
@@ -5266,6 +5648,13 @@ function escapeAttr(value) {
 
 export const __ctoxTestHooks = {
   aggregateFlowMetrics,
+  aggregateRunMetrics,
+  harnessFlowFromEvents,
+  liveActivityFromEvents,
+  withLiveActivity,
+  flowForSelectedTask,
+  reconcileSelection,
+  changeConcernsSelectedTask,
   normalizeExecutionProgress,
   taskTelemetry,
   emptyTelemetry,
