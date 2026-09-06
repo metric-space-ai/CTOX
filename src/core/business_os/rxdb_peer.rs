@@ -5969,19 +5969,18 @@ fn projection_normalized_value_for_schema_field(
     };
     let declared_type = match property.schema_type.as_ref() {
         Some(declared) if declared.single_type().is_none() => {
-            // Union members retain their actual type; never coerce to the first
-            // declared alternative. String bounds still apply to valid strings.
             if !declared.matches_value(value) {
                 return fallback();
             }
+            // A valid union member must not be coerced to another member.
+            // Strings still pass through the existing maxLength enforcement.
             if value.is_string() {
                 Some("string")
             } else {
                 return ProjectionValueNormalization::Keep;
             }
         }
-        Some(declared) => declared.single_type(),
-        None => None,
+        declared => declared.and_then(|declared| declared.single_type()),
     };
     match declared_type {
         Some("number") => {
@@ -6136,17 +6135,15 @@ fn projection_default_value_for_field(
     if let Some(default) = &property.default {
         return default.clone();
     }
-    if let Some(default) = projection_union_default(property) {
-        return default;
-    }
     if field.ends_with("_at_ms") || field == "createdAt" {
         return Value::from(timestamp_default);
     }
     match property
         .schema_type
         .as_ref()
-        .and_then(|kind| kind.single_type())
+        .and_then(|declared| declared.default_type())
     {
+        Some("null") => Value::Null,
         Some("array") => Value::Array(Vec::new()),
         Some("boolean") => Value::Bool(false),
         Some("integer") | Some("number") => Value::from(0),
@@ -6156,25 +6153,6 @@ fn projection_default_value_for_field(
         _ if !property.properties.is_empty() => Value::Object(serde_json::Map::new()),
         _ => Value::Null,
     }
-}
-
-fn projection_union_default(property: &JsonSchema) -> Option<Value> {
-    let declared = property.schema_type.as_ref()?;
-    if declared.single_type().is_some() {
-        return None;
-    }
-    // A repair default must itself satisfy the union. Prefer null when the
-    // contract permits it, independently of the order used in the wire schema.
-    [
-        Value::Null,
-        Value::String(String::new()),
-        Value::from(0),
-        Value::Bool(false),
-        Value::Array(Vec::new()),
-        Value::Object(serde_json::Map::new()),
-    ]
-    .into_iter()
-    .find(|value| declared.matches_value(value))
 }
 
 pub(super) fn is_projection_tombstone(document: &Value) -> bool {
@@ -6281,19 +6259,92 @@ fn projection_tombstone_required_default(schema: &RxJsonSchema, field: &str) -> 
     if let Some(default) = &property.default {
         return default.clone();
     }
-    if let Some(default) = projection_union_default(property) {
-        return default;
-    }
     match property
         .schema_type
         .as_ref()
-        .and_then(|kind| kind.single_type())
+        .and_then(|declared| declared.default_type())
     {
+        Some("null") => Value::Null,
         Some("boolean") => Value::Bool(false),
         Some("number") | Some("integer") => Value::from(0),
         Some("array") => Value::Array(Vec::new()),
         Some("object") => Value::Object(serde_json::Map::new()),
         _ => Value::String(String::new()),
+    }
+}
+
+#[cfg(test)]
+mod projection_schema_union_tests {
+    use super::*;
+
+    fn nullable_property() -> JsonSchema {
+        serde_json::from_value(serde_json::json!({"type":["string","null"],"maxLength":4})).unwrap()
+    }
+
+    #[test]
+    fn union_projection_preserves_members_and_string_constraints() {
+        let property = nullable_property();
+        for value in [Value::Null, Value::String("task".into())] {
+            assert!(matches!(
+                projection_normalized_value_for_schema_field(
+                    "active_task_id",
+                    &property,
+                    &value,
+                    true,
+                    123
+                ),
+                ProjectionValueNormalization::Keep
+            ));
+        }
+        assert!(
+            matches!(projection_normalized_value_for_schema_field("active_task_id", &property, &Value::String("task-long".into()), true, 123), ProjectionValueNormalization::Replace(Value::String(value)) if value == "task")
+        );
+    }
+
+    #[test]
+    fn invalid_union_values_use_typed_fallbacks_not_arbitrary_coercion() {
+        let property = nullable_property();
+        assert!(matches!(
+            projection_normalized_value_for_schema_field(
+                "active_task_id",
+                &property,
+                &Value::from(7),
+                true,
+                123
+            ),
+            ProjectionValueNormalization::Replace(Value::Null)
+        ));
+        assert!(matches!(
+            projection_normalized_value_for_schema_field(
+                "active_task_id",
+                &property,
+                &Value::from(7),
+                false,
+                123
+            ),
+            ProjectionValueNormalization::Remove
+        ));
+    }
+
+    #[test]
+    fn projection_and_tombstone_defaults_honor_explicit_nullability() {
+        let schema: RxJsonSchema = serde_json::from_value(serde_json::json!({"version":0,"primaryKey":"id","type":"object","properties":{"id":{"type":"string"},"active_task_id":{"type":["string","null"]}},"required":["id","active_task_id"]})).unwrap();
+        assert_eq!(
+            projection_default_value_for_field(
+                "active_task_id",
+                &schema.properties["active_task_id"],
+                123
+            ),
+            Value::Null
+        );
+        assert_eq!(
+            projection_tombstone_required_default(&schema, "active_task_id"),
+            Value::Null
+        );
+        assert_eq!(
+            projection_tombstone_required_default(&schema, "id"),
+            Value::String(String::new())
+        );
     }
 }
 
