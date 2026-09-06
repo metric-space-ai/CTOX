@@ -24,6 +24,7 @@
     "qa:accessibility": "node scripts/assert-accessibility-contract.mjs",
     "qa:app-starter-browser": "node scripts/assert-app-starter-browser.mjs",
     "qa:creator-browser": "node scripts/assert-creator-browser.mjs",
+    "qa:shell-generation-native": "node scripts/shell-generation-native.browser.mjs",
     "audit:app-quality": "node scripts/audit-app-quality.mjs",
     "qa:design-gates": "node scripts/run-design-quality-gates.mjs",
     "shell:artifact": "node scripts/build-shell-artifact.mjs",

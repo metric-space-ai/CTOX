@@ -54,6 +54,13 @@ Abhängigkeitskette und einen Browsertest mit Aktivierung während des Ladens.
 App-Katalog und installierte Apps behalten ihre eigenen Resolver. ctox.dev
 darf bei fehlenden Assets keine Ersatz-Shell auswählen.
 
+Der [native Browser-Wechseltest vom 2026-09-06](dev/shell-generation-native-reproduction-20260906.md)
+reproduziert eine weitere Lücke ohne ctox.dev: zehn alte Testdokumente laden
+nach dem Wechsel über den echten nativen HTTP-Server das neue RxDB-Bundle.
+Der Test bleibt rot, bis die Generation erhalten bleibt. Seine genaue
+Binärprovenienz, begrenzte Reichweite, Einzelmessungen und die noch fehlende
+Prüfung signierter Slots sind im Befund dokumentiert.
+
 ## Vertrauenskette
 
 Der Release-Workflow baut ein deterministisches USTAR/Gzip-Artefakt, prüft den
