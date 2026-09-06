@@ -1,7 +1,7 @@
 {
   "id": "ctox",
   "title": "CTOX",
-  "description": "Home for the crew, with a live workplace, queue controls and member profiles.",
+  "description": "Native control surface for queues, runs, sync state, and agent context.",
   "entry": "modules/ctox/index.html",
   "collections": [
     "business_commands",
@@ -32,15 +32,15 @@
     "shell_contract": "v2",
     "shell_geometry_contract": "business-os-v2-global-1",
     "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-ctox\" xmlns=\"http://www.w3.org/2000/svg\"><polygon points=\"12 2 22 8 22 16 12 22 2 16 2 8\" fill=\"currentColor\" fill-opacity=\"0.12\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polygon><polyline points=\"12 22 12 12 22 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 12 2 8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><polyline points=\"12 2 12 12\" stroke=\"currentColor\" stroke-width=\"1.5\" stroke-dasharray=\"2 2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></polyline><circle cx=\"12\" cy=\"12\" r=\"3.5\" fill=\"currentColor\" fill-opacity=\"0.88\"></circle></svg>",
-    "left": "crew views",
-    "center": "crew home and workplace",
+    "left": "runtime scopes",
+    "center": "active workbench",
     "default_width": 1320,
     "default_height": 860,
     "min_width": 640,
     "min_height": 480
   },
   "category": "System",
-  "version": "1.2.0",
+  "version": "1.1.1",
   "developer": "CTOX",
   "license": "AGPL-3.0-only",
   "tags": [
@@ -50,7 +50,7 @@
     "governance"
   ],
   "store": {
-    "summary": "Meet the crew, follow its work and manage tasks, profiles and learnings.",
+    "summary": "Native CTOX control surface for queue tasks, runs, module reports, releases, and source evidence.",
     "repository": "metric-space-ai/ctox",
     "source_path": "modules/ctox",
     "installable": false,

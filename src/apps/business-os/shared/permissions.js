@@ -105,11 +105,6 @@ export function canUseBusinessPermission({
   const moduleAssigned = scopeType === 'module'
 
     && isModuleAssignedToActor(governance, normalizedScopeId, actor.id);
-  // Task controls use BusinessOsScope::task(id, false, false) natively.
-  if (permission === BusinessOsPermissions.CtoxTaskManage && scopeType === "task") {
-    assigned = false;
-    owned = false;
-  }
   const effectiveAssigned = Boolean(assigned || moduleAssigned);
 
   if (explicitGrantAllows(model, actor, permission, scopeType, normalizedScopeId)) {
@@ -256,7 +251,7 @@ function fallbackRoleAllows(role, permission, scopeType, { assigned = false, own
   const normalizedRole = normalizeRole(role);
   if (roleCanManage(normalizedRole) && OWNER_ADMIN_PERMISSIONS.has(permission)) return true;
   if (permission === BusinessOsPermissions.CtoxTaskCreate) return true;
-
+  if (scopeType === 'task' && owned && permission === BusinessOsPermissions.CtoxTaskManage) return true;
   if (scopeType === 'module' && assigned && normalizedRole === 'founder') {
     return ASSIGNED_MODULE_PERMISSIONS.has(permission);
   }

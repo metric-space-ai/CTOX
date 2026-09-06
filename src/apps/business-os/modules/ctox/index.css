@@ -1,546 +1,1825 @@
-/* App-local workspace; the shell owns its window, chrome and resize handles. */
-.crew-home-app {
-  position: relative;
-  display: block;
-  height: 100%;
-  min-height: 0;
-  overflow: hidden;
-  color: var(--text, var(--text-primary, #263344));
-  background: var(--surface, #f6f7f9);
-  font: 14px/1.5 var(--font-sans, system-ui, sans-serif);
-  container-type: inline-size;
-}
-.crew-home-app *,
-.crew-home-app *::before,
-.crew-home-app *::after {
-  box-sizing: border-box;
-}
-.crew-home-app [hidden] {
-  display: none !important;
-}
-.crew-home-pane {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-  min-height: 0;
-  border: 0;
-}
-.crew-app-header {
-  flex: none;
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  padding: 16px 28px;
-  border-bottom: 1px solid var(--border, #dce1e8);
-}
-.crew-app-header .ctox-pane-title {
-  font-size: 16px;
-  margin: 0;
-}
-.shell-window[data-shell-contract="v2"] .crew-app-header {
-  padding-left: 80px;
-  padding-right: 74px;
-}
-.crew-home-active-heading {
-  margin-bottom: 16px;
-}
-.crew-app-header nav {
-  display: flex;
-  gap: 4px;
-  flex-wrap: wrap;
-}
-.crew-home-app button {
-  font: inherit;
-  color: inherit;
-  background: transparent;
-  border: 1px solid var(--border, #dce1e8);
-  border-radius: 6px;
-  padding: 8px 13px;
-  cursor: pointer;
-}
-.crew-home-app button:hover {
-  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
-}
-.crew-home-app button:focus-visible,
-.crew-home-app input:focus-visible,
-.crew-home-app textarea:focus-visible,
-.crew-home-app select:focus-visible {
-  outline: 2px solid var(--accent, #1685ee);
-  outline-offset: 3px;
-}
-.crew-home-app button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-.crew-home-app nav button {
-  border-color: transparent;
-}
-.crew-home-app nav button[aria-current="page"] {
-  background: var(--surface-hover, rgba(127, 127, 127, 0.08));
-  font-weight: 650;
-}
-.crew-home-app button.crew-primary {
-  color: var(--accent, #1685ee);
-  border-color: currentColor;
-}
-.crew-status {
-  display: flex;
-  gap: 10px 18px;
-  flex-wrap: wrap;
-  align-items: center;
-  padding: 10px 28px;
-  min-height: 42px;
-  flex: none;
-  color: var(--muted, #667383);
-  font-size: 12px;
-  border-bottom: 1px solid var(--border, #dce1e8);
-}
-.crew-status strong {
-  color: var(--text, #263344);
-}
-.crew-status-dot {
-  height: 6px;
-  width: 6px;
-  border-radius: 50%;
-  background: var(--success, #34a26f);
-}
-.crew-status-dot.is-paused {
-  background: var(--muted, #667383);
-}
-.crew-view {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
-  padding: 32px 40px 48px;
-}
-.crew-view-heading {
-  margin: 0 0 30px;
-}
-.crew-view-heading h1,
-.crew-task-heading h1 {
-  font-size: clamp(24px, 3cqw, 34px);
-  letter-spacing: -0.035em;
-  line-height: 1.18;
-  font-weight: 600;
-  margin: 7px 0 12px;
-  overflow-wrap: anywhere;
-}
-.crew-view-heading p,
-.crew-eyebrow {
-  color: var(--muted, #667383);
-  margin: 5px 0;
-}
-.crew-view h2 {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 0 0 18px;
-}
-.crew-current {
-  display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
-  align-items: center;
-  gap: 28px;
-  padding: 0 0 18px;
-  border-bottom: 1px solid var(--border, #dce1e8);
-}
-.crew-current .crew-creature--workplace {
-  --crew-size: 144px;
-}
-.crew-current + .crew-home-room {
-  padding-top: 18px;
-}
-.crew-current + .crew-home-room .crew-member {
-  padding-top: 4px;
-  padding-bottom: 4px;
-}
-.crew-current + .crew-home-room .crew-creature--home {
-  --crew-size: 72px;
-}
-.crew-current h2 {
-  font-size: 24px;
-  max-width: 650px;
-  overflow-wrap: anywhere;
-}
-.crew-home-room {
-  display: flex;
-  align-items: flex-end;
-  flex-wrap: wrap;
-  gap: 28px 54px;
-  padding: 48px 12px 24px;
-}
-.crew-home-app .crew-member {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 7px;
-  padding: 12px 18px;
-  border: 1px solid transparent;
-  border-bottom-color: var(--border, #dce1e8);
-  min-width: 128px;
-}
-.crew-member strong {
-  font-size: 17px;
-  font-weight: 600;
-}
-.crew-member > span:last-child {
-  font-size: 12px;
-  color: var(--muted, #667383);
-}
-.crew-task-heading {
-  display: flex;
-  align-items: center;
-  gap: 28px;
-  margin-bottom: 22px;
-}
-.crew-task-heading > div {
-  min-width: 0;
-}
-.crew-task-heading .crew-member {
-  flex: none;
-}
-.crew-prompt {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  max-width: 850px;
-  margin: 24px 0;
-  line-height: 1.7;
-}
-.crew-section {
-  padding: 26px 0;
-  border-top: 1px solid var(--border, #dce1e8);
-}
-.crew-plan {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-  max-width: 850px;
-}
-.crew-plan li {
-  display: flex;
-  gap: 16px;
-  padding: 14px 0;
-  align-items: flex-start;
-}
-.crew-step-number {
-  display: grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  flex: none;
-  border: 1px solid var(--border, #dce1e8);
-  border-radius: 50%;
-  font-variant-numeric: tabular-nums;
-}
-.crew-plan li div {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.crew-plan li div span {
-  color: var(--muted, #667383);
-  font-size: 12px;
-}
-.crew-plan .is-in_progress .crew-step-number {
-  border: 2px solid var(--accent, #1685ee);
-  color: var(--accent, #1685ee);
-}
-.crew-plan .is-completed .crew-step-number::after {
-  content: "✓";
-}
-.crew-plan .is-completed .crew-step-number {
-  font-size: 0;
-}
-.crew-plan .is-completed .crew-step-number::after {
-  font-size: 16px;
-}
-.crew-events {
-  list-style: none;
-  padding: 0;
-  margin: 0;
-}
-.crew-events li {
-  display: grid;
-  grid-template-columns: 150px minmax(0, 1fr);
-  gap: 18px;
-  padding: 12px 0;
-  border-bottom: 1px solid var(--border, #dce1e8);
-}
-.crew-events p {
-  margin: 4px 0;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-.crew-events time,
-.crew-run time {
-  font-size: 12px;
-  color: var(--muted, #667383);
-}
-.crew-run {
-  padding: 18px 0;
-  border-bottom: 1px solid var(--border, #dce1e8);
-  overflow-wrap: anywhere;
-}
-.crew-run header {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-}
-.crew-run-metrics {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 16px;
-  font-size: 12px;
-  color: var(--muted, #667383);
-  padding-top: 8px;
-}
-.crew-run blockquote {
-  margin: 14px 0 0;
-}
-.crew-actions,
-.crew-owner-controls,
-.crew-paging {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  flex-wrap: wrap;
-}
-.crew-action-hint,
-.crew-owner-controls > span,
-.crew-paging small {
-  font-size: 12px;
-  color: var(--muted, #667383);
-}
-.crew-filters {
-  display: flex;
-  align-items: end;
-  gap: 14px;
-  flex-wrap: wrap;
-  margin-bottom: 18px;
-}
-.crew-home-app label {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  font-size: 12px;
-  font-weight: 550;
-}
-.crew-home-app input,
-.crew-home-app select,
-.crew-home-app textarea {
-  width: 100%;
-  border: 1px solid var(--border, #dce1e8);
-  background: var(--background, #f6f7f9);
-  color: inherit;
-  border-radius: 5px;
-  padding: 8px 10px;
-  font: inherit;
-  font-size: 14px;
-}
-.crew-home-app textarea {
-  min-height: 95px;
-  resize: vertical;
-}
-.crew-home-app input[type="range"] {
-  padding: 0;
-  accent-color: var(--accent, #1685ee);
-}
-.crew-filters label {
-  flex: 1;
-  min-width: 150px;
-}
-.crew-owner-controls {
-  margin: 22px 0;
-}
-.crew-queue-group {
-  padding: 24px 0 8px;
-  border-top: 1px solid var(--border, #dce1e8);
-}
-.crew-queue-group:not(:has(.crew-task-row)) { padding:12px 0; }
-.crew-queue-group:not(:has(.crew-task-row)) h2 { margin:0; }
-.crew-queue-group h2 {
-  display: flex;
-  gap: 12px;
-  align-items: baseline;
-}
-.crew-queue-group h2 span {
-  font-size: 12px;
-  color: var(--muted, #667383);
-}
-.crew-home-app .crew-task-row {
-  width: 100%;
-  display: grid;
-  grid-template-columns: minmax(150px, 1fr) minmax(120px, 0.8fr) 140px;
-  gap: 18px;
-  text-align: left;
+/* CTOX module — flow console on top of the standard shell/kit classes.
+   The frame (.ctox-workspace/.ctox-pane/.ctox-column-resizer), pane headers,
+   chips, badges, list items, buttons, inputs, callouts, cards, fields and the
+   context menu all come from shared/base.css + app.css. This file only carries
+   what the kit cannot express: the compact per-task pipeline, workflow
+   canvas/SVG state machine, live metric strip, timeline scrubber and drawer
+   stepper. */
+
+/* Shell V2 compact pane headers: task/live-flow titles share one row and the
+   task filter strip scrolls locally instead of wrapping into the shell chrome. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app { padding: 0 0 84px; overflow: hidden; background: var(--shell-v2-surface, var(--bg)); }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane { border: 0; border-radius: 0; background: var(--shell-v2-surface, var(--surface)); box-shadow: none; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-header { box-sizing: border-box; min-height: var(--shell-v2-header-row-size, 37px); padding: 0 8px; background: var(--shell-v2-surface-alt, var(--surface-2)); border-bottom: 1px solid var(--shell-v2-line, var(--line)); display: grid; grid-template-rows: var(--shell-v2-header-row-size, 37px) auto; align-content: start; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-title-row { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-titles { flex-direction: row; align-items: baseline; gap: 8px; padding-top: 0; overflow: hidden; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-kicker { flex: 0 0 auto; line-height: 1; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
+
+.ctox-harness-app {
+  /* custom: workflow canvas + SVG state machine tokens (no kit equivalent) */
+  --ctox-left-width: 340px;
+  --ctox-canvas: color-mix(in srgb, var(--bg) 84%, var(--surface));
+  --ctox-flow-lane-fill: color-mix(in srgb, var(--surface-2) 38%, transparent);
+  --ctox-flow-lane-stroke: color-mix(in srgb, var(--line) 70%, transparent);
+  --ctox-flow-edge: color-mix(in srgb, var(--muted) 52%, transparent);
+  --ctox-flow-node-fill: color-mix(in srgb, var(--surface) 94%, var(--surface-2));
+  --ctox-flow-node-stroke: color-mix(in srgb, var(--line) 82%, transparent);
+  --ctox-flow-channel-fill: color-mix(in srgb, var(--surface) 90%, var(--surface-2));
+  --ctox-flow-channel-open-fill: color-mix(in srgb, var(--surface-2) 76%, var(--surface));
+  --ctox-flow-muted-fill: color-mix(in srgb, var(--muted) 66%, transparent);
+  /* custom: keep the console bottom clear of the floating shell chat dock */
+  padding-bottom: 84px;
+}
+
+/* The kit owns the tracks and resizer behavior; the module only pins panes to
+   their explicit tracks so narrow auto-flow can never place the main pane on
+   the resizer column. */
+.ctox-harness-left {
+  grid-column: 1;
+  /* The single content column must not be widened by the intrinsic min-content
+     width of one of its rows (the collapsed filter tray's selects do exactly
+     that): without minmax(0, 1fr) the well grows past the pane and the pinned
+     row actions end up clipped by the pane's own overflow. */
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr) auto;
+}
+
+.ctox-harness-app > [data-resizer="left"] {
+  grid-column: 2;
+}
+
+.ctox-harness-main {
+  grid-column: 3;
+}
+
+/* Flow console layout — header, metrics, recessed canvas, timeline, footer. */
+.ctox-harness-main {
+  grid-template-rows: auto auto minmax(0, 1fr) auto auto;
+}
+
+/* Left column rides the shell-owned canonical grammar (header → filterbar →
+   tray → view band → well → footer); the chrome classes come from
+   shared/base.css. Filterbar and tray are siblings of the header, not its
+   children, so the header itself stays exactly one shell header row high. */
+.ctox-harness-left > .ctox-pane-header { grid-row: 1; }
+.ctox-harness-left > .ctox-filterbar { grid-row: 2; }
+.ctox-harness-left > .ctox-filter-tray { grid-row: 3; }
+.ctox-harness-left > .ctox-view-switch { grid-row: 4; }
+.ctox-harness-left > .ctox-well { grid-row: 5; }
+.ctox-harness-left > .ctox-pane-footer { grid-row: 6; }
+.ctox-harness-main > .ctox-pane-header { grid-row: 1; }
+.ctox-harness-main > .ctox-metrics-strip { grid-row: 2; }
+.ctox-harness-main > .ctox-flow-well { grid-row: 3; }
+.ctox-harness-main > .ctox-timeline-panel { grid-row: 4; }
+.ctox-harness-main > .ctox-harness-footer { grid-row: 5; }
+
+/* ---------------------------------------------------------------------------
+   Shell V2 header zones. `.shell-window-content` is `inset: 0` and is never
+   indented, so the app has to keep the three shell zones free itself: the
+   80px app icon top-left, the header band across the full width and the 74px
+   window controls top-right. Geometry follows the Knowledge reference.
+   -------------------------------------------------------------------------- */
+/* In a V2 window the 6px shell frame IS the pane frame, and the 12px channel
+   between the columns is the separator (contract §9). A pane border on top of
+   that would draw a second frame — and its 1px left edge sits inside the 80x74
+   icon zone as soon as the shell's workspace padding drops to 6px (narrow
+   window). Borderless and square, like the Knowledge reference. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-pane {
   border: 0;
   border-radius: 0;
-  border-bottom: 1px solid var(--border, #dce1e8);
-  padding: 14px 0;
 }
-.crew-task-row strong,
-.crew-task-row small {
-  display: block;
-  overflow-wrap: anywhere;
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-pane > .ctox-pane-header {
+  box-sizing: border-box;
+  height: var(--shell-v2-header-row-size, 37px);
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding: 0 14px;
 }
-.crew-task-row small,
-.crew-task-row time,
-.crew-task-row > span:nth-child(2) {
-  font-size: 12px;
-  color: var(--muted, #667383);
-  overflow-wrap: anywhere;
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-pane > .ctox-pane-header > .ctox-pane-title-row {
+  height: 100%;
+  min-width: 0;
 }
-.crew-task-row time {
-  text-align: right;
+
+/* Kicker and title sit side by side — the stacked pair does not fit one row —
+   and the title truncates instead of being squeezed to zero width. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-header .ctox-pane-titles {
+  flex-direction: row;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 0;
+  overflow: hidden;
 }
-.crew-paging {
-  margin-top: 24px;
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-header .ctox-pane-title {
+  min-width: 0;
+  margin-top: 0;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
-.crew-empty,
-.crew-identity-missing {
-  color: var(--muted, #667383);
-  font-size: 13px;
+
+/* Pre-boot: the task column aside ships empty (the chrome is JS-built by
+   buildTaskColumn, pinned by the module guard test). An empty pane must not
+   reserve a grid track — neither a 340px column nor a stacked row — so it is
+   removed and the console collapses to the single flow column. */
+.ctox-harness-app > .ctox-harness-left:empty {
+  display: none;
 }
-.crew-error {
-  color: var(--danger, #c74949);
-  overflow-wrap: anywhere;
+
+.ctox-harness-app:has(> .ctox-harness-left:empty) {
+  grid-template-columns: minmax(0, 1fr);
 }
-.crew-notice {
-  padding: 12px 28px;
-  border-bottom: 1px solid var(--border, #dce1e8);
+
+.ctox-harness-app:has(> .ctox-harness-left:empty) > [data-resizer] {
+  display: none;
 }
-.crew-profile {
-  position: absolute;
-  z-index: 10;
-  right: 0;
-  top: 0;
-  bottom: 0;
-  width: min(470px, 100%);
-  overflow: auto;
-  background: var(--surface, #f6f7f9);
-  border-left: 1px solid var(--border, #dce1e8);
-  padding: 28px;
+
+.ctox-harness-app:has(> .ctox-harness-left:empty) > .ctox-harness-main {
+  grid-column: 1;
 }
-.crew-profile-heading {
-  position: relative;
-  margin-bottom: 26px;
+
+/* With no task column the flow head IS the top-left corner of the window, so
+   it takes over both shell zone duties: it starts past the 80px icon and it
+   spans the full two header rows the icon is tall (contract §2), which keeps
+   the whole 80x74 icon zone inside the header instead of over the canvas. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app:has(> .ctox-harness-left:empty) > .ctox-harness-main > .ctox-pane-header {
+  height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  min-height: calc(var(--shell-v2-header-row-size, 37px) * 2);
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
 }
-.crew-profile-heading h2 {
-  font-size: 26px;
-  margin: 8px 0;
+
+/* First head of the top row: the 80px app icon spans the header row AND the
+   filterbar below it, so both start past the icon. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-pane-header,
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-filterbar {
+  padding-left: calc(var(--shell-v2-icon-size, 80px) + 14px);
 }
-.crew-profile-heading .crew-close {
-  position: absolute;
-  right: 0;
-  top: 0;
+
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-filterbar {
+  box-sizing: border-box;
+  min-height: var(--shell-v2-header-row-size, 37px);
+  padding-right: 14px;
+  padding-bottom: 0;
 }
-.crew-profile h3 {
-  margin: 0 0 18px;
-  font-size: 16px;
+
+/* Last head of the top row: keep the 74px window controls free. */
+.shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-main > .ctox-pane-header {
+  padding-right: 70px;
 }
-.crew-profile form {
-  display: flex;
-  flex-direction: column;
-  gap: 18px;
+
+/* Loading empty state spans the whole console grid. */
+.ctox-harness-main > .ctox-empty {
+  grid-row: 1 / -1;
 }
-.crew-axis input {
-  margin: 3px 0 8px;
-}
-.crew-color-swatch {
-  display: inline-block;
-  height: 10px;
-  width: 10px;
-  border-radius: 50%;
-  margin-right: 6px;
-}
-.crew-stats {
+
+/* custom: loading skeleton rows while the queue hydrates */
+.ctox-loading-list {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 18px;
+  gap: 10px;
+  padding: 10px 14px 0;
 }
-.crew-stats dt {
-  color: var(--muted, #667383);
+
+.ctox-loading-list span {
+  display: block;
+  height: 34px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--hairline);
+  position: relative;
+}
+
+.ctox-loading-list span::before,
+.ctox-loading-list span::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 16%, transparent);
+}
+
+.ctox-loading-list span::before {
+  top: 5px;
+  width: 42%;
+  height: 8px;
+}
+
+.ctox-loading-list span::after {
+  top: 21px;
+  width: 74%;
+  height: 6px;
+}
+
+/* The task-column chrome (filterbar → tray → counted band → well → footer) is
+   the shell-owned canonical grammar from shared/base.css — this module declares
+   NO chrome CSS. Only the well padding and the four-up band grid are scoped. */
+.ctox-harness-left > .ctox-well {
+  padding: 6px;
+  border-top: 1px solid var(--line);
+}
+
+.ctox-harness-left .ctox-pane-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.ctox-harness-left .ctox-pane-tab {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-flow-well {
+  min-height: 0;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.ctox-harness-footer {
+  min-width: 0;
+  overflow: hidden;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  padding: 5px 10px;
+  font-size: 10.5px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The two views are deliberately different shapes, not two paddings of the
+   same shape (Betreiber-Direktive 31.08.2026):
+     is-cards        roomy shards, 3 lines (title / meta row / stage pipeline)
+     is-compact-flow one dense line per entry, hairline separated
+   The gap belongs to the card view; the list view packs rows edge to edge. */
+.ctox-task-list {
+  display: grid;
+  align-content: start;
+  /* Rows are content sized, never squeezed: the items carry `overflow: hidden`,
+     so their automatic minimum size is 0 and plain `auto` tracks would shrink
+     the whole list to fit the well instead of letting the well scroll — which
+     is exactly what a short (stacked, 720px) task column does. */
+  grid-auto-rows: max-content;
+}
+
+.ctox-task-list.is-cards {
+  gap: 6px;
+}
+
+.ctox-task-list.is-compact-flow {
+  gap: 0;
+}
+
+.ctox-task-card,
+.ctox-task-flow-row {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  background: var(--surface);
+  padding: 0;
+}
+
+.ctox-task-card::before,
+.ctox-task-flow-row::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 2px;
+  background: transparent;
+}
+
+.ctox-task-card.is-selected,
+.ctox-task-flow-row.is-selected {
+  background: var(--accent-soft);
+}
+
+.ctox-task-card.is-selected::before,
+.ctox-task-flow-row.is-selected::before {
+  background: var(--accent);
+}
+
+.ctox-task-card.is-pinned:not(.is-selected),
+.ctox-task-flow-row.is-pinned:not(.is-selected) {
+  background: color-mix(in srgb, var(--accent-soft) 45%, var(--surface));
+}
+
+/* Card selector: the generous one. Three stacked lines, roomy padding. */
+.ctox-task-selector {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  padding: 11px 40px 12px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ctox-task-selector:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: -2px;
+}
+
+.ctox-task-selector > strong,
+.ctox-task-selector > small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-task-selector > strong {
+  color: var(--text-strong);
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.ctox-task-selector > small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+/* Card meta row: the detail fields the console already loads — status first,
+   then assignment/source and last change, dot separated. */
+.ctox-task-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.ctox-task-meta > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-task-meta > span + span::before {
+  content: "· ";
+  color: color-mix(in srgb, var(--muted) 60%, transparent);
+}
+
+.ctox-task-meta-status {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.ctox-task-meta-status.is-problem {
+  color: var(--danger);
+}
+
+.ctox-task-actions {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  display: inline-flex;
+  z-index: 2;
+}
+
+.ctox-task-actions .ctox-pane-icon.is-active {
+  color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.ctox-task-pipeline {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  min-width: 0;
+  margin-top: 2px;
+}
+
+.ctox-task-pipeline > span {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  min-width: 0;
+}
+
+.ctox-task-pipeline i {
+  display: block;
+  height: 3px;
+  background: color-mix(in srgb, var(--line) 74%, transparent);
+}
+
+.ctox-task-pipeline em {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-task-pipeline .is-complete i {
+  background: color-mix(in srgb, var(--success) 72%, var(--line));
+}
+
+.ctox-task-pipeline .is-current i {
+  background: var(--accent);
+}
+
+.ctox-task-pipeline .is-current em {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.ctox-task-pipeline.is-problem .is-current i {
+  background: var(--danger);
+}
+
+/* ---------------------------------------------------------------------------
+   List view: exactly ONE line per entry — title left, a single short meta
+   (the four-stage micro bar) right. Rows sit edge to edge on a hairline, so
+   the well shows the maximum number of tasks per screen.
+   -------------------------------------------------------------------------- */
+.ctox-task-flow-row {
+  border-bottom: 1px solid var(--hairline, var(--line));
+}
+
+.ctox-task-flow-row:last-child {
+  border-bottom: 0;
+}
+
+.ctox-task-flow-row .ctox-task-selector {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 0;
+  padding: 4px 30px 4px 10px;
+}
+
+.ctox-task-flow-row .ctox-task-selector > strong {
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+/* Micro pipeline: four segments, no visible captions. The stage names stay in
+   the accessibility tree (and the wrapper keeps its aria-label naming the
+   current stage), so the dense row loses no information. */
+.ctox-task-pipeline.is-compact {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  width: auto;
+  margin: 0;
+}
+
+.ctox-task-pipeline.is-compact > span {
+  display: block;
+  width: 12px;
+  min-width: 12px;
+}
+
+.ctox-task-pipeline.is-compact em {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The pin action has to fit the one-line row instead of a 30px card corner. */
+.ctox-task-flow-row .ctox-task-actions {
+  top: 50%;
+  right: 3px;
+  transform: translateY(-50%);
+}
+
+.ctox-task-flow-row .ctox-task-actions .ctox-pane-icon {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+}
+
+.ctox-task-list > p {
+  margin: 0;
+  padding: 9px 14px;
+  color: var(--muted);
   font-size: 12px;
 }
-.crew-stats dd {
-  font-size: 24px;
-  margin: 3px 0 0;
+
+/* On-demand Web Stack popover on the main view — hidden by default, toggled
+   from the collected header icon; anchored to the main pane's top-right. */
+.ctox-harness-main {
+  position: relative;
 }
-.crew-learning {
-  padding: 16px 0;
-  border-bottom: 1px solid var(--border, #dce1e8);
-}
-.crew-learning small {
-  color: var(--muted, #667383);
-}
-.crew-learning p {
-  overflow-wrap: anywhere;
-}
-.crew-dialog-layer {
+
+.ctox-web-stack-panel {
   position: absolute;
-  inset: 0;
+  top: 46px;
+  right: 12px;
   z-index: 20;
-  background: rgba(32, 40, 50, 0.2);
+  display: grid;
+  gap: 8px;
+  width: min(340px, calc(100% - 24px));
+  max-height: min(72%, 520px);
+  overflow: auto;
+  padding: 10px 12px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--panel-radius);
+  background: var(--surface);
+}
+
+.ctox-web-stack-panel[hidden] {
+  display: none;
+}
+
+.ctox-web-stack-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ctox-web-stack-head-titles {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ctox-web-stack-head-titles .ctox-badge {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ctox-web-stack-head-actions {
+  display: inline-flex;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+/* custom: web stack projection panel — compact source/capture rows */
+.ctox-web-stack-body {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.ctox-web-stack-body > small,
+.ctox-web-stack-source-list > small,
+.ctox-web-stack-capture-list > small {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.25;
+}
+
+.ctox-web-stack-source-list,
+.ctox-web-stack-capture-list {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ctox-web-stack-capture-list > span {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 760;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ctox-web-stack-source,
+.ctox-web-stack-capture {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+  border-top: 1px solid var(--hairline);
+  padding-top: 5px;
+}
+
+.ctox-web-stack-source > span,
+.ctox-web-stack-capture > span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.ctox-web-stack-source strong,
+.ctox-web-stack-source small,
+.ctox-web-stack-capture strong,
+.ctox-web-stack-capture small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-web-stack-source strong,
+.ctox-web-stack-capture strong {
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.2;
+}
+
+.ctox-web-stack-source small,
+.ctox-web-stack-capture small {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.25;
+}
+
+/* custom: live indicator with spinner (runtime liveness, no kit equivalent) */
+.ctox-live-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  width: max-content;
+  max-width: 100%;
+  color: color-mix(in srgb, var(--accent) 82%, var(--text));
+  font-size: 11px;
+  font-weight: 760;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.ctox-live-chip i {
+  width: 11px;
+  height: 11px;
+  border: 2px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-top-color: var(--accent);
+  border-radius: 999px;
+  animation: ctox-loading-spin 0.85s linear infinite;
+}
+
+.ctox-live-chip strong {
+  color: inherit;
+  font-size: inherit;
+  font-weight: 780;
+}
+
+.ctox-live-chip.is-compact {
+  margin-top: 3px;
+  font-size: 10.5px;
+}
+
+.ctox-live-chip.is-unavailable {
+  color: var(--muted);
+}
+
+.ctox-live-chip.is-unavailable i {
+  animation: none;
+  border-color: color-mix(in srgb, var(--muted) 42%, transparent);
+}
+
+/* custom: live metric strip for the flow console. One hairline between cards,
+   no gap-as-frame trick. */
+.ctox-metrics-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-bottom: 1px solid var(--hairline);
+}
+
+.ctox-metric-card + .ctox-metric-card {
+  border-left: 1px solid var(--hairline);
+}
+
+.ctox-metric-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  background: var(--surface);
+  padding: 5px 12px;
+}
+
+.ctox-metric-card span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-metric-card strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 750;
+  line-height: 1.1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ctox-metric-card.is-live strong {
+  color: color-mix(in srgb, var(--accent) 84%, var(--text));
+}
+
+.ctox-metric-card.is-empty strong {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+/* custom: workflow canvas — large pannable SVG drawing surface */
+.ctox-canvas-container {
+  position: relative;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 1fr;
+  overflow: hidden;
+  /* The workflow SVG has a deliberately large intrinsic drawing surface.
+     Keep its layout and paint invalidation inside the canvas when the outer
+     Business OS window changes mode or size. */
+  contain: layout paint;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.ctox-flow-canvas {
+  position: relative;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: auto;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  background: var(--ctox-canvas);
+  overscroll-behavior: contain;
+}
+
+.ctox-flow-canvas:active {
+  cursor: grabbing;
+}
+
+/* custom: floating zoom toolbar over the canvas. Plain surface, no blur
+   or drop shadow — the controls are what matter, the chrome is not. */
+.ctox-flow-toolbar {
+  position: absolute;
+  bottom: 16px;
+  right: 16px;
+  z-index: 6;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--control-radius);
+  background: var(--surface-2);
+  padding: 3px 6px;
+}
+
+.ctox-flow-toolbar button {
+  display: inline-grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text);
+  padding: 0;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ctox-flow-toolbar button:hover {
+  background: color-mix(in srgb, var(--accent) 15%, transparent);
+  color: var(--accent);
+}
+
+.ctox-flow-toolbar button:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.ctox-flow-toolbar button:disabled:hover {
+  background: transparent;
+  color: var(--text);
+}
+
+.ctox-flow-toolbar span {
+  min-width: 42px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  user-select: none;
+}
+
+.ctox-flow-canvas-inner {
+  min-width: 980px;
+  min-height: 780px;
+  margin: 10px auto 16px;
+  contain: layout paint style;
+}
+
+/* custom: SVG state machine diagram (lanes, edges, nodes) */
+.ctox-flow-diagram {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.ctox-flow-creature-slot {
+  overflow: visible;
+  cursor: pointer;
+  outline: none;
+  opacity: 0.92;
+  transition: opacity 180ms ease, filter 180ms ease;
+}
+
+.ctox-flow-creature-slot:hover,
+.ctox-flow-creature-slot:focus-visible,
+.ctox-flow-creature-slot.is-selected {
+  opacity: 1;
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--accent) 66%, transparent));
+}
+
+.ctox-flow-creature-shell {
+  position: relative;
+  display: block;
+  width: 44px;
+  height: 44px;
+}
+
+.ctox-flow-creature-slot.is-selected .ctox-flow-creature-shell::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border: 1px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  border-radius: 50%;
+  pointer-events: none;
+  animation: ctox-flow-creature-focus 1.6s ease-out infinite;
+}
+
+.ctox-flow-creature-shell .ctox-crew-creature {
+  display: inline-grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  contain: layout style;
+  transform-origin: 50% 78%;
+}
+
+.ctox-flow-creature-shell .ctox-crew-creature:is(.is-working, .is-review),
+.ctox-flow-creature-shell .ctox-crew-creature:is(.is-working, .is-review) .ctox-crew-body,
+.ctox-flow-creature-shell .ctox-crew-creature:is(.is-working, .is-review) .ctox-crew-eyes {
+  will-change: transform;
+}
+
+.ctox-flow-creature-shell .ctox-crew-creature svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.ctox-flow-creature-shell .ctox-crew-body {
+  fill: var(--crew-color);
+  filter: drop-shadow(0 3px 5px color-mix(in srgb, var(--crew-color) 32%, transparent));
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.ctox-flow-creature-shell .ctox-crew-eyes,
+.ctox-flow-creature-shell .ctox-crew-eyes-x,
+.ctox-flow-creature-shell .ctox-crew-eyes-sleeping {
+  fill: none;
+  stroke: #090a0c;
+  stroke-width: 5;
+  stroke-linecap: round;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.ctox-flow-creature-shell .ctox-crew-creature.is-failed {
+  transform: translateY(10px) scale(1.08, .7);
+}
+
+.ctox-flow-creature-shell .ctox-crew-creature.is-failed .ctox-crew-body {
+  transform: scale(1.14, .72);
+  transform-origin: 50% 90%;
+}
+
+@keyframes ctox-flow-creature-focus {
+  0% { opacity: .68; transform: scale(.9); }
+  70%, 100% { opacity: 0; transform: scale(1.18); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ctox-flow-creature-slot.is-selected .ctox-flow-creature-shell::after {
+    animation: none;
+    opacity: .8;
+  }
+}
+
+.ctox-flow-lanes rect {
+  fill: var(--ctox-flow-lane-fill);
+  stroke: var(--ctox-flow-lane-stroke);
+  stroke-width: 1;
+}
+
+.ctox-flow-lanes text {
+  fill: var(--ctox-flow-muted-fill);
+  font-size: 11px;
+  font-weight: 620;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ctox-flow-edge {
+  fill: none;
+  stroke: var(--ctox-flow-edge);
+  stroke-width: 1.05;
+  opacity: 0.42;
+  marker-end: url("#ctox-flow-arrow");
+}
+
+.ctox-flow-edge.is-observed {
+  stroke: var(--accent);
+  stroke-width: calc(2 + var(--edge-strength, 0.8) * 2.4);
+  opacity: calc(0.42 + var(--edge-strength, 0.8) * 0.58);
+}
+
+.ctox-flow-edge.is-active-edge {
+  stroke-dasharray: 10 8;
+  animation: ctox-flow-edge-move 1.1s linear infinite;
+}
+
+.ctox-flow-inbound-label {
+  fill: var(--ctox-flow-muted-fill);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.ctox-flow-channel-edge {
+  fill: none;
+  stroke: var(--ctox-flow-edge);
+  stroke-width: 1;
+  opacity: 0.46;
+  marker-end: url("#ctox-flow-arrow");
+}
+
+.ctox-flow-channel-edge.is-selected {
+  stroke: color-mix(in srgb, var(--accent) 74%, transparent);
+  stroke-width: 2;
+  opacity: 0.9;
+}
+
+.ctox-flow-channel-edge.is-open {
+  stroke-dasharray: 6 7;
+  opacity: 0.5;
+}
+
+.ctox-flow-channel-edge.is-terminal {
+  opacity: 0.95;
+}
+
+.ctox-flow-channel-node {
+  opacity: 0.52;
+}
+
+.ctox-flow-channel-node rect {
+  fill: var(--ctox-flow-channel-fill);
+  stroke: var(--ctox-flow-node-stroke);
+  stroke-width: 0.9;
+}
+
+.ctox-flow-channel-node.is-selected {
+  opacity: 1;
+}
+
+.ctox-flow-channel-node.is-selected rect {
+  fill: color-mix(in srgb, var(--accent) 13%, var(--surface));
+  stroke: color-mix(in srgb, var(--accent) 58%, transparent);
+  stroke-width: 1.5;
+}
+
+.ctox-flow-channel-node.is-outbound.is-open {
+  opacity: 0.58;
+}
+
+.ctox-flow-channel-node.is-outbound.is-open rect {
+  fill: var(--ctox-flow-channel-open-fill);
+  stroke-dasharray: 5 5;
+}
+
+.ctox-flow-channel-node.is-outbound.is-terminal rect {
+  fill: color-mix(in srgb, var(--success) 12%, var(--surface));
+  stroke: color-mix(in srgb, var(--success) 58%, transparent);
+}
+
+.ctox-flow-channel-name {
+  fill: var(--text);
+  font-size: 11px;
+  font-weight: 720;
+  letter-spacing: 0;
+}
+
+.ctox-flow-channel-count {
+  fill: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.ctox-flow-diagram marker path {
+  fill: var(--ctox-flow-edge);
+}
+
+.ctox-flow-node-g {
+  cursor: pointer;
+  outline: none;
+  opacity: 0.22;
+  transition: opacity 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ctox-flow-node-g.is-observed {
+  opacity: calc(0.26 + var(--trace-strength, 0.7) * 0.74);
+}
+
+.ctox-flow-node-g.is-current,
+.ctox-flow-node-g.is-selected {
+  opacity: 1;
+}
+
+.ctox-flow-node-g:hover {
+  opacity: 1;
+}
+
+.ctox-flow-node-live-ring {
+  fill: transparent;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  opacity: 0.55;
+  animation: ctox-flow-node-pulse 1.45s ease-out infinite;
+}
+
+.ctox-flow-node-box,
+.ctox-flow-node-diamond {
+  fill: var(--ctox-flow-node-fill);
+  stroke: var(--ctox-flow-node-stroke);
+  stroke-width: 0.95;
+  transition: all 0.22s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.ctox-flow-node-g.is-trace .ctox-flow-node-box,
+.ctox-flow-node-g.is-trace .ctox-flow-node-diamond {
+  fill: color-mix(in srgb, var(--accent) 10%, var(--surface));
+  stroke: color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.ctox-flow-node-g.is-done .ctox-flow-node-box,
+.ctox-flow-node-g.is-done .ctox-flow-node-diamond {
+  fill: color-mix(in srgb, var(--success) 8%, transparent);
+  stroke: color-mix(in srgb, var(--success) 48%, transparent);
+}
+
+.ctox-flow-node-g.is-current .ctox-flow-node-box,
+.ctox-flow-node-g.is-current .ctox-flow-node-diamond,
+.ctox-flow-node-g.is-selected .ctox-flow-node-box,
+.ctox-flow-node-g.is-selected .ctox-flow-node-diamond {
+  fill: color-mix(in srgb, var(--accent) 18%, var(--surface));
+  stroke: color-mix(in srgb, var(--accent) 80%, transparent);
+  stroke-width: 2;
+}
+
+.ctox-flow-node-g:hover .ctox-flow-node-box,
+.ctox-flow-node-g:hover .ctox-flow-node-diamond {
+  stroke: color-mix(in srgb, var(--accent) 80%, transparent);
+  stroke-width: 1.8;
+}
+
+.ctox-flow-node-g.is-blocked .ctox-flow-node-box,
+.ctox-flow-node-g.is-blocked .ctox-flow-node-diamond {
+  fill: color-mix(in srgb, var(--danger) 8%, transparent);
+  stroke: color-mix(in srgb, var(--danger) 60%, transparent);
+}
+
+.ctox-flow-node-phase {
+  fill: var(--muted);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 0.055em;
+  text-transform: uppercase;
+}
+
+.ctox-flow-node-title {
+  fill: var(--text);
+  font-size: 13.2px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+
+.ctox-flow-node-metrics {
+  fill: var(--muted);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+/* custom: timeline scrubber panel under the canvas */
+.ctox-timeline-panel {
+  display: grid;
+  gap: 5px;
+  height: 118px;
+  min-height: 118px;
+  overflow: hidden;
+  border-top: 1px solid var(--hairline);
+  padding: 7px 14px 8px;
+}
+
+.ctox-timeline-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ctox-timeline-head > div {
+  display: grid;
+  gap: 1px;
+}
+
+.ctox-timeline-head strong {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.ctox-timeline-scrub {
+  position: relative;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+/* Execution progress bar — driven ONLY by execution_progress.percent from the
+   durable plan projection. There is deliberately no indeterminate/marquee
+   variant: when nothing is measured the track is simply empty and the header
+   reads "nicht erfasst". No transition on the unmeasured state so an empty bar
+   never appears to animate toward a value. */
+.ctox-execution-progress {
+  display: grid;
+  gap: 6px;
+  padding: 10px 16px 12px;
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+
+.ctox-execution-progress-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.ctox-execution-progress-head strong {
+  font-size: 14px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.ctox-execution-progress.is-unmeasured .ctox-execution-progress-head strong {
+  font-weight: 600;
+  color: var(--muted);
+}
+
+.ctox-execution-progress-track {
+  position: relative;
+  height: 6px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.ctox-execution-progress-track > i {
+  display: block;
+  height: 100%;
+  width: var(--execution-progress, 0%);
+  border-radius: inherit;
+  background: var(--accent, currentColor);
+  transition: width 320ms ease;
+}
+
+.ctox-execution-progress.is-unmeasured .ctox-execution-progress-track > i {
+  width: 0;
+  transition: none;
+}
+
+.ctox-execution-progress-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.ctox-execution-progress-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ctox-execution-progress-track > i {
+    transition: none;
+  }
+}
+
+/* The scrubber fill reflects the SELECTED event index (a navigation position),
+   which is why it is visually quieter than the execution bar above it. The
+   --timeline-progress variable is set on .ctox-timeline-panel and was
+   previously consumed by no rule at all, leaving the native track permanently
+   unfilled. Two flat solid layers, no gradient: this module stays shell-native
+   (guarded by "Presentation layer stays compact and shell-native"). ::before is
+   the full-width track, ::after the measured fill laid exactly over it. */
+.ctox-timeline-scrub::before {
+  content: "";
+  display: block;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.ctox-timeline-scrub::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 2px;
+  width: var(--timeline-progress, 0%);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent, currentColor) 62%, transparent);
+}
+
+/* No measurable range -> no fill at all, never a decorative remnant. */
+.ctox-timeline-panel.is-disabled .ctox-timeline-scrub::after {
+  width: 0;
+}
+
+.ctox-timeline-panel input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.ctox-timeline-panel.is-disabled {
+  color: var(--muted);
+}
+
+.ctox-timeline-panel.is-disabled input[type="range"] {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.ctox-timeline-panel input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.ctox-timeline-panel input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 22px;
+  height: 22px;
+  margin-top: -9px;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--line));
+  border-radius: 999px;
+  background: var(--surface-2);
+  box-shadow: none;
+}
+
+.ctox-timeline-panel input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.ctox-timeline-panel input[type="range"]::-moz-range-progress {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.ctox-timeline-panel input[type="range"]::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--line));
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.ctox-timeline-scale {
+  display: grid;
+  grid-auto-columns: minmax(86px, 1fr);
+  grid-auto-flow: column;
+  gap: 12px;
+  overflow-x: auto;
+  padding: 0 0 2px;
+  scrollbar-width: thin;
+}
+
+.ctox-timeline-scale button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 7px;
+  align-items: start;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.ctox-timeline-scale button:hover,
+.ctox-timeline-scale button.is-current {
+  color: var(--accent);
+}
+
+.ctox-timeline-scale button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.ctox-timeline-scale button:disabled:hover {
+  color: inherit;
+}
+
+.ctox-timeline-scale span {
+  grid-row: span 2;
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 760;
+}
+
+.ctox-timeline-scale strong,
+.ctox-timeline-scale small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ctox-timeline-scale strong {
+  color: var(--text);
+  font-size: 11.5px;
+  line-height: 1.15;
+}
+
+.ctox-timeline-scale small {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.1;
+}
+
+.ctox-timeline-scale button.is-current strong,
+.ctox-timeline-scale button.is-current span,
+.ctox-timeline-scale button.is-current small {
+  color: var(--accent);
+}
+
+.ctox-timeline-detail {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: start;
+  min-height: 20px;
+}
+
+.ctox-timeline-detail span,
+.ctox-timeline-detail p,
+.ctox-timeline-detail small {
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.2;
+}
+
+.ctox-timeline-detail p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 0;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+/* custom: drawer content stack (task/node detail) on the shell drawer-body */
+.ctox-task-drawer {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+}
+
+.ctox-task-drawer .drawer-header-row small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.25;
+}
+
+/* custom: live status strip — flex layout around the kit callout */
+.ctox-task-status-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ctox-task-status-strip > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.ctox-task-status-strip small {
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* custom: task edit form layout inside the kit card */
+.ctox-task-edit > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ctox-task-edit-heading {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.ctox-task-edit-heading small {
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.ctox-task-edit .ctox-card-body {
+  display: grid;
+  gap: 10px;
+}
+
+.ctox-task-edit-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.ctox-task-edit-field .ctox-field-label {
+  margin-bottom: 0;
+}
+
+.ctox-task-edit-field small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ctox-task-edit-footer {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 12px 12px;
+}
+
+.ctox-task-edit-footer small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.ctox-task-drawer .ctox-card-body p {
+  margin: 0;
+}
+
+/* Cards without a header (fact grid) keep the card body off the top edge. */
+.ctox-task-drawer .ctox-card > .ctox-card-body:first-child {
+  padding-top: 12px;
+}
+
+.ctox-task-drawer .ctox-card-body p + p {
+  margin-top: 6px;
+}
+
+.ctox-node-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* custom: drawer step timeline header + stepper (no kit equivalent) */
+.ctox-drawer-timeline {
+  display: grid;
+  gap: 12px;
+}
+
+.ctox-drawer-timeline header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ctox-drawer-timeline header h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.ctox-drawer-timeline header small {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.ctox-drawer-steps {
+  display: grid;
+  gap: 0;
+  margin-left: 1px;
+  position: relative;
+}
+
+.ctox-drawer-steps::before {
+  content: "";
+  position: absolute;
+  top: 20px;
+  bottom: 20px;
+  left: 16px;
+  width: 1px;
+  background: color-mix(in srgb, var(--accent) 50%, transparent);
+  z-index: 0;
+}
+
+.ctox-drawer-steps button {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 2px 12px;
+  width: 100%;
+  border: 0;
+  border-radius: var(--control-radius);
+  background: transparent;
+  color: inherit;
+  padding: 10px 8px 10px 0;
+  position: relative;
+  text-align: left;
+}
+
+.ctox-drawer-steps button.is-current {
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.ctox-drawer-steps span {
+  grid-row: span 2;
   display: grid;
   place-items: center;
-  padding: 20px;
+  width: 32px;
+  height: 32px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 760;
+  position: relative;
+  z-index: 1;
 }
-.crew-control-dialog {
-  width: min(440px, 100%);
-  max-height: 100%;
-  overflow: auto;
-  background: var(--surface, #f6f7f9);
-  border: 1px solid var(--border, #dce1e8);
-  padding: 26px;
+
+.ctox-drawer-steps button.is-current span {
+  border-color: color-mix(in srgb, var(--accent) 92%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: color-mix(in srgb, var(--accent) 82%, var(--text));
 }
-.crew-control-dialog form {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
+
+.ctox-drawer-steps strong,
+.ctox-drawer-steps small,
+.ctox-drawer-steps em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.crew-control-dialog h2 {
-  margin: 0;
-  font-size: 22px;
+
+.ctox-drawer-steps strong {
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.2;
+  white-space: nowrap;
 }
-.crew-control-dialog p {
-  margin: 0;
+
+.ctox-drawer-steps button.is-current strong {
+  color: color-mix(in srgb, var(--accent) 82%, var(--text));
+}
+
+.ctox-drawer-steps small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.3;
+}
+
+.ctox-drawer-steps em {
+  grid-column: 2;
+  color: var(--muted);
   font-size: 12px;
-  color: var(--muted, #667383);
+  font-style: normal;
+  line-height: 1.28;
+  white-space: nowrap;
 }
-@container (max-width:740px) {
-  .crew-app-header {
-    padding: 14px 20px;
-    gap: 12px;
-    flex-wrap: wrap;
+
+@keyframes ctox-flow-node-pulse {
+  0% {
+    opacity: 0.74;
+    stroke-width: 2;
+    transform: scale(1);
   }
-  .crew-view {
-    padding: 24px 22px 36px;
+  70% {
+    opacity: 0.08;
+    stroke-width: 5;
+    transform: scale(1.08);
   }
-  .crew-status {
-    padding: 10px 22px;
+  100% {
+    opacity: 0;
+    stroke-width: 5;
+    transform: scale(1.1);
   }
-  .crew-current {
-    grid-template-columns: 160px minmax(0, 1fr);
-    gap: 18px;
+}
+
+@keyframes ctox-flow-edge-move {
+  to {
+    stroke-dashoffset: -18;
   }
-  .crew-current .crew-creature--workplace {
-    --crew-size: 140px;
+}
+
+@keyframes ctox-loading-spin {
+  to {
+    transform: rotate(360deg);
   }
-  .crew-home-room {
-    gap: 24px;
-    padding: 32px 0;
+}
+
+/* ---------------------------------------------------------------------------
+   The console keeps its two columns (tasks | live flow) down to the shell's
+   own 768px boundary and stacks below it — the window is the container, not
+   the screen, and 768px is the shell-owned 2-to-1 breakpoint. This block also
+   carries the phone geometry for the compact flow row, the metric strip, the
+   timeline detail and the web-stack popover.
+   -------------------------------------------------------------------------- */
+@container business-app-window (max-width: 768px) {
+  .ctox-harness-app {
+    grid-template-columns: minmax(0, 1fr);
+    overflow: auto;
   }
-  .crew-home-app .crew-task-row {
-    grid-template-columns: minmax(140px, 1fr) minmax(120px, 1fr);
-  }
-  .crew-task-row time {
+
+  .ctox-harness-app > [data-resizer] {
     display: none;
   }
-  .crew-events li {
-    grid-template-columns: 120px minmax(0, 1fr);
+
+  .ctox-harness-left,
+  .ctox-harness-main {
+    grid-column: 1;
+    min-height: 360px;
+  }
+
+  /* Stacked: the task column is the only column, so its head is the only head
+     of the top row and has to keep the window controls free as well. The
+     controls are 74px tall — two header rows — so the filterbar underneath is
+     still inside their zone and has to stay clear of them too. */
+  .shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-pane-header,
+  .shell-window[data-shell-contract="v2"] .ctox-harness-app > .ctox-harness-left > .ctox-filterbar {
+    padding-right: 70px;
+  }
+
+  /* The one-line list row stays one line here too — stacking title and stage
+     bar would turn the dense view back into a small card. Only the roomier
+     card padding gives way. */
+  .ctox-task-selector {
+    padding: 10px 38px 10px 12px;
+  }
+
+  .ctox-metrics-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .ctox-metric-card:nth-child(3) {
+    border-left: 0;
+    border-top: 1px solid var(--line);
+  }
+
+  .ctox-metric-card:nth-child(4) {
+    border-top: 1px solid var(--line);
+  }
+
+  /* Timeline detail row: label / text / meta stack instead of squeezing. The
+     panel is fixed 118px on desktop; on the sheet it must grow with its
+     content so the scrubber and detail never get clipped (the canvas well
+     above keeps the remaining 1fr). */
+  .ctox-timeline-panel {
+    height: auto;
+    min-height: 118px;
+    overflow: visible;
+  }
+
+  .ctox-timeline-detail {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2px;
+  }
+
+  .ctox-web-stack-panel {
+    top: 8px;
+    right: 8px;
+    width: calc(100% - 16px);
+    max-height: 78%;
   }
 }
+
+/* Touch targets on coarse pointers (phone/tablet): every interactive control
+   reaches the 44px minimum; the 28px canvas zoom buttons, the timeline scale
+   entries and the drawer stepper rows are custom components the kit's generic
+   rules do not cover. */
+@media (pointer: coarse) {
+  .ctox-harness-app button,
+  .ctox-harness-app input,
+  .ctox-harness-app select,
+  .ctox-harness-app textarea {
+    min-height: 44px;
+  }
+
+  .ctox-harness-app .ctox-pane-icon {
+    width: 44px;
+    min-width: 44px;
+  }
+
+  .ctox-harness-app .ctox-pane-tab {
+    min-height: 44px;
+  }
+
+  .ctox-flow-toolbar button {
+    min-width: 44px;
+    height: 44px;
+  }
+
+  .ctox-timeline-scale button {
+    min-height: 44px;
+  }
+
+  /* Taller grab area for the scrubber thumb. */
+  .ctox-timeline-panel input[type="range"] {
+    height: 32px;
+  }
+
+  /* The drawer stepper lives in the shell drawer (full-width sheet on phones);
+     its generic 44px form rule does not cover these custom grid buttons. */
+  .ctox-drawer-steps button {
+    min-height: 44px;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
-  .crew-home-app * {
-    scroll-behavior: auto;
+  .ctox-live-chip i,
+  .ctox-flow-edge.is-active-edge,
+  .ctox-flow-node-live-ring {
+    animation: none;
   }
 }
+
+/* Wo der ausgewaehlte Task GERADE steht (Owner-Befund 04.09.2026: "visuell ist
+   gar nicht klar, wo er gerade im harness loop steckt"). Der Standort ist ein
+   anderer Zustand als "vom Nutzer angeklickt" und muss ohne Suchen auffallen. */
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-box,
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-diamond {
+  stroke: var(--accent, #7fd4b0);
+  stroke-width: 2.5;
+}
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-phase,
+.ctox-flow-node-g.is-crew-hier .ctox-flow-node-title { fill: var(--accent, #7fd4b0); }
