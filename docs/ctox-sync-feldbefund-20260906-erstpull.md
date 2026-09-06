@@ -148,3 +148,82 @@ es jeden Browser? Test: Eigentümer startet eine Nachrecherche im eigenen Browse
 Hinweis für die Sync-Engineure: Auf `origin/main` (06.09.) liegen seit dem Tenant-Release Commits
 wie „fix(sync): stop retired background transfers at awaited boundaries", „preserve direct bridges
 and isolate DB runtime coordinators" — möglicherweise genau diese Klasse. Nicht verifiziert.
+
+## KORREKTUR 20:20 UTC: Messfehler in allen „seit X"-Abfragen dieses Dokuments
+
+Alle serverseitigen Aussagen der Form „seit 18:00 / seit dem Neustart **null** Zeilen" beruhen auf
+`lastWriteTime/1000 >= strftime('%s', …)`. `strftime` liefert TEXT, die linke Seite ist REAL; SQLite
+wertet REAL < TEXT, der Vergleich ist **immer falsch**. Eine Abfrage ohne Zeitfilter zeigt vier
+`outbound.sellify.lookup`-Befehle als `completed` um 19:44:46, 19:45:26 und 20:06:37 (2×) — aus dem
+Browser des Eigentümers, also **kommen Schreibvorgänge aus dem Browser sehr wohl an**.
+
+Damit sind zurückzunehmen bzw. neu zu messen: „Push tot", „kein Befehl seit 18:00", „Recherchestarts
+erreichen den Server nie", „frischer Speicher ändert nichts (Server null Zeilen)". **Bestehen bleiben**
+die Browser-Zähler (`sentFrames` konstant, Warteschlange wächst, `catching-up` ohne Erst-Pull) und die
+Beobachtung „App nach Login 25 min leer, Reload heilt die Anzeige" — sie stammen nicht aus dieser
+Abfrage. Die Neu-Messung mit korrektem Vergleich folgt unten.
+
+## Neu-Messung mit korrektem Vergleich (20:33 UTC) — Diagnose: 15–20 Minuten Latenz, nicht „tot"
+
+`typeof(lastWriteTime)=real`, `typeof(strftime('%s',…))=text`; mit `datetime(lastWriteTime/1000,'unixepoch') >= '…'`:
+
+- **24 Befehle seit 19:10:15**, alle `outbound.sellify.lookup` / `completed`, in Schüben:
+  18:58:26 (7), 19:06:14 (3), 19:40:50 (4), dazu 19:44:46, 19:45:26, 20:06:37 (2). Das sind die
+  Vorabgleiche der Recherchestarts aus meinem Fenster (Klicks 18:41, 18:47, 19:10, 19:19) und aus
+  dem Browser des Eigentümers (~20:04). **Round-trip Klick → completed: 17–21 Minuten.**
+- **Null `business_os.chat.task`-Aufgaben seit 18:00**, Routing-State und Queue-Projektion heute
+  leer. Die App wartet auf den Vorabgleich max. 120 s (`researchLead`, Timeout 120000 für
+  Varianten-Läufe) und bricht dann ab: beim Eigentümer als Dialog „Der Sellify-Abgleich ist
+  fehlgeschlagen … bitte erneut versuchen" (Screenshot 20:0x), in meinen Sammelläufen still
+  (`suppressAlerts`). **Deshalb wird nie eine Recherche eingereiht.**
+
+Zusammengesetzte Ursache (belegt bis auf den letzten Schritt):
+1. Das laufende Threads-Modul erzeugt einen Bedarfsabfrage-Sturm auf `ctox_task_approval_requests`
+   (zwei `recentQuery`, modules/threads/index.js:447-448; 3793 Konsolenmeldungen, 0 Abschlüsse).
+2. Diese Frames füllen die Sendewarteschlange des Browsers (queued 3098 → 3491 in 8 min,
+   `sentFrames` nahezu konstant); Befehls-Frames stehen dahinter an → 15–20 min Latenz.
+3. Der 120-s-Vorabgleich der App läuft in diese Latenz und bricht ab.
+4. Vermutlich derselbe Stau hält den Erst-Pull großer Kollektionen in `catching-up`.
+
+Nicht mehr haltbar: „Push tot" (Korrektur oben). Weiter offen: ob das Schließen des Threads-Moduls
+die Warteschlange leert und Recherchestarts wieder binnen Sekunden ankommen (Test läuft).
+
+## 20:42 UTC: Schleife im Threads-Modul belegt — und der Gegenbeweis
+
+`modules/threads/index.js`: `refresh()` (Zeile 442) lädt bei jedem Aufruf `ctox_task_approval_requests`
+zweimal (`recentQuery(200, {status:'pending'})` und `recentQuery(200)`), dazu `user_thread_states`
+u. a.; `refresh()` wird von einem `setInterval` (Zeile 416), von Bereitschaftswechseln
+(`wireReadiness` → `render`) und ~20 weiteren Stellen ausgelöst. Jede `find()` auf einer nicht
+`live`-Kollektion ist eine Bedarfsabfrage über den Draht. Solange `user_thread_states` in
+`catching-up` hängt, feuern Bereitschaftswechsel dauerhaft → Abfragesturm → Sendewarteschlange voll.
+
+**Gegenbeweis:** Seite neu geladen und — bevor das Threads-Modul startete —
+`sync.suspendCollections(['ctox_task_approval_requests','user_thread_states'])` (bei 136 s).
+Ergebnis nach 264 s: `outbound_lead_generation_leads` **`live`, `firstPullCompletedAtMs` gesetzt**
+(zum ersten Mal heute), App „Daten werden synchronisiert (4/5)", 19 Leads; Sendewarteschlange 490
+statt > 3400. Der Stau des Threads-Moduls blockiert also den Erst-Pull anderer Kollektionen und die
+Befehlszustellung. Der Recherche-Klick-Test mit leerer Warteschlange folgt.
+
+Eigentümer-Browser (Screenshot ~20:04): „Auswahl neu recherchieren (2)" → „Kein Lead konnte
+gestartet werden (2 Fehler): Der Sellify-Abgleich ist fehlgeschlagen … bitte erneut versuchen" =
+120-s-Timeout des Vorabgleichs. Um 20:39:15/17 wurden zwei Lookups binnen Sekunden `completed`
+(vermutlich erneuter Klick) — im Eigentümer-Browser könnte die Latenz nach dem Dienstneustart
+bereits kurz sein; nicht belegt, welcher Dialog dort folgte.
+
+## 20:46 UTC: Beweis — mit ausgesetzten Sturm-Kollektionen kommt ein Recherchestart in 27 s an
+
+Klick „Auswahl nachrecherchieren" (DrinkStar) um **20:45:16** → `outbound.sellify.lookup` `completed`
+**20:45:38** → `business_os.chat.task` „Nachrecherche: DrinkStar GmbH" **accepted 20:45:43**, mit
+`payload.writeback_contract.mechanism = business_command` (App 1.0.100). Round-trip **27 s** statt
+15–20 min. Einziger Unterschied zu den sieben gescheiterten Starts davor: vor dem Start des
+Threads-Moduls `sync.suspendCollections(['ctox_task_approval_requests','user_thread_states'])`.
+
+Damit ist die Kette belegt: Threads-Modul-Schleife → Sendewarteschlange voll → Befehlslatenz
+15–20 min → 120-s-Vorabgleich der App bricht ab → keine Recherche. Der Sendezähler
+`business_commands.frameTransport.sentFrames` (3) ist dabei **kein** verlässliches Maß für
+gesendete Befehle (Befehl kam an, Zähler blieb bei 3) — nicht als Beleg verwenden.
+
+Sofortmaßnahme für Nutzer bis zum Fix: Threads-Modul nicht laufen lassen (es startet in der
+Leiste als „0 Threads · Läuft" automatisch; ein Schließen-Knopf fehlt). Eigentlicher Fix gehört ins
+Threads-Modul (Refresh-Schleife, zwei 200er-Abfragen je Lauf) und/oder in die Bedarfsladung
+(Abfragen auf nicht-`live`-Kollektionen dürfen die Befehlszustellung nicht verdrängen).
