@@ -22,6 +22,15 @@ use tokio::{
 
 const MAX_CONNECTIONS: usize = 32;
 
+/// Create the host-owned runtime directory with private rights at creation.
+/// tempfile's directory default follows umask and is commonly world-readable.
+pub fn private_ipc_directory() -> io::Result<tempfile::TempDir> {
+    tempfile::Builder::new()
+        .prefix("cs-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+}
+
 pub struct LocalAuthorityHost {
     endpoint: PathBuf,
     stop: Option<oneshot::Sender<()>>,
@@ -111,12 +120,25 @@ fn denied(message: &str) -> io::Error {
 }
 struct BoundSocket {
     listener: StdListener,
-    _lock: File,
+    _lock: HostDirectoryLock,
     path: PathBuf,
     inode: (u64, u64),
 }
-impl BoundSocket {
-    fn bind(directory: &Path) -> io::Result<Self> {
+
+/// Exclusive ownership of a private native runtime directory. Hosts acquire
+/// this before opening their Raft store and retain it until runtime shutdown.
+pub struct HostDirectoryLock {
+    directory: PathBuf,
+    _file: File,
+}
+impl HostDirectoryLock {
+    pub fn acquire(directory: &Path) -> io::Result<Self> {
+        Self::acquire_named(directory, "host.lock")
+    }
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+    fn acquire_named(directory: &Path, name: &str) -> io::Result<Self> {
         if !directory.is_absolute() {
             return Err(denied(
                 "authority IPC requires an absolute private directory",
@@ -140,7 +162,7 @@ impl BoundSocket {
             .truncate(false)
             .mode(0o600)
             .custom_flags(libc::O_NOFOLLOW)
-            .open(directory.join("authority.lock"))?;
+            .open(directory.join(name))?;
         let lock_meta = lock.metadata()?;
         if !lock_meta.is_file() || lock_meta.uid() != current_uid() || lock_meta.mode() & 0o077 != 0
         {
@@ -156,7 +178,17 @@ impl BoundSocket {
                 error
             }
         })?;
-        let path = directory.join("authority.sock");
+        Ok(Self {
+            directory,
+            _file: lock,
+        })
+    }
+}
+
+impl BoundSocket {
+    fn bind(directory: &Path) -> io::Result<Self> {
+        let lock = HostDirectoryLock::acquire_named(directory, "authority.lock")?;
+        let path = lock.directory().join("authority.sock");
         match fs::symlink_metadata(&path) {
             Ok(meta) if meta.file_type().is_socket() && meta.uid() == current_uid() => {
                 let probe =

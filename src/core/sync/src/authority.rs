@@ -16,13 +16,7 @@ pub mod webrtc;
 
 pub type NodeId = u64;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Peer {
-    pub identity: String,
-    pub executor: bool,
-    pub data_replica: bool,
-}
+pub use crate::contracts::ExecutionPeer as Peer;
 
 pub use crate::contracts::{
     CheckpointCopyReceipt, ExecutionOwnership as Ownership, ExecutionSpec, WorkerMembership,

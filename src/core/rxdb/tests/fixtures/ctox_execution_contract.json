@@ -8,7 +8,36 @@
     "CTOX_SYNC_IPC_DEADLINE_MILLIS": 10000
   },
 
+  "copyTypes": ["SyncHostTiming"],
+  "defaultTypes": ["ExecutionPeer"],
+  "sensitiveTypes": ["SyncHostTransport", "SyncHostIceServer"],
   "types": {
+    "ExecutionPeer": {
+      "identity": "string",
+      "executor": "bool",
+      "dataReplica": "bool"
+    },
+    "SyncHostTiming": {
+      "heartbeatMs": "u64",
+      "electionMinMs": "u64",
+      "electionMaxMs": "u64"
+    },
+    "SyncHostConfiguration": {
+      "version": "u32",
+      "scopeId": "string",
+      "local": "SyncHostMember",
+      "voters": "nodes:ExecutionPeer",
+      "timing": "SyncHostTiming"
+    },
+    "SyncHostTransport": {
+      "signalingUrls": "list:string",
+      "iceServers": "list:SyncHostIceServer"
+    },
+    "SyncHostIceServer": {
+      "urls": "list:string",
+      "username": "string",
+      "credential": "string"
+    },
     "WorkerMembership": {
       "nodeId": "u64",
       "identity": "string",
@@ -105,6 +134,10 @@
     }
   },
   "unions": {
+    "SyncHostMember": {
+      "voter": { "nodeId": "u64" },
+      "worker": { "member": "WorkerMembership" }
+    },
     "AuthorityFailure": {
       "notLeader": { "leader": "optional:u64" },
       "unavailable": { "reason": "string" },

@@ -4267,7 +4267,7 @@
     "additionalProperties": true
   },
   "ctox_queue_tasks": {
-    "version": 2,
+    "version": 3,
     "primaryKey": "id",
     "type": "object",
     "properties": {
@@ -4333,6 +4333,9 @@
         "type": "number"
       },
       "crew_member_id": {
+        "type": "string"
+      },
+      "crew_assigned_member_id": {
         "type": "string"
       },
       "execution_progress": {

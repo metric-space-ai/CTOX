@@ -1,4 +1,6 @@
 //! Bind execution-control requests and replies to configured peer keys and fresh request nonces.
+#[cfg(all(feature = "webrtc", unix))]
+pub(crate) mod route;
 #[cfg(test)]
 #[path = "auth_tests.rs"]
 mod tests;
@@ -47,7 +49,7 @@ fn unhex<const N: usize>(text: &str) -> io::Result<[u8; N]> {
     }
     Ok(bytes)
 }
-pub(super) fn public_key(identity: &str) -> io::Result<[u8; 32]> {
+pub(crate) fn public_key(identity: &str) -> io::Result<[u8; 32]> {
     unhex(
         identity
             .strip_prefix("ed25519:")

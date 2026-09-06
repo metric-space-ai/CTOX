@@ -854,32 +854,6 @@ impl WebRTCRsConnectionHandler {
         self: &Arc<Self>,
         remote_peer_id: PeerId,
     ) -> RxResult<()> {
-        self.connect_execution_peer(remote_peer_id, false).await
-    }
-
-    /// A nonvoting worker initiates toward a configured authority voter. Voters
-    /// do not discover these workers, so this edge has exactly one initiator.
-    /// The host supplies the confirmed route; signatures still authenticate it.
-    pub async fn connect_worker_to_authority_peer(
-        self: &Arc<Self>,
-        remote_peer_id: PeerId,
-    ) -> RxResult<()> {
-        if self.peer_role != super::NativePeerRole::WorkjetExecutor {
-            return Err(new_rx_error(
-                "RC_WEBRTC_PEER",
-                Some(serde_json::json!({
-                    "message": "only a native Workjet worker may initiate a worker-to-authority connection"
-                })),
-            ));
-        }
-        self.connect_execution_peer(remote_peer_id, true).await
-    }
-
-    async fn connect_execution_peer(
-        self: &Arc<Self>,
-        remote_peer_id: PeerId,
-        worker_to_voter: bool,
-    ) -> RxResult<()> {
         if self.closed.load(Ordering::Acquire) {
             return Err(new_rx_error(
                 "RC_WEBRTC_PEER",
@@ -926,7 +900,7 @@ impl WebRTCRsConnectionHandler {
                 })),
             ));
         }
-        if worker_to_voter || own_peer_id < remote_peer_id {
+        if own_peer_id < remote_peer_id {
             self.ensure_peer_connection(remote_peer_id, true).await?;
         }
         Ok(())

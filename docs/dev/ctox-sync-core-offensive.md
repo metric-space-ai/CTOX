@@ -7,6 +7,263 @@ noch aktiv. Ihre Entfernung gehört ausdrücklich zur Abnahme.
 
 ## Aktueller Abnahmestand
 
+Die separate Abnahme mit vier echten CTOX-Prozessen ist **rot**. Mit privaten
+IPC-Verzeichnissen starten alle vier Hosts und beantworten die lokale
+Identitätsprüfung. Die Signalisierungsdiagnose weist sechs Angebote, sechs
+Antworten und zwölf ICE-Kandidaten nach (`host-private-ipc-cli-signal-counts.json`).
+Trotzdem bestätigt der erste Voter innerhalb der unveränderten 15-Sekunden-Grenze
+keine Mehrheit; die übrigen Voter haben keine nutzbare WebRTC-Kontrollroute.
+Die vier Host-Stderr-Protokolle bleiben leer. Der Fehler ist damit hinter dem
+Signalisierungsaustausch eingegrenzt, seine Ursache aber noch nicht bewiesen.
+Aufnahme, Wiederverbindung, Wiederanlauf und Widerruf werden in dieser
+Prozessabnahme noch nicht erreicht. Grüne Tests innerhalb eines Prozesses
+ersetzen diese fehlende Abnahme nicht. Dieser Implementierungsstand wird auf
+ausdrücklichen Nutzerwunsch auf `main` integriert; er ist keine Freigabe für
+robustes SSH-/QR-Onboarding oder produktives Agent-Failover.
+
+Die beiden generierten Workjet-Vertragsdateien sind mit `ca7dd885f` auf
+Workjets `main` veröffentlicht. Sie wurden in einem sauberen Checkout von
+`dbcf2072e` generiert; Paket-Typecheck, Host-Schema-Prüfung und der Driftcheck
+aller fünf Ausgaben bestehen dort. Der bestehende, anderweitig veränderte
+Workjet-Checkout wurde dafür nicht zusammengeführt oder bereinigt.
+
+### Gemeinsamer nativer CLI-/Service-Host
+
+Der abschließende vollständige Sync-Testlauf nach der IPC-Rechtekorrektur besteht
+**74/74**, ohne Skips (`host-main-final-sync.json`). Darin sind fünf
+Host-Transportprüfungen und alle 14 WebRTC-Szenarien enthalten; letztere benötigen
+17,19 Sekunden. Dieser Lauf bleibt vom oben beschriebenen roten Vier-Prozess-Test
+getrennt. Die Formatprüfung des Sync-Crates und des betroffenen CTOX-Host-Adapters
+besteht ebenfalls. Clippy über alle Sync-Targets mit `-D warnings` besteht
+abschließend in 25,60 Sekunden (`host-main-final-clippy.json`).
+
+`src/core/sync_host/` verbindet den vorhandenen CTOX-Service und die neue lokale
+`ctox sync`-CLI mit derselben `host_runtime`-Funktion. Der Adapter lädt die
+unveränderlichen Host-Pins aus der vorhandenen Runtime-SQLite-Datenbank und
+Schlüssel sowie gesonderte Transportkonfiguration aus dem verschlüsselten
+Secret-Store. Ein gemeinsamer Prozess-Lock schützt die Stores bereits vor ihrem
+Öffnen. Der Host startet den bestehenden nativen Sync-Lifecycle mit einem
+eigenen leeren Kontroll-DB-Handle; Business-Collections werden auch dann
+abgewiesen, wenn ihre Replikationsliste leer ist. Der tatsächliche IPC-Endpunkt
+wird veröffentlicht, aktiv auf Identität/Protokoll geprüft und beim Ende der
+Laufzeit entzogen. Der lokale Status behauptet ausschließlich Listener-Liveness.
+
+Die öffentlich eingelesenen Host-Setup-Typen sind nun Teil der bestehenden
+kanonischen Fixture mit generierten Rust-, TypeScript- und Effect-Definitionen.
+Die bisherigen handgeschriebenen Rust-Typen entfallen. IPC-Version 1 und native
+Kontrollversion 5 bleiben unverändert. Die Transportkonfiguration verlangt
+explizite ICE-Einstellungen und eigene Signaling-Zugangsdaten; sie verwendet
+keine Business-OS-Grant-Felder als Ersatz. Eine Suche nach einem alten Secret-Key
+legt auf einer frischen Installation keine Business-Datenbank mehr an. Bereits
+vorhandene Legacy-Key-Daten bleiben im bestehenden Migrationspfad.
+
+Der erste CLI-Abnahmeversuch endete mit einer unlokalisierten Deadline
+(`host-runtime-cli.json`). Der ergänzte Kontext lokalisierte den Abbruch beim
+ersten `sync init` (`host-runtime-cli-diagnostic-fixed.json`). Ein separater
+Prozess-Sample zeigte ausschließlich `_dyld_start`, also noch keinen CTOX-Code;
+dieser Probeprozess beendete `init` anschließend erfolgreich nach 11,42 Sekunden.
+Das erklärt einen beobachteten Startverzug, beweist aber nicht rückwirkend die
+Ursache jedes Timeouts. Die CLI-Prüfung behält ihre 20-Sekunden-Startgrenze.
+
+Die erste vollständige Sync-Prüfung mit generierten Host-Typen lief gleichzeitig
+mit dem großen CTOX-Binary-Link (`host-contracts-sync.json`). Die ersten neun
+Testprogramme bestanden; in der WebRTC-Prüfung bestanden 11/14 Szenarien.
+Zwei Fehler zeigten bestätigte Aufnahme-Replays, während die Assertions einen
+erstmaligen Applied-Beleg erwarteten; ein weiterer Lauf erreichte den erwarteten
+Quorum-Zustand nicht. Die Diagnose enthält SQLite-Append-Zeiten bis etwa
+1,9 Sekunden. Diese Lastbeobachtung ist kein Nachweis eines behobenen Fehlers.
+Die Assertions und Deadlines bleiben unverändert. Clippy mit allen Targets und
+`-D warnings` bestand anschließend (`host-contracts-clippy.json`). Der aktuelle
+gemeinsame Stand enthält zusätzlich die unverändert übernommene Crew-Integration
+von `ca1c0e362`; er erhält eigene Build- und Testnachweise.
+
+Auf diesem gemeinsamen Stand besteht die Browser-RxDB-Suite **117/117**, ohne
+Skips. Clippy über alle Sync-Targets mit `-D warnings` besteht ebenfalls
+(`host-main-clippy.json`, 26,29 Sekunden). Der Workjet-Contract-Typecheck, die
+drei vorhandenen IPC-Schema-Tests, die neue Host-Schema-Prüfung und der
+Generator-Driftcheck für alle fünf Rust-/TypeScript-Ausgaben bestehen. Diese
+Workjet-Prüfungen verwenden den kanonischen lokalen Checkout; eine neue
+Desktop-/Mobile-Veröffentlichung ist damit nicht nachgewiesen.
+
+Der vollständige gemeinsame Sync-Lauf besteht anschließend **73/73**, ohne
+Skips (`host-main-sync.json`): 19 Unit-, 11 Cluster-, 5 Checkpoint-, 1 Effect-,
+5 Konfigurations-, 4 Transport-, 2 IPC-, 9 Lifecycle-, 1 Store-Conformance-,
+14 WebRTC-, 1 Membership- und 1 Workjet-Key-Test. Die 14 WebRTC-Szenarien benötigen
+16,25 Sekunden; ihre bestehenden Assertions und Deadlines sind unverändert.
+Während dieses Laufs läuft kein Cargo-Build parallel. Die separat gestartete
+macOS-Signaturprüfung ist als zusätzliche Leseaktivität zu berücksichtigen.
+Der gemeinsame CTOX-Binary-Build besteht (`host-main-binary.json`, 8m22s);
+die 484 Warnungen entsprechen dem zuvor beobachteten Umfang.
+
+Die CLI-Abnahme des ungekürzten 809-MiB-Dev-Binary scheitert dagegen weiterhin
+an `sync init` vor der Host-Veröffentlichung (`host-main-cli.json`). Ein weiterer
+Sample mit dem gleichen Legacy-Datensatz zeigt wieder ausschließlich
+`_dyld_start` und noch keinen CTOX-Code (`host-legacy-probe.sample`). Die
+macOS-Signaturprüfung bestätigt einen gültigen Binary. Der Testdatenträger ist
+ein fast volles HFS+-SD-Medium. Die Diagnose ersetzt keine erfolgreiche
+Prozessabnahme und keinen Nachweis der Startup-Performance eines Releases.
+
+Eine separate, erneut signaturgeprüfte Testkopie ohne Debug-Symbole behält alle
+23 geprüften Code-/Datensektionen unverändert (`host-test-binary.json`), reduziert
+die Dateigröße aber nur von 848.006.056 auf 764.681.200 Bytes. Auch diese erste
+Prozessabnahme scheitert beim Start (`host-main-cli-stripped.json`). Die Fixture
+verwendet anschließend Symlinks statt Hardlinks, damit sie beim Anlegen und
+Aufräumen ihrer Bundle-Marker den Link-Zähler des geprüften Binary nicht verändert.
+Dieser Lauf erreicht Identitätsanlage, Legacy-Key-Migration, Workjet-Key-Import
+und Konfiguration; der erste Host endet vor Veröffentlichung des Listeners.
+Die ergänzte Diagnose zeigt `PermissionDenied` (`host-main-cli-start-diagnostic.json`).
+
+Der Host hatte das IPC-Verzeichnis mit den umask-abhängigen Standardrechten von
+`tempfile` erzeugt. Der Listener verlangt bereits private Verzeichnisrechte und
+weist diesen Pfad korrekt ab. `local_host::private_ipc_directory` erzeugt das
+Verzeichnis jetzt atomar mit angeforderten Rechten `0700`; der CTOX-Adapter nutzt
+diese Kernfunktion. Die bisherige Rechteprüfung bleibt unverändert. Ein eigener
+Test prüft Rechte und Akzeptanz durch den tatsächlichen Host-Lock. Die veraltete
+Testkopie wurde nach bestätigtem Ende aller Nutzer entfernt; der ursprüngliche
+geliehene Build-Target blieb erhalten. Der folgende Build entfernt die Symbole
+bereits beim Linken des lokalen Test-Binary (`-Cstrip=symbols`); das ist keine
+neue Runtime-Konfiguration und keine veröffentlichte Release-Abnahme.
+
+Die gemeinsame Signaling-Fixture ist aus den bestehenden WebRTC-Tests
+extrahiert; derselbe lokale Server wird für die separate Vier-Prozess-Abnahme
+verwendet. Diese ruft das tatsächlich gebaute CTOX-Programm auf und prüft
+Legacy-Key-Migration, importierten Workjet-Key, exklusiven Host-Besitz, aktuellen
+Listener, Aufnahme, Reconnect, Worker-Neustart und Widerruf. Sie führt keinen
+Coding-Harness aus. Aktuelle Endergebnisse werden nach Abschluss dieses Laufs
+hier ergänzt; bisherige grüne Kernprüfungen ersetzen diese Abnahme nicht.
+
+Offen bleiben produktive Signaling-Grants, vollständige CTOX-Service-Abnahme,
+Windows-Listener, Workjets produktive SSH-/QR-Aufnahme und echte Harness-Ausführung.
+Details und administrative CLI-Schritte stehen im
+[Host-Vertrag](ctox-sync-worker-host-contract.md).
+
+### Dauerhafte native Host-Pins
+
+`host_config.rs` definiert die lokale native Konfiguration und speichert sie in
+einer eigenen Tabelle der vorhandenen Host-Runtime-SQLite-Datenbank. Scope,
+lokaler Node/Public-Key, Voter- oder Worker-Rolle, die drei Voter-Schlüssel und
+ihre Fähigkeiten bleiben über Neustarts gebunden. Ein erneutes Speichern darf
+diese Bindung nicht still verändern. Dafür braucht es einen geprüften
+Migrationsweg; Raft-Zeitparameter können für den nächsten Start geändert werden.
+Der Schreibvorgang verwendet eine unmittelbare SQLite-Transaktion, das Laden
+validiert das Format und seine Invarianten erneut. Fremde Runtime-Tabellen
+werden weder neu aufgebaut noch überschrieben.
+
+Die bestehenden nativen Voter-/Worker-Attachments erhalten ihre Optionen aus
+dieser Konfiguration und prüfen den lokalen Schlüssel. Routen starten leer und
+werden weiterhin durch signierte Discovery ermittelt. Schlüsselmaterial,
+Signaling-Token und aktive IPC-Endpunkte gehören nicht in diesen Datensatz.
+Der gemeinsame Kontrollraum ist `ctox-execution:<scope>`; produktive
+Business-OS-Räume werden nicht als Ausführungsnetz verwendet. Worker erhalten
+keinen eigenen Raft-Store. Ihre lokalen Pins ersetzen keine Quorum-Aufnahme.
+
+Der erste echte Neustartlauf zeigte eine unzulässige Kopplung: Das Ableiten des
+IPC-Verzeichnisses aus dem vollständigen Datenpfad überschritt auf macOS die
+Unix-Socket-Pfadlänge (`host-config-restart.json`). Der Host übergibt deshalb das
+lokale private IPC-Verzeichnis getrennt vom dauerhaften Speicherpfad, wie es der
+bestehende Listener bereits vorsieht. Dessen Rechte-, Besitzer- und
+Exklusivitätsprüfungen bleiben erhalten; es gibt keinen Netzwerk-Fallback.
+
+Die neue Neustart-Fixture fährt drei native Voter und einen Worker vollständig
+herunter und rekonstruiert anschließend Schlüsselobjekte und Konfiguration aus
+denselben Pins sowie die Voter aus denselben Raft-Stores. Sie prüft vorhandenen
+Auftragsbesitz, unveränderte Mitgliedschaft, Replay, Widerruf und die Sperre
+erhaltener Handles nach Shutdown über echte lokale WebRTC-Verbindungen.
+Der gezielte Neustarttest besteht in 26,61 Sekunden, ohne Änderung der
+60-Sekunden-Frist (`host-config-restart-receipt.json`). Ein vorheriger Lauf
+scheiterte an der erwarteten Aufnahme-Receipt-Art, ohne deren Wert auszugeben
+(`host-config-restart-ipc.json`). Die Assertion blieb erhalten und gibt jetzt den
+Receipt aus. Der anschließende Erfolg beweist die Ursache dieses Zwischenfehlers
+nicht. Die vollständige Sync-Suite besteht anschließend **65/65**, ohne Skips
+(`host-config-sync.json`): 19 Unit-, 11 Cluster-, 5 Checkpoint-, 1 Effect-,
+5 Host-Konfigurations-, 2 IPC-, 9 Lifecycle-, 1 Store-Conformance-, 10 echte
+WebRTC-, 1 Membership- und 1 Workjet-Identitäts-Test. Die zehn WebRTC-Szenarien
+benötigen zusammen 17,86 Sekunden, der Build 27,39 Sekunden. Die bestehenden
+Assertions und Fristen sind unverändert. Clippy über alle Sync-Targets mit
+`-D warnings` besteht in 12,93 Sekunden (`host-config-clippy.json`); Format- und
+Diff-Prüfung bestehen ebenfalls. Browser-/Wire-Suite und CTOX-Gesamtcheck wurden
+für diese ausschließlich native Konfigurationsänderung nicht erneut ausgeführt;
+ihre unten genannten Ergebnisse gehören zum vorherigen Quellstand.
+
+Dieser vorherige Abnahmestand umfasste noch keinen produktiven Host-Anschluss.
+Der nachfolgende CLI-/Service-Adapter ist oben beschrieben; Signaling-Zulassung
+und sichtbare SSH-/QR-Aufnahme bleiben offen.
+Es wird keine zertifizierte Harness-Wiederherstellung oder Migration behauptet.
+
+### Wiedererkennung von Votern nach Adresswechsel
+
+Bei der Prüfung des produktiven Host-Anschlusses zeigte sich eine notwendige
+Vorarbeit: `ExecutionGroupOptions.routes` und `WorkerExecutionOptions.routes`
+verlangten drei feste Signaling-Adressen. Der bestehende Reconnect übernahm nur
+die geänderte lokale Adresse, aktualisierte aber die Routen zu anderen Votern
+nicht. Diese Adressen als dauerhafte Host-Konfiguration zu speichern hätte
+einen Neustartfehler festgeschrieben.
+
+Die Route-Map ist jetzt ein optionaler Starthinweis. Native Peers im selben
+admittierten Raum werden über `ctox.sync.authority.route.v1` geprüft. Dieser
+native Kontrollaufruf verwendet den vorhandenen signierten Envelope mit eigenen
+Request-/Reply-Kennungen und bindet Scope, Empfänger, frische Nonce und aktuelle
+Signaling-Adresse. Eine Route wird erst nach einem gültigen Nachweis eines der
+drei konfigurierten Voter-Schlüssel ersetzt; die Verbindung muss nach der Antwort
+noch dieselbe und weiterhin admittiert sein. Worker-Schlüssel dürfen damit keine
+Voter-Route übernehmen. Der Nachweis ruft keine fachliche Operation auf und
+vergibt weder Mitgliedschaft noch Ausführungsberechtigung.
+
+Die bisherige Pflicht zu vollständigen Adress-Maps und die ausschließlich daran
+gebundene Discovery sind ersetzt. Auch die eigene ereignisbasierte Liste offener
+Verbindungen entfällt: Beim späten Anhängen eines Workers fehlten darin bereits
+geöffnete Kanäle. Die Discovery liest ihre aktuellen Verbindungen aus dem
+Transport-Handler; Ereignisse wecken nur die Verarbeitung.
+
+Da beide nativen Hosts jetzt Kandidaten entdecken, ist die frühere einseitige
+Worker-Initiierung entfernt (`connect_worker_to_authority_peer` samt internem
+Boolean-Sonderpfad). Voter und Worker verwenden dieselbe Regel: Nur die kleinere
+Signaling-ID erzeugt ein Angebot. Der allgemeine native Browser-Responder bleibt
+passiv. Die WebRTC-Fixture erfasst die tatsächlichen SDP-Angebote und prüft diese
+Richtung zusätzlich zu den bisherigen Aufnahme-, Widerrufs- und Datengrenzen.
+
+Es gibt weiterhin genau drei Voter. Bestätigte
+Konfiguration, produktive Signaling-Grants, Anschluss an den CTOX-Service und
+SSH-/QR-Abnahme sind damit noch nicht erledigt.
+
+Die beiden neuen Signatur-/Replay-Prüfungen bestehen mit allen bisherigen
+Kern-Unit-Tests (19/19, `voter-route-unit.json`). Der zusätzliche echte
+WebRTC-Test besteht in 19,82 Sekunden (`voter-route-single-initiator.json`):
+Start ohne Routen, Voter 3 unter neuer Adresse, anschließend Voter 2 stoppen.
+Die wiederhergestellte Verbindung ist damit für die Mehrheit nötig. Der
+bestehende Worker-Auftrag bleibt autorisiert; Wiederholung, Widerruf und
+verweigerte Business-Datenzugriffe werden weiterhin geprüft. Der Test erfasst
+auch die tatsächlichen SDP-Angebote und fordert die gemeinsame Initiator-Regel.
+Die vollständige native RxDB-Suite besteht **422/422**: 389 Unit-Tests
+(46,62 s), 31 Conformance-Tests, Error-Guard und Idle-Budget (8,59 s), ohne Skips.
+Beleg: `voter-route-native.json`. Der Build benötigte auf dem gemeinsamen
+externen Volume 4 Minuten 9 Sekunden; dies ist keine App-Laufzeitmessung.
+Die vollständige Sync-Suite besteht **59/59**, ohne Skips: 19 Unit-, 11 Cluster-,
+5 Checkpoint-, 1 Effect-, 2 IPC-, 9 Lifecycle-, 1 Store-Conformance-,
+9 echte WebRTC-, 1 Membership- und 1 Workjet-Identitäts-Test. Die neun
+WebRTC-Szenarien benötigen zusammen 17,37 Sekunden; Build 1 Minute.
+Beleg: `voter-route-sync.json`. Die unveränderten Fristen bleiben erhalten.
+Beide Crates bestehen Clippy über alle Targets mit `-D warnings`
+(`voter-route-native-clippy.json`, 33,05 s; `voter-route-sync-clippy.json`,
+52,38 s). Die Formatprüfungen und die fünf generierten Verträge sind konsistent.
+Der aktuelle Wire-Daemon ist gebaut (`voter-route-wire-build.json`, 42,65 s).
+Die Browser-/Wire-Suite besteht mit `--require-wire-daemon` **116/116**, ohne
+Skips (`voter-route-js-wire.log`); Cross-Process-Wire 2,73 s, File-Fetch 1,89 s.
+`cargo check --locked --bin ctox` mit dem bisherigen Dev-Profil besteht in
+4 Minuten 21 Sekunden; unverändert 484 Bestandswarnungen, davon 478 im
+CTOX-Binary. Belege: `voter-route-root-check.json` und
+`voter-route-root-check.log`. Alle genannten Belege liegen unter
+`/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/`.
+Diese Prüfungen zertifizieren weder WAN-Betrieb noch produktive SSH-/QR-Aufnahme,
+Harness-Wiederaufnahme oder die noch ausstehende Runtime-Migration.
+
+Zwischenläufe bleiben im Nachweisverzeichnis erhalten: ein Borrow-Konflikt im
+neuen Fixture, fehlende Worker-Routen beim späten Attachment und ein nicht
+admittierter neuer Voter-Kanal vor Entfernung des Initiator-Sonderpfads. Eine
+zwischenzeitlich fehlgeschlagene Admission-Assertion lieferte noch keinen
+Receipt-Wert; ihre Diagnostik wurde ergänzt und die Assertion beibehalten.
+Sie wird nicht ohne weiteren Nachweis einem bestimmten Fehler zugeordnet.
+
 ### Native Worker ohne Business-OS-Collections
 
 Der gemeinsame NativeSync-Lifecycle erhält die Datenbankidentität jetzt explizit

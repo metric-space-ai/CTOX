@@ -31,6 +31,32 @@ deployable replacement daemon. Business records still replicate through RxDB.
   permissions remain independent and must validate the remote role and identity.
   Hosts await `shutdown` before closing persistence; Drop provides an unwind
   backstop. The default 20/20 batches and 5-second replication retry are retained.
+- `host_config.rs`: versioned native host pins in the host runtime SQLite database.
+  The singleton record contains the scope, local voter/worker identity, three
+  distinct voter keys and Raft timing. Saving uses an immediate transaction and
+  refuses identity, scope, role or capability rebinding; existing runtime tables
+  remain untouched. Loading validates the stored record again. Signing material,
+  signaling credentials, route hints and live IPC endpoints are excluded.
+  Voter attachment options use a stable storage directory and both roles use the
+  dedicated `ctox-execution:<scope>` room; the supplied key must match the pin.
+  The host supplies its private IPC directory separately: a long persistent
+  database path must not become a Unix socket path. The existing listener owns
+  path-length, ownership, permissions and process-lock validation.
+  A worker record is local configuration, never a quorum admission receipt.
+  Host setup types now come from the same generated Rust/TypeScript contract
+  as IPC. Native validation additionally enforces distinct pins and membership
+  constraints; schema decoding alone never proves admission.
+- `host_runtime.rs`: one foreground lifecycle for the CTOX service and `ctox sync
+  run`. It validates the configured control-only database, starts the existing
+  native session/attachment, publishes the actual listener, supervises it and
+  shuts down the session before its caller closes storage.
+- `../sync_host/`: the CTOX CLI/service adapter. Signing keys and explicit
+  transport settings use the encrypted CTOX secret store; public pins use the
+  runtime SQLite store. A common process lease precedes opening Raft or RxDB.
+  `sync status` actively verifies the local listener's identity and protocol;
+  it does not report membership or execution readiness. Production signaling
+  grants and Workjet SSH/QR integration remain open. See the
+  [host setup contract](../../../docs/dev/ctox-sync-worker-host-contract.md).
 - `authority/node.rs`: pinned OpenRaft 0.9.25 adapter. Three configured peers
   confirm job ownership and generation. `local_job` is a projection;
   `validate_ownership` requires a linearizable quorum read.
@@ -56,10 +82,15 @@ deployable replacement daemon. Business records still replicate through RxDB.
 - `native_execution.rs`: `NativeSyncSession::attach_execution` attaches one
   configured authority group to the session's actual replication pool. It checks
   room, local signing identity and routing configuration, registers the signed
-  control receiver and connects only configured native peers. The session stops
+  control receiver and discovers native candidates admitted to the room. The session stops
   the group before closing transport. Membership never changes host data-access
-  predicates. Discovery accepts configured signaling routes advertised as
-  `ctox_instance` or `workjet_executor`; a role alone never adds a trusted key.
+  predicates. Discovery probes signaling routes advertised as `ctox_instance`
+  or `workjet_executor`; a role alone never adds a trusted key. The native-only
+  `ctox.sync.authority.route.v1` method reuses the signed envelope, with distinct
+  request/reply kinds. Fresh nonce, scope, recipient and the current signaling
+  address bind the proof. Only the three pinned voter keys may update routing;
+  the connection must still be the same admitted lifetime after verification.
+  A route proof neither invokes Raft nor grants membership or execution.
   Authority control waits for reciprocal protocol/token admission;
   receiving an inbound probe alone is insufficient. Production provisioning and
   executor/gateway enforcement are still required.
@@ -73,10 +104,12 @@ deployable replacement daemon. Business records still replicate through RxDB.
   implemented local listener reject attachment explicitly.
   `NativeSyncSession::attach_worker` now owns a `NativeExecutionWorker` using
   this same generic `NativeExecutionHost` supervisor. Worker options contain a
-  confirmed identity pin and three voter routes, with no Raft store path.
+  confirmed identity pin and exactly three voters, with no Raft store path.
+  Route maps are optional startup hints; an empty map uses authenticated discovery.
   Exactly one voter or worker attachment may occupy a native session. Workers
-  initiate toward their voters regardless of signaling-ID ordering; voter pairs
-  retain their lower-ID-only rule. Role, room, route and local-key checks precede
+  and voters use one rule: the lower signaling ID alone initiates. The former
+  worker-only override is removed now that both ends discover candidates.
+  Role, room, route and local-key checks precede
   activation. Admission and business collection gates remain host-owned.
   A local signaling reconnect keeps the signing identity, membership and IPC
   endpoint. Discovery reads the current signaling ID for each initiator decision
@@ -88,7 +121,7 @@ deployable replacement daemon. Business records still replicate through RxDB.
   replay, revocation, denied business reads and retained-handle shutdown. The
   worker has the greatest signaling ID and opens no Raft store. This is a native
   control-path acceptance, not a completed coding-agent turn. Product onboarding,
-  automatic discovery of changed voter routes and harness supervision remain open.
+  signaling grants and harness supervision remain open.
 - `authority/store.rs`: SQLite Raft log, vote, state machine and snapshots.
   Receipts and state changes commit atomically. A duplicate command returns
   `Replayed`; it never grants permission to perform another external effect.
@@ -174,6 +207,7 @@ check free capacity before starting a build:
 
 ```sh
 node src/core/sync/tools/generate-contracts.mjs --check --workjet-root ../workjet
+node src/core/sync/tools/assert-host-contracts.mjs ../workjet
 TMPDIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/tmp CARGO_TARGET_DIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/cargo-target cargo test --manifest-path src/core/sync/Cargo.toml --features webrtc -j 1
 TMPDIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/tmp CARGO_TARGET_DIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/cargo-target cargo clippy --manifest-path src/core/sync/Cargo.toml --features webrtc --all-targets -- -D warnings
 ```
@@ -193,8 +227,12 @@ a worker as a production instance fails. They retain the signed-key checks and
 denial of business-record access. The group still requires exactly three voting
 peers, and host admission is a fixture. Additional enrolled workers use the
 confirmed worker directory separately from that three-voter configuration.
+The `host_cli_acceptance` example accepts an actual CTOX binary and a private
+fixture work directory. It runs separate processes with generated keys and
+local signaling; it never executes a coding harness or uses production state.
+
 This is not certification of WAN,
 harness export/import, credentials, a mobile host or the production signaling
-admission path. Provisioning, production host lifecycle integration, continuous process supervision,
+admission path. Provisioning, full production-service acceptance, continuous process supervision,
 gateway/tool fencing, real Codex/Claude resume and coordinated migrations remain
 required before replacing active Workjet execution and mailbox paths.

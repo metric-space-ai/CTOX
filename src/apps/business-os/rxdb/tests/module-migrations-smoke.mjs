@@ -1,0 +1,23 @@
+import assert from 'node:assert/strict';
+import { readdirSync, existsSync } from 'node:fs';
+
+const modules = new URL('../../modules/', import.meta.url);
+for (const entry of readdirSync(modules, { withFileTypes: true })) {
+  if (!entry.isDirectory()) continue;
+  const url = new URL(`${entry.name}/schema.js`, modules);
+  if (!existsSync(url)) continue;
+  const { collections = {}, migrationStrategies = {} } = await import(url.href);
+  for (const [name, definition] of Object.entries(collections)) {
+    const schema = definition.schema || definition;
+    const strategies = migrationStrategies[name] || definition.migrationStrategies || {};
+    assert.equal(Object.keys(strategies).length, schema.version, `${entry.name}/${name}: complete migration map`);
+    for (let version = 1; version <= schema.version; version++) {
+      assert.equal(typeof strategies[version], 'function', `${entry.name}/${name}: migration ${version}`);
+    }
+    if (name === 'ctox_queue_tasks') {
+      const oldDoc = { id: 'existing-v2-task', crew_member_id: null };
+      assert.deepEqual(strategies[3](oldDoc), oldDoc, `${entry.name}: additive v2 upgrade`);
+    }
+  }
+}
+console.log('All module collections have contiguous migration strategies');

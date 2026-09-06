@@ -1,17 +1,10 @@
 //! Host-owned timing for Internet-connected authority peers.
-use serde::{Deserialize, Serialize};
 use std::io;
 
 /// OpenRaft 0.9 uses heartbeat_interval as the complete quorum-read RPC budget,
 /// not only the interval between heartbeats. Its 50 ms default targets low-latency
 /// datacenter networks. Keep this policy explicit at the native host boundary.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct AuthorityTiming {
-    pub heartbeat_ms: u64,
-    pub election_min_ms: u64,
-    pub election_max_ms: u64,
-}
+pub use crate::contracts::SyncHostTiming as AuthorityTiming;
 
 impl Default for AuthorityTiming {
     fn default() -> Self {

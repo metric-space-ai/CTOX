@@ -37,6 +37,7 @@ mod report;
 mod secrets;
 mod service;
 mod skill_store;
+mod sync_host;
 mod ui;
 mod web_stack;
 
@@ -210,6 +211,11 @@ CAPABILITIES / WEB STACK
 
 GOVERNANCE / MISSION
   ctox service --foreground      run the daemon loop in the foreground
+  ctox sync init | identity      initialize or inspect the native Sync key
+  ctox sync import-key ID        import a pinned PKCS#8 key from stdin
+  ctox sync configure            store public native host configuration from stdin
+  ctox sync transport            store separate transport credentials from stdin
+  ctox sync status | run         inspect or run the native execution host
   ctox governance <subcmd>       governance decisions and audits
   ctox channel <subcmd>          communication channels (email, jami, webrtc)
   ctox mailserver <subcmd>       manage mailserver domains, users, and send test emails
@@ -366,7 +372,7 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
             // Recovery / inspection commands — must work even when the
             // runtime DB is wedged.
             "upgrade" | "update" | "version" | "status" | "doctor" | "service" | "mailserver"
-            | "appsec" | "crew" => {
+            | "appsec" | "crew" | "sync" => {
                 return true;
             }
             // Agent-facing web-stack calls persist their evidence in the
@@ -460,13 +466,18 @@ fn skips_cli_turn_ledger(args: &[String]) -> bool {
 
 fn dispatch_command(root: &Path, args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
+        Some("sync") => sync_host::handle_command(root, &args[1..]),
         None => tui::run_tui(root),
         Some("help") | Some("--help") | Some("-h") => {
             print_help();
             Ok(())
         }
         Some("crew") => {
-            let conn = rusqlite::Connection::open_with_flags(paths::core_db(&root), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let conn = rusqlite::Connection::open_with_flags(paths::core_db(&root), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .context("Crew database is not readable yet; start CTOX once to initialize it (WAL readers also require access to its shared-memory directory)")?;
+            conn.busy_timeout(persistence::sqlite_busy_timeout_duration())?;
+            let initialized: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='crew_members')", [], |r| r.get(0))?;
+            anyhow::ensure!(initialized, "Crew has not been initialized yet; start CTOX once to create the crew tables");
             let members = crew::members(&conn)?;
             match args.get(1).map(String::as_str) {
                 Some("list") if args.len() == 2 => println!("{}", serde_json::to_string_pretty(&members)?),

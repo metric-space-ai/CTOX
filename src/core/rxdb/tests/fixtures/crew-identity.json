@@ -6,6 +6,7 @@
     "stats": {"tasks_total": 2, "succeeded": 1, "failed": 1}
   },
   "public_fields": ["id", "name", "shape", "color", "archived", "state", "active_task_id", "updated_at_ms"],
+  "lifecycle": {"assignment_field": "crew_assigned_member_id", "unavailable_event": "crew_selection_unavailable", "resting_window_ms": 86400000},
   "learning": {
     "id": "crew-learning:fixture", "member_id": "crew-milo", "text": "Vor dem Import das Schema prüfen.",
     "kind": "insight", "scope": {"module": "reports"}, "evidence_run_id": "attempt-fixture",

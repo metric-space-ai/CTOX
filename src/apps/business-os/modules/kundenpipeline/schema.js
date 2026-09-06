@@ -83,7 +83,4 @@ export const migrationStrategies = {
     }),
     2: (oldDoc) => oldDoc,
   },
-  kundenpipeline_vorgaenge: { 1: (oldDoc) => oldDoc },
-  kundenpipeline_entscheidungen: { 1: (oldDoc) => oldDoc },
-  kundenpipeline_projekte: { 1: (oldDoc) => oldDoc },
 };

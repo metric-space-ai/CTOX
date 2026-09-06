@@ -312,6 +312,26 @@ pub fn role_can_manage(role: &str) -> bool {
     )
 }
 
+pub(crate) fn role_sees_private_crew_fields(role: &str) -> bool {
+    matches!(
+        parse_role(role),
+        BusinessOsRole::Chef | BusinessOsRole::Admin | BusinessOsRole::Founder
+    )
+}
+
+pub(crate) fn crew_fields_for_role(role: &str) -> Option<Vec<String>> {
+    if role_sees_private_crew_fields(role) {
+        None
+    } else {
+        Some(
+            crate::crew::PUBLIC_MEMBER_FIELDS
+                .iter()
+                .map(|field| field.to_string())
+                .collect(),
+        )
+    }
+}
+
 /// Collections that hold administrative / sensitive control data and must not
 /// replicate to non-admin peers. This is a CONSERVATIVE deny-set: every
 /// collection NOT listed here is workspace app data and stays readable by all

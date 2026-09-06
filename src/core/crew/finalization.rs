@@ -76,7 +76,6 @@ pub(crate) fn public_reply_text(reply: &str) -> String {
 }
 
 /// Pump-owned transaction. Replays cannot count an attempt or learning twice.
-
 pub(crate) fn finalize_attempt(
     conn: &Connection,
     attempt: &str,
@@ -108,9 +107,17 @@ pub(crate) fn finalize_attempt(
         return Ok(());
     };
     let succeeded = status == "succeeded";
-    let retrospective = parse_retrospective(reply).filter(|r| {
-        r.validate(succeeded && review_passed == Some(true), owner_feedback)
-            .is_ok()
+    let retrospective = parse_retrospective(reply).and_then(|mut r| {
+        r.normalize();
+        match r.validate(succeeded && review_passed == Some(true), owner_feedback) {
+            Ok(()) => Some(r),
+            Err(_) => {
+                // The transaction's finalized_at guard makes this once per attempt.
+                // Neither the rejected text nor credentials are logged.
+                eprintln!("[ctox crew] rejected retrospective for attempt {attempt}: invalid prose or unsupported evidence");
+                None
+            }
+        }
     });
     if let Some(r) = &retrospective {
         for learning in &r.learnings {

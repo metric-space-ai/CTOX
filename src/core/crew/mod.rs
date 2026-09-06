@@ -2,8 +2,12 @@
 //! attempt bookkeeping remain owned by CTOX, never by the embedded worker.
 mod finalization;
 pub(crate) use finalization::*;
+mod lifecycle;
+#[cfg(test)]
+mod lifecycle_tests;
 mod runtime;
 use anyhow::{bail, Context, Result};
+pub(crate) use lifecycle::*;
 pub(crate) use runtime::*;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -36,6 +40,9 @@ pub(crate) struct Soul {
     pub voice: String,
 }
 impl Soul {
+    pub fn normalize(&mut self) {
+        self.sketch = prose_line(&self.sketch);
+    }
     pub fn validate(&self) -> Result<()> {
         if [
             self.gruendlichkeit_vs_tempo,
@@ -51,6 +58,7 @@ impl Soul {
             || self.voice.trim().is_empty()
             || self.voice.contains(['\n', '\r'])
             || self.voice.matches(['.', '!', '?']).count() > 1
+            || (!self.sketch.is_empty() && !safe_prose(&self.sketch, 600))
         {
             bail!("invalid crew soul: axes must be 0–100, sketch ≤600 and voice ≤200 characters");
         }
@@ -130,6 +138,38 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<()> {
             "ALTER TABLE communication_routing_state ADD COLUMN crew_member_id TEXT;",
         )?;
     }
+    for (table, column) in [
+        ("communication_routing_state", "crew_assigned_member_id"),
+        ("crew_attempts", "started_at"),
+    ] {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+            params![table, column],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} TEXT;"))?;
+        }
+    }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_crew_attempt_unstarted
+            ON crew_attempts(started_at,finalized_at,selected_at,attempt_id)
+            WHERE started_at IS NULL AND finalized_at IS NULL;
+         CREATE TABLE IF NOT EXISTS crew_projection_tombstones(event_id TEXT PRIMARY KEY);",
+    )?;
+    ensure_selection_event_index(conn)?;
+    // Learning edits/deletions invalidate the member projection without scanning
+    // its learning rows on every wake. Advance even for two writes in one ms.
+    for (operation, reference) in [("INSERT", "NEW"), ("UPDATE", "NEW"), ("DELETE", "OLD")] {
+        conn.execute_batch(&format!(
+            "CREATE TRIGGER IF NOT EXISTS crew_learning_touch_{operation}
+             AFTER {operation} ON crew_member_learnings BEGIN
+                 UPDATE crew_members SET updated_at=strftime('%Y-%m-%dT%H:%M:%fZ',
+                     max(julianday('now'), coalesce(julianday(updated_at),0)+0.001/86400.0))
+                 WHERE id={reference}.member_id;
+             END;"
+        ))?;
+    }
     conn.execute_batch(
         "CREATE INDEX IF NOT EXISTS idx_crew_active_task
         ON communication_routing_state(crew_member_id,route_status,leased_at,message_key);",
@@ -207,6 +247,10 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<()> {
 }
 
 pub(crate) fn members(conn: &Connection) -> Result<Vec<Member>> {
+    Ok(members_with_errors(conn)?.0)
+}
+
+fn members_with_errors(conn: &Connection) -> Result<(Vec<Member>, Vec<String>)> {
     let mut statement = conn.prepare("SELECT id,name,shape,color,created_at,archived,soul_json,specialties_json,stats_json,updated_at FROM crew_members ORDER BY id LIMIT 1000")?;
     let rows = statement.query_map([], |r| {
         Ok((
@@ -222,23 +266,32 @@ pub(crate) fn members(conn: &Connection) -> Result<Vec<Member>> {
             r.get::<_, String>(9)?,
         ))
     })?;
-    rows.map(|r| {
+    let mut members = Vec::new();
+    let mut errors = Vec::new();
+    for r in rows {
         let (id, name, shape, color, created_at, archived, soul, specialties, stats, updated_at) =
             r?;
-        Ok(Member {
-            id,
-            name,
-            shape,
-            color,
-            created_at,
-            archived,
-            soul: serde_json::from_str(&soul)?,
-            specialties: serde_json::from_str(&specialties)?,
-            stats: serde_json::from_str(&stats)?,
-            updated_at,
-        })
-    })
-    .collect()
+        let parsed = (|| -> Result<Member> {
+            Ok(Member {
+                id: id.clone(),
+                name,
+                shape,
+                color,
+                created_at,
+                archived,
+                soul: serde_json::from_str(&soul)?,
+                specialties: serde_json::from_str(&specialties)?,
+                stats: serde_json::from_str(&stats)?,
+                updated_at,
+            })
+        })();
+        match parsed {
+            Ok(member) => members.push(member),
+            // Never copy malformed JSON (potentially sensitive) into diagnostics.
+            Err(_) => errors.push(format!("invalid crew member data: {id}")),
+        }
+    }
+    Ok((members, errors))
 }
 
 #[derive(Default)]
@@ -272,8 +325,14 @@ pub(crate) fn select(
     now_ms: i64,
 ) -> Option<Selection> {
     for (wanted, reason) in [
-        (&task.manual_member, "Manuelle Zuordnung vor dem Lease"),
-        (&task.continuity_member, "Kontinuität im bestehenden Thread"),
+        (
+            &task.manual_member,
+            "assigned: Manuelle Zuordnung vor dem Lease",
+        ),
+        (
+            &task.continuity_member,
+            "continuity: Kontinuität im bestehenden Thread",
+        ),
     ] {
         if let Some(member) = wanted
             .as_ref()
@@ -295,7 +354,7 @@ pub(crate) fn select(
         let failures = history.iter().filter(|h| h.member_id==m.id && !h.succeeded && task.module.is_some() && h.module==task.module && h.finished_at_ms >= now_ms.saturating_sub(86_400_000)).count().min(10);
         (m, (hits.min(20) * 10 + successes * 3) as i64 - (failures * 5) as i64, hits, successes, failures)
     }).min_by(|a,b| b.1.cmp(&a.1).then_with(|| a.0.stats.last_active_at.cmp(&b.0.stats.last_active_at)).then_with(|| a.0.id.cmp(&b.0.id)))
-        .map(|(m,score,hits,successes,failures)| Selection { member_id:m.id.clone(),reason:format!("{} ({}): {} Punkte; {} Spezialitäten-Treffer, {} passende Erfolge, {} Modul-Fehlschläge in 24 h; Gleichstand nach letzter Aktivität und ID",m.name,m.id,score,hits,successes,failures) })
+        .map(|(m,score,hits,successes,failures)| Selection { member_id:m.id.clone(),reason:format!("selected: {} ({}): {} Punkte; {} Spezialitäten-Treffer, {} passende Erfolge, {} Modul-Fehlschläge in 24 h; Gleichstand nach letzter Aktivität und ID",m.name,m.id,score,hits,successes,failures) })
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -319,21 +378,26 @@ pub(crate) struct Retrospective {
     pub learnings: Vec<Learning>,
 }
 pub(crate) fn normalized(text: &str) -> String {
-    text.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase()
+    prose_line(text).to_lowercase()
+}
+pub(crate) fn prose_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 /// Store only prose. Reject path/credential-shaped content rather than guessing at
 /// redaction; arbitrary worker fields never enter durable crew records.
 pub(crate) fn safe_prose(text: &str, limit: usize) -> bool {
-    let lower = text.to_lowercase();
+    let prose = prose_line(text);
+    let lower = prose.to_lowercase();
+    static SENSITIVE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let sensitive = SENSITIVE.get_or_init(|| regex::Regex::new(
+        r"(?i)(?:/users/|/home/|/tmp/|/var/|[a-z]:\\|~/|\./|(?:^|\s)/[\w.-]+|\\+[\w.-]+\\[\w.-]+|\b[\w.-]+(?:/[\w.-]+)+\.[a-z0-9]+\b|\b(?:AKIA|ghp_|eyJ|sk-)|\b[\w-]*key[\w-]*\s*=|[\w.+-]+@[\w.-]+\.[a-z]{2,})"
+    ).expect("constant crew prose pattern"));
     !text.trim().is_empty()
         && text.chars().count() <= limit
-        && !text.contains(['/', '\\', '\0'])
+        && !text.contains('\0')
+        && !sensitive.is_match(&prose)
         && !text.chars().any(|c| c.is_control() && !c.is_whitespace())
         && ![
-            "sk-",
             "bearer ",
             "api_key",
             "api-key",
@@ -347,12 +411,18 @@ pub(crate) fn safe_prose(text: &str, limit: usize) -> bool {
             "credential",
             "pwd=",
             "private key",
-            "@",
+            "ctox_crew_soul",
         ]
         .iter()
         .any(|s| lower.contains(s))
 }
 impl Retrospective {
+    pub fn normalize(&mut self) {
+        self.retrospective = prose_line(&self.retrospective);
+        for learning in &mut self.learnings {
+            learning.text = prose_line(&learning.text);
+        }
+    }
     pub fn validate(&self, passed: bool, owner_feedback: Option<&str>) -> Result<()> {
         if !safe_prose(&self.retrospective, 300) || self.learnings.len() > 3 {
             bail!("invalid crew retrospective");
@@ -413,6 +483,19 @@ mod tests {
             serde_json::from_str(include_str!("../rxdb/tests/fixtures/crew-identity.json"))
                 .unwrap();
         let mut public = fixture["member"].clone();
+        let declared: BTreeSet<&str> = fixture["public_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(
+            PUBLIC_MEMBER_FIELDS
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            declared
+        );
         public_member_document(&mut public);
         assert!(public.get("soul").is_none());
         assert!(public.get("stats").is_none());
