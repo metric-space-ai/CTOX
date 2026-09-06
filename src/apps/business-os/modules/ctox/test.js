@@ -32,6 +32,7 @@ const {
   deriveHarnessHealth,
   eventToNodeId,
   flowCrewSvg,
+  flowSvg,
   flowSourceView,
   formatRelativeAge,
   friendlyWebStackStatus,
@@ -60,6 +61,27 @@ const {
 test('Missing authoritative task telemetry remains a safe empty state', () => {
   assert.equal(authoritativeTaskStatus(null), '');
   assert.equal(authoritativeTaskNodeId(null), '');
+});
+
+test('Harness diagram renders complete nodes with and without a selected task', () => {
+  const model = buildHarnessModel(
+    { runs: [], queue: [], communications: [], tickets: [], tools: [] },
+    { ok: false },
+    'en',
+  );
+  const trace = { nodeStrength: new Map(), edgeStrength: new Map() };
+  const working = { id: 'flow-render-task', status: 'running', executionPhase: 'running' };
+  for (const selectedTask of [null, working]) {
+    const html = flowSvg(model, model.nodeMap.get('queued'), trace, selectedTask, { lang: 'en' });
+    assert.match(html, /class="ctox-flow-diagram"/);
+    assert.equal((html.match(/class="ctox-flow-node-g /g) || []).length, model.nodes.length);
+    if (selectedTask) {
+      assert.match(html, /class="ctox-flow-node-g [^"]*is-crew-hier[^>]*\sdata-node-id="running"/);
+      assert.equal((html.match(/is-crew-hier/g) || []).length, 1);
+    } else {
+      assert.doesNotMatch(html, /is-crew-hier/);
+    }
+  }
 });
 
 test('CTOX flow map places the same crew on waiting, working, and failed task nodes', () => {
@@ -95,8 +117,20 @@ test('CTOX flow map places the same crew on waiting, working, and failed task no
       ['model-failed', { id: 'model-failed', x: 720, y: 360 }],
     ]),
   };
-  const html = flowCrewSvg(model, working, { lang: 'de' });
-  assert.equal((html.match(/ctox-flow-creature-slot/g) || []).length, 3);
+  const workingHtml = flowCrewSvg(model, working, { lang: 'de' });
+  const waitingHtml = flowCrewSvg(model, waiting, { lang: 'de' });
+  const failedHtml = flowCrewSvg(model, failed, { lang: 'de' });
+  assert.equal((workingHtml.match(/ctox-flow-creature-slot/g) || []).length, 1);
+  assert.equal((waitingHtml.match(/ctox-flow-creature-slot/g) || []).length, 2);
+  assert.equal((failedHtml.match(/ctox-flow-creature-slot/g) || []).length, 2);
+  assert.doesNotMatch(workingHtml, /data-task-id="task-(waiting|failed)"/);
+  assert.doesNotMatch(waitingHtml, /data-task-id="task-failed"/);
+  assert.doesNotMatch(failedHtml, /data-task-id="task-waiting"/);
+  for (const [html, id] of [[workingHtml, working.id], [waitingHtml, waiting.id], [failedHtml, failed.id]]) {
+    assert.match(html, new RegExp(`class="ctox-flow-creature-slot is-selected"[^>]+data-task-id="${id}"`));
+    assert.match(html, /data-task-id="task-working"/);
+  }
+  const html = workingHtml + waitingHtml + failedHtml;
   assert.match(html, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
   assert.match(html, /data-task-id="task-waiting"[^>]+data-creature-node-id="queued"/);
   assert.match(html, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);

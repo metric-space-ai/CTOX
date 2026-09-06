@@ -59,6 +59,12 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `channel=${channel}\n`);
           NODE
 
+      - name: Install pinned browser test dependencies
+        run: npm ci --prefix src/apps/business-os
+
+      - name: Guard CTOX harness rendering
+        run: node src/apps/business-os/modules/ctox/test.js
+
       - name: Run focused shell artifact tests
         run: npm run test:shell-artifact --prefix src/apps/business-os
 
