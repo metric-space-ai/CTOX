@@ -255,6 +255,12 @@ pub fn validate_write_document(
             continue;
         }
         match obj.get(req) {
+            Some(Value::Null)
+                if json_schema
+                    .properties
+                    .get(req)
+                    .and_then(|prop| prop.schema_type.as_ref())
+                    .is_some_and(|kind| kind.contains("null")) => {}
             None | Some(Value::Null) => return Err(format!("required field '{req}' is missing")),
             _ => {}
         }
@@ -268,24 +274,15 @@ pub fn validate_write_document(
             Some(value) if !value.is_null() => value,
             _ => continue,
         };
-        let Some(declared) = prop.schema_type.as_deref() else {
+        let Some(declared) = prop.schema_type.as_ref() else {
             continue;
         };
-        let type_ok = match declared {
-            "string" => value.is_string(),
-            "number" => value.is_number(),
-            "integer" => value.is_i64() || value.is_u64(),
-            "boolean" => value.is_boolean(),
-            "object" => value.is_object(),
-            "array" => value.is_array(),
-            _ => true, // compound/unknown declared types: do not reject
-        };
-        if !type_ok {
+        if !declared.accepts(value) {
             return Err(format!(
-                "field '{name}' has wrong type (expected {declared})"
+                "field '{name}' has wrong type (expected {declared:?})"
             ));
         }
-        if declared == "string" {
+        if declared.contains("string") {
             if let (Some(max), Some(s)) = (prop.max_length, value.as_str()) {
                 if s.len() as u64 > max {
                     return Err(format!("field '{name}' exceeds maxLength {max}"));

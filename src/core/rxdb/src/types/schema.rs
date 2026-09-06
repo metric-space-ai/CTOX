@@ -34,6 +34,61 @@ impl PrimaryKey {
     }
 }
 
+// ref: rxdb/src/types/rx-schema.d.ts:8,42
+/// Keep scalar and union declarations distinct so schema hashes preserve the
+/// browser contract, including nullable fields such as active_task_id.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum JsonSchemaType {
+    Single(String),
+    Union(Vec<String>),
+}
+
+impl JsonSchemaType {
+    pub fn as_single_type(&self) -> Option<&str> {
+        match self {
+            Self::Single(kind) => Some(kind),
+            Self::Union(_) => None,
+        }
+    }
+
+    pub fn contains(&self, kind: &str) -> bool {
+        match self {
+            Self::Single(declared) => declared == kind,
+            Self::Union(declared) => declared.iter().any(|item| item == kind),
+        }
+    }
+
+    pub fn accepts(&self, value: &Value) -> bool {
+        let matches = |kind: &str| match kind {
+            "string" => value.is_string(),
+            "number" => value.is_number(),
+            "integer" => value.is_i64() || value.is_u64(),
+            "boolean" => value.is_boolean(),
+            "object" => value.is_object(),
+            "array" => value.is_array(),
+            "null" => value.is_null(),
+            _ => true, // Preserve the existing policy for extension types.
+        };
+        match self {
+            Self::Single(kind) => matches(kind),
+            Self::Union(kinds) => kinds.iter().any(|kind| matches(kind)),
+        }
+    }
+}
+
+impl From<&str> for JsonSchemaType {
+    fn from(value: &str) -> Self {
+        Self::Single(value.to_owned())
+    }
+}
+
+impl From<String> for JsonSchemaType {
+    fn from(value: String) -> Self {
+        Self::Single(value)
+    }
+}
+
 // ref: rxdb/src/types/rx-schema.d.ts JsonSchema<RxDocType>
 //
 // JSON-Schema fragment. Upstream is a TS conditional/recursive type. Here we
@@ -42,7 +97,7 @@ impl PrimaryKey {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct JsonSchema {
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
-    pub schema_type: Option<String>,
+    pub schema_type: Option<JsonSchemaType>,
 
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub properties: HashMap<String, JsonSchema>,
