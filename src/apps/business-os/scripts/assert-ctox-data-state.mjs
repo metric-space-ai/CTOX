@@ -108,6 +108,27 @@ try {
         });
       assert.ok(geometry.width > 300 && geometry.height > 400);
       assert.ok(geometry.titleContrast >= 4.5, `${theme}: title contrast ${geometry.titleContrast}`);
+      // Resolve the shared token in the browser, including dark-theme overrides.
+      const lines = await page.locator('[data-ctox-main]').evaluate((el) => {
+        const probe = document.createElement('span');
+        probe.style.color = 'var(--line)';
+        el.append(probe);
+        const expected = getComputedStyle(probe).color;
+        probe.remove();
+        return {
+          expected,
+          header: getComputedStyle(el.querySelector('.ctox-pane-header')).borderBottomColor,
+          well: getComputedStyle(el.querySelector('.ctox-flow-well')).borderTopColor,
+        };
+      });
+      assert.equal(lines.header, lines.expected, `${theme}: header uses Kit line`);
+      assert.equal(lines.well, lines.expected, `${theme}: canvas uses Kit line`);
+      if (state === 'working') {
+        const selector = page.locator('.ctox-task-selector').first();
+        await selector.focus();
+        assert.notEqual(await selector.evaluate(el => getComputedStyle(el).boxShadow), 'none', `${theme}: Kit keyboard focus ring`);
+        await selector.evaluate(el => el.blur());
+      }
       await page.screenshot({
         path: path.join(output, `${state}-${theme}.png`),
       });
