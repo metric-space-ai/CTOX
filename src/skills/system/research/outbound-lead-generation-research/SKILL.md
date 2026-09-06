@@ -184,21 +184,22 @@ When to write a script: a source you will hit again for many leads (register lis
 
 ## 7. Writeback — the only way results reach the lead
 
-One command per lead, dispatched through the command bus; the native handler validates it, writes the lead collection, and the UI updates through replication. Never edit collections or SQLite directly, never report results as chat text only.
+One writeback per lead, sent through the **MCP tool `business_os.execute_writeback`** of the
+`ctox-business-os` server. The server binds `module` and `research_command_id` to your task
+itself, validates the payload with the native handler, writes the lead collection, and the UI
+updates through replication. Nothing else counts: **do not** run `ctox business-os commands
+dispatch`, any other CLI, shell, SQLite or direct SQL for the writeback — those paths are
+forbidden by the task contract (`forbidden_mechanisms`), fail in the sandbox, and the daemon
+rejects the task as incomplete when no successful `execute_writeback` receipt exists for your
+lead and your research command. Never edit collections directly, never report results as chat
+text only.
 
-```bash
-ctox business-os commands dispatch --json '{
-  "id": "research-writeback-<lead-id>-<n>",
-  "command_id": "research-writeback-<lead-id>-<n>",
-  "module": "outbound-lead-generation",
-  "command_type": "outbound.lead.research_writeback",
+Call:
+
+```json
+business_os.execute_writeback({
   "record_id": "<lead-id>",
-  "status": "pending_sync",
   "payload": {
-    "record_id": "<lead-id>",
-    "module": "outbound-lead-generation",
-    "research_command_id": "<your command id>",
-    "gap_task_id": "",
     "field_status": {
       "<field>": {
         "status": "verified|no_match|unsupported|action_required",
@@ -214,8 +215,13 @@ ctox business-os commands dispatch --json '{
       "evidence": [ {"field_key": "<field>", "source_id": "...", "url": "...", "quote": "...", "person_key": null} ]
     }
   }
-}'
+})
 ```
+
+Do not add `module`, `research_command_id`, `command_id` or `gap_task_id` yourself — the server
+sets them from the signed task session. Read the tool's returned `status`: `accepted` or
+`completed` means the writeback landed; anything else means it did not, and the task is not done
+until a retry succeeds.
 
 ### Validation rules the daemon enforces (get them right on the first attempt)
 
@@ -231,9 +237,8 @@ Build the writeback in this order, then send it once: (1) collect the terminal s
 - A **non-verified** field (`no_match`, `unsupported`, `action_required`) must NOT carry a populated `value`. State the reason instead.
 - Person fields describe the priority contact(s) you actually found: when you report persons in `person_records`, set the matching `person_*` fields `verified` with their `person_key` instead of `no_match`. `no_match` on a person field means you found no such person at all.
 - Person fields carry a `person_key`; `result.fields` holds structured objects only, never free text.
-- `research_command_id` is your own command id; `gap_task_id` stays empty for a chat assignment (it is only set when the daemon handed you a queue task "Lückenschluss: …" — then copy it from that task).
-- **Dispatch exactly one command: the writeback.** Never dispatch read commands (`outbound.task.readback`, `outbound.lead.read`, `outbound.queue_task.read`, `outbound.lead.show` or anything similar) to check your own result. Every dispatched command becomes its own queue task and its own agent turn — twelve such reads once blocked a whole campaign for three hours. Read state with `ctox business-os commands inspect <your writeback command id>`, and stop there.
-- Done means the dispatch answered `ok: true` with status `accepted` or `completed`. Report the counts (verified / no_match / action_required / unsupported) and the persons found in one short chat message.
+- **Exactly one writeback call per lead.** Never dispatch read commands (`outbound.task.readback`, `outbound.lead.read`, `outbound.queue_task.read`, `outbound.lead.show` or anything similar) to check your own result, and never enqueue Business OS actions (`business_os.execute_action`, `business_os.propose_action`) for the writeback — they are not the writeback and are rejected outside the task contract. Every dispatched command becomes its own queue task and its own agent turn — twelve such reads once blocked a whole campaign for three hours.
+- Done means `business_os.execute_writeback` returned status `accepted` or `completed`. Report the counts (verified / no_match / action_required / unsupported) and the persons found in one short chat message.
 
 ## 8. Unblocking across turns (login, captcha, MFA)
 
@@ -266,7 +271,7 @@ The human is not always at the keyboard, and your turn is bounded. The system th
 | Company is a subsidiary / renamed / merged | Research the entity the lead names. Put former names into `firma_fruehere_namen`, note the parent in `firma_geschaeftstaetigkeit`, and never silently replace the lead with the parent company. |
 | Register shows the company as inactive | `firma_aktivitaetsstatus` verified with the register entry; keep researching the remaining fields, the lead is still a record. |
 | Country is AT or CH | Use the country's register first (Firmenbuch/JustizOnline, Zefix/SHAB/Moneyhouse). A DE-only field on a foreign lead is `unsupported`, not `no_match`. |
-| The writeback is rejected | Read the error, fix exactly that (see §7 rules), dispatch again with a new command id. Three rejected attempts in a row: write back what is valid, mark the rest `action_required` with the error as reason, and report it. |
+| The writeback is rejected | Read the error, fix exactly that (see §7 rules), call `business_os.execute_writeback` again. Three rejected attempts in a row: write back what is valid, mark the rest `action_required` with the error as reason, and report it. |
 | Your turn budget runs out | `field_status.json` is your checkpoint; the follow-up turn continues from it. Better a complete writeback with honest `no_match` than a half one. |
 | You found nothing at all for a field | `no_match` — but only with the documented search and two reads. `no_match` without evidence is a false statement, not a result. |
 
