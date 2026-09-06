@@ -5036,13 +5036,70 @@ struct PromptWorkerActivity {
     leases_released: bool,
     lease_heartbeat_stop: Arc<std::sync::atomic::AtomicBool>,
     lease_heartbeat: Option<thread::JoinHandle<()>>,
-    prepared_attempt: Option<anyhow::Result<PreparedCrewAttempt>>,
 }
 
 struct PreparedCrewAttempt {
     attempt_id: String,
     recoverable_attempt: Option<lcm::WorkerAttemptRecord>,
     crew_soul_block: Option<String>,
+}
+
+#[cfg(test)]
+fn assert_no_crew_admission_evidence(conn: &rusqlite::Connection) {
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM crew_attempts WHERE finalized_at IS NULL",
+            [],
+            |r| r.get::<_, i64>(0)
+        )
+        .unwrap(),
+        0
+    );
+    let has_events: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ctox_harness_flow_events')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    if has_events {
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ctox_harness_flow_events WHERE event_kind='crew_selected'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+    }
+}
+
+// Called only after all admission/hold/redirect guards, before the turn starts.
+fn prepare_admitted_worker_attempt(root: &Path, job: &QueuedPrompt) -> Result<PreparedCrewAttempt> {
+    let recoverable_attempt = lcm::run_recoverable_worker_attempt(
+        &crate::paths::core_db(root),
+        &worker_attempt_work_key(job),
+    )?;
+    let attempt_id = recoverable_attempt
+        .as_ref()
+        .map(|a| a.attempt_id.clone())
+        .unwrap_or_else(|| format!("worker-attempt:{}", uuid::Uuid::new_v4()));
+    let crew_soul_block = crate::crew::prepare_attempt_or_continue(
+        root,
+        &job.leased_message_keys,
+        CHANNEL_ROUTER_LEASE_OWNER,
+        &attempt_id,
+        job.thread_key.as_deref(),
+        &job.queue_task_metadata,
+        job.suggested_skill.as_deref(),
+        &job.prompt,
+    );
+    Ok(PreparedCrewAttempt {
+        attempt_id,
+        recoverable_attempt,
+        crew_soul_block,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5179,35 +5236,6 @@ impl PromptWorkerActivity {
             leases_released: false,
             lease_heartbeat_stop,
             lease_heartbeat,
-            // Snapshot identity during lease attachment; no cockpit reads are
-            // added to the harness turn or its progress callbacks.
-            prepared_attempt: Some((|| -> anyhow::Result<PreparedCrewAttempt> {
-                let recoverable_attempt = lcm::run_recoverable_worker_attempt(
-                    &crate::paths::core_db(root),
-                    &worker_attempt_work_key(job),
-                )?;
-                let attempt_id = recoverable_attempt
-                    .as_ref()
-                    .map(|attempt| attempt.attempt_id.clone())
-                    .unwrap_or_else(|| format!("worker-attempt:{}", uuid::Uuid::new_v4()));
-                // Execution conversations contain command suffixes for review
-                // isolation. Crew continuity uses the durable chat/thread key.
-                let crew_soul_block = crate::crew::prepare_attempt(
-                    root,
-                    &job.leased_message_keys,
-                    CHANNEL_ROUTER_LEASE_OWNER,
-                    &attempt_id,
-                    job.thread_key.as_deref(),
-                    &job.queue_task_metadata,
-                    job.suggested_skill.as_deref(),
-                    &job.prompt,
-                )?;
-                Ok(PreparedCrewAttempt {
-                    attempt_id,
-                    recoverable_attempt,
-                    crew_soul_block,
-                })
-            })()),
         }
     }
 
@@ -6011,16 +6039,13 @@ fn start_prompt_worker(
             let conversation_id =
                 turn_loop::conversation_id_for_thread_key(conversation_thread_key.as_deref());
             let attempt_work_key = worker_attempt_work_key(&job);
-            // Lease preparation errors surface only after the unchanged
-            // admission/redirect guards above. Execution consumes held data.
+            // Admission is now complete. Crew preparation is optional and cannot
+            // turn a profile/selection failure into a worker retry.
             let PreparedCrewAttempt {
                 attempt_id,
                 recoverable_attempt,
                 crew_soul_block,
-            } = worker_activity
-                .prepared_attempt
-                .take()
-                .context("worker lease preparation was already consumed")??;
+            } = prepare_admitted_worker_attempt(&root, &job)?;
             // The Business OS command/evidence run and the worker finalization
             // share one durable attempt identity.
             let command_turn_id = attempt_id.clone();
@@ -33913,7 +33938,14 @@ Business OS command:
             let mut shared = lock_shared_state(&state);
             track_leased_keys_locked(&mut shared, &job.leased_message_keys, &[]);
         }
+        let conn = rusqlite::Connection::open(crate::paths::core_db(&root)).unwrap();
+        conn.execute(
+            "UPDATE communication_routing_state SET lease_owner=?1 WHERE message_key=?2",
+            params![CHANNEL_ROUTER_LEASE_OWNER, task.message_key],
+        )
+        .unwrap();
         let mut worker_activity = PromptWorkerActivity::start(&root, &state, &job);
+        assert_no_crew_admission_evidence(&conn);
 
         // The start_prompt_worker working-hours hold block: durable defer,
         // pending ack, no second in-memory copy, then release activity keys.
@@ -37133,9 +37165,15 @@ Business OS command:
             outbound_anchor: None,
         };
 
+        channels::lease_queue_task(&root, &queue_task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
+            .unwrap();
+        let activity = PromptWorkerActivity::start(&root, &state, &job);
         let redirected = maybe_redirect_owner_visible_work_to_strategy_setup(&root, &state, &job)
             .expect("strategy reroute should succeed");
         assert!(redirected);
+        let conn = rusqlite::Connection::open(crate::paths::core_db(&root)).unwrap();
+        assert_no_crew_admission_evidence(&conn);
+        drop(activity);
 
         let stale = channels::load_queue_task(&root, &stale_task.message_key)
             .expect("failed to reload stale queue task")
@@ -43452,6 +43490,7 @@ The previous controller turn is incomplete. Update these files now:\n\
             priority_time_credit_hours: 0,
             attempt: 0,
             crew_member_id: None,
+            crew_assigned_member_id: None,
         };
         assert!(queue_task_is_synthetic_e2e_bench_leftover(&synthetic));
 
@@ -43486,6 +43525,7 @@ The previous controller turn is incomplete. Update these files now:\n\
             priority_time_credit_hours: 0,
             attempt: 0,
             crew_member_id: None,
+            crew_assigned_member_id: None,
         };
         assert!(!queue_task_is_synthetic_e2e_bench_leftover(&normal));
     }

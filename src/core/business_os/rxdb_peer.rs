@@ -2840,17 +2840,11 @@ async fn run_native_peer(
                         token,
                         collection,
                     ),
-                    fields: if collection == "ctox_crew_members"
-                        && !store::verify_webrtc_capability_actor(&doc_authz_root, token)
-                            .is_some_and(|(_, role)| {
-                                matches!(role.as_str(), "chef" | "admin" | "founder")
-                            }) {
-                        Some(
-                            crate::crew::PUBLIC_MEMBER_FIELDS
-                                .iter()
-                                .map(|field| field.to_string())
-                                .collect(),
-                        )
+                    fields: if collection == "ctox_crew_members" {
+                        let role = store::verify_webrtc_capability_actor(&doc_authz_root, token)
+                            .map(|(_, role)| role)
+                            .unwrap_or_else(|| "user".into());
+                        super::policy::crew_fields_for_role(&role)
                     } else {
                         None
                     },

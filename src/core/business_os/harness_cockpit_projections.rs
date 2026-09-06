@@ -30,10 +30,12 @@ pub(crate) struct WorkerSnapshot {
 struct BusinessProjectionWriter {
     inner: NativeProjectionWriter,
     payloads: BTreeMap<(String, String), Value>,
+    crew_sources: BTreeMap<String, (String, Option<String>, bool)>,
 }
 impl BusinessProjectionWriter {
     fn open(root: &Path) -> Result<Self> {
-        store::open_store(root)?.execute_batch(
+        let inner = NativeProjectionWriter::open(root)?;
+        inner.source_connection().execute_batch(
             "CREATE INDEX IF NOT EXISTS idx_cockpit_live_records
                 ON business_records(collection, record_id) WHERE deleted=0;
              CREATE INDEX IF NOT EXISTS idx_cockpit_event_task_time
@@ -68,8 +70,9 @@ impl BusinessProjectionWriter {
 
         )?;
         Ok(Self {
-            inner: NativeProjectionWriter::open(root)?,
+            inner,
             payloads: BTreeMap::new(),
+            crew_sources: BTreeMap::new(),
         })
     }
     fn upsert_source_projection(
@@ -241,14 +244,17 @@ pub(crate) fn schedule_flow_refresh(root: &Path, kind: &str) {
         kind,
         "worker.plan_updated" | "worker.turn_started" | "cockpit.review"
     );
-    let crew = matches!(kind, "crew_selected" | "crew.selected");
+    let crew = matches!(
+        kind,
+        "crew_selected" | "crew.selected" | "crew_selection_unavailable"
+    );
     wake(
         root,
         EVENTS | if chat { CHAT } else { 0 } | if crew { STATUS | QUEUE } else { 0 },
     );
 }
 pub(crate) fn schedule_runs_refresh(root: &Path) {
-    wake(root, RUNS);
+    wake(root, RUNS | STATUS);
 }
 
 pub(crate) fn publish_service_stopped(root: &Path, boot_id: String) {
@@ -371,6 +377,26 @@ fn refresh_selected(
     if !has_table(&conn, "communication_routing_state")? {
         return Ok(());
     }
+    if flags & (STATUS | QUEUE) != 0 && has_table(&conn, "crew_attempts")? {
+        crate::crew::retain_attempts(&conn, Utc::now().timestamp_millis())?;
+        let ids = conn
+            .prepare("SELECT event_id FROM crew_projection_tombstones ORDER BY event_id LIMIT 128")?
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for id in ids {
+            writer.tombstone_source_projection(
+                "ctox_harness_events",
+                &id,
+                Utc::now().timestamp_millis(),
+            )?;
+            if writer.inner.delivered_to_rxdb("ctox_harness_events") {
+                conn.execute(
+                    "DELETE FROM crew_projection_tombstones WHERE event_id=?1",
+                    [&id],
+                )?;
+            }
+        }
+    }
     if flags & STATUS != 0 {
         project_status(root, &conn, writer, snapshot)?;
     }
@@ -383,7 +409,7 @@ fn refresh_selected(
     if flags & RUNS != 0 {
         project_runs(root, &conn, writer)?;
     }
-    if has_table(&conn, "crew_members")? {
+    if flags & (STATUS | QUEUE) != 0 && has_table(&conn, "crew_members")? {
         project_crew(root, &conn, writer)?;
     }
     if flags & CHAT != 0 && has_table(&conn, "ctox_harness_flow_events")? {
@@ -477,6 +503,20 @@ fn project_status(
         }
     });
     let (pause, pause_error) = queue_pause_state(root);
+    snapshot.last_error = snapshot.last_error.and_then(|error| {
+        let previous = error
+            .split("Crew selection unavailable:")
+            .next()
+            .unwrap_or("")
+            .trim_end_matches([';', ' ']);
+        (!previous.is_empty()).then(|| previous.to_string())
+    });
+    if let Some(error) = crate::crew::selection_last_error(root) {
+        snapshot.last_error = Some(match snapshot.last_error {
+            Some(other) => format!("{other}; {error}"),
+            None => error,
+        });
+    }
     if let Some(error) = pause_error {
         snapshot.last_error = Some(match snapshot.last_error {
             Some(previous) => format!("{previous}; {error}"),
@@ -521,6 +561,7 @@ fn event_kind(kind: &str) -> Option<&'static str> {
         "worker.turn_completed" => "turn_completed",
         "worker.phase" | "worker.turn_started" => "phase",
         "crew.selected" | "crew_selected" => "crew_selected",
+        "crew_selection_unavailable" => "crew_selection_unavailable",
         _ => return None,
     })
 }
@@ -567,7 +608,7 @@ fn project_events(
                        'worker.turn_started','worker.tool_started','worker.tool_completed',
                        'worker.thinking_started','worker.thinking','worker.plan_updated',
                        'worker.token_usage','worker.turn_completed','worker.phase',
-                       'crew.selected','crew_selected')
+                       'crew.selected','crew_selected','crew_selection_unavailable')
                  ORDER BY created_at DESC, event_id DESC LIMIT 200",
             )?;
             let events = statement
@@ -838,46 +879,52 @@ fn project_crew(
     writer: &mut BusinessProjectionWriter,
 ) -> Result<()> {
     let now = Utc::now().timestamp_millis();
-    let mut learning_ids = BTreeSet::new();
     for member in crate::crew::members(conn)? {
-        if let Some(updated) =
+        let Some(updated) =
             required_projection_millis(root, "ctox_crew_members", &member.updated_at)
-        {
-            let active: Option<String> = conn
-                .query_row(
-                    "SELECT message_key FROM communication_routing_state
+        else {
+            continue;
+        };
+        let active: Option<String> = conn
+            .query_row(
+                "SELECT message_key FROM communication_routing_state
              WHERE crew_member_id=?1 AND route_status='leased'
              ORDER BY leased_at,message_key LIMIT 1",
-                    [&member.id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let failed: bool = conn.query_row(
-                "SELECT COALESCE((SELECT succeeded=0 FROM crew_attempts WHERE member_id=?1
-             AND finalized_at IS NOT NULL ORDER BY finalized_at DESC,attempt_id DESC LIMIT 1),0)",
                 [&member.id],
                 |r| r.get(0),
+            )
+            .optional()?;
+        let failed: bool = conn.query_row(
+                "SELECT COALESCE((SELECT succeeded=0 AND julianday(finalized_at)>=julianday(?2,'unixepoch')
+             FROM crew_attempts WHERE member_id=?1
+             AND finalized_at IS NOT NULL ORDER BY finalized_at DESC,attempt_id DESC LIMIT 1),0)",
+                params![member.id, now / 1000 - 86_400],
+                |r| r.get(0),
             )?;
-            let state = if active.is_some() {
-                "on_duty"
-            } else if failed {
-                "resting_after_failure"
-            } else {
-                "home"
-            };
-            writer.upsert_source_projection(
-                "ctox_crew_members",
-                &member.id,
-                updated,
-                json!({
-                    "id":member.id,"name":member.name,"shape":member.shape,"color":member.color,
-                    "archived":member.archived,"state":state,"active_task_id":active,
-                    "soul":member.soul,"specialties":member.specialties,"stats":member.stats,
-                    "updated_at_ms":updated
-                }),
-            )?;
+        let stamp = (member.updated_at.clone(), active.clone(), failed);
+        if writer.crew_sources.get(&member.id) == Some(&stamp) {
+            continue;
         }
+        let state = if active.is_some() {
+            "on_duty"
+        } else if failed {
+            "resting_after_failure"
+        } else {
+            "home"
+        };
+        writer.upsert_source_projection(
+            "ctox_crew_members",
+            &member.id,
+            updated,
+            json!({
+                "id":member.id,"name":member.name,"shape":member.shape,"color":member.color,
+                "archived":member.archived,"state":state,"active_task_id":active,
+                "soul":member.soul,"specialties":member.specialties,"stats":member.stats,
+                "updated_at_ms":updated
+            }),
+        )?;
         crate::crew::retain_learnings(conn, &member.id)?;
+        let mut learning_ids = BTreeSet::new();
         let rows = conn.prepare(
             "SELECT id,text,kind,scope_json,evidence_run_id,created_at,confirmed_by_owner,archived
              FROM crew_member_learnings WHERE member_id=?1
@@ -906,26 +953,33 @@ fn project_crew(
                 }),
             )?;
         }
-    }
-    // Native source deletions (retention/Owner delete) become durable tombstones.
-    let store = store::open_store(root)?;
-    let mut cursor = String::new();
-    loop {
-        let ids = store
-            .prepare(
-                "SELECT record_id FROM business_records WHERE collection='ctox_crew_learnings'
-             AND deleted=0 AND record_id>?1 ORDER BY record_id LIMIT 128",
-            )?
-            .query_map([&cursor], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if ids.is_empty() {
-            break;
-        }
-        for id in ids {
-            cursor = id.clone();
-            if !learning_ids.contains(&id) {
-                writer.tombstone_source_projection("ctox_crew_learnings", &id, now)?;
+        // Native source deletions (retention/Owner delete) become durable tombstones.
+        let mut cursor = String::new();
+        loop {
+            let ids = writer
+                .inner
+                .source_connection()
+                .prepare(
+                    "SELECT record_id FROM business_records WHERE collection='ctox_crew_learnings'
+             AND deleted=0 AND json_extract(payload_json,'$.member_id')=?2
+             AND record_id>?1 ORDER BY record_id LIMIT 128",
+                )?
+                .query_map(params![cursor, member.id], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if ids.is_empty() {
+                break;
             }
+            for id in ids {
+                cursor = id.clone();
+                if !learning_ids.contains(&id) {
+                    writer.tombstone_source_projection("ctox_crew_learnings", &id, now)?;
+                }
+            }
+        }
+        if writer.inner.delivered_to_rxdb("ctox_crew_members")
+            && (learning_ids.is_empty() || writer.inner.delivered_to_rxdb("ctox_crew_learnings"))
+        {
+            writer.crew_sources.insert(member.id, stamp);
         }
     }
     Ok(())

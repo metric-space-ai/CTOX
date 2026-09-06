@@ -1437,7 +1437,7 @@ fn open_event_connection(root: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-fn ensure_event_schema(conn: &Connection) -> Result<()> {
+pub(crate) fn ensure_event_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS ctox_harness_flow_events (
             event_id TEXT PRIMARY KEY,

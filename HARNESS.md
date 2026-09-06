@@ -755,16 +755,36 @@ bei Neustarts und Migrationen erhalten. `crew_members` und
 `crew_member_learnings` sind die Autorität; `crew_attempts` bindet ein Mitglied
 an genau eine Attempt-ID und verbucht dessen Ergebnis höchstens einmal.
 
-Vor der Worker-Ausführung wählt `crew::select` als reine Funktion: manuelle
+Erst nach den fünf Zulassungs-/Hold-/Redirect-Guards wählt `crew::select` als reine Funktion: manuelle
 Zuordnung vor Thread-Kontinuität, danach Spezialitäten, passende Erfolge und
 Fehlschläge der letzten 24 Stunden. Bei Gleichstand entscheiden letzte Aktivität
 und ID. Archivierte Mitglieder werden nicht neu ausgewählt. Ein wiederaufgenommener
 Versuch behält seine ursprüngliche Identität. Die wörtliche Begründung steht im
 Harness-Flow-Ereignis `crew_selected` und in dessen Cockpit-Projektion.
+`crew_assigned_member_id` ist eine einmalige Owner-Zuweisung und wird bei der
+Übernahme geleert; `crew_member_id` beschreibt ausschließlich die tatsächliche
+Auswahl. Ein Retry wird erneut bewertet und nutzt seinen eigenen vorherigen
+Attempt nicht als Thread-Kontinuität. Kontinuität anderer Tasks setzt einen
+wirklich zugelassenen/gestarteten oder finalisierten Attempt voraus.
 
-`{{CREW_SOUL_BLOCK}}` wird deterministisch aus fünf Achsen, Charakter, Stimme und
+Crew-Fehler stoppen den Worker nicht: Sind keine lesbaren aktiven Mitglieder
+verfügbar, läuft die Slice ohne Soul-Block und ohne Crew-Attempt weiter. Das
+Warnereignis `crew_selection_unavailable` und `ctox_harness_status.last_error`
+machen die Ursache sichtbar; gleiche Ursachen werden nur einmal je Prozess/Root
+geloggt. Korrupte einzelne Profile werden bei der Auswahl übersprungen.
+
+Die Migration installiert den eindeutigen Auswahlereignis-Index; historische
+Duplikate behalten die älteste Zeile. Der Pump entfernt nie gestartete Waisen
+nach der 15-Minuten-Lease-TTL, schützt noch geleaste Tasks und bewahrt 500 jüngste
+finalisierte Crew-Attempts plus alle Attempts nichtterminaler Tasks. Löschungen
+alter Schein-Start-Ereignisse werden über eine kleine dauerhafte Tombstone-Outbox
+wiederholbar in die Projektion übertragen.
+
+Der Soul-Block wird deterministisch aus fünf Achsen, Charakter, Stimme und
 Statistik gerendert. Höchstens acht bestätigte und zwei ausdrücklich unbestätigte,
-zum Scope passende Learnings werden angefügt. Der Block ist auf 4.000 UTF-8-Bytes
+zum Scope passende Learnings werden angefügt. Unbestätigte Learnings ohne Scope
+werden nie injiziert; gesetzte Modul-/Command-/Thread-Scopes müssen jeweils passen.
+Zeilenumbrüche und Mehrfach-Whitespace werden zu einzelnen Leerzeichen normalisiert. Der Block ist auf 4.000 UTF-8-Bytes
 begrenzt, steht auf dem tatsächlichen Prompt-Pfad nach dem CTO-Systemkontext und
 den Ausführungsregeln und verleiht keine zusätzlichen Befugnisse.
 

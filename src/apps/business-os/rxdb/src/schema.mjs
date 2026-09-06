@@ -102,7 +102,7 @@ export const CTOX_BUSINESS_OS_SCHEMA_HASHES = Object.freeze({
   ctox_crew_members: 'f970c60287f30817cfee50bc835f6e542d8ffec75f23208b8068836f9aa11b3c',
   ctox_harness_events: '0bce9f675a1a3a088a33d9bfe4b48cdaeae1a5e6972cc3f3c7e7086cd6eac576',
   ctox_harness_status: 'c190044b6226c4f11546e66a05f2d3b1e00d224074f40bb2646dc72cc5be809c',
-  ctox_queue_tasks: '8f33e3d4b2de956ca8b7c9f522a3c7bcb6669ac767e61e534936e8fa406b77f3',
+  ctox_queue_tasks: '8b030859850415d647feeeeb020cbf537d7d3e107a59a794394f6e173ffdada2',
   ctox_runs: '1d4379388ee8e6403411830dae6d467c96f0b38f2d65f7c49c0384a5d1acd045',
   ctox_runtime_settings: '3958bb6580e9705f3688fcf453a80ec33c486b43ac6988f015ffc16cb5ac918d',
   ctox_task_approval_requests: '5bbda4583cadd08e30c5948d2ed197cbf4a1f8f342580c1e531fd2a054da84fe',

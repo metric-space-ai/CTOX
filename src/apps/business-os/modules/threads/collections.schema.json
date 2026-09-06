@@ -103,6 +103,9 @@
         "command_type": {
           "type": "string"
         },
+        "crew_assigned_member_id": {
+          "type": "string"
+        },
         "crew_member_id": {
           "type": "string"
         },
@@ -173,7 +176,7 @@
         "module"
       ],
       "type": "object",
-      "version": 2
+      "version": 3
     },
     "ctox_task_approval_requests": {
       "additionalProperties": true,

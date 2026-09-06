@@ -322,6 +322,7 @@ pub struct QueueTaskView {
     pub priority_time_credit_hours: i64,
     pub attempt: i64,
     pub crew_member_id: Option<String>,
+    pub crew_assigned_member_id: Option<String>,
 }
 
 pub(crate) fn register_queue_projection_hooks(
@@ -365,6 +366,15 @@ fn load_queue_projection_tasks(
         }
     }
     Ok(tasks)
+}
+
+/// Control-plane assignment updates the existing queue projection through the
+/// same hooks as queue transitions; it never changes queue status or admission.
+pub(crate) fn refresh_queue_assignment_projection(root: &Path, task: &str) -> Result<()> {
+    let conn = open_channel_db(&crate::paths::core_db(root))?;
+    attach_queue_projection_store(root, &conn)?;
+    let tasks = load_queue_projection_tasks(&conn, &[task.to_string()])?;
+    refresh_queue_projection_tasks(root, &conn, &tasks)
 }
 
 #[derive(Debug, Clone)]
@@ -6185,7 +6195,7 @@ fn list_queue_tasks_from_conn(conn: &Connection, limit: usize) -> Result<Vec<Que
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id, r.crew_assigned_member_id
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6251,7 +6261,7 @@ fn list_queue_tasks_from_conn_with_statuses(
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id, r.crew_assigned_member_id
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6403,7 +6413,7 @@ pub(crate) fn load_queue_tasks_by_message_key_from_conn(
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id, r.crew_assigned_member_id
             FROM communication_messages m
             LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
             WHERE m.channel = ?1
@@ -6457,7 +6467,7 @@ fn load_queue_task_for_business_os_command_from_conn(
             r.lease_expires_at, r.lease_worker_id, r.first_pending_at,
             r.failure_class, COALESCE(r.failure_attempt_count, 0), r.retry_not_before,
             r.hold_reason, r.wait_entity_type, r.wait_entity_id,
-            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id
+            COALESCE(r.priority_time_credit_hours, 0), COALESCE(r.attempt, 0), r.crew_member_id, r.crew_assigned_member_id
         FROM communication_messages m
         LEFT JOIN communication_routing_state r ON r.message_key = m.message_key
         WHERE m.channel = ?1
@@ -6500,6 +6510,7 @@ fn map_queue_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<QueueTaskView
     task.priority_time_credit_hours = row.get(32)?;
     task.attempt = row.get(33)?;
     task.crew_member_id = row.get(34)?;
+    task.crew_assigned_member_id = row.get(35)?;
     Ok(task)
 }
 
@@ -6582,6 +6593,7 @@ fn queue_task_from_message(message: ChannelMessageView) -> Result<QueueTaskView>
         priority_time_credit_hours: 0,
         attempt: 0,
         crew_member_id: None,
+        crew_assigned_member_id: None,
     })
 }
 

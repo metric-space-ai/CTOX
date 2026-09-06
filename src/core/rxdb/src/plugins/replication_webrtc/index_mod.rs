@@ -1377,11 +1377,7 @@ where
                                         )
                                         .await;
                                         if let Some(fields) = handler_task.document_fields_for_peer(&item.peer, &target_name) {
-                                            if let Some(documents) = response.get_mut("documents").and_then(Value::as_array_mut) {
-                                                for document in documents {
-                                                    super::webrtc_types::retain_readable_fields(document, &fields);
-                                                }
-                                            }
+                                            super::webrtc_types::mask_master_response(&mut response, &fields);
                                         }
                                         response
                                     }
@@ -3538,6 +3534,10 @@ mod tests {
 
     #[async_trait::async_trait]
     impl WebRTCConnectionHandler for MockHandler {
+        // This fixture has no private document fields.
+        fn document_fields_for_peer(&self, _: &Self::Peer, _: &str) -> Option<Vec<String>> {
+            None
+        }
         type Peer = MockPeer;
 
         fn connect_stream(&self) -> RxStream<MockPeer> {
