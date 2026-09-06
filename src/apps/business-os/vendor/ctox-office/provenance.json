@@ -51,7 +51,7 @@
     },
     {
       "path": "src/apps/business-os/office-engine/src/business-os-bridge.mjs",
-      "sha256": "4b7ae4ad79e0fb62ebf4447620c8bd11f8a9fe8ef61d2be5b78e15435415c36b"
+      "sha256": "a84f0866d44f2f420100f0baffbcc1fef6ed3b34c689db182d4e083e44d5db3d"
     },
     {
       "path": "src/apps/business-os/office-engine/src/capsule.mjs",
