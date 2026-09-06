@@ -1,4 +1,4 @@
-import { loadRxdbRuntime } from './rxdb-runtime.js?v=20260906-shell-v2-sync-bridge-v341';
+import { loadRxdbRuntime } from './rxdb-runtime.js?v=20260906-office-transfer-cancellation';
 
 const CTOX_RXDB_RUNTIME = Object.freeze({
   name: 'ctox-rxdb-js',

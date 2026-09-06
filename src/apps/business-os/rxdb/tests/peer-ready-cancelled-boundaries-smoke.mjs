@@ -45,4 +45,44 @@ for (const boundary of ['checkpoint', 'permission', 'loader']) {
   assert.equal(pulls, 0, `${boundary}: cancelled state started replication`);
   assert.equal(callbacks, 0, `${boundary}: cancelled state announced readiness`);
 }
-console.log('peer-ready cancelled boundaries smoke passed');
+const replicationPrototype = replicationWebRtcTestInternals.getReplicationStateClass().prototype;
+for (const [direction, boundary] of [['pull', 'read'], ['push', 'read'], ['push', 'dirty'], ['push', 'write']]) {
+  let release;
+  let entered;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  let writes = 0;
+  let checkpoints = 0;
+  const pause = async (name, value) => {
+    if (boundary === name) { entered(); await pending; }
+    return value;
+  };
+  const batch = { documents: [{ id: 'cancelled-document' }], checkpoint: { sequence: 1 } };
+  const state = {
+    cancelled: false,
+    pull: {}, push: {},
+    pullCheckpointsByPeer: new Map(), pushCheckpointsByPeer: new Map(),
+    peer: { request() { writes += 1; return pause('write', []); } },
+    demandSidecar: { markDirty: () => pause('dirty', undefined) },
+    collection: { name: 'cancel-test', schema: { primaryPath: 'id' }, storageCollection: {
+      getChangedDocumentsSince: () => pause('read', batch),
+      async bulkWrite() { writes += 1; },
+    } },
+    requestMasterChangesSince: async () => ({ peerId: 'native-test', result: await pause('read', batch) }),
+    changedDocumentReadOptionsForPeer: () => ({}),
+    recordLocalPushChangedSinceRead() {},
+    replicationOriginForPeer: () => 'native-test',
+    invalidateDemandCacheForRemoteWrite: async () => {},
+    persistCheckpointsForPeer: async () => { checkpoints += 1; },
+    requestTimeoutMsFor: () => 1000,
+  };
+  const run = replicationPrototype[direction === 'pull' ? 'pullFromPeer' : 'pushToPeer'].call(state, 'native-test');
+  await started;
+  state.cancelled = true;
+  state.peer = null;
+  release();
+  await run;
+  assert.equal(writes, boundary === 'write' ? 1 : 0, `${direction}/${boundary}: cancelled transfer issued a new write`);
+  assert.equal(checkpoints, 0, `${direction}/${boundary}: cancelled transfer advanced its checkpoint`);
+}
+console.log('peer-ready and transfer cancelled boundaries smoke passed');

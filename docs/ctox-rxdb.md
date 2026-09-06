@@ -1026,8 +1026,17 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
 **Cache-buster discipline.** The only bundle URL lives in
 `src/apps/business-os/shared/rxdb-runtime.js`. Both `shared/db.js` and
 `shared/sync.js` import that loader with the **same literal APP_BUILD query
-buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The data-plane guard checks both
-values against each other and the shell build.
+buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The bundle query revision and
+the HTML entry's `app.js` query must also equal APP_BUILD. The data-plane
+guard checks this entire chain: shared static assets can remain fresh in
+browser/CDN caches for four hours, so changing only the bundle URL inside
+an unchanged loader URL does not deliver the new runtime to existing users.
+
+Cancelled replication transfers must re-check their lifetime after asynchronous
+storage reads, dirty-marker updates, and transport responses. A retired state
+must not issue another write through its detached peer or advance checkpoints;
+the current state owns retry and acknowledgement. The cancelled-boundaries
+smoke covers these races independently from collection-handshake cancellation.
 
 App modules do **not** import the bundle directly — they receive the database
 handle from the shell facade (`setBusinessOsDatabaseContext`). The matching
@@ -1037,8 +1046,9 @@ facade, so it carries no buster and is no longer checked by the guard.
 A different loader URL can create a second module instance; an unversioned
 loader can keep an old bundle cached after a deployment. After any runtime
 `src/` change, rebuild dist with the command above and bump the single bundle
-buster in `rxdb-runtime.js`. Keep both loader import busters aligned with
-APP_BUILD. The shared promise resets after import rejection, so a later call
+buster in `rxdb-runtime.js`, APP_BUILD, the HTML entry and both loader imports
+to the same new revision. Shell-only build revisions also advance the canonical
+bundle URL even when its bytes are unchanged. The shared promise resets after import rejection, so a later call
 can retry the same URL without creating a second bundle identity.
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build
