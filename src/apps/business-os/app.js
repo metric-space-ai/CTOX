@@ -6342,6 +6342,14 @@ window.addEventListener('online', () => {
   moduleScriptPreloadHealthySinceMs = 0;
 });
 
+function instanceModuleAssetPath(relative) {
+  // Installed and local apps belong to the instance, outside the signed slot.
+  return /^(installed-modules|local-modules)\//.test(relative)
+    && new URL(import.meta.url).pathname.startsWith('/business-os/_shell/')
+    ? `../../${relative}`
+    : relative;
+}
+
 function moduleBasePath(mod) {
   const entry = String(mod.entry || `modules/${mod.id}/index.html`)
     .replace(/^\.?\//, '')
@@ -6349,12 +6357,7 @@ function moduleBasePath(mod) {
     .split('#')[0];
   const slash = entry.lastIndexOf('/');
   const base = slash >= 0 ? entry.slice(0, slash) : `modules/${mod.id}`;
-  // Installed apps belong to the instance, outside the immutable shell tree.
-  // Keep this relative to app.js so imports, fetches and styles share one base.
-  return base.startsWith('installed-modules/')
-    && new URL(import.meta.url).pathname.startsWith('/business-os/_shell/')
-    ? `../../${base}`
-    : base;
+  return instanceModuleAssetPath(base);
 }
 
 function documentsWorkspaceAppId() {
@@ -8031,8 +8034,9 @@ function ensureModuleStylesheet(moduleLike) {
   const base = moduleBasePath(moduleLike);
   const revision = moduleRevisionQuery(moduleLike);
   const href = new URL(`${base}/index.css?v=${APP_BUILD}${revision}`, document.baseURI).href;
+  const pathname = new URL(href).pathname;
   const existing = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-    .filter((link) => link.href.includes(`/${base}/index.css`));
+    .filter((link) => new URL(link.href).pathname === pathname);
   if (existing.some((link) => link.href === href)) return;
   existing.forEach((link) => link.remove());
   const link = document.createElement('link');
@@ -9445,8 +9449,8 @@ function moduleIconAssetPath(mod) {
   if (!iconPath || iconPath.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(iconPath)) return '';
   const cleanPath = iconPath.replace(/^\.?\//, '').split('?')[0].split('#')[0];
   if (!cleanPath || cleanPath.includes('..')) return '';
-  if (cleanPath.startsWith('modules/') || cleanPath.startsWith('installed-modules/')) {
-    return cleanPath;
+  if (/^(modules|installed-modules|local-modules)\//.test(cleanPath)) {
+    return instanceModuleAssetPath(cleanPath);
   }
   return `${moduleBasePath(mod)}/${cleanPath}`;
 }

@@ -3368,7 +3368,7 @@ fn file_modified_label(path: &Path) -> String {
 }
 
 fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> anyhow::Result<()> {
-    let raw_rel = if path == "/" {
+    let raw_rel = if matches!(path, "/" | "/business-os" | "/business-os/") {
         "index.html"
     } else {
         path.trim_start_matches('/')

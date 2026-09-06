@@ -1,0 +1,90 @@
+{
+  "schema": "ctox.shell.asset-routing-browser.v1",
+  "passed": true,
+  "reports": [
+    {
+      "pinned": false,
+      "cases": [
+        {
+          "source": "modules",
+          "script": "http://127.0.0.1:56615/business-os/modules/fixture/index.js?v=asset-probe",
+          "frame": "http://127.0.0.1:56615/business-os/modules/fixture/index.html",
+          "stylesheet": "http://127.0.0.1:56615/business-os/modules/fixture/index.css?v=asset-probe_2"
+        },
+        {
+          "source": "installed-modules",
+          "script": "http://127.0.0.1:56615/business-os/installed-modules/fixture/index.js?v=asset-probe",
+          "frame": "http://127.0.0.1:56615/business-os/installed-modules/fixture/index.html",
+          "stylesheet": "http://127.0.0.1:56615/business-os/installed-modules/fixture/index.css?v=asset-probe_2"
+        },
+        {
+          "source": "local-modules",
+          "script": "http://127.0.0.1:56615/business-os/local-modules/fixture/index.js?v=asset-probe",
+          "frame": "http://127.0.0.1:56615/business-os/local-modules/fixture/index.html",
+          "stylesheet": "http://127.0.0.1:56615/business-os/local-modules/fixture/index.css?v=asset-probe_2"
+        }
+      ],
+      "requests": [
+        "/case",
+        "/business-os/app.js",
+        "/business-os/modules/fixture/index.js",
+        "/business-os/modules/fixture/index.html",
+        "/business-os/modules/fixture/icon.svg",
+        "/business-os/modules/fixture/index.css",
+        "/business-os/modules/fixture/index.css",
+        "/business-os/installed-modules/fixture/index.js",
+        "/business-os/installed-modules/fixture/index.html",
+        "/business-os/installed-modules/fixture/icon.svg",
+        "/business-os/installed-modules/fixture/index.css",
+        "/business-os/installed-modules/fixture/index.css",
+        "/business-os/local-modules/fixture/index.js",
+        "/business-os/local-modules/fixture/index.html",
+        "/business-os/local-modules/fixture/icon.svg",
+        "/business-os/local-modules/fixture/index.css",
+        "/business-os/local-modules/fixture/index.css"
+      ]
+    },
+    {
+      "pinned": true,
+      "cases": [
+        {
+          "source": "modules",
+          "script": "http://127.0.0.1:56615/business-os/_shell/1.2.3/modules/fixture/index.js?v=asset-probe",
+          "frame": "http://127.0.0.1:56615/business-os/_shell/1.2.3/modules/fixture/index.html",
+          "stylesheet": "http://127.0.0.1:56615/business-os/_shell/1.2.3/modules/fixture/index.css?v=asset-probe_2"
+        },
+        {
+          "source": "installed-modules",
+          "script": "http://127.0.0.1:56615/business-os/installed-modules/fixture/index.js?v=asset-probe",
+          "frame": "http://127.0.0.1:56615/business-os/installed-modules/fixture/index.html",
+          "stylesheet": "http://127.0.0.1:56615/business-os/installed-modules/fixture/index.css?v=asset-probe_2"
+        },
+        {
+          "source": "local-modules",
+          "script": "http://127.0.0.1:56615/business-os/local-modules/fixture/index.js?v=asset-probe",
+          "frame": "http://127.0.0.1:56615/business-os/local-modules/fixture/index.html",
+          "stylesheet": "http://127.0.0.1:56615/business-os/local-modules/fixture/index.css?v=asset-probe_2"
+        }
+      ],
+      "requests": [
+        "/case",
+        "/business-os/_shell/1.2.3/app.js",
+        "/business-os/_shell/1.2.3/modules/fixture/index.js",
+        "/business-os/_shell/1.2.3/modules/fixture/index.html",
+        "/business-os/_shell/1.2.3/modules/fixture/icon.svg",
+        "/business-os/_shell/1.2.3/modules/fixture/index.css",
+        "/business-os/_shell/1.2.3/modules/fixture/index.css",
+        "/business-os/installed-modules/fixture/index.js",
+        "/business-os/installed-modules/fixture/index.html",
+        "/business-os/installed-modules/fixture/icon.svg",
+        "/business-os/installed-modules/fixture/index.css",
+        "/business-os/installed-modules/fixture/index.css",
+        "/business-os/local-modules/fixture/index.js",
+        "/business-os/local-modules/fixture/index.html",
+        "/business-os/local-modules/fixture/icon.svg",
+        "/business-os/local-modules/fixture/index.css",
+        "/business-os/local-modules/fixture/index.css"
+      ]
+    }
+  ]
+}

@@ -1,5 +1,54 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Final root-path and app-asset regressions
+
+The follow-up fixes `/business-os/`: its empty relative path previously skipped
+signed document pinning although `/index.html` passed the browser fixture.
+All four entry paths now share the document resolver. The final native server
+source SHA256 is
+`e99626e47c35883ae46c30516986bec8f88b1dc688583d80525342d916a8e5ba`.
+The optimized binary SHA256 is
+`580887fe5133089d77dc6dd1a44c0e865e539c9a1d22285738ce6ee8d602790c`.
+
+The native suite again passed 45 tests. The first HTTP probe exceeded its
+five-second request deadline under a one-CPU build unit; the build itself
+completed successfully in 10m47s. A separate two-CPU fixture retained the
+five-second latency assertion while allowing longer transport observation:
+all 12 requests passed, including same-size corruption and removal after
+admission, restoration, absent release (410), invalid address (400), and absent
+inventory entry (404). The first root request took 3,467.6 ms; subsequent entry
+documents took 28.3–78.2 ms. This is one run, not a boot p95.
+Report: `beweise/raw/shell-native-final-http-probe-report.json`.
+
+The canonical Browser/WebRTC/native/browser fixture completed all thirty
+commands with p50 **250 ms**, p95 **339.75 ms**, no missing assets, request
+failures, cache repairs or startup reloads. Unit
+`ctox-sync-native-shell-final-flow-20260906.service`, invocation
+`20fba3ca69ae4dcb8c52a65ec0ac0ebe`. Its navigation phase nevertheless took
+**20,297 ms**. Warm command acceptance passes for this isolated fixture;
+cold boot and production performance acceptance remain open.
+Reports: `beweise/raw/shell-native-final-roundtrip-marks.json` and
+`beweise/raw/shell-native-final-stage-report.json`.
+
+The shell now resolves installed and local module scripts, frames, icons and
+styles outside the immutable slot. Stylesheet reuse/revision replacement compares
+normalized URL paths, avoiding duplicate styles on warm mounts.
+`src/apps/business-os/scripts/shell-asset-routing.browser.mjs` uses the actual
+production helper bodies in a browser component fixture: six cases cover the
+three module sources under both source and pinned shell URLs with real HTTP
+imports/fetches/images/styles. It does not claim full app or Sync acceptance.
+The static Shell-V2 contract passed 37/37 apps and geometry passed CTOX,
+Documents and Spreadsheets at 1180 and 720 pixels, six cases total.
+
+The candidate has not been activated on production. GitHub workflow dispatch
+returned HTTP 401 and the release-tag push could not obtain HTTPS credentials.
+The earlier main push through `832e5058e` succeeded. The later root/app fixes
+must also reach origin/main before the next signed shell is published.
+The unpublished local beta14 tag for the earlier source was removed; the next
+release tag must name the complete, verified main revision. Production remains on native
+`branch-main-490f1ab80-20260906` and signed beta13 while maintenance/readiness
+and real browser app operation remain unresolved.
+
 ## Final native checks and deployed data preservation
 
 The final native source also removes the silent archived-tree fallback and
