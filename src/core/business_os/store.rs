@@ -3756,6 +3756,58 @@ pub fn save_module_source_record(
     root: &Path,
     mutation: ModuleSourceSaveMutation,
 ) -> anyhow::Result<Value> {
+    save_module_source_record_inner(root, mutation, None)
+}
+
+pub(crate) fn ensure_module_source_record_current(
+    root: &Path,
+    module_id: &str,
+    path: &str,
+    expected_content: Option<&str>,
+) -> anyhow::Result<()> {
+    let app_root = resolve_business_os_app_root(root)?;
+    let module_id = source_sanitize_slug(module_id);
+    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+    let (module_root, _) = resolve_module_source_root_for_root(root, &app_root, &module_id)?;
+    let rel = normalize_source_relative_path(path)?;
+    anyhow::ensure!(
+        is_allowed_source_path(&rel),
+        "source file type is not editable: {}",
+        rel.display()
+    );
+    ensure_source_path_has_no_symlink_components(&module_root, &rel)?;
+    let current = match fs::read_to_string(module_root.join(&rel)) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        current.as_deref() == expected_content,
+        "coding source conflict for {}: live source differs from the turn baseline; reload before editing",
+        rel.display()
+    );
+    Ok(())
+}
+
+pub(crate) fn save_module_source_record_if_current(
+    root: &Path,
+    mutation: ModuleSourceSaveMutation,
+    expected_content: Option<&str>,
+) -> anyhow::Result<Value> {
+    ensure_module_source_record_current(
+        root,
+        &mutation.module_id,
+        &mutation.path,
+        expected_content,
+    )?;
+    save_module_source_record_inner(root, mutation, Some(expected_content))
+}
+
+fn save_module_source_record_inner(
+    root: &Path,
+    mutation: ModuleSourceSaveMutation,
+    expected_content: Option<Option<&str>>,
+) -> anyhow::Result<Value> {
     let app_root = resolve_business_os_app_root(root)?;
     let module_id = source_sanitize_slug(&mutation.module_id);
     anyhow::ensure!(!module_id.is_empty(), "module_id is required");
@@ -3774,6 +3826,13 @@ pub fn save_module_source_record(
             .with_context(|| format!("failed to create source directory {}", parent.display()))?;
     }
     let previous_content = fs::read_to_string(&target).ok();
+    if let Some(expected_content) = expected_content {
+        anyhow::ensure!(
+            previous_content.as_deref() == expected_content,
+            "coding source conflict for {}: live source changed before write",
+            rel.display()
+        );
+    }
     let previous_sha256 = previous_content
         .as_deref()
         .map(|content| hex_sha256(content.as_bytes()));

@@ -2040,7 +2040,6 @@ fn apply_update(
             &current_link,
             previous_release_root.as_deref(),
             &layout.state_root,
-            &backup_path,
             should_restart,
         )?;
         persist_update_phase(
@@ -2075,7 +2074,6 @@ fn apply_update(
                 &current_link,
                 previous_release_root.as_deref(),
                 &layout.state_root,
-                &backup_path,
                 true,
             )?;
             persist_update_phase(
@@ -2351,18 +2349,37 @@ fn rollback_to_previous_release(
     current_link: &Path,
     previous_release_root: Option<&Path>,
     state_root: &Path,
-    backup_path: &Path,
     should_restart: bool,
 ) -> Result<()> {
-    stop_background_for_release_switch(current_link)?;
-    restore_state_backup(backup_path, state_root)?;
-    if let Some(previous_release_root) = previous_release_root {
-        switch_current_release(current_link, previous_release_root)?;
-        sync_managed_launch_binaries(install_root, current_link, state_root)?;
-        if should_restart {
-            let _ = service::start_background(current_link);
-        }
-    }
+    // An automatic executable recovery must never restore a pre-build data
+    // snapshot: the old daemon may have accepted writes during the build.
+    // Backups remain available for an explicit operator-directed data restore.
+    recover_previous_release_preserving_state(
+        current_link,
+        previous_release_root,
+        stop_background_for_release_switch,
+        |current_link| {
+            sync_managed_launch_binaries(install_root, current_link, state_root)?;
+            refresh_service_unit(current_link, state_root, Some(install_root))?;
+            if should_restart {
+                service::start_background(current_link)?;
+            }
+            Ok(())
+        },
+    )
+}
+
+fn recover_previous_release_preserving_state(
+    current_link: &Path,
+    previous_release_root: Option<&Path>,
+    stop: impl FnOnce(&Path) -> Result<()>,
+    activate: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    let previous_release_root = previous_release_root
+        .context("automatic release recovery has no previous executable; live data preserved")?;
+    stop(current_link)?;
+    switch_current_release(current_link, previous_release_root)?;
+    activate(current_link)?;
     Ok(())
 }
 
@@ -5550,6 +5567,97 @@ mod tests {
                 "nach Runde {round} lagen {count} Sicherungen vor, erlaubt sind {UPDATE_BACKUP_RETENTION_COUNT}"
             );
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_release_recovery_preserves_live_sqlite_writes() -> Result<()> {
+        let temp = tempdir()?;
+        let state_root = temp.path().join("state");
+        ensure_dir(&state_root)?;
+        let db_path = state_root.join("ctox.sqlite3");
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE recovery_probe (value TEXT); INSERT INTO recovery_probe VALUES ('before-build');")?;
+        let backup = backup_state_root(&state_root)?;
+        conn.execute("INSERT INTO recovery_probe VALUES ('during-build')", [])?;
+        let previous = temp.path().join("previous");
+        let candidate = temp.path().join("candidate");
+        ensure_dir(&previous)?;
+        ensure_dir(&candidate)?;
+        let current = temp.path().join("current");
+        switch_current_release(&current, &candidate)?;
+
+        recover_previous_release_preserving_state(
+            &current,
+            Some(&previous),
+            |_| Ok(()),
+            |_| Ok(()),
+        )?;
+
+        assert_eq!(fs::canonicalize(&current)?, fs::canonicalize(&previous)?);
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM recovery_probe", [], |row| row.get(0))?;
+        assert_eq!(
+            count, 2,
+            "automatic recovery must retain writes accepted after backup"
+        );
+        drop(conn);
+        let reopened = rusqlite::Connection::open(&db_path)?;
+        let count: i64 =
+            reopened.query_row("SELECT COUNT(*) FROM recovery_probe", [], |row| row.get(0))?;
+        assert_eq!(count, 2, "committed live data must survive reopening");
+        assert!(
+            backup.exists(),
+            "recovery must retain the explicit recovery backup"
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn automatic_release_recovery_propagates_stop_and_activation_failures() -> Result<()> {
+        let temp = tempdir()?;
+        let previous = temp.path().join("previous");
+        let candidate = temp.path().join("candidate");
+        ensure_dir(&previous)?;
+        ensure_dir(&candidate)?;
+        let current = temp.path().join("current");
+        switch_current_release(&current, &candidate)?;
+        let state = temp.path().join("live-state");
+        fs::write(&state, "latest writes")?;
+        let stopped = recover_previous_release_preserving_state(
+            &current,
+            Some(&previous),
+            |_| anyhow::bail!("service stop refused"),
+            |_| panic!("activation must not run after stop refusal"),
+        );
+        assert!(stopped
+            .unwrap_err()
+            .to_string()
+            .contains("service stop refused"));
+        assert_eq!(fs::canonicalize(&current)?, fs::canonicalize(&candidate)?);
+        let activated = recover_previous_release_preserving_state(
+            &current,
+            Some(&previous),
+            |_| Ok(()),
+            |_| anyhow::bail!("previous service failed to start"),
+        );
+        assert!(activated
+            .unwrap_err()
+            .to_string()
+            .contains("previous service failed to start"));
+        assert_eq!(fs::read_to_string(&state)?, "latest writes");
+        let absent = recover_previous_release_preserving_state(
+            &current,
+            None,
+            |_| panic!("missing recovery target must not stop the service"),
+            |_| panic!("missing recovery target must not activate"),
+        );
+        assert!(absent
+            .unwrap_err()
+            .to_string()
+            .contains("live data preserved"));
+        Ok(())
     }
 
     #[test]
