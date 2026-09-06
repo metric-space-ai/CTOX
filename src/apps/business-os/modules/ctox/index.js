@@ -2164,6 +2164,9 @@ function flowSvg(model, selectedNode, visibleTrace, selectedTask, state, taskSte
   const standortNodeId = selectedTask ? (taskCrewNodeId(selectedTask, model) || '') : '';
   const communicationOnly = isCommunicationFlow(selectedTask, state);
   const harnessOffsetY = reviewHarnessOffsetY(selectedTask, state);
+  // Wo steht der ausgewaehlte Task GERADE im Loop? Dieser Knoten wird markiert,
+  // damit die Frage "wo steckt er" ohne Suchen beantwortet ist.
+  const standortNodeId = selectedTask ? (taskCrewNodeId(selectedTask, model) || '') : '';
   return `
     <svg class="ctox-flow-diagram" viewBox="0 ${viewBox.y} ${FLOW_WIDTH} ${viewBox.height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="CTOX work flow diagram">
       <defs>
@@ -4936,6 +4939,7 @@ export const __ctoxTestHooks = {
   clampMetric,
   deriveHarnessHealth,
   eventToNodeId,
+  flowSvg,
   flowSourceView,
   formatRelativeAge,
   friendlyWebStackStatus,

@@ -22,8 +22,13 @@ const schemaPrimitive = {
 function type(value, lang) {
   const [container, item] = value.split(':');
   if (item) {
-    if (!['optional', 'list', 'set'].includes(container)) throw new Error(`Unknown type ${value}`);
+    if (!['optional', 'list', 'set', 'nodes'].includes(container)) throw new Error(`Unknown type ${value}`);
     const inner = type(item, lang);
+    if (container === 'nodes') return ({
+      rust: `std::collections::BTreeMap<u64, ${inner}>`,
+      ts: `Readonly<Record<string, ${inner}>>`,
+      schema: `Schema.Record(Schema.String, ${inner})`,
+    })[lang];
     if (lang === 'schema') return container === 'optional' ? `Schema.optionalKey(Schema.NullOr(${inner}))` : `Schema.Array(${inner})`;
     if (lang === 'ts') return container === 'optional' ? `${inner} | null` : `ReadonlyArray<${inner}>`;
     return `${{ optional: 'Option', list: 'Vec', set: 'std::collections::BTreeSet' }[container]}<${inner}>`;
@@ -64,7 +69,11 @@ for (const [name, values] of Object.entries(fixture.enums)) {
   dependencies.set(name, []);
 }
 for (const [name, fields] of Object.entries(fixture.types)) {
-  rust += `\n#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]\n#[serde(rename_all = "camelCase", deny_unknown_fields)]\npub struct ${name} {\n${rustFields(fields)}}\n`;
+  const derives = ['Clone', 'PartialEq', 'Eq', 'Serialize', 'Deserialize'];
+  if (!(fixture.sensitiveTypes ?? []).includes(name)) derives.unshift('Debug');
+  if ((fixture.copyTypes ?? []).includes(name)) derives.push('Copy');
+  if ((fixture.defaultTypes ?? []).includes(name)) derives.push('Default');
+  rust += `\n#[derive(${derives.join(', ')})]\n#[serde(rename_all = "camelCase", deny_unknown_fields)]\npub struct ${name} {\n${rustFields(fields)}}\n`;
   ts += `\nexport interface ${name} {\n` + Object.entries(fields).map(([field, value]) => `  readonly ${field}${value.startsWith('optional:') ? '?' : ''}: ${type(value, 'ts')};\n`).join('') + '}\n';
   schemaOutputs.set(name, `export const ${name}Schema = Schema.Struct({\n${schemaFields(fields)}\n});\n`);
   dependencies.set(name, fieldDependencies(fields));

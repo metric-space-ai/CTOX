@@ -1123,6 +1123,15 @@ fn ensure_secret_schema(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn load_legacy_master_key(root: &Path) -> Result<Option<String>> {
+    // A fresh native host has no legacy business database. Looking for an old
+    // key must not create that database through persistence::open_sqlite.
+    if !persistence::sqlite_path(root).is_file() {
+        return Ok(None);
+    }
+    persistence::load_text_value(root, MASTER_KEY_STORAGE_KEY)
+}
+
 fn ensure_secret_master_key(root: &Path) -> Result<(SecretMaterial, &'static str)> {
     static MASTER_KEY_GUARD: OnceLock<Mutex<()>> = OnceLock::new();
     let _guard = MASTER_KEY_GUARD
@@ -1156,7 +1165,7 @@ fn ensure_secret_master_key(root: &Path) -> Result<(SecretMaterial, &'static str
                 [MASTER_KEY_STORAGE_KEY],
             )?;
         }
-        if let Some(legacy) = persistence::load_text_value(root, MASTER_KEY_STORAGE_KEY)? {
+        if let Some(legacy) = load_legacy_master_key(root)? {
             anyhow::ensure!(
                 legacy.trim() == raw.trim(),
                 "secret master key file conflicts with the legacy runtime key"
@@ -1186,7 +1195,7 @@ fn ensure_secret_master_key(root: &Path) -> Result<(SecretMaterial, &'static str
         return Ok((key, "migrated_protected_file"));
     }
 
-    if let Some(raw) = persistence::load_text_value(root, MASTER_KEY_STORAGE_KEY)? {
+    if let Some(raw) = load_legacy_master_key(root)? {
         let key = decode_master_key(
             &raw,
             "failed to decode legacy SQLite-stored secret master key",

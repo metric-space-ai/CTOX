@@ -93,7 +93,7 @@ ctox-feedback            = { path = "src/core/harness/feedback" }
 ctox-cloud-requirements  = { path = "src/core/harness/cloud-requirements" }
 ctox-utils-absolute-path = { path = "src/core/harness/utils/absolute-path" }
 toml = "0.9"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
 tokio-tungstenite = { version = "0.28.0", features = [
     "proxy",
     "rustls-tls-native-roots",

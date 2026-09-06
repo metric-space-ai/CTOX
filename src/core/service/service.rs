@@ -1449,6 +1449,9 @@ pub fn run_foreground(root: &Path) -> Result<()> {
     let runtime_dir = root.join("runtime");
     std::fs::create_dir_all(&runtime_dir)
         .with_context(|| format!("failed to create runtime dir {}", runtime_dir.display()))?;
+    // Configured execution hosts use the same lifecycle as `ctox sync run`.
+    // Bring-up failure is fatal before any Business OS worker is started.
+    let _sync_host = crate::sync_host::start_if_configured(root)?;
     install_service_panic_hook();
     #[cfg(unix)]
     unsafe {

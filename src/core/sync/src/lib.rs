@@ -5,6 +5,10 @@ pub mod checkpoint;
 #[path = "contracts.generated.rs"]
 pub mod contracts;
 pub mod host_config;
+#[cfg(feature = "webrtc")]
+pub mod host_runtime;
+#[cfg(feature = "webrtc")]
+pub mod host_transport;
 pub mod ipc;
 #[cfg(unix)]
 pub mod local_host;

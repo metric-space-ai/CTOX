@@ -1,37 +1,16 @@
 //! Persisted native host configuration. Credentials and live IPC state never live
 //! in this record; the operator host supplies them from its secret/runtime store.
-use crate::authority::{
-    auth::SigningIdentity, timing::AuthorityTiming, NodeId, Peer, WorkerMembership,
-};
+use crate::authority::{auth::SigningIdentity, NodeId};
 use rusqlite::{Connection, OptionalExtension};
-use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io,
     path::{Path, PathBuf},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub enum HostMember {
-    Voter { node_id: NodeId },
-    Worker { member: WorkerMembership },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct HostConfiguration {
-    pub version: u32,
-    pub scope_id: String,
-    pub local: HostMember,
-    pub voters: BTreeMap<NodeId, Peer>,
-    pub timing: AuthorityTiming,
-}
+pub use crate::contracts::{
+    SyncHostConfiguration as HostConfiguration, SyncHostMember as HostMember,
+};
 impl HostConfiguration {
     pub fn node_id(&self) -> NodeId {
         match &self.local {
