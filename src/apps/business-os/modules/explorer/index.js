@@ -488,25 +488,14 @@ export async function mount(ctx) {
         openRow(row);
       }
     });
-    item.addEventListener('contextmenu', (event) => {
-      if (!ctx.contextMenu) return;
-      const actions = [
-        { label: row.isFolder ? T.open : T.previewLabel, icon: '↗', action: () => openRow(row) },
-      ];
-      if (row.sourceId === FILE_SOURCE.id) {
-        actions.push(
-          { type: 'separator' },
-          ...(!row.isFolder ? [{ label: T.download, icon: '↓', action: () => downloadRow(row) }] : []),
-          { label: T.rename, icon: '✎', action: () => renameFileRow(row) },
-          { label: T.toTrash, icon: '⌫', action: () => trashFileRow(row) }
-        );
-      } else {
-        actions.push(
-          { type: 'separator' },
-          { label: T.showInModule, icon: '⌁', action: () => openRow(row) }
-        );
-      }
-      ctx.contextMenu.show(event, actions);
+    // The shell owns pointer and keyboard context menus for module targets.
+    ctx.contextActions?.register(item, {
+      entity: {
+        collection: sourceCollectionId(SOURCES.find((source) => source.id === row.sourceId) || state.activeSource),
+        type: row.isFolder ? 'folder' : 'file',
+        id: row.id,
+        label: row.label,
+      },
     });
     return item;
   }
@@ -607,9 +596,15 @@ export async function mount(ctx) {
       </dl>
       <button type="button" data-preview-open>${escapeHtml(openLabelFor(row))}</button>
       ${row.sourceId === FILE_SOURCE.id && !row.isFolder ? '<button type="button" data-preview-download>Herunterladen</button>' : ''}
+      ${row.sourceId === FILE_SOURCE.id ? `
+        <button type="button" data-preview-rename>${escapeHtml(T.rename)}</button>
+        <button type="button" data-preview-trash>${escapeHtml(T.toTrash)}</button>
+      ` : ''}
     `;
     refs.preview.querySelector('[data-preview-open]')?.addEventListener('click', () => openRow(row));
     refs.preview.querySelector('[data-preview-download]')?.addEventListener('click', () => downloadRow(row));
+    refs.preview.querySelector('[data-preview-rename]')?.addEventListener('click', () => renameFileRow(row));
+    refs.preview.querySelector('[data-preview-trash]')?.addEventListener('click', () => trashFileRow(row));
     if (row.sourceId === FILE_SOURCE.id && !row.isFolder) renderStoredFilePreview(row);
   }
 

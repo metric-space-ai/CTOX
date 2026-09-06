@@ -55,8 +55,12 @@ for (const app of inventory.sourceApps) {
   if (!Number.isInteger(minimumWidth) || minimumWidth < 360 || minimumWidth > Number(presentation?.initial_size?.width)) {
     failures.push(`${app.id}: minimum_size.width must be an integer between 360 and initial_size.width`);
   }
-  if (!Number.isInteger(minimumHeight) || minimumHeight < 480 || minimumHeight > Number(presentation?.initial_size?.height)) {
-    failures.push(`${app.id}: minimum_size.height must be an integer between 480 and initial_size.height`);
+  // File Viewer opens one window per file and has a reviewed 520x400 minimum;
+  // the original migration cohort retains its 480px, single-instance contract.
+  const fileViewer = app.id === 'file-viewer';
+  const heightFloor = fileViewer ? 400 : 480;
+  if (!Number.isInteger(minimumHeight) || minimumHeight < heightFloor || minimumHeight > Number(presentation?.initial_size?.height)) {
+    failures.push(`${app.id}: minimum_size.height must be an integer between ${heightFloor} and initial_size.height`);
   }
   if (Number.isFinite(layoutMinimumWidth) && layoutMinimumWidth !== minimumWidth) {
     failures.push(`${app.id}: layout.min_width must match presentation.minimum_size.width when declared`);
@@ -64,7 +68,10 @@ for (const app of inventory.sourceApps) {
   if (Number.isFinite(layoutMinimumHeight) && layoutMinimumHeight !== minimumHeight) {
     failures.push(`${app.id}: layout.min_height must match presentation.minimum_size.height when declared`);
   }
-  if (presentation.multi_instance !== false) failures.push(`${app.id}: multi_instance must be false in migration v1`);
+  if (fileViewer && (minimumWidth !== 520 || minimumHeight !== 400)) {
+    failures.push(`${app.id}: minimum_size must retain the 520x400 file preview contract`);
+  }
+  if (presentation.multi_instance !== fileViewer) failures.push(`${app.id}: multi_instance must be ${fileViewer}`);
   if (presentation.auto_restore !== false) failures.push(`${app.id}: auto_restore must be false in migration v1`);
 }
 

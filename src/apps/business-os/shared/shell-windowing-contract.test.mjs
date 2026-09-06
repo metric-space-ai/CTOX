@@ -274,8 +274,12 @@ test('all app launch routes converge on the shared window manager', () => {
   assert.match(appSource, /state\.windowManager\.create\(\{/);
   assert.match(appSource, /ownerId: `desktop-app:\$\{entry\.id\}`/);
   assert.match(appSource, /ownerId: `desktop-app:\$\{mod\.id\}`/);
-  for (const staticAppId of ['explorer', 'file-viewer']) {
-    assert.match(appSource, new RegExp(`id: '${staticAppId}'`));
+  for (const appId of ['explorer', 'file-viewer']) {
+    const moduleDef = registry.modules.find((entry) => entry.id === appId);
+    assert.ok(moduleDef, `${appId} must remain in the canonical registry`);
+    assert.equal(moduleDef.launch_kind, 'desktop-app');
+    assert.equal(launchesInWindow(moduleDef), true);
+    assert.equal(usesLegacyWorkspace(moduleDef), false);
   }
   assert.doesNotMatch(appSource, /id:\s*'code-editor',[\s\S]*?title:\s*'Source Editor'/);
   assert.match(appSource, /mountIntegratedModuleSource[\s\S]*?desktop-apps\/code-editor\/app\.js/);

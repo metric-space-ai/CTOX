@@ -139,6 +139,13 @@ jobs:
           java-version: "17"
           cache: gradle
       - uses: android-actions/setup-android@v3
+      - name: Enable emulator hardware acceleration
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo udevadm settle --timeout=30
+          test -r /dev/kvm && test -w /dev/kvm
       - name: Install pinned Android SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
@@ -158,7 +165,8 @@ jobs:
           disable-animations: true
           script: |
             adb install -r src/apps/business-os-mobile/android/app/build/outputs/apk/debug/app-debug.apk
-            adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity
+            adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity > "$RUNNER_TEMP/android-phone-launch.txt"
+            cat "$RUNNER_TEMP/android-phone-launch.txt" && grep -q '^Status: ok' "$RUNNER_TEMP/android-phone-launch.txt"
             adb exec-out screencap -p > "$RUNNER_TEMP/android-phone.png"
       - name: 4:3 tablet launch smoke
         uses: reactivecircus/android-emulator-runner@v2
@@ -167,23 +175,41 @@ jobs:
           target: google_apis
           arch: x86_64
           profile: "Nexus 9"
+          avd-name: ctox-tablet-landscape
           disable-animations: true
+          pre-emulator-launch-script: |
+            test -f "$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
+            sed -i '/^hw.initialOrientation[[:space:]]*=/d' "$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
+            echo 'hw.initialOrientation=landscape' >> "$HOME/.android/avd/ctox-tablet-landscape.avd/config.ini"
           script: |
             adb install -r src/apps/business-os-mobile/android/app/build/outputs/apk/debug/app-debug.apk
-            adb shell settings put system accelerometer_rotation 0
-            adb shell settings put system user_rotation 1
-            adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity
+            adb shell wm user-rotation lock 0
+            adb shell wm fixed-to-user-rotation enabled
+            adb shell am start -W -n dev.ctox.businessosmobile/.MainActivity > "$RUNNER_TEMP/android-tablet-launch.txt"
+            cat "$RUNNER_TEMP/android-tablet-launch.txt" && grep -q '^Status: ok' "$RUNNER_TEMP/android-tablet-launch.txt"
+            adb shell dumpsys window displays > "$RUNNER_TEMP/android-tablet-display.txt"
             sleep 2
             adb exec-out screencap -p > "$RUNNER_TEMP/android-tablet-4x3.png"
-            python3 - <<'PY'
-            import os, struct
-            path = os.path.join(os.environ["RUNNER_TEMP"], "android-tablet-4x3.png")
-            with open(path, "rb") as image:
-                header = image.read(24)
-            width, height = struct.unpack(">II", header[16:24])
-            assert width > height, f"tablet did not rotate to landscape: {width}x{height}"
-            assert abs((width / height) - (4 / 3)) < 0.08, f"tablet is not 4:3: {width}x{height}"
-            PY
+      - name: Verify tablet screenshot geometry
+        shell: python
+        run: |
+          import os, struct
+          path = os.path.join(os.environ["RUNNER_TEMP"], "android-tablet-4x3.png")
+          with open(path, "rb") as image:
+              header = image.read(24)
+          width, height = struct.unpack(">II", header[16:24])
+          assert width > height, f"tablet did not rotate to landscape: {width}x{height}"
+          assert abs((width / height) - (4 / 3)) < 0.08, f"tablet is not 4:3: {width}x{height}"
+      - name: Preserve Android smoke failure evidence
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: business-os-mobile-android-failure
+          path: |
+            ${{ runner.temp }}/android-*.png
+            ${{ runner.temp }}/android-*-launch.txt
+            ${{ runner.temp }}/android-tablet-display.txt
+          if-no-files-found: warn
       - name: Package checksums and manifests
         run: |
           cp "$MOBILE_ROOT/android/app/build/outputs/apk/debug/app-debug.apk" "$RUNNER_TEMP/CTOXBusinessOSMobile-android-debug.apk"

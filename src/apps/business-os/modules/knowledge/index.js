@@ -111,6 +111,43 @@ const state = {
 
 const els = {};
 
+let knowledgeOverlayCleanup = null;
+
+function closeKnowledgeOverlay() {
+  knowledgeOverlayCleanup?.();
+  knowledgeOverlayCleanup = null;
+}
+
+function openKnowledgeOverlay(content) {
+  closeKnowledgeOverlay();
+  const root = els.root || state.ctx?.host;
+  if (!root) return;
+  const previousFocus = document.activeElement;
+  const overlay = document.createElement('div');
+  overlay.className = 'knowledge-app-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-label', content.querySelector('h2')?.textContent || 'Knowledge');
+  overlay.tabIndex = -1;
+  overlay.append(content);
+  const onKeyDown = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      closeKnowledgeOverlay();
+    }
+  };
+  overlay.addEventListener('keydown', onKeyDown);
+  root.append(overlay);
+  knowledgeOverlayCleanup = () => {
+    overlay.removeEventListener('keydown', onKeyDown);
+    overlay.remove();
+    if (previousFocus?.isConnected) previousFocus.focus?.();
+  };
+  (content.querySelector('input, textarea, button, [tabindex="0"]') || overlay).focus();
+}
+
+
+
 export async function mount(ctx) {
   await ensureStyles();
   cancelInitialKnowledgeRetry();
@@ -138,6 +175,7 @@ export async function mount(ctx) {
   window.addEventListener('message', handleShellMessage);
   return () => {
     disposed = true;
+    closeKnowledgeOverlay();
     window.removeEventListener('message', handleShellMessage);
     window.removeEventListener('click', handleContextOutsideClick, { capture: true });
     window.removeEventListener('keydown', handleContextEscape);
@@ -2171,7 +2209,7 @@ async function dispatchKnowledgeCommand(command) {
 function showCommandStatus(result) {
   const copy = state.messages || labels[state.lang];
   const message = result?.ok ? `${copy.queued} · ${result.task_id || result.command_id}` : copy.queueFailed;
-  state.ctx.openBottomDrawer(drawerContent('Knowledge Command', message));
+  openKnowledgeOverlay(drawerContent('Knowledge Command', message));
 }
 
 function openCreateKnowledgeBookDrawer() {
@@ -2207,7 +2245,7 @@ function openCreateKnowledgeBookDrawer() {
       },
     }),
   });
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function openImportKnowledgeBookDrawer() {
@@ -2242,7 +2280,7 @@ function openImportKnowledgeBookDrawer() {
       },
     }),
   });
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function openExportKnowledgeBookDrawer() {
@@ -2286,7 +2324,7 @@ function openExportKnowledgeBookDrawer() {
       },
     }),
   });
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function knowledgeActionDrawer({ title, subtitle, fields, actionLabel, commandType, recordId, commandTitle, buildPayload }) {
@@ -2317,7 +2355,7 @@ function knowledgeActionDrawer({ title, subtitle, fields, actionLabel, commandTy
     submitButton.disabled = !valid;
     submitButton.setAttribute('aria-disabled', String(!valid));
   };
-  body.querySelector('[data-close-drawer]').addEventListener('click', state.ctx.closeDrawers);
+  body.querySelector('[data-close-drawer]').addEventListener('click', closeKnowledgeOverlay);
   form.addEventListener('input', updateSubmitState);
   form.addEventListener('change', updateSubmitState);
   form.addEventListener('submit', async (event) => {
@@ -2378,7 +2416,7 @@ async function openKnowledgeConfig() {
       <button class="ctox-button is-primary" type="button" data-drawer-save disabled aria-disabled="true">An CTOX geben</button>
     </footer>
   `;
-  body.querySelector('[data-close-drawer]').addEventListener('click', state.ctx.closeDrawers);
+  body.querySelector('[data-close-drawer]').addEventListener('click', closeKnowledgeOverlay);
   const configTextarea = body.querySelector('[data-drawer-markdown]');
   const configSave = body.querySelector('[data-drawer-save]');
   const updateConfigSubmit = () => {
@@ -2395,12 +2433,12 @@ async function openKnowledgeConfig() {
     await queueMarkdownSave();
   });
   updateConfigSubmit();
-  state.ctx.openLeftDrawer(body);
+  openKnowledgeOverlay(body);
 }
 
 function openRunbookConfig() {
   const runbook = state.runbooks.find((entry) => runbookIdMatches(entry.id || entry.runbook_id, state.selectedRunbookId));
-  state.ctx.openRightDrawer(drawerContent('Runbook Runtime', [
+  openKnowledgeOverlay(drawerContent('Runbook Runtime', [
     ['Ausführung', 'CTOX Task Queue'],
     ['Command history', 'Local command data'],
     ['Ausgewählt', runbook?.title || state.selectedRunbookId || 'kein Runbook'],
@@ -2415,7 +2453,7 @@ function drawerContent(title, rows) {
     ? `<dl class="ctox-fields knowledge-config-list">${rows.map(([key, value]) => `<dt>${escapeHtml(key)}</dt><dd>${escapeHtml(value)}</dd>`).join('')}</dl>`
     : `<p>${escapeHtml(rows)}</p>`;
   body.innerHTML = `<header class="drawer-header-row"><div><h2>${escapeHtml(title)}</h2></div><button class="ctox-pane-icon" type="button" data-close-drawer aria-label="Schließen">${actionIcon('close')}</button></header>${content}`;
-  body.querySelector('[data-close-drawer]').addEventListener('click', state.ctx.closeDrawers);
+  body.querySelector('[data-close-drawer]').addEventListener('click', closeKnowledgeOverlay);
   return body;
 }
 

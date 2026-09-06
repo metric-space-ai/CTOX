@@ -3,15 +3,15 @@ mod runtime_support;
 pub(crate) use mission_state::drain_pending_mission_state_clobbers;
 #[cfg(test)]
 pub(crate) use mission_state::drain_pending_mission_state_clobbers_for_test;
-pub use mission_state::{
-    ClosureConfidence, ContinuationMode, MissionStateFields, MissionStatus, TriggerIntensity,
-    count_open_closure_blocking_claims, drain_pending_mission_state_clobber_events_to_governance,
-};
 use mission_state::{
-    OwnerIntentClearGuard, apply_canonical_focus_diff_to_mission_state,
-    apply_imported_focus_diff_controls, import_legacy_mission_state, load_mission_state_with,
-    load_mission_states_with, map_mission_claim_row, map_strategic_directive_row,
-    map_verification_run_row, persist_mission_state_with, render_focus_continuity_from_record,
+    apply_canonical_focus_diff_to_mission_state, apply_imported_focus_diff_controls,
+    import_legacy_mission_state, load_mission_state_with, load_mission_states_with,
+    map_mission_claim_row, map_strategic_directive_row, map_verification_run_row,
+    persist_mission_state_with, render_focus_continuity_from_record, OwnerIntentClearGuard,
+};
+pub use mission_state::{
+    count_open_closure_blocking_claims, drain_pending_mission_state_clobber_events_to_governance,
+    ClosureConfidence, ContinuationMode, MissionStateFields, MissionStatus, TriggerIntensity,
 };
 use mission_state::{focus_semantic_conflicts_local, normalize_mission_text};
 pub(crate) use runtime_support::seed_mission_state_for_queue_with;
@@ -34,9 +34,9 @@ pub use runtime_support::{
 use anyhow::Context;
 use anyhow::Result;
 use regex::Regex;
+use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
-use rusqlite::params;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -45,10 +45,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
