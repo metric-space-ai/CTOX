@@ -5044,7 +5044,7 @@ struct PromptWorkerActivity {
 struct PreparedCrewAttempt {
     attempt_id: String,
     recoverable_attempt: Option<lcm::WorkerAttemptRecord>,
-    crew_soul_block: Option<String>,
+    crew: Option<crate::crew::CrewTurnContext>,
 }
 
 #[cfg(test)]
@@ -5093,7 +5093,16 @@ fn prepare_admitted_worker_attempt(root: &Path, job: &QueuedPrompt) -> Result<Pr
         .as_ref()
         .map(|a| a.attempt_id.clone())
         .unwrap_or_else(|| format!("worker-attempt:{}", uuid::Uuid::new_v4()));
-    let crew_soul_block = crate::crew::prepare_attempt_or_continue(
+    // The router judges with one bounded, tool-free model call; tests keep the
+    // deterministic path so admission never depends on a provider.
+    let settings = runtime_env::effective_operator_env_map(root).unwrap_or_default();
+    let model_judge = crate::crew::ModelRouterJudge {
+        root,
+        settings: &settings,
+    };
+    let judge: Option<&dyn crate::crew::RouterJudge> =
+        if cfg!(test) { None } else { Some(&model_judge) };
+    let crew = crate::crew::prepare_attempt_or_continue(
         root,
         &job.leased_message_keys,
         CHANNEL_ROUTER_LEASE_OWNER,
@@ -5102,11 +5111,12 @@ fn prepare_admitted_worker_attempt(root: &Path, job: &QueuedPrompt) -> Result<Pr
         &job.queue_task_metadata,
         job.suggested_skill.as_deref(),
         &job.prompt,
+        judge,
     );
     Ok(PreparedCrewAttempt {
         attempt_id,
         recoverable_attempt,
-        crew_soul_block,
+        crew,
     })
 }
 
@@ -6088,8 +6098,20 @@ fn start_prompt_worker(
             let PreparedCrewAttempt {
                 attempt_id,
                 recoverable_attempt,
-                crew_soul_block,
+                crew,
             } = prepare_admitted_worker_attempt(&root, &job)?;
+            if let Some(context) = crew.as_ref() {
+                push_event(
+                    &event_state,
+                    format!(
+                        "Crew: {} ({}) takes {} — {}",
+                        context.member_name,
+                        context.member_id,
+                        job.source_label,
+                        clip_text(&context.selection_reason, 200)
+                    ),
+                );
+            }
             // The Business OS command/evidence run and the worker finalization
             // share one durable attempt identity.
             let command_turn_id = attempt_id.clone();
@@ -6254,7 +6276,10 @@ fn start_prompt_worker(
                 },
             );
             let mut session_options = chat_turn_session_options_for_queue_job(&job);
-            session_options.crew_soul_block = crew_soul_block;
+            session_options.crew_persona = crew.as_ref().map(|context| context.persona.clone());
+            session_options.crew_memory_block = crew
+                .as_ref()
+                .and_then(|context| context.memory_block.clone());
             let progress_error = Arc::new(Mutex::new(None::<String>));
             session_options.worker_attempt = Some(turn_loop::WorkerAttemptContext {
                 attempt_id: attempt_id.clone(),
@@ -6289,10 +6314,15 @@ fn start_prompt_worker(
                         })?;
                         let settings =
                             runtime_env::effective_operator_env_map(&root).unwrap_or_default();
+                        let persona = session_options.crew_persona.clone();
                         if session
                             .as_ref()
                             .map(|session| {
-                                session.matches_current_worker_contract(&root, &settings)
+                                session.matches_current_worker_contract(
+                                    &root,
+                                    &settings,
+                                    persona.as_deref(),
+                                )
                             })
                             .transpose()?
                             == Some(false)
@@ -6300,7 +6330,11 @@ fn start_prompt_worker(
                             *session = None;
                         }
                         if session.is_none() {
-                            *session = Some(turn_loop::PersistentSession::start(&root, &settings)?);
+                            *session = Some(turn_loop::PersistentSession::start(
+                                &root,
+                                &settings,
+                                persona.as_deref(),
+                            )?);
                         }
                         let recorder_error = Arc::clone(&progress_error);
                         let result =
@@ -10907,7 +10941,8 @@ fn chat_turn_session_options_for_queue_job(
             additional_writable_roots: Vec::new(),
             additional_readable_roots: Vec::new(),
             worker_attempt: None,
-            crew_soul_block: None,
+            crew_persona: None,
+            crew_memory_block: None,
         };
     }
     if is_systematic_research_job(job) {
@@ -10930,7 +10965,8 @@ fn chat_turn_session_options_for_queue_job(
             additional_writable_roots: Vec::new(),
             additional_readable_roots: Vec::new(),
             worker_attempt: None,
-            crew_soul_block: None,
+            crew_persona: None,
+            crew_memory_block: None,
         };
     }
     if business_os_app_module_target_from_metadata(&job.queue_task_metadata).is_some() {
@@ -10946,7 +10982,8 @@ fn chat_turn_session_options_for_queue_job(
             additional_writable_roots: Vec::new(),
             additional_readable_roots: Vec::new(),
             worker_attempt: None,
-            crew_soul_block: None,
+            crew_persona: None,
+            crew_memory_block: None,
         };
     }
     turn_loop::ChatTurnSessionOptions {
@@ -15183,6 +15220,10 @@ fn start_mission_maintenance_loop(root: std::path::PathBuf, state: Arc<Mutex<Sha
             // renewal, lease expired) is mechanically released or settled on
             // a bounded cadence instead of surviving its worker forever.
             run_orphaned_queue_lease_sweep(&root, &state);
+            // Crew learning: one finalized attempt per tick feeds the member's
+            // memory in the LCM (anchors from the typed retrospective, then the
+            // existing continuity refresh). Serial, bounded, after the gates.
+            run_crew_learning_tick(&root, &state);
             thread::sleep(Duration::from_secs(MISSION_MAINTENANCE_POLL_SECS));
         }
     });
@@ -15313,6 +15354,36 @@ fn reconcile_stale_queue_projections_for_service(
 /// rows stay released, settled terminal rows leave the sweep candidate set,
 /// and linked Business OS commands resume through `retry_wait` with the same
 /// command id — the sweep never creates or duplicates a command.
+fn run_crew_learning_tick(root: &Path, state: &Arc<Mutex<SharedState>>) {
+    if cfg!(test) {
+        return;
+    }
+    let settings = runtime_env::effective_operator_env_map(root).unwrap_or_default();
+    match crate::crew::run_learning_tick(root, &settings) {
+        Ok(Some(outcome)) => push_event(
+            state,
+            format!(
+                "Crew learning: {} learned from attempt {} ({} anchors, refreshed {}{})",
+                outcome.member_id,
+                outcome.attempt_id,
+                outcome.anchors_added,
+                if outcome.refreshed_kinds.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    outcome.refreshed_kinds.join("+")
+                },
+                outcome
+                    .error
+                    .as_deref()
+                    .map(|error| format!("; {}", clip_text(error, 160)))
+                    .unwrap_or_default()
+            ),
+        ),
+        Ok(None) => {}
+        Err(err) => push_event(state, format!("Crew learning tick failed: {err}")),
+    }
+}
+
 fn run_orphaned_queue_lease_sweep(root: &Path, state: &Arc<Mutex<SharedState>>) {
     {
         let gate = ORPHANED_QUEUE_LEASE_SWEEP_GATE.get_or_init(|| Mutex::new(None));
@@ -34186,7 +34257,7 @@ Business OS command:
         // Exercise the admitted service path and its normal durable completion,
         // with a deterministic leaf result instead of a live model invocation.
         let prepared = prepare_admitted_worker_attempt(&root, &job)?;
-        assert!(prepared.crew_soul_block.is_none());
+        assert!(prepared.crew.is_none());
         assert!(prepared.recoverable_attempt.is_none());
         assert_no_crew_admission_evidence(&conn);
         let engine = LcmEngine::open(&crate::paths::core_db(&root), LcmConfig::default())?;
@@ -44060,16 +44131,17 @@ Im Workspace muss synthesis/helper-run.json existieren."
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE communication_routing_state(message_key TEXT PRIMARY KEY,route_status TEXT,leased_at TEXT)").unwrap();
         crate::crew::ensure_schema(&conn).unwrap();
-        let block = crate::crew::render_soul_block(&crate::crew::members(&conn).unwrap()[0], &[]);
-        let mut prompt = prompt;
-        crate::crew::append_soul(&mut prompt, Some(&block));
-        assert!(prompt.starts_with(&original));
-        assert!(prompt.ends_with(&block));
+        // Crew identity never rides in the task text: the persona is a
+        // base-instruction suffix, the memory a runtime-context block.
+        let persona = crate::crew::render_persona(&crate::crew::members(&conn).unwrap()[0]);
+        assert!(persona.starts_with("<ctox_crew_persona"));
+        assert!(!prompt.contains("ctox_crew_persona"));
+        assert_eq!(prompt, original);
         assert!(prompt.contains("Never write Business OS SQLite files or RxDB tables directly"));
         assert!(prompt.contains(
             "Do not update queue rows, command rows, chat rows, or runtime status tables yourself"
         ));
-        assert!(crate::context::lcm::estimate_tokens(&block) <= 1200);
+        assert!(crate::context::lcm::estimate_tokens(&persona) <= 1200);
     }
 
     #[test]

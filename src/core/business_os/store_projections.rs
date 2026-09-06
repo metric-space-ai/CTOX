@@ -871,6 +871,17 @@ pub(super) fn enrich_queue_projection_payload(
     ] {
         object.insert(key.to_string(), serde_json::json!(value));
     }
+    // Ticket-born work carries its ticket key so the Tickets app can show
+    // which member holds it and why it waits.
+    object.insert(
+        "ticket_key".to_string(),
+        serde_json::json!(task
+            .metadata
+            .get("ticket_key")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())),
+    );
     object.insert(
         "failure_attempt_count".into(),
         Value::from(task.failure_attempt_count),
