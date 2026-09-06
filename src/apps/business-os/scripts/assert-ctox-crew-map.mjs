@@ -27,30 +27,41 @@ try {
 
   const url = `http://127.0.0.1:${port}/`;
   await page.goto(url, { waitUntil: 'domcontentloaded' });
-  const first = await collect(page);
-  assertResult(first);
-  await assertMotionSettles(page);
-  await page.screenshot({ path: path.join(outputDir, 'ctox-crew-map.png'), fullPage: true });
+  const first = await collectSelections(page, true);
 
   await page.reload({ waitUntil: 'domcontentloaded' });
-  const reloaded = await collect(page);
-  assertResult(reloaded);
-  if (first.identityColor !== reloaded.identityColor) throw new Error('crew identity changed after a clean reload');
+  const reloaded = await collectSelections(page, false);
+  for (let i = 0; i < first.length; i++) {
+    if (first[i].identityColor !== reloaded[i].identityColor) throw new Error('crew identity changed after a clean reload');
+  }
   if (consoleErrors.length) throw new Error(`browser console/network errors: ${consoleErrors.join(' | ')}`);
 
   const report = { ok: true, url, first, reloaded, consoleErrors };
   fs.writeFileSync(path.join(outputDir, 'ctox-crew-map.json'), JSON.stringify(report, null, 2));
-  console.log(JSON.stringify({ ok: true, scenarios: 2, screenshot: path.join(outputDir, 'ctox-crew-map.png') }, null, 2));
+  console.log(JSON.stringify({ ok: true, scenarios: 6, outputDir }, null, 2));
 } finally {
   await browser.close();
   await new Promise((resolve) => server.close(resolve));
 }
 
-async function collect(page) {
+async function collectSelections(page, screenshots) {
+  const results = [];
+  for (const selected of ['task-working', 'task-waiting', 'task-failed']) {
+    const result = await collect(page, selected);
+    assertResult(result);
+    await assertMotionSettles(page);
+    if (screenshots) await page.screenshot({ path: path.join(outputDir, `${selected}.png`), fullPage: true });
+    results.push(result);
+  }
+  return results;
+}
+
+async function collect(page, selected) {
   await page.waitForFunction(() => Boolean(window.__ctoxCrewReady));
+  await page.evaluate((id) => window.__selectCrewTask(id), selected);
   await page.evaluate(() => window.__triggerCrewTurn?.());
   await page.waitForTimeout(220);
-  return page.evaluate(() => {
+  return page.evaluate((selected) => {
     const slots = Array.from(document.querySelectorAll('.ctox-flow-creature-slot'));
     const byTask = Object.fromEntries(slots.map((slot) => [slot.dataset.taskId, {
       node: slot.dataset.creatureNodeId,
@@ -60,10 +71,12 @@ async function collect(page) {
       activityUpdatedAt: slot.querySelector('.ctox-crew-creature')?.dataset.activityUpdatedAt || '',
       xEyes: slot.querySelectorAll('.ctox-crew-eyes-x path').length,
     }]));
-    document.querySelector('[data-task-id="task-waiting"]')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    document.querySelector(`[data-task-id="${selected}"]`)?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     const focusedAfterClick = window.__focusedTask || '';
     document.querySelector('[data-task-id="task-working"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
     return {
+      selected,
+      selectedIds: slots.filter(slot => slot.classList.contains('is-selected')).map(slot => slot.dataset.taskId),
       count: slots.length,
       byTask,
       focusedAfterClick,
@@ -76,7 +89,7 @@ async function collect(page) {
       motionProfiles: document.querySelector('main')?.__ctoxCrewProceduralMotion?.profiles?.length ?? -1,
       motionFrame: document.querySelector('main')?.__ctoxCrewProceduralMotion?.frame || 0,
     };
-  });
+  }, selected);
 }
 
 async function assertMotionSettles(page) {
@@ -91,13 +104,17 @@ async function assertMotionSettles(page) {
 }
 
 function assertResult(result) {
-  if (result.count !== 3) throw new Error(`expected 3 map creatures, got ${result.count}`);
-  if (result.byTask['task-waiting']?.node !== 'queued' || result.byTask['task-waiting']?.mode !== 'sleeping') throw new Error('waiting creature is not sleeping at queued');
+  const expected = result.selected === 'task-working' ? ['task-working'] : ['task-working', result.selected];
+  if (result.count !== expected.length || Object.keys(result.byTask).some(id => !expected.includes(id))) {
+    throw new Error(`expected selected task plus running tasks only: ${JSON.stringify(result)}`);
+  }
+  if (result.selectedIds.length !== 1 || result.selectedIds[0] !== result.selected) throw new Error('selected creature is not marked');
+  if (result.selected === 'task-waiting' && (result.byTask['task-waiting']?.node !== 'queued' || result.byTask['task-waiting']?.mode !== 'sleeping')) throw new Error('waiting creature is not sleeping at queued');
   if (result.byTask['task-working']?.node !== 'running' || result.byTask['task-working']?.mode !== 'working') throw new Error('working creature is not active at running');
   if (!result.byTask['task-working']?.transform) throw new Error(`fresh durable tool turn did not trigger a finite creature impulse: ${JSON.stringify(result)}`);
   if (result.byTask['task-waiting']?.transform) throw new Error('waiting creature must remain still');
-  if (result.byTask['task-failed']?.node !== 'model-failed' || result.byTask['task-failed']?.xEyes !== 2) throw new Error('failed creature lacks the failed node or X eyes');
-  if (result.focusedAfterClick !== 'task-waiting' || result.focusedAfterKeyboard !== 'task-working') throw new Error('map creature selection is not mouse/keyboard reachable');
+  if (result.selected === 'task-failed' && (result.byTask['task-failed']?.node !== 'model-failed' || result.byTask['task-failed']?.xEyes !== 2)) throw new Error('failed creature lacks the failed node or X eyes');
+  if (result.focusedAfterClick !== result.selected || result.focusedAfterKeyboard !== 'task-working') throw new Error('map creature selection is not mouse/keyboard reachable');
   if (result.fullTaskId !== 'queue:system::task_1234567890abcdef' || !result.visibleTaskId.startsWith('…')) throw new Error('chat task id deep-link is missing');
   if (!result.identityColor || result.identityColor !== result.chatIdentityColor) throw new Error('chat and map do not share the same creature identity');
 }
@@ -136,8 +153,14 @@ function harnessHtml() {
     const waiting={id:'task-waiting',commandId:'cmd-waiting',title:'Waiting task',status:'queued',executionPhase:'queued'};
     const failed={id:'task-failed',commandId:'cmd-failed',title:'Failed task',status:'failed',executionPhase:'terminal',terminalStatus:'failed'};
     const model={activeTask:working,activeNodeId:'running',tasks:[working,waiting,failed],nodeMap:new Map([['queued',{id:'queued',x:180,y:240}],['running',{id:'running',x:500,y:240}],['model-failed',{id:'model-failed',x:820,y:440}]])};
-    document.querySelector('#crew').innerHTML=__ctoxTestHooks.flowCrewSvg(model,working,{lang:'de'});
-    document.querySelectorAll('.ctox-flow-creature-slot').forEach((slot)=>{const select=()=>window.__focusedTask=slot.dataset.taskId;slot.addEventListener('click',select);slot.addEventListener('keydown',(event)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();select()}})});
+    window.__selectCrewTask=(id)=>{
+      const selected=model.tasks.find(task=>task.id===id);
+      if(!selected) throw new Error('unknown fixture task: '+id);
+      document.querySelector('#crew').innerHTML=__ctoxTestHooks.flowCrewSvg(model,selected,{lang:'de'});
+      document.querySelectorAll('.ctox-flow-creature-slot').forEach((slot)=>{const select=()=>window.__focusedTask=slot.dataset.taskId;slot.addEventListener('click',select);slot.addEventListener('keydown',(event)=>{if(event.key==='Enter'||event.key===' '){event.preventDefault();select()}})});
+      syncCrewProceduralMotion(document.querySelector('main'));
+    };
+    window.__selectCrewTask(working.id);
     document.querySelector('#chat').innerHTML=__businessChatTestInternals.messageMarkup({id:'m1',role:'ctox',text:'Recherche gestartet.',taskId:'queue:system::task_1234567890abcdef',commandId:'cmd-working',status:'running'});
     document.querySelector('#chat-creature').innerHTML=crewCreatureHtml({id:'chat-random',messages:[{commandId:'cmd-working',taskId:'task-working'}]},'running','map');
     syncCrewProceduralMotion(document.querySelector('main'));
