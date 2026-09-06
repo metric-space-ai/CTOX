@@ -4,6 +4,7 @@ pub mod authority;
 pub mod checkpoint;
 #[path = "contracts.generated.rs"]
 pub mod contracts;
+pub mod host_config;
 pub mod ipc;
 #[cfg(unix)]
 pub mod local_host;

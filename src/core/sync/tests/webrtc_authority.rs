@@ -2,6 +2,9 @@
 //! Actual localhost WebRTC/UDP channels; only signaling is an isolated fixture.
 #[path = "support/checkpoint.rs"]
 mod checkpoint_fixture;
+#[cfg(unix)]
+#[path = "support/configured_host.rs"]
+mod configured_host;
 #[path = "support/native.rs"]
 mod native_fixture;
 use ctox_sync::authority::{

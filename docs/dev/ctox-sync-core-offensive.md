@@ -7,6 +7,58 @@ noch aktiv. Ihre Entfernung gehört ausdrücklich zur Abnahme.
 
 ## Aktueller Abnahmestand
 
+### Dauerhafte native Host-Pins
+
+`host_config.rs` definiert die lokale native Konfiguration und speichert sie in
+einer eigenen Tabelle der vorhandenen Host-Runtime-SQLite-Datenbank. Scope,
+lokaler Node/Public-Key, Voter- oder Worker-Rolle, die drei Voter-Schlüssel und
+ihre Fähigkeiten bleiben über Neustarts gebunden. Ein erneutes Speichern darf
+diese Bindung nicht still verändern. Dafür braucht es einen geprüften
+Migrationsweg; Raft-Zeitparameter können für den nächsten Start geändert werden.
+Der Schreibvorgang verwendet eine unmittelbare SQLite-Transaktion, das Laden
+validiert das Format und seine Invarianten erneut. Fremde Runtime-Tabellen
+werden weder neu aufgebaut noch überschrieben.
+
+Die bestehenden nativen Voter-/Worker-Attachments erhalten ihre Optionen aus
+dieser Konfiguration und prüfen den lokalen Schlüssel. Routen starten leer und
+werden weiterhin durch signierte Discovery ermittelt. Schlüsselmaterial,
+Signaling-Token und aktive IPC-Endpunkte gehören nicht in diesen Datensatz.
+Der gemeinsame Kontrollraum ist `ctox-execution:<scope>`; produktive
+Business-OS-Räume werden nicht als Ausführungsnetz verwendet. Worker erhalten
+keinen eigenen Raft-Store. Ihre lokalen Pins ersetzen keine Quorum-Aufnahme.
+
+Der erste echte Neustartlauf zeigte eine unzulässige Kopplung: Das Ableiten des
+IPC-Verzeichnisses aus dem vollständigen Datenpfad überschritt auf macOS die
+Unix-Socket-Pfadlänge (`host-config-restart.json`). Der Host übergibt deshalb das
+lokale private IPC-Verzeichnis getrennt vom dauerhaften Speicherpfad, wie es der
+bestehende Listener bereits vorsieht. Dessen Rechte-, Besitzer- und
+Exklusivitätsprüfungen bleiben erhalten; es gibt keinen Netzwerk-Fallback.
+
+Die neue Neustart-Fixture fährt drei native Voter und einen Worker vollständig
+herunter und rekonstruiert anschließend Schlüsselobjekte und Konfiguration aus
+denselben Pins sowie die Voter aus denselben Raft-Stores. Sie prüft vorhandenen
+Auftragsbesitz, unveränderte Mitgliedschaft, Replay, Widerruf und die Sperre
+erhaltener Handles nach Shutdown über echte lokale WebRTC-Verbindungen.
+Der gezielte Neustarttest besteht in 26,61 Sekunden, ohne Änderung der
+60-Sekunden-Frist (`host-config-restart-receipt.json`). Ein vorheriger Lauf
+scheiterte an der erwarteten Aufnahme-Receipt-Art, ohne deren Wert auszugeben
+(`host-config-restart-ipc.json`). Die Assertion blieb erhalten und gibt jetzt den
+Receipt aus. Der anschließende Erfolg beweist die Ursache dieses Zwischenfehlers
+nicht. Die vollständige Sync-Suite besteht anschließend **65/65**, ohne Skips
+(`host-config-sync.json`): 19 Unit-, 11 Cluster-, 5 Checkpoint-, 1 Effect-,
+5 Host-Konfigurations-, 2 IPC-, 9 Lifecycle-, 1 Store-Conformance-, 10 echte
+WebRTC-, 1 Membership- und 1 Workjet-Identitäts-Test. Die zehn WebRTC-Szenarien
+benötigen zusammen 17,86 Sekunden, der Build 27,39 Sekunden. Die bestehenden
+Assertions und Fristen sind unverändert. Clippy über alle Sync-Targets mit
+`-D warnings` besteht in 12,93 Sekunden (`host-config-clippy.json`); Format- und
+Diff-Prüfung bestehen ebenfalls. Browser-/Wire-Suite und CTOX-Gesamtcheck wurden
+für diese ausschließlich native Konfigurationsänderung nicht erneut ausgeführt;
+ihre unten genannten Ergebnisse gehören zum vorherigen Quellstand.
+
+Das ist noch kein produktiver Host-Anschluss: Service-Aufruf, Secret-Store-
+Anbindung, Signaling-Zulassung und sichtbare SSH-/QR-Aufnahme bleiben offen.
+Es wird keine zertifizierte Harness-Wiederherstellung oder Migration behauptet.
+
 ### Wiedererkennung von Votern nach Adresswechsel
 
 Bei der Prüfung des produktiven Host-Anschlusses zeigte sich eine notwendige

@@ -60,6 +60,35 @@ Mitgliedschaft noch Quorum oder Ausführbarkeit. Der versionierte native
 Kontrollaufruf `ctox.sync.authority.route.v1` verwendet den vorhandenen signierten
 Envelope mit eigenen Request-/Reply-Kennungen; er ist keine Workjet-IPC-Operation.
 
+## Persistierte native Host-Konfiguration
+
+`ctox_sync::host_config` liest und schreibt einen versionierten Singleton in
+`ctox_sync_host` innerhalb der vom Host bereitgestellten Runtime-SQLite-Datenbank.
+Die vorhandenen Runtime-Tabellen bleiben erhalten. Der Datensatz pinnt Scope,
+lokale Node-ID, Rolle und Public-Key sowie genau drei verschiedene Voter mit
+ihren Ausführungs-/Datenfähigkeiten. Änderungen dieser Bindung werden auch bei
+einem erneuten Speichern in einer unmittelbaren Transaktion abgelehnt; sie
+benötigen einen expliziten Migrationsweg. Raft-Zeitparameter können für einen
+späteren Neustart aktualisiert werden.
+
+`voter_options` und `worker_options` prüfen zusätzlich den aus dem lokalen
+Secret-Store gelieferten Schlüssel und erzeugen die bestehenden nativen
+Attachment-Optionen. Das private lokale IPC-Verzeichnis bleibt ein gesondertes
+Startargument des Hosts: Der vollständige dauerhafte Datenpfad kann länger als
+ein zulässiger Unix-Socketpfad sein. Der bestehende Listener prüft weiterhin
+Pfadlänge, Benutzer, Dateirechte und exklusiven Besitz. Die Konfiguration speichert
+weder diesen Schlüssel noch
+Zugangstoken, flüchtige Routen oder einen aktiven IPC-Endpunkt. Die Route-Maps
+starten leer. Der dedizierte Raum heißt `ctox-execution:<scope>`; er ersetzt
+keine Business-OS-Session und darf keine Business-OS-Zugangsdaten übernehmen.
+Worker erhalten keinen Raft-Speicherpfad. Eine gespeicherte Worker-Konfiguration
+ist ausdrücklich kein bestätigter Mitgliedschaftsbeleg.
+
+Das Format ist native interne Persistenz, kein neuer Wire-Vertrag. Der konkrete
+CTOX-Service-Aufruf, die lokale Secret-Store-Anbindung und produktive
+Signaling-Zulassung sind noch nicht implementiert. Die Oberfläche darf daher aus
+einer gespeicherten Konfiguration noch keinen betriebsbereiten Worker ableiten.
+
 ## Operationen und genaue Bedeutung
 
 Jede Anfrage enthält `{ version, requestId, operation }`. `version` ist

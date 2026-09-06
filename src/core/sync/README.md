@@ -31,6 +31,21 @@ deployable replacement daemon. Business records still replicate through RxDB.
   permissions remain independent and must validate the remote role and identity.
   Hosts await `shutdown` before closing persistence; Drop provides an unwind
   backstop. The default 20/20 batches and 5-second replication retry are retained.
+- `host_config.rs`: versioned native host pins in the host runtime SQLite database.
+  The singleton record contains the scope, local voter/worker identity, three
+  distinct voter keys and Raft timing. Saving uses an immediate transaction and
+  refuses identity, scope, role or capability rebinding; existing runtime tables
+  remain untouched. Loading validates the stored record again. Signing material,
+  signaling credentials, route hints and live IPC endpoints are excluded.
+  Voter attachment options use a stable storage directory and both roles use the
+  dedicated `ctox-execution:<scope>` room; the supplied key must match the pin.
+  The host supplies its private IPC directory separately: a long persistent
+  database path must not become a Unix socket path. The existing listener owns
+  path-length, ownership, permissions and process-lock validation.
+  A worker record is local configuration, never a quorum admission receipt.
+  This is a native internal persistence schema, not a second Rust/TypeScript wire
+  contract. Product service startup, secret-store access and signaling grants
+  remain to be connected.
 - `authority/node.rs`: pinned OpenRaft 0.9.25 adapter. Three configured peers
   confirm job ownership and generation. `local_job` is a projection;
   `validate_ownership` requires a linearizable quorum read.
