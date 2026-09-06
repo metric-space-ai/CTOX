@@ -276,10 +276,16 @@ export async function createCtoxForkRuntime({ root, bridge, permissions, emit, l
       }
       return activeSave.promise;
     },
-    export({ format = 'xlsx' } = {}) {
+    async export({ format = 'xlsx' } = {}) {
       const expectedFormat = isDocument ? 'docx' : 'xlsx';
       if (format !== expectedFormat) throw Object.assign(new Error(`Unsupported ${kind} export format: ${format}`), { code: 'unsupported_format' });
       if (access.export === false) throw permissionError(`${isDocument ? 'Document' : 'Spreadsheet'} export is not permitted`);
+      // Export the acknowledged snapshot containing the edits present when the
+      // user requested the download. A running save may serialize an older
+      // revision, so wait for it and save any remaining draft before exporting.
+      // A failed save must reject the download, never silently return old data.
+      if (pendingSave) await pendingSave.promise;
+      if (saveTracker.dirty) await this.save({ reason: 'export' });
       return bridge.export({ recordId, versionId, format });
     },
     focus() { frame.contentWindow.focus(); return { focused: true }; },

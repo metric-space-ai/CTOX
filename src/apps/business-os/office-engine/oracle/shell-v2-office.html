@@ -114,6 +114,12 @@
         if (realtime) await new Promise(resolve=>setTimeout(resolve,1500));
         completedCommits.push(command);
         return {status:'completed',payload:{outcome:{ok:true,record_id:record.id,version_id:next.id,blob_id:next.blob_id}}};
+      } else if(command.type.endsWith('.export')) {
+        const encodeBlob=id=>btoa(chunks.filter(row=>row.blob_id===id).sort((a,b)=>a.idx-b.idx).map(row=>atob(row.data)).join(''));
+        const exported=await window.officeLabExport(kind,encodeBlob(version.editor_blob_id),encodeBlob(version.blob_id));
+        const blobId=`native-export-${crypto.randomUUID()}`;
+        chunks.push({id:`${blobId}-0`,blob_id:blobId,idx:0,total:1,data:exported.data});
+        persist();return {status:'completed',payload:{outcome:{ok:true,blob_id:blobId,source_sha256:exported.sha256}}};
       } else throw new Error(`Unimplemented lab command: ${command.type}`);
       persist();return {status:'completed',payload:{outcome:{ok:true,record_id:record.id,version_id:version.id,editor_blob_id:version.editor_blob_id,editor_protocol:version.editor_protocol,editor_protocol_version:10,conversion_state:'prepared'}}};
     }},
