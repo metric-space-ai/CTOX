@@ -41,6 +41,7 @@ mod rxdb_peer_tombstones;
 mod rxdb_peer_workjet_devices;
 pub mod server;
 mod session;
+mod shell_assets;
 pub mod shell_update;
 pub mod store;
 mod store_appsec_commands;

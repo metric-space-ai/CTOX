@@ -37,6 +37,7 @@
   "loadingEditor": "Lade Editor",
   "documentPreparing": "Tabelle wird vorbereitet.",
   "editorLoadFailed": "Editor konnte nicht geladen werden:",
+  "retry": "Erneut versuchen",
   "noSavedVersionFound": "Zu dieser Tabelle wurde keine gespeicherte Version gefunden. Bitte erneut importieren oder den Datensatz verwalten.",
   "loadVersionRepairPrompt": "Bitte erneut importieren oder den Datensatz verwalten.",
   "loadVersionFailed": "Tabelle konnte nicht geladen werden:",

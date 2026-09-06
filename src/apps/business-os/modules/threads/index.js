@@ -58,6 +58,7 @@ export async function mount(ctx) {
   state.requestedThreadId = String(ctx.args?.thread_id || ctx.args?.thread || '').trim();
   state.data = emptyData();
   state.threadsReadiness = null;
+  state.refreshInFlight = null;
   state.status = '';
 
   const messages = await loadModuleMessages(import.meta.url, ctx.locale || 'de', labels);
@@ -408,15 +409,43 @@ function wireUi() {
   state.cleanup.push(() => window.removeEventListener('hashchange', onHash));
 }
 
+// Field finding 2026-09-06 (managed tenant): this module keeps running in the
+// background after it was opened once. A 10 s poll with ~8 demand queries per
+// refresh (two 200-row approval queries among them) queued thousands of
+// wire fetches per hour; business command frames waited behind them and took
+// 15-20 minutes to reach CTOX, so every research start in the Outbound app
+// aborted on its 120 s Sellify pre-flight. Polling therefore only runs while
+// the module is actually visible, never overlaps itself, and backs off.
+const REALTIME_POLL_MS = 30000;
+
+function moduleIsVisible() {
+  if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return false;
+  const host = state.ctx?.host;
+  if (!host || !host.isConnected) return false;
+  // offsetParent is null for display:none subtrees (hidden module windows).
+  return host.offsetParent !== null || host === document.body;
+}
+
 function wireRealtime() {
   // Demand-query writes also emit collection changes. Subscribing a refresh
   // to those same queries creates a fetch -> change -> refresh feedback loop
-  // and continuously replaces clickable approval controls. A short bounded
-  // poll keeps cross-profile updates visible without render churn.
+  // and continuously replaces clickable approval controls. A bounded poll,
+  // gated on visibility, keeps cross-profile updates visible without churn.
   const timer = window.setInterval(() => {
+    if (!moduleIsVisible()) return;
+    if (state.refreshInFlight) return;
     refresh().catch((error) => console.warn('[threads] refresh failed', error));
-  }, 10000);
-  return () => window.clearInterval(timer);
+  }, REALTIME_POLL_MS);
+  const onVisible = () => {
+    if (moduleIsVisible() && !state.refreshInFlight) {
+      refresh().catch((error) => console.warn('[threads] refresh failed', error));
+    }
+  };
+  document.addEventListener('visibilitychange', onVisible);
+  return () => {
+    window.clearInterval(timer);
+    document.removeEventListener('visibilitychange', onVisible);
+  };
 }
 
 // Sync readiness is a render hint only: while the user_threads collection
@@ -440,6 +469,13 @@ function wireReadiness() {
 }
 
 async function refresh(options = {}) {
+  // Single flight: overlapping refreshes multiply the demand queries below.
+  if (state.refreshInFlight) return state.refreshInFlight;
+  state.refreshInFlight = refreshOnce(options).finally(() => { state.refreshInFlight = null; });
+  return state.refreshInFlight;
+}
+
+async function refreshOnce(options = {}) {
   if (options.restartSync) startSync().catch((error) => showError(error));
   const me = currentUserId();
   const [recentThreads, pendingApprovals, recentApprovals, states] = await Promise.all([

@@ -1620,10 +1620,23 @@ pub fn install_antigravity_subscription(
 }
 
 /// Non-secret Business OS projection of all executable subscription pools.
-fn projected_secret_is_ready(root: &Path, secret: &RuntimeSecretRef) -> bool {
-    secret.scope == INSTANCE_CODEX_SECRET_SCOPE
-        && crate::secrets::read_secret_value(root, &secret.scope, &secret.name)
-            .is_ok_and(|value| !value.trim().is_empty())
+fn projected_credential_tuple_is_ready(root: &Path, secrets: &[&RuntimeSecretRef]) -> bool {
+    if secrets.is_empty()
+        || secrets
+            .iter()
+            .any(|secret| secret.scope != INSTANCE_CODEX_SECRET_SCOPE)
+    {
+        return false;
+    }
+    let keys = secrets
+        .iter()
+        .map(|secret| (secret.scope.as_str(), secret.name.as_str()))
+        .collect::<Vec<_>>();
+    // A rotation must not expose a mixture of old and new token readiness.
+    // Reuse the secret store's single-snapshot read instead of reopening it
+    // for each member of the credential tuple.
+    crate::secrets::read_secret_values(root, &keys)
+        .is_ok_and(|values| values.iter().all(|value| !value.trim().is_empty()))
 }
 
 pub fn provider_subscription_status(root: &Path) -> serde_json::Value {
@@ -1634,8 +1647,10 @@ pub fn provider_subscription_status(root: &Path) -> serde_json::Value {
     if let Some(stored) = &stored {
         accounts.extend(stored.runtime.claude_accounts.iter().map(|account| {
             let ready = !account.disabled
-                && projected_secret_is_ready(root, &account.access_token_secret)
-                && projected_secret_is_ready(root, &account.refresh_token_secret);
+                && projected_credential_tuple_is_ready(
+                    root,
+                    &[&account.access_token_secret, &account.refresh_token_secret],
+                );
             serde_json::json!({
                 "id": account.id, "provider": "claude", "enabled": !account.disabled, "ready": ready,
                 "status": if account.disabled { "disabled" } else if ready { "ready" } else { "error" }
@@ -1643,9 +1658,14 @@ pub fn provider_subscription_status(root: &Path) -> serde_json::Value {
         }));
         accounts.extend(stored.runtime.codex_accounts.iter().map(|account| {
             let ready = !account.disabled
-                && projected_secret_is_ready(root, &account.id_token_secret)
-                && projected_secret_is_ready(root, &account.access_token_secret)
-                && projected_secret_is_ready(root, &account.refresh_token_secret);
+                && projected_credential_tuple_is_ready(
+                    root,
+                    &[
+                        &account.id_token_secret,
+                        &account.access_token_secret,
+                        &account.refresh_token_secret,
+                    ],
+                );
             serde_json::json!({
                 "id": account.id, "provider": "codex", "enabled": !account.disabled, "ready": ready,
                 "status": if account.disabled { "disabled" } else if ready { "ready" } else { "error" }
@@ -1653,9 +1673,14 @@ pub fn provider_subscription_status(root: &Path) -> serde_json::Value {
         }));
         accounts.extend(stored.runtime.antigravity_accounts.iter().map(|account| {
             let ready = !account.disabled
-                && projected_secret_is_ready(root, &account.access_token_secret)
-                && projected_secret_is_ready(root, &account.refresh_token_secret)
-                && projected_secret_is_ready(root, &account.state_secret);
+                && projected_credential_tuple_is_ready(
+                    root,
+                    &[
+                        &account.access_token_secret,
+                        &account.refresh_token_secret,
+                        &account.state_secret,
+                    ],
+                );
             serde_json::json!({
                 "id": account.id, "provider": "antigravity", "enabled": !account.disabled, "ready": ready,
                 "status": if account.disabled { "disabled" } else if ready { "ready" } else { "error" }
@@ -4119,8 +4144,57 @@ mod tests {
         assert_eq!(projection["revision"], 1);
         assert_eq!(projection["default_provider"], "claude");
         assert_eq!(projection["accounts"][0]["id"], "claude-test-account");
+        assert_eq!(projection["accounts"][0]["ready"], true);
         let rendered = projection.to_string();
         assert!(!rendered.contains("do-not-leak"));
+    }
+
+    #[test]
+    fn business_os_subscription_projection_requires_a_complete_credential_tuple() {
+        let root = tempfile::tempdir().unwrap();
+        install_claude_subscription(
+            root.path(),
+            "claude-tuple",
+            &credentials("tuple-access-do-not-leak", "tuple-refresh-do-not-leak"),
+        )
+        .unwrap();
+        let stored = load_instance_proxy_config(root.path()).unwrap().unwrap();
+        let account = &stored.runtime.claude_accounts[0];
+        let access = &account.access_token_secret;
+        let refresh = &account.refresh_token_secret;
+        assert!(projected_credential_tuple_is_ready(
+            root.path(),
+            &[access, refresh]
+        ));
+
+        let mut invalid = refresh.clone();
+        invalid.scope = "unrelated-scope".to_string();
+        assert!(!projected_credential_tuple_is_ready(
+            root.path(),
+            &[access, &invalid]
+        ));
+        invalid.scope = refresh.scope.clone();
+        invalid.name.push_str("-missing");
+        assert!(!projected_credential_tuple_is_ready(
+            root.path(),
+            &[access, &invalid]
+        ));
+
+        crate::secrets::write_secret_records(
+            root.path(),
+            &[crate::secrets::SecretRecordWrite {
+                scope: &refresh.scope,
+                name: &refresh.name,
+                value: " ",
+                description: None,
+                metadata: serde_json::json!({}),
+            }],
+        )
+        .unwrap();
+        let projection = provider_subscription_status(root.path());
+        assert_eq!(projection["accounts"][0]["ready"], false);
+        assert_eq!(projection["accounts"][0]["status"], "error");
+        assert!(!projection.to_string().contains("do-not-leak"));
     }
 
     #[test]
