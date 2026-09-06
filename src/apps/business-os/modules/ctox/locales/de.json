@@ -1,4 +1,8 @@
 {
+  "dataState_loading": "Wird geladen…",
+  "dataState_offline": "Nicht verbunden · letzter lokaler Stand",
+  "dataState_error": "Laden fehlgeschlagen",
+  "dataState_idle": "Keine aktive Aufgabe",
   "now": "Jetzt",
   "noActiveWork": "Keine aktive Arbeit",
   "idleDetail": "Wartet auf den nächsten CTOX-Lauf oder ein Live-Ereignis.",

@@ -1,4 +1,8 @@
 {
+  "dataState_loading": "Loading…",
+  "dataState_offline": "Disconnected · last local state",
+  "dataState_error": "Could not load",
+  "dataState_idle": "No active task",
   "now": "Now",
   "noActiveWork": "No active work",
   "idleDetail": "Waiting for the next CTOX run or live event.",

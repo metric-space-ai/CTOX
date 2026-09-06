@@ -55,7 +55,20 @@ export function createBusinessOsOfficeBridge(ctx, kind) {
     },
 
     async prepare({ recordId, versionId } = {}) {
-      return withChunkLease(ctx, config, `${config.module}-prepare`, async () => {
+      return withChunkLease(ctx, config, `${config.module}-prepare`, async (sourceLease) => {
+        // A locally created/imported file is not necessarily on the native
+        // peer yet (especially in a follower tab). Publish its dependencies
+        // before submitting the native conversion command. This is push-only:
+        // opening one file must never await a complete collection download.
+        await flushSourceLease(ctx, sourceLease, config.chunks);
+        for (const name of [config.versions, config.records]) {
+          const lease = await ctx.sync.leaseCollection(name, `${config.module}-prepare-source`);
+          try {
+            await flushSourceLease(ctx, lease, name);
+          } finally {
+            await lease?.release?.().catch(() => null);
+          }
+        }
         const outcome = await dispatch(ctx, config, 'prepare', recordId, {
           [`${kind}_id`]: recordId,
           version_id: versionId,
@@ -428,8 +441,19 @@ function demandFileLoaderFromLease(lease) {
   return bridge?.state?.demandFileLoader || lease?.state?.demandFileLoader || null;
 }
 
-async function flushBridgeSync(value, collectionName) {
-  const bridge = value?.bridge || value || null;
+async function flushSourceLease(ctx, lease, collectionName) {
+  if (!lease?.bridge?.state || lease.bridge.mode === 'follower') {
+    lease.bridge = await ctx.sync.startCollection(collectionName, { pin: false, forceDirect: true });
+  }
+  await flushBridgeSync(lease, collectionName, { pushOnly: true });
+}
+
+async function flushBridgeSync(value, collectionName, { pushOnly = false } = {}) {
+  let bridge = value?.bridge || value || null;
+  if (!bridge?.state && bridge?.ready) {
+    bridge = await withSyncTimeout(() => bridge.ready, 60000,
+      `CTOX product sync bridge timed out: ${collectionName}`);
+  }
   if (bridge?.mode === 'follower' && typeof bridge.flush === 'function') {
     await withSyncTimeout(
       () => bridge.flush(),
@@ -439,11 +463,21 @@ async function flushBridgeSync(value, collectionName) {
     return;
   }
   const state = bridge?.state || value?.state || null;
-  if (!state) return;
+  if (!state) {
+    if (pushOnly) throw new Error(`CTOX product sync push unavailable: ${collectionName}`);
+    return;
+  }
   await withSyncTimeout(
-    () => {
+    async () => {
+      if (pushOnly && typeof state.waitForOpenPeerId === 'function' && typeof state.pushToPeer === 'function') {
+        const peerId = await state.waitForOpenPeerId();
+        // Unlike the background all-peer sweep, this rejects transport errors
+        // instead of merely scheduling a later retry and resolving early.
+        return state.pushToPeer(peerId);
+      }
       if (typeof state.pushToRemotePeers === 'function') return state.pushToRemotePeers();
       if (typeof state.scheduleLocalWritePush === 'function') return state.scheduleLocalWritePush();
+      if (pushOnly) throw new Error(`CTOX product sync push unavailable: ${collectionName}`);
       return state.awaitInSync?.();
     },
     60000,
@@ -454,7 +488,7 @@ async function flushBridgeSync(value, collectionName) {
 async function withSyncTimeout(operation, timeoutMs, message) {
   let timeout = null;
   try {
-    await Promise.race([
+    return await Promise.race([
       Promise.resolve().then(operation),
       new Promise((_, reject) => {
         timeout = setTimeout(() => {
