@@ -762,7 +762,8 @@ und ID. Archivierte Mitglieder werden nicht neu ausgewählt. Ein wiederaufgenomm
 Versuch behält seine ursprüngliche Identität. Die wörtliche Begründung steht im
 Harness-Flow-Ereignis `crew_selected` und in dessen Cockpit-Projektion.
 `crew_assigned_member_id` ist eine einmalige Owner-Zuweisung und wird bei der
-Übernahme geleert; `crew_member_id` beschreibt ausschließlich die tatsächliche
+erfolgreichen Übernahme geleert; ein Crew-Fehler erhält die manuelle Zuweisung.
+`crew_member_id` beschreibt ausschließlich die tatsächliche
 Auswahl. Ein Retry wird erneut bewertet und nutzt seinen eigenen vorherigen
 Attempt nicht als Thread-Kontinuität. Kontinuität anderer Tasks setzt einen
 wirklich zugelassenen/gestarteten oder finalisierten Attempt voraus.
@@ -770,8 +771,12 @@ wirklich zugelassenen/gestarteten oder finalisierten Attempt voraus.
 Crew-Fehler stoppen den Worker nicht: Sind keine lesbaren aktiven Mitglieder
 verfügbar, läuft die Slice ohne Soul-Block und ohne Crew-Attempt weiter. Das
 Warnereignis `crew_selection_unavailable` und `ctox_harness_status.last_error`
-machen die Ursache sichtbar; gleiche Ursachen werden nur einmal je Prozess/Root
-geloggt. Korrupte einzelne Profile werden bei der Auswahl übersprungen.
+machen die Ursache sichtbar; gleiche Ursachen werden höchstens einmal pro Stunde
+je Prozess/Root geloggt. Der Pump stellt die Diagnose nach Neustart aus dem
+dauerhaften Flow-Ledger wieder her. Korrupte einzelne Profile werden bei der
+Auswahl übersprungen. Die Pflichtbelege aus LCM bleiben dagegen fail-closed:
+Ein Fehler beim Lesen wiederaufnehmbarer Attempts läuft weiter durch den
+bestehenden Recoverable-Pfad; diese Änderung behebt keine LCM-Verfügbarkeit.
 
 Die Migration installiert den eindeutigen Auswahlereignis-Index in vorhandenen
 Flow-Ledgern; historische Duplikate behalten die älteste Zeile. Ein noch fehlendes

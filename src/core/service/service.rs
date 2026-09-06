@@ -5077,6 +5077,10 @@ fn assert_no_crew_admission_evidence(conn: &rusqlite::Connection) {
 
 // Called only after all admission/hold/redirect guards, before the turn starts.
 fn prepare_admitted_worker_attempt(root: &Path, job: &QueuedPrompt) -> Result<PreparedCrewAttempt> {
+    // LCM evidence is mandatory: a read failure must not create a fresh attempt
+    // that could repeat already completed effects. It still reaches the existing
+    // recoverable-finalization path. Only optional Crew preparation is fail-open;
+    // this change does not claim to recover an unavailable/corrupt LCM store.
     let recoverable_attempt = lcm::run_recoverable_worker_attempt(
         &crate::paths::core_db(root),
         &worker_attempt_work_key(job),
@@ -33890,6 +33894,142 @@ Business OS command:
 
         assert_eq!(updated, 0);
         assert_eq!(route_status_for(&root, &task.message_key), "leased");
+    }
+
+    #[test]
+    fn crew_unavailable_service_attempt_finishes_without_releasing_for_retry() -> anyhow::Result<()>
+    {
+        let root = temp_root("crew-unavailable-service-lifecycle");
+        let accepted = crate::business_os::store::record_command(
+            &root,
+            crate::business_os::store::BusinessCommand {
+                origin: crate::business_os::store::CommandOrigin::TrustedLocal,
+                id: Some("crew-service-completion".into()),
+                module: "ctox".into(),
+                command_type: "business_os.chat.task".into(),
+                record_id: Some("ctox".into()),
+                payload: serde_json::json!({"title":"Inspect fixture","instruction":"Inspect fixture","prompt":"Inspect fixture"}),
+                client_context: serde_json::json!({"source":"test"}),
+            },
+        )?;
+        let task = channels::load_queue_task(&root, &accepted.task_id.unwrap())?.unwrap();
+        channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)?;
+        channels::transition_business_command_for_task(
+            &root,
+            &task.message_key,
+            "leased",
+            None,
+            None,
+            None,
+            "fixture lease",
+        )?;
+        channels::transition_business_command_for_task(
+            &root,
+            &task.message_key,
+            "running",
+            None,
+            None,
+            None,
+            "fixture start",
+        )?;
+        let conn = rusqlite::Connection::open(crate::paths::core_db(&root))?;
+        conn.execute("UPDATE crew_members SET archived=1", [])?;
+        let job = QueuedPrompt {
+            queue_task_metadata: task.metadata.clone(),
+            prompt: task.prompt.clone(),
+            goal: task.title.clone(),
+            preview: task.title.clone(),
+            source_label: "queue".into(),
+            suggested_skill: None,
+            leased_message_keys: vec![task.message_key.clone()],
+            leased_ticket_event_keys: vec![],
+            thread_key: Some(task.thread_key.clone()),
+            workspace_root: None,
+            ticket_self_work_id: None,
+            outbound_email: None,
+            outbound_anchor: None,
+        };
+        let state = Arc::new(Mutex::new(SharedState::default()));
+        track_leased_keys_locked(
+            &mut lock_shared_state(&state),
+            &job.leased_message_keys,
+            &[],
+        );
+        let mut activity = PromptWorkerActivity::start(&root, &state, &job);
+        // Exercise the admitted service path and its normal durable completion,
+        // with a deterministic leaf result instead of a live model invocation.
+        let prepared = prepare_admitted_worker_attempt(&root, &job)?;
+        assert!(prepared.crew_soul_block.is_none());
+        assert!(prepared.recoverable_attempt.is_none());
+        assert_no_crew_admission_evidence(&conn);
+        let engine = LcmEngine::open(&crate::paths::core_db(&root), LcmConfig::default())?;
+        engine.begin_worker_attempt_finalization(lcm::WorkerAttemptFinalizationInput {
+            attempt_id: &prepared.attempt_id,
+            work_key: &worker_attempt_work_key(&job),
+            conversation_id: 7403,
+            source_label: "queue",
+            agent_outcome: lcm::AgentOutcome::Success,
+            reply_text: "Fixture inspected",
+            error_text: None,
+        })?;
+        channels::persist_business_command_worker_result(
+            &root,
+            &task.message_key,
+            "Fixture inspected",
+        )?;
+        channels::record_business_command_review(
+            &root,
+            &task.message_key,
+            "passed",
+            "passed",
+            &serde_json::json!({"fixture":true}),
+        )?;
+        assert_eq!(
+            apply_business_command_writebacks_for_attempt(
+                &root,
+                &crate::paths::core_db(&root),
+                &prepared.attempt_id,
+                &job.leased_message_keys,
+                || {
+                    Ok(usize::from(
+                        crate::business_os::store::complete_business_command_from_queue_reply(
+                            &root,
+                            &task.message_key,
+                            "Fixture inspected",
+                        )?
+                        .is_some(),
+                    ))
+                }
+            )?,
+            1
+        );
+        assert_eq!(
+            channels::ack_leased_messages_for_attempt(
+                &root,
+                &prepared.attempt_id,
+                &job.leased_message_keys,
+                "handled",
+                None
+            )?,
+            1
+        );
+        activity.release_leased_keys_locked(&mut lock_shared_state(&state));
+        drop(activity);
+        assert_eq!(route_status_for(&root, &task.message_key), "handled");
+        assert!(
+            channels::lease_queue_task(&root, &task.message_key, CHANNEL_ROUTER_LEASE_OWNER)
+                .is_err()
+        );
+        let counters: (i64, i64, Option<String>) = conn.query_row("SELECT attempt,failure_attempt_count,retry_not_before FROM communication_routing_state WHERE message_key=?1", [&task.message_key], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        assert_eq!(counters, (1, 0, None));
+        assert!(engine
+            .worker_attempt(&prepared.attempt_id)?
+            .unwrap()
+            .queue_effects_applied_at
+            .is_some());
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM ctox_harness_flow_events WHERE event_kind='crew_selection_unavailable'", [], |r|r.get::<_,i64>(0))?, 1);
+        assert!(lock_shared_state(&state).pending_prompts.is_empty());
+        Ok(())
     }
 
     #[test]

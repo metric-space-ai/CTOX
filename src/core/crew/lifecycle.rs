@@ -13,6 +13,12 @@ pub(crate) fn ensure_selection_event_index(conn: &Connection) -> Result<()> {
         // any worker starts. Admission installs the index before its first event.
         return Ok(());
     }
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_crew_selection_diagnostic_time
+        ON ctox_harness_flow_events(created_at)
+        WHERE event_kind IN ('crew_selected','crew_selection_unavailable')
+          AND COALESCE(json_extract(metadata_json,'$.repaired'),0)=0;",
+    )?;
     let indexed: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_crew_selection_event_attempt')",
         [], |r| r.get(0),

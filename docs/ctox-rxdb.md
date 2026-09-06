@@ -1030,15 +1030,22 @@ evidence. CI runs the provenance/dependency-audit asserts
 
 `communication_routing_state.crew_assigned_member_id` is the one-shot manual
 assignment; `ctox.crew.assign` writes it and admitted execution consumes it.
+Failed Crew preparation does not consume that assignment.
 `crew_member_id` remains the actual attempt identity. Both optional fields are
 projected, including explicit null when cleared. `ctox_queue_tasks` migrates
-2→3 with the existing no-op browser migration; ctox, reports and threads inherit
-that schema. No other existing collection version changes.
+2→3 with explicit no-op migration entries in ctox and threads; reports re-exports
+the ctox migration map. The module-migrations smoke checks every collection's
+contiguous migration map against its version, including wrapped schemas.
+No other existing collection version changes.
 
 `crew_selection_unavailable` is a new harness-event kind. A failed crew lookup
 never consumes worker retry budget or stops admission. The current diagnostic
-is also exposed through `ctox_harness_status.last_error` and clears after a
-healthy selection. `resting_after_failure` lasts at most 24 hours after the
+is also exposed through `ctox_harness_status.last_error`; the pump restores it
+from durable selection events after restart. Identical causes can emit again
+after one hour, and a healthy selection supersedes the old diagnostic.
+Selection reasons use `assigned:`, `continuity:` or `selected:`; both initial
+and repaired flow events derive `selection_kind` from that same prefix.
+`resting_after_failure` lasts at most 24 hours after the
 latest failed attempt; active work takes precedence.
 
 Crew projection runs are gated by STATUS/QUEUE wakes. Source member timestamps
@@ -1050,6 +1057,10 @@ ordinary admission/status wakes. It removes at most 128 completed attempts and
 128 expired never-started attempts per pass,
 keeping the newest 500 finalized attempts plus nonterminal tasks. A durable
 internal `crew_projection_tombstones` outbox retries orphan-event tombstones.
+Maintenance is best-effort, skips databases without that outbox, logs a failing
+sweep once until recovery, and leaves other projections running. Learning
+tombstone scans use the member/record-ID expression index. Source stamps are
+captured after learning retention so its delete trigger causes no extra replay.
 The migration removes duplicate selection events in bounded delete batches
 before building its unique index, preserving the oldest event. A missing flow
 ledger stays lazy; admission initializes and indexes it before the first crew

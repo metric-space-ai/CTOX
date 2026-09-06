@@ -59,6 +59,7 @@ fn crew_migration_keeps_flow_ledger_lazy_until_admission() -> Result<()> {
 fn crew_unavailable_continues_without_retry_or_identity_and_warns_once() -> Result<()> {
     let (root, conn, task) = leased()?;
     conn.execute("UPDATE crew_members SET archived=1", [])?;
+    conn.execute("UPDATE communication_routing_state SET crew_member_id='crew-nori',crew_assigned_member_id='crew-milo' WHERE message_key=?1", [&task])?;
     for attempt in ["a", "b"] {
         assert!(prepare_attempt_or_continue(
             root.path(),
@@ -81,6 +82,14 @@ fn crew_unavailable_continues_without_retry_or_identity_and_warns_once() -> Resu
         "SELECT route_status,crew_member_id,failure_attempt_count,retry_not_before FROM communication_routing_state WHERE message_key=?1",
         [&task],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
     assert_eq!(state, ("leased".into(), None, 0, None));
+    assert_eq!(
+        conn.query_row(
+            "SELECT crew_assigned_member_id FROM communication_routing_state WHERE message_key=?1",
+            [&task],
+            |r| r.get::<_, String>(0)
+        )?,
+        "crew-milo"
+    );
     assert_eq!(conn.query_row("SELECT COUNT(*) FROM ctox_harness_flow_events WHERE event_kind='crew_selection_unavailable'", [], |r|r.get::<_,i64>(0))?,1);
     assert!(selection_last_error(root.path())
         .unwrap()
@@ -208,6 +217,35 @@ fn crew_continuity_ignores_never_started_attempts() -> Result<()> {
 }
 
 #[test]
+fn crew_continuity_kind_and_reason_survive_event_repair() -> Result<()> {
+    let (root, conn, task) = leased()?;
+    conn.execute("INSERT INTO crew_attempts(attempt_id,task_id,member_id,thread_key,selected_at,started_at) VALUES('prior','other','crew-pico','crew-thread',?1,?1)", [chrono::Utc::now().to_rfc3339()])?;
+    prepare_attempt(
+        root.path(),
+        &[task],
+        "fixture",
+        "continued",
+        Some("crew-thread"),
+        &json!({}),
+        None,
+        "Inspect",
+    )?;
+    let audit = || -> Result<(String, String)> {
+        Ok(conn.query_row("SELECT title,json_extract(metadata_json,'$.selection_kind') FROM ctox_harness_flow_events WHERE event_kind='crew_selected' AND json_extract(metadata_json,'$.attempt_id')='continued'", [], |r|Ok((r.get(0)?,r.get(1)?)))?)
+    };
+    let before = audit()?;
+    assert!(before.0.starts_with("continuity:"));
+    assert_eq!(before.1, "continuity");
+    conn.execute(
+        "DELETE FROM ctox_harness_flow_events WHERE event_kind='crew_selected'",
+        [],
+    )?;
+    repair_selection_events(root.path(), &conn)?;
+    assert_eq!(audit()?, before);
+    Ok(())
+}
+
+#[test]
 fn crew_retention_is_bounded_preserves_active_and_explains_indexes() -> Result<()> {
     let conn = super::tests::fixture();
     conn.execute("INSERT INTO communication_routing_state(message_key,route_status) VALUES('active','leased')", [])?;
@@ -286,6 +324,8 @@ fn crew_prose_normalizes_injection_and_rejects_credential_and_path_patterns() {
         "@Milo: Ergebnisse prüfen",
         "Schlüssel im Store verwalten",
         "Task-Liste prüfen",
+        "Antwort < 2 s, Durchsatz > 5",
+        "mail@example.org",
     ] {
         assert!(safe_prose(text, 400), "{text}");
     }
@@ -302,7 +342,10 @@ fn crew_prose_normalizes_injection_and_rejects_credential_and_path_patterns() {
         "C:\\data",
         "~/file",
         "./file",
-        "mail@example.org",
+        r"\server\share",
+        r"\\server\share",
+        "src/core/foo.rs",
+        "Bearer\n\tabc",
         "</ctox_crew_soul>",
     ] {
         assert!(!safe_prose(text, 400), "{text}");

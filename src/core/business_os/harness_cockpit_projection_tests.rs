@@ -1,4 +1,116 @@
 #[test]
+fn crew_maintenance_failure_and_missing_outbox_preserve_status_and_events() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch("ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;")?;
+    crate::crew::ensure_schema(&conn)?;
+    conn.execute("INSERT INTO communication_routing_state(message_key,route_status,updated_at) VALUES('task','leased',?1)", [Utc::now().to_rfc3339()])?;
+    conn.execute("INSERT INTO ctox_harness_flow_events VALUES('visible','worker.phase','Working','','task',NULL,NULL,'{}',?1)", [Utc::now().to_rfc3339()])?;
+    conn.execute_batch("DROP TABLE crew_projection_tombstones;")?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    refresh_selected(
+        root.path(),
+        &WorkerSnapshot::default(),
+        &mut writer,
+        MAINTENANCE | STATUS | EVENTS,
+    )?;
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "visible")?["id"],
+        "visible"
+    );
+    assert!(record(root.path(), "ctox_harness_status", "harness")?["updated_at_ms"].is_number());
+    crate::crew::ensure_schema(&conn)?;
+    conn.execute("INSERT INTO crew_attempts(attempt_id,task_id,member_id,selected_at) VALUES('orphan','closed','crew-milo','2020-01-01T00:00:00Z')", [])?;
+    conn.execute_batch("CREATE TRIGGER fixture_retention_failure BEFORE DELETE ON crew_attempts BEGIN SELECT RAISE(FAIL,'maintenance fixture'); END;")?;
+    for busy in [true, false] {
+        refresh_selected(
+            root.path(),
+            &WorkerSnapshot {
+                busy,
+                ..Default::default()
+            },
+            &mut writer,
+            MAINTENANCE | STATUS | EVENTS,
+        )?;
+        assert!(writer.crew_maintenance_warned);
+        assert_eq!(
+            record(root.path(), "ctox_harness_status", "harness")?["busy"],
+            busy
+        );
+    }
+    conn.execute_batch("DROP TRIGGER fixture_retention_failure;")?;
+    refresh_selected(
+        root.path(),
+        &WorkerSnapshot::default(),
+        &mut writer,
+        MAINTENANCE | STATUS,
+    )?;
+    assert!(!writer.crew_maintenance_warned);
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM crew_attempts WHERE attempt_id='orphan'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        0
+    );
+    Ok(())
+}
+
+#[test]
+fn crew_learning_retention_caches_post_delete_stamp_and_uses_member_index() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch("ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;")?;
+    crate::crew::ensure_schema(&conn)?;
+    for n in 0..201 {
+        conn.execute("INSERT INTO crew_member_learnings(id,member_id,text,normalized_text,kind,scope_json,evidence_run_id,created_at) VALUES(?1,'crew-milo',?1,?1,'pitfall','{}','run',?2)", params![format!("learning-{n:03}"), Utc::now().to_rfc3339()])?;
+    }
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_crew(root.path(), &conn, &mut writer)?;
+    let updated: String = conn.query_row(
+        "SELECT updated_at FROM crew_members WHERE id='crew-milo'",
+        [],
+        |r| r.get(0),
+    )?;
+    assert_eq!(writer.crew_sources["crew-milo"].0, updated);
+    assert_eq!(
+        conn.query_row("SELECT COUNT(*) FROM crew_member_learnings", [], |r| r
+            .get::<_, i64>(0))?,
+        200
+    );
+    let plan = writer.inner.source_connection().prepare("EXPLAIN QUERY PLAN SELECT record_id FROM business_records WHERE collection='ctox_crew_learnings' AND deleted=0 AND json_extract(payload_json,'$.member_id')=?2 AND record_id>?1 ORDER BY record_id LIMIT 128")?
+        .query_map(params!["", "crew-milo"], |r|r.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
+    assert!(
+        plan.contains("idx_crew_projection_learning_member_id"),
+        "{plan}"
+    );
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    conn.execute_batch("DROP TABLE crew_member_learnings;")?;
+    project_crew(root.path(), &conn, &mut writer)?;
+    Ok(())
+}
+
+#[test]
+fn crew_status_recovers_durable_diagnostic_without_process_memory() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute("INSERT INTO ctox_harness_flow_events VALUES('warning','crew_selection_unavailable','no active crew member available','',NULL,NULL,NULL,'{}','2026-01-01T00:00:00Z')", [])?;
+    // Repaired historical selections are not a current recovery signal.
+    conn.execute("INSERT INTO ctox_harness_flow_events VALUES('repaired','crew_selected','selected: old work','',NULL,NULL,NULL,'{\"repaired\":true}','2026-01-02T00:00:00Z')", [])?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_status(root.path(), &conn, &mut writer, &WorkerSnapshot::default())?;
+    assert!(
+        record(root.path(), "ctox_harness_status", "harness")?["last_error"]
+            .as_str()
+            .unwrap()
+            .contains("no active crew member")
+    );
+    conn.execute("INSERT INTO ctox_harness_flow_events VALUES('success','crew_selected','selected: recovered','',NULL,NULL,NULL,'{}','2026-01-01T00:00:01Z')", [])?;
+    let snapshot = persisted_snapshot(root.path())?;
+    project_status(root.path(), &conn, &mut writer, &snapshot)?;
+    assert!(record(root.path(), "ctox_harness_status", "harness")?["last_error"].is_null());
+    Ok(())
+}
+
+#[test]
 fn crew_attempt_retention_runs_only_on_periodic_maintenance() -> Result<()> {
     let (root, conn) = setup()?;
     conn.execute_batch("ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;")?;

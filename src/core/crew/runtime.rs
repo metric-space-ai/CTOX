@@ -5,10 +5,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 struct SelectionDiagnostics {
-    seen: BTreeSet<String>,
+    seen: BTreeMap<String, Instant>,
     last_error: Option<String>,
 }
 fn diagnostics() -> &'static Mutex<BTreeMap<PathBuf, SelectionDiagnostics>> {
@@ -27,7 +28,15 @@ fn selection_warning(root: &Path, task: Option<&str>, attempt: &str, cause: &str
         let mut all = diagnostics().lock().unwrap_or_else(|e| e.into_inner());
         let entry = all.entry(root.to_path_buf()).or_default();
         entry.last_error = Some(format!("Crew selection unavailable: {cause}"));
-        entry.seen.insert(cause.to_string())
+        let now = Instant::now();
+        let due = entry
+            .seen
+            .get(cause)
+            .is_none_or(|last| now.duration_since(*last) >= Duration::from_secs(3600));
+        if due {
+            entry.seen.insert(cause.to_string(), now);
+        }
+        due
     };
     if first {
         eprintln!("[ctox crew] selection unavailable: {cause}; execution continues without requiring crew identity");
@@ -45,6 +54,44 @@ fn selection_warning(root: &Path, task: Option<&str>, attempt: &str, cause: &str
             },
         );
     }
+}
+
+fn selection_kind(reason: &str) -> &'static str {
+    if reason.starts_with("assigned:") {
+        "assigned"
+    } else if reason.starts_with("continuity:") {
+        "continuity"
+    } else {
+        "selected"
+    }
+}
+
+/// Pump-only restart recovery. The latest successful selection supersedes an
+/// older failure; malformed-member warnings on a usable selection remain visible.
+pub(crate) fn durable_selection_last_error(conn: &Connection) -> Result<Option<String>> {
+    let has_events: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='ctox_harness_flow_events')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !has_events {
+        return Ok(None);
+    }
+    let cause: Option<Option<String>> = conn
+        .query_row(
+            "SELECT CASE WHEN event_kind='crew_selection_unavailable' THEN title
+                ELSE json_extract(metadata_json,'$.selection_error') END
+         FROM ctox_harness_flow_events
+         WHERE event_kind IN ('crew_selected','crew_selection_unavailable')
+           AND COALESCE(json_extract(metadata_json,'$.repaired'),0)=0
+         ORDER BY created_at DESC,rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(cause
+        .flatten()
+        .map(|cause| format!("Crew selection unavailable: {cause}")))
 }
 
 /// Crew is optional context. A broken profile or unavailable crew store must not
@@ -75,7 +122,16 @@ pub(crate) fn prepare_attempt_or_continue(
         skill,
         prompt,
     ) {
-        Ok(block) => block,
+        Ok(block) => {
+            let mut all = diagnostics().lock().unwrap_or_else(|e| e.into_inner());
+            let entry = all.entry(root.to_path_buf()).or_default();
+            // A fresh failure after recovery is a new state transition, even
+            // inside the previous warning's rate-limit window.
+            if entry.last_error.is_none() {
+                entry.seen.clear();
+            }
+            block
+        }
         Err(error) => {
             // Do not audit raw SQL/JSON errors or prompt material.
             let cause = if error.to_string() == "no active crew member available" {
@@ -86,8 +142,11 @@ pub(crate) fn prepare_attempt_or_continue(
             selection_warning(root, task_ids.first().map(String::as_str), attempt, cause);
             if let Ok(conn) = Connection::open(crate::paths::core_db(root)) {
                 for id in task_ids {
-                    let _ = conn.execute("UPDATE communication_routing_state SET crew_member_id=NULL,crew_assigned_member_id=NULL
-                        WHERE message_key=?1 AND route_status='leased' AND lease_owner=?2", params![id,lease_owner]);
+                    let _ = conn.execute(
+                        "UPDATE communication_routing_state SET crew_member_id=NULL
+                        WHERE message_key=?1 AND route_status='leased' AND lease_owner=?2",
+                        params![id, lease_owner],
+                    );
                 }
             }
             None
@@ -207,8 +266,8 @@ pub(crate) fn prepare_attempt(
     let learnings = load_context_learnings(&tx, &member.id, &task)?;
     let block = render_soul_block(member, &learnings);
     tx.commit()?;
-    for warning in warnings {
-        selection_warning(root, Some(task_id), attempt, &warning);
+    for warning in &warnings {
+        selection_warning(root, Some(task_id), attempt, warning);
     }
     if inserted > 0 {
         crate::service::harness_flow::record_harness_flow_event_lossy(
@@ -221,7 +280,7 @@ pub(crate) fn prepare_attempt(
                 work_id: None,
                 ticket_key: None,
                 attempt_index: None,
-                metadata: json!({"attempt_id":attempt,"crew_member_id":selection.member_id,"reason":selection.reason,"selection_kind":if task.manual_member.as_deref()==Some(member.id.as_str()) {"assigned"}else{"selected"},"cockpit_eligible":true}),
+                metadata: json!({"attempt_id":attempt,"crew_member_id":selection.member_id,"reason":selection.reason,"selection_kind":selection_kind(&selection.reason),"selection_error":warnings.first(),"cockpit_eligible":true}),
             },
         );
     }
@@ -257,7 +316,7 @@ pub(crate) fn repair_selection_events(root: &Path, conn: &Connection) -> Result<
                     work_id: None,
                     ticket_key: None,
                     attempt_index: None,
-                    metadata: json!({"attempt_id":attempt,"crew_member_id":member,"reason":reason,"selection_kind":if reason.starts_with("assigned:") {"assigned"}else{"selected"},"cockpit_eligible":true}),
+                    metadata: json!({"attempt_id":attempt,"crew_member_id":member,"reason":reason,"selection_kind":selection_kind(&reason),"repaired":true,"cockpit_eligible":true}),
                 },
             );
         }
@@ -410,6 +469,42 @@ pub(crate) fn append_soul(context: &mut String, block: Option<&str>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn crew_warning_window_expires_and_durable_lookup_uses_index() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        std::fs::create_dir_all(root.path().join("runtime"))?;
+        let conn = rusqlite::Connection::open(crate::paths::core_db(root.path()))?;
+        crate::service::harness_flow::ensure_event_schema(&conn)?;
+        super::ensure_selection_event_index(&conn)?;
+        super::selection_warning(root.path(), None, "a", "crew preparation failed");
+        super::selection_warning(root.path(), None, "b", "crew preparation failed");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM ctox_harness_flow_events WHERE event_kind='crew_selection_unavailable'", [], |r|r.get::<_,i64>(0))?, 1);
+        super::diagnostics()
+            .lock()
+            .unwrap()
+            .get_mut(root.path())
+            .unwrap()
+            .seen
+            .insert(
+                "crew preparation failed".into(),
+                std::time::Instant::now() - std::time::Duration::from_secs(3601),
+            );
+        super::selection_warning(root.path(), None, "c", "crew preparation failed");
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM ctox_harness_flow_events WHERE event_kind='crew_selection_unavailable'", [], |r|r.get::<_,i64>(0))?, 2);
+        super::diagnostics().lock().unwrap().remove(root.path());
+        assert!(super::selection_last_error(root.path()).is_none());
+        assert!(super::durable_selection_last_error(&conn)?
+            .unwrap()
+            .contains("crew preparation failed"));
+        let plan = conn.prepare("EXPLAIN QUERY PLAN SELECT title FROM ctox_harness_flow_events WHERE event_kind IN ('crew_selected','crew_selection_unavailable') AND COALESCE(json_extract(metadata_json,'$.repaired'),0)=0 ORDER BY created_at DESC,rowid DESC LIMIT 1")?.query_map([], |r|r.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?.join("\n");
+        assert!(
+            plan.contains("idx_crew_selection_diagnostic_time"),
+            "{plan}"
+        );
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn lease_identity_and_literal_reason_survive_replay() -> Result<()> {
