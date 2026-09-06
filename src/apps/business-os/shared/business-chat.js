@@ -392,6 +392,14 @@ export function initBusinessChat({
   root.addEventListener('click', handleRootClick, true);
   window.addEventListener('ctox-business-os-chat-submit', handleExternalSubmit);
   window.addEventListener(CHAT_OPEN_EVENT, handleExternalOpen);
+  const handleOpenForCommand = (event) => {
+    const detail = event?.data?.type === 'ctox-business-os-open-chat' ? event.data : (event?.detail || null);
+    if (!detail) return;
+    if (event?.data && event.origin && event.origin !== window.location.origin) return;
+    openChatForCommand(state, db, session, detail).catch(() => {});
+  };
+  window.addEventListener('ctox-business-os-open-chat', handleOpenForCommand);
+  window.addEventListener('message', handleOpenForCommand);
   root.addEventListener('scroll', handleScroll, true);
   window.addEventListener('resize', handleResize);
   root.addEventListener('wheel', handleWheel, { passive: false });
@@ -418,6 +426,8 @@ export function initBusinessChat({
     root.removeEventListener('click', handleRootClick, true);
     window.removeEventListener('ctox-business-os-chat-submit', handleExternalSubmit);
     window.removeEventListener(CHAT_OPEN_EVENT, handleExternalOpen);
+    window.removeEventListener('ctox-business-os-open-chat', handleOpenForCommand);
+    window.removeEventListener('message', handleOpenForCommand);
     root.removeEventListener('scroll', handleScroll, true);
     window.removeEventListener('resize', handleResize);
     root.removeEventListener('wheel', handleWheel, { passive: false });
@@ -3968,6 +3978,28 @@ async function openCtoxTask(taskId, commandId, taskStatus) {
     await app.openModule('ctox');
   }
   window.dispatchEvent(new CustomEvent('ctox-business-os-focus-task', { detail: focus }));
+  // The module runs in its own frame; the DOM event above never reaches it.
+  for (const frame of document.querySelectorAll('iframe')) {
+    try {
+      if (new URL(frame.getAttribute('src') || frame.src || '', window.location.href).origin !== window.location.origin) continue;
+      frame.contentWindow?.postMessage({ type: 'ctox-business-os-focus-task', focus }, window.location.origin);
+    } catch {}
+  }
+}
+
+// Task -> chat (slice 7): the CTOX app asks for the chat that carries a command.
+async function openChatForCommand(state, db, session, detail = {}) {
+  const commandId = String(detail.commandId || detail.command_id || '').trim();
+  const taskId = String(detail.taskId || detail.task_id || '').trim();
+  if (!commandId && !taskId) return;
+  await hydrateChatsFromRxDb({ state, db, session }).catch(() => false);
+  const chat = (state.chats || []).find((candidate) => Array.isArray(candidate.messages) && candidate.messages.some((message) =>
+    (commandId && (message.commandId === commandId || message.command_id === commandId))
+    || (taskId && (message.taskId === taskId || message.task_id === taskId))));
+  if (!chat) return;
+  markChatExpandedByUser(state, chat, claimChatOpenOwnership(state));
+  focusChatForUser(state, chat);
+  touchChats(state, [chat]);
 }
 
 // Date and Temporal Utilities for Calendar-Scoped Chats

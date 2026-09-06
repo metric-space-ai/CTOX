@@ -54,6 +54,10 @@ const labels = {
     taskResumed: 'Folgeauftrag angelegt.',
     taskDeleted: 'Task gelöscht.',
     taskActionFailed: 'Aktion fehlgeschlagen.',
+    loadFailed: "Laden fehlgeschlagen",
+    retryLoad: "Erneut laden",
+    syncDisconnected: "Sync nicht verbunden – Anzeige kann veraltet sein",
+    openInChat: "Im Chat öffnen",
     zoomOut: "Verkleinern",
     zoomIn: "Vergrößern",
     flowControls: "Flussdiagramm-Steuerung",
@@ -309,6 +313,10 @@ const labels = {
     taskResumed: 'Follow-up task queued.',
     taskDeleted: 'Task deleted.',
     taskActionFailed: 'Action failed.',
+    loadFailed: "Loading failed",
+    retryLoad: "Reload",
+    syncDisconnected: "Sync not connected – the view may be stale",
+    openInChat: "Open in chat",
     zoomOut: "Zoom out",
     zoomIn: "Zoom in",
     flowControls: "Flow chart controls",
@@ -756,6 +764,16 @@ async function renderFromLocalCache(state) {
   state.refreshInFlight = true;
   try {
     await hydrateFromLocal(state);
+    state.loadError = '';
+  } catch (error) {
+    if (state.disposed) return;
+    state.loadError = String(error?.message || error || 'unknown');
+    if (state.model) {
+      render(state);
+    } else {
+      renderLoading(state);
+    }
+    throw error;
   } finally {
     state.refreshInFlight = false;
   }
@@ -997,8 +1015,11 @@ function taskTimestampMs(task) {
 }
 
 function harnessFlowProjectionMissing(state) {
-  if (state?.flow?.ok) return false;
-  const error = String(state?.flow?.error || '').toLowerCase();
+  // Health judges the server projection (the blob), not the selected task's
+  // own flow: a finished task without events is not a missing projection.
+  const flow = state?.blobFlow || state?.flow;
+  if (flow?.ok) return false;
+  const error = String(flow?.error || '').toLowerCase();
   if (error.includes('projection')) return true;
   if (error.includes('rxdb')) return true;
   return state?.ctx?.sync?.mode === 'webrtc';
@@ -1676,6 +1697,7 @@ function actionIcon(state, name) {
     open: 'M14 5h5v5M19 5l-8 8M11 5H5v14h14v-6',
     play: 'M8 5.5v13l10-6.5-10-6.5Z',
     pause: 'M8 5v14M16 5v14',
+    chat: 'M4 5h16v10H9l-5 4V5Z',
     trash: 'M5 7h14M10 7V5h4v2M8 7l1 13h6l1-13M10.5 11v5M13.5 11v5',
   };
   return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="${paths[name] || paths.open}"></path></svg>`;
@@ -2105,7 +2127,7 @@ function renderMain(state) {
       ${metricCard(t.elapsed, elapsedSeconds, 'seconds', state.lang, { live })}
     </section>
     ${executionProgressBar(metrics, state)}
-    ${shouldShowCrewHome(state) ? crewHomeMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
+    ${state.loadError ? loadErrorMarkup(state) : shouldShowCrewHome(state) ? crewHomeMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
       <div class="ctox-flow-toolbar" aria-label="${escapeAttr(t.flowControls)}" data-flow-control>
         <button type="button" class="ctox-pane-icon" data-zoom="-" aria-label="${escapeAttr(t.zoomOut)}" title="${escapeAttr(t.zoomOut)}" ${state.zoom <= MIN_ZOOM ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
         <span>${Math.round(state.zoom * 100)}%</span>
@@ -2118,7 +2140,7 @@ function renderMain(state) {
       </div>
     </div>`}
     ${timelinePanel(state, selectedTask, selectedNode, metrics)}
-    <footer class="ctox-harness-footer" data-harness-health-tooltip>${escapeHtml(selectedTask ? taskDisplayTitle(selectedTask, state) : t.flowFooterEmpty)} · ${escapeHtml(flowSource.mode)} · ${escapeHtml(flowSource.status)}${live ? ` · ${escapeHtml(t.live)}` : ''}</footer>
+    <footer class="ctox-harness-footer ${syncIsConnected(state) ? '' : 'is-disconnected'}" data-harness-health-tooltip>${syncIsConnected(state) ? '' : `<span class="ctox-footer-hint">${escapeHtml(t.syncDisconnected)}</span> · `}${escapeHtml(selectedTask ? taskDisplayTitle(selectedTask, state) : t.flowFooterEmpty)} · ${escapeHtml(flowSource.mode)} · ${escapeHtml(flowSource.status)}${live ? ` · ${escapeHtml(t.live)}` : ''}</footer>
   `;
   restoreFlowViewport(state, previousViewport);
   main.querySelector('[data-harness-pause]')?.addEventListener('click', () => {
@@ -2135,6 +2157,10 @@ function renderMain(state) {
     openWebStackDrawer(state);
   });
   wireCrewHome(state, main);
+  main.querySelector('[data-ctox-retry-load]')?.addEventListener('click', () => {
+    state.loadError = '';
+    renderFromLocalCache(state).catch(() => {});
+  });
   main.querySelector('[data-open-selected-task]')?.addEventListener('click', () => {
     if (selectedTask) selectTask(state, selectedTask.id, { drawer: true, center: false });
   });
@@ -2660,7 +2686,8 @@ function flowCrewSvg(model, selectedTask, state) {
     const x = node.x - 82 + column * 42;
     const y = node.y - NODE_HEIGHT / 2 - 52 - row * 40;
     const selected = task.id === selectedTask?.id;
-    const status = taskCrewStatus(task);
+    // Without a live channel nothing on screen is current: the crew sleeps.
+    const status = syncIsConnected(state) || !state?.ctx ? taskCrewStatus(task) : 'idle';
     // Der Knoten, auf dem das ausgewaehlte Wesen steht, ist der Schritt, an dem
     // der Task GERADE arbeitet. Er wird markiert, damit die Karte die Frage
     // "wo steckt er im Loop" ohne Suchen beantwortet.
@@ -3146,6 +3173,7 @@ function taskDrawer(task, state) {
           ${canModifyCtoxApp(state) ? '' : `<small>${escapeHtml(t.chefAdminOnly)}</small>`}
         </div>
         <div class="ctox-pane-actions">
+          ${task.commandId ? `<button type="button" class="ctox-pane-icon" data-ctox-open-chat aria-label="${escapeAttr(t.openInChat)}" title="${escapeAttr(t.openInChat)}">${actionIcon(state, 'chat')}</button>` : ''}
           ${canResumeCtoxTask(task) ? `<button type="button" class="ctox-pane-icon" data-ctox-task-resume aria-label="${escapeAttr(t.resumeTask)}" title="${escapeAttr(t.resumeTask)}" ${state.ctx?.commandBus?.dispatch ? '' : 'disabled'}>${actionIcon(state, 'play')}</button>` : ''}
           <button type="button" class="ctox-pane-icon" data-ctox-task-delete aria-label="${escapeAttr(t.deleteTask)}" title="${escapeAttr(t.deleteTask)}" ${canModifyCtoxApp(state) ? '' : 'disabled'}>${actionIcon(state, 'trash')}</button>
         </div>
@@ -3217,6 +3245,9 @@ function taskDrawer(task, state) {
   });
   body.querySelectorAll('[data-open-crew-member]').forEach((button) => {
     button.addEventListener('click', () => openCrewMemberDrawer(state, button.dataset.openCrewMember));
+  });
+  body.querySelector('[data-ctox-open-chat]')?.addEventListener('click', () => {
+    openTaskInChat(state, task);
   });
   body.querySelectorAll('[data-ctox-task-control]').forEach((button) => {
     button.addEventListener('click', async () => {
@@ -4510,6 +4541,38 @@ async function refreshSelectedTaskLive(state) {
 // timeline slider or the canvas, or an input inside the pane has focus, the
 // rebuild waits; it runs as soon as the interaction ends.
 
+// --- Three honest states (slice 6) ------------------------------------------
+// idle -> crew at home (slice 4); sync not connected -> creatures sleep and the
+// footer says so; load failed -> reason plus a retry button. Never an endless
+// "syncing".
+
+function syncIsConnected(state) {
+  const sync = state?.ctx?.sync;
+  if (!sync) return false;
+  if (sync.mode !== 'webrtc') return false;
+  const diagnostics = sync.diagnostics || null;
+  if (diagnostics && typeof diagnostics === 'object') {
+    if (diagnostics.peerConnected === false) return false;
+    const channel = String(diagnostics.channelState || '').toLowerCase();
+    if (channel && channel !== 'open') return false;
+  }
+  return true;
+}
+
+function loadErrorMarkup(state) {
+  const t = labels[state.lang];
+  return `
+    <div class="ctox-canvas-container ctox-flow-well">
+      <section class="ctox-empty ctox-load-error" role="alert">
+        <div>
+          <strong>${escapeHtml(t.loadFailed)}</strong>
+          <span>${escapeHtml(String(state.loadError || ''))}</span>
+          <button type="button" class="ctox-button is-primary" data-ctox-retry-load>${escapeHtml(t.retryLoad)}</button>
+        </div>
+      </section>
+    </div>`;
+}
+
 function mainIsBusy(state) {
   if (state.mainInteracting) return true;
   const main = state.ctx?.host?.querySelector?.('[data-ctox-main]');
@@ -4617,6 +4680,21 @@ function wireTimelineStepButtons(state, root) {
   });
 }
 
+// Task -> chat: the shell window owns the chat bar. From inside the module
+// frame the request travels up as a message; when the module is mounted
+// inline, the same event is dispatched on the window directly.
+function openTaskInChat(state, task) {
+  const detail = { commandId: task?.commandId || '', taskId: nativeTaskId(task) || task?.id || '', source: 'ctox' };
+  const message = { type: 'ctox-business-os-open-chat', ...detail };
+  try {
+    if (window.parent && window.parent !== window) {
+      window.parent.postMessage(message, window.location.origin);
+      return;
+    }
+  } catch {}
+  window.dispatchEvent(new CustomEvent('ctox-business-os-open-chat', { detail }));
+}
+
 function clearPersistedFocusTask() {
   try {
     sessionStorage.removeItem('ctox.businessOs.focusTask');
@@ -4672,6 +4750,7 @@ function memberStateLine(member, state) {
 }
 
 function memberCreatureHtml(member, state, taskState = memberCreatureState(member)) {
+  if (state?.ctx && !syncIsConnected(state)) taskState = 'idle';
   const task = member?.active_task_id ? taskByNativeId(state, member.active_task_id) : null;
   const liveTask = task ? withLiveActivity(task, state?.selectedLive) : null;
   return crewCreatureHtml({
@@ -5248,6 +5327,9 @@ function wireShellMessages(state) {
   const messageHandler = (event) => {
     if (event.data?.type === 'ctox-business-os-language') applyLanguage(event.data.lang);
     if (event.data?.type === 'ctox-business-os-preferences') applyLanguage(event.data.language);
+    // The chat bar lives in the shell window; the module runs in its own frame.
+    // A deep link therefore arrives as a message, not as a DOM event.
+    if (event.data?.type === 'ctox-business-os-focus-task') focusHandler({ detail: event.data.focus || event.data });
   };
   const preferenceHandler = (event) => {
     applyLanguage(event.detail?.language);
@@ -5453,7 +5535,8 @@ function isLiveMetricSubject(task, state) {
 
 function flowSourceView(state) {
   const t = labels[state.lang];
-  if (state.flow?.ok === false && state.ctx?.sync?.mode === 'webrtc') {
+  const projection = state.blobFlow || state.flow;
+  if (projection?.ok === false && state.ctx?.sync?.mode === 'webrtc') {
     return {
       mode: state.runtimeStatus || displayFlowMode('rxdb-webrtc'),
       status: t.flowProjectionMissing,

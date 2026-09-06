@@ -1749,6 +1749,23 @@
   color: var(--muted);
 }
 
+/* Honest states (slice 6) */
+.ctox-load-error div {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+.ctox-load-error span {
+  max-width: 48ch;
+  color: var(--muted);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.ctox-harness-footer.is-disconnected .ctox-footer-hint {
+  color: var(--warning, #d9a441);
+  font-weight: 640;
+}
+
 /* Task controls (slice 2): sit under the status strip, same rhythm as the edit form. */
 .ctox-task-controls {
   display: flex;

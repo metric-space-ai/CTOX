@@ -189,5 +189,9 @@
   "flowDiagram": "CTOX work flow",
   "laneCommunication": "Owner communication",
   "laneQueue": "Queue and execution",
-  "laneEvidence": "Evidence check"
+  "laneEvidence": "Evidence check",
+  "loadFailed": "Loading failed",
+  "retryLoad": "Reload",
+  "syncDisconnected": "Sync not connected – the view may be stale",
+  "openInChat": "Open in chat"
 }

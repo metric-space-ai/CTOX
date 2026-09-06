@@ -24,7 +24,7 @@ import {
   normalizeCollectionReadinessState,
 } from './sync-contract.js?v=20260903-shell-v2-crew-bar-v338';
 import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260903-shell-v2-crew-bar-v338';
-import { loadRxdbRuntime } from './rxdb-runtime.js?v=20260903-shell-v2-crew-bar-v338';
+import { loadRxdbRuntime } from './rxdb-runtime.js?v=20260906-shell-v2-crew-home-v339';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 
 const CTOX_RXDB_PROTOCOL = 'ctox-rxdb-protocol-v1';
