@@ -9,18 +9,22 @@ Chromium headless shell (Playwright 1.60.0). Neither run reached command timing:
 
 - `ctox-sync-browser-timing-baseline-20260906.service`: raw main-derived shell
   source; failed during boot.
-- `ctox-sync-browser-timing-signed-20260906.service`: independently downloaded,
-  signature-verified and activated `0.1.46-beta.13` in the isolated test root;
-  failed at the same imports.
+- `ctox-sync-browser-timing-signed-20260906.service`: attempted a signed-slot
+  test, but the CLI rejected the incomplete test-root shape and silently used
+  the isolated source checkout instead. The browser server then used its own
+  separate root without that active slot. This run did not test signed-slot
+  delivery. The first candidate browser run repeated this setup mistake.
 
 The native server returned HTTP 500 for `shared/command-bus.js` and
 `shared/sync-contract.js` with the internal v338 revision, reporting
 `active Business OS index.html does not declare a shell generation`.
 The entry document uses `20260906-office-page-exit`, while the native resolver
-recognizes only tokens containing `-shell-v2-`. The signed release reproduces
-the failure, so it is not explained by an incomplete source fixture or a stale
-browser cache. No production activation or production state mutation was used
-for either reproduction.
+recognizes only tokens containing `-shell-v2-`. Both observed failures
+therefore prove the source/recovery-tree boot regression, not a signed-slot
+regression. Read-only inspection confirmed that the source test root was
+activated at 18:15:44 UTC, while production retained its original 15:38:52 UTC
+activation. The corrected runner creates all required root markers and asserts
+the active slot in the exact fixture database before starting the browser.
 
 An isolated candidate now addresses signed shell files by immutable release
 paths and pins the document base to that admitted release. It preserves a
