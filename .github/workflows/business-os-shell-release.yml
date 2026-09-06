@@ -65,6 +65,13 @@ jobs:
       - name: Guard CTOX harness rendering
         run: node src/apps/business-os/modules/ctox/test.js
 
+      - name: Install pinned layout test browser
+        working-directory: src/apps/business-os
+        run: npx playwright install --with-deps chromium
+
+      - name: Guard visible harness layout and loaded document identity
+        run: node src/apps/business-os/modules/ctox/tests/layout.browser.mjs
+
       - name: Run focused shell artifact tests
         run: npm run test:shell-artifact --prefix src/apps/business-os
 

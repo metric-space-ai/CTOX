@@ -18,7 +18,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260906-data-state-v1';
+const CTOX_STYLE_BUILD = '20260906-kit-v2';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -4958,6 +4958,7 @@ export const __ctoxTestHooks = {
   taskColumnMarkup,
   taskListInner,
   renderTaskList,
+  renderMain,
   applyTaskSelection,
   webStackPanel,
   taskPipelineStage,

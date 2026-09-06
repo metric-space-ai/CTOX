@@ -8,8 +8,23 @@ import {
   normalizeShellHealth,
   normalizeShellUpdateStatus,
   normalizeShellVersion,
+  readEmbeddedIdentity,
   shellChannel,
 } from './shell-release-status.js';
+
+test('loaded document identity is independent of a later active release', () => {
+  const metadata = {
+    'meta[name="ctox-shell-version"]': [{ content: '0.1.46-beta.7' }],
+    'meta[name="ctox-shell-source-commit"]': [{ content: 'a'.repeat(40) }],
+  };
+  const documentRoot = { querySelectorAll: (selector) => metadata[selector] || [] };
+  assert.deepEqual(readEmbeddedIdentity(documentRoot), {
+    version: '0.1.46-beta.7', sourceCommit: 'a'.repeat(40), channel: 'beta', state: 'current',
+  });
+  metadata['meta[name="ctox-shell-version"]'].push({ content: '0.1.46-beta.8' });
+  assert.throws(() => readEmbeddedIdentity(documentRoot), /ambiguous/);
+  assert.throws(() => readEmbeddedIdentity({ querySelectorAll: () => [] }), /identity/);
+});
 
 test('shell identity stays short and channel-aware', () => {
   assert.equal(normalizeShellVersion('v1.2.3'), '1.2.3');

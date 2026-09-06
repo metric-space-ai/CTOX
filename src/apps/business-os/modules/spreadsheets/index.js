@@ -931,6 +931,61 @@ function parseCSVContent(text, delimiter = ',') {
   return lines;
 }
 
+async function withSpreadsheetVersionTimeout(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(message), {
+          code: 'spreadsheet_version_read_timeout',
+        })), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isTransientSpreadsheetVersionReadError(error) {
+  if (error?.code === 'spreadsheet_version_read_timeout') return true;
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('webrtc replication cancelled')
+    || message.includes('query_cancelled')
+    || message.includes('replication-cancel')
+    || message.includes('database connection is closing')
+    || (message.includes('idbdatabase') && message.includes('closing'));
+}
+
+async function resolveSpreadsheetVersionLocalFirst(readLocal, recover) {
+  try {
+    const doc = await readLocal(4500);
+    if (doc) return doc;
+  } catch (error) {
+    if (!isTransientSpreadsheetVersionReadError(error)) throw error;
+  }
+  await recover();
+  return readLocal(60000);
+}
+
+async function awaitSpreadsheetVersionReplication(ctx) {
+  if (typeof ctx?.sync?.startCollection !== 'function') return;
+  const message = ctx.t?.('spreadsheetVersionReplicationTimeout') || 'spreadsheet_version_replication_timeout';
+  let bridge = await withTimeout(
+    ctx.sync.startCollection('spreadsheet_versions', { forceDirect: true }),
+    60000,
+    message,
+  );
+  if (bridge?.ready) {
+    const ready = typeof bridge.ready === 'function' ? bridge.ready() : bridge.ready;
+    bridge = (await withTimeout(ready, 60000, message)) || bridge;
+  }
+  const state = bridge?.state || bridge;
+  if (typeof state?.waitForOpenPeerId === 'function') {
+    await withTimeout(state.waitForOpenPeerId(60000), 60000, message);
+  }
+}
+
 async function loadSelectedVersion(state) {
   if (spreadsheetDraftProtected(state)) return null;
   const record = selectedRecord(state);
@@ -953,27 +1008,31 @@ async function loadSelectedVersion(state) {
     && selectedRecord(state)?.current_version_id === versionId
     && !spreadsheetDraftProtected(state);
   try {
-    let doc = record.current_version_id
-      ? await withTimeout(
-        spreadsheetCollection(state.ctx, 'spreadsheet_versions').findOne(record.current_version_id).exec(),
-        4500,
-        `Version ${record.current_version_id} konnte nicht geladen werden.`,
-      )
-      : null;
-    if (!isCurrent()) return null;
-    if (!doc) {
-      const fallback = await withTimeout(
-        spreadsheetCollection(state.ctx, 'spreadsheet_versions').find({
-          selector: { spreadsheet_id: record.id },
-          sort: [{ updated_at_ms: 'desc' }],
-          limit: 1,
-        }).exec(),
-        4500,
-        `Keine Versionen für ${record.id} gefunden.`,
-      );
+    const doc = await resolveSpreadsheetVersionLocalFirst(async (timeoutMs) => {
       if (!isCurrent()) return null;
-      doc = fallback[0] || null;
-    }
+      let doc = record.current_version_id
+        ? await withSpreadsheetVersionTimeout(
+          spreadsheetCollection(state.ctx, 'spreadsheet_versions').findOne(record.current_version_id).exec(),
+          timeoutMs,
+          `Version ${record.current_version_id} konnte nicht geladen werden.`,
+        )
+        : null;
+      if (!isCurrent()) return null;
+      if (!doc) {
+        const fallback = await withSpreadsheetVersionTimeout(
+          spreadsheetCollection(state.ctx, 'spreadsheet_versions').find({
+            selector: { spreadsheet_id: record.id },
+            sort: [{ updated_at_ms: 'desc' }],
+            limit: 1,
+          }).exec(),
+          timeoutMs,
+          `Keine Versionen für ${record.id} gefunden.`,
+        );
+        if (!isCurrent()) return null;
+        doc = fallback[0] || null;
+      }
+      return doc || null;
+    }, () => awaitSpreadsheetVersionReplication(state.ctx));
     if (!isCurrent()) return null;
     if (!doc) {
       if (handle?.recordId !== selection) {
@@ -2311,6 +2370,10 @@ async function withTimeout(promise, ms, message) {
 }
 
 export const __spreadsheetsTestHooks = {
+  withSpreadsheetVersionTimeout,
+  isTransientSpreadsheetVersionReadError,
+  resolveSpreadsheetVersionLocalFirst,
+  awaitSpreadsheetVersionReplication,
   ensureSpreadsheetRuntimeReady,
   openSpreadsheetFile,
   hasActiveListFilters,

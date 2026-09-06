@@ -3628,9 +3628,11 @@ fn inject_launch_context(
 }
 
 fn business_os_static_cache_control(is_index: bool, rel: &str, request_url: &str) -> &'static str {
-    if is_index {
-        // The shell document carries the per-session launch context again, so
-        // it must not be shared between users by any cache.
+    if is_index || rel == "ctox-shell-manifest.json" {
+        // The shell document carries per-session launch context. The manifest
+        // is an active-slot pointer at a stable URL: a cached response can name
+        // a different release after activation. Neither may be shared or served
+        // stale. Immutable artifact files retain their own cache policy below.
         return "no-store";
     }
 
@@ -4593,10 +4595,10 @@ mod tests {
     }
 
     #[test]
-    fn static_index_revalidates_with_a_bodyless_304() {
+    fn static_index_is_never_cached_and_304_writer_is_bodyless() {
         assert_eq!(
             business_os_static_cache_control(true, "index.html", "/"),
-            "no-cache, must-revalidate"
+            "no-store"
         );
         let mut response = Vec::new();
         write_static_not_modified_response(
@@ -4620,6 +4622,21 @@ mod tests {
         assert!(is_compressible("image/svg+xml"));
         assert!(!is_compressible("image/png"));
         assert!(!is_compressible("font/woff2"));
+    }
+
+    #[test]
+    fn active_shell_manifest_is_never_cached_across_activation() {
+        for url in [
+            "/ctox-shell-manifest.json",
+            "/business-os/ctox-shell-manifest.json",
+            "/ctox-shell-manifest.json?v=release-shell-v2-test",
+        ] {
+            assert_eq!(
+                business_os_static_cache_control(false, "ctox-shell-manifest.json", url),
+                "no-store",
+                "active-slot identity must not use a stale response: {url}"
+            );
+        }
     }
 
     #[test]

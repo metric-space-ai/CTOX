@@ -18,6 +18,7 @@ import {
   createTarArchive,
   isExcludedRuntimePath,
   sha256,
+  stampShellDocument,
   validateRelativePath,
   validateSemVer,
   validateSourceCommit,
@@ -33,6 +34,7 @@ async function makeFixture() {
   for (const filename of ROOT_RUNTIME_FILES) {
     await writeFile(join(sourceRoot, filename), `runtime:${filename}\n`);
   }
+  await writeFile(join(sourceRoot, 'index.html'), '<!doctype html><html><head><title>CTOX</title></head><body></body></html>');
   for (const tree of RUNTIME_TREES) {
     await mkdir(join(sourceRoot, tree), { recursive: true });
     await writeFile(join(sourceRoot, tree, 'runtime.txt'), `${tree}\n`);
@@ -122,6 +124,17 @@ function parseTar(gzipBytes) {
 async function cleanup(fixtureRoot) {
   await rm(fixtureRoot, { recursive: true, force: true });
 }
+
+test('document identity rejects ambiguous input and changes with the release', () => {
+  const source = Buffer.from('<!doctype html><html><head></head><body></body></html>');
+  const stamped = stampShellDocument(source, { version: VERSION, sourceCommit: SOURCE_COMMIT });
+  assert.ok(stamped.includes(Buffer.from(`content="${VERSION}"`)));
+  assert.notDeepEqual(stamped, stampShellDocument(source, { version: '1.2.4', sourceCommit: SOURCE_COMMIT }));
+  assert.notDeepEqual(stamped, stampShellDocument(source, { version: VERSION, sourceCommit: 'a'.repeat(40) }));
+  for (const invalid of [Buffer.from('missing head'), Buffer.from('<head></head><head></head>'), stamped]) {
+    assert.throws(() => stampShellDocument(invalid, { version: VERSION, sourceCommit: SOURCE_COMMIT }), /one head/);
+  }
+});
 
 test('identity and archive path validation is strict', () => {
   for (const version of ['1.2.3', '0.0.0-alpha.1+build.7']) assert.equal(validateSemVer(version), version);
@@ -223,6 +236,11 @@ test('deterministic builds have byte-identical archives and complete sorted inve
 
     const embeddedEntry = entries.find((entry) => entry.path === `${root}/ctox-shell-manifest.json`);
     const embedded = JSON.parse(embeddedEntry.data.toString('utf8'));
+    const html = entries.find((entry) => entry.path === `${root}/index.html`).data.toString('utf8');
+    assert.ok(html.includes(`<meta name="ctox-shell-version" content="${embedded.version}">`));
+    assert.ok(html.includes(`<meta name="ctox-shell-source-commit" content="${embedded.sourceCommit}">`));
+    assert.equal(embedded.files.find((file) => file.path === 'index.html').sha256, sha256(Buffer.from(html)));
+    assert.doesNotMatch(await readFile(join(sourceRoot, 'index.html'), 'utf8'), /ctox-shell-version/);
     assert.equal(embedded.schema, SHELL_SCHEMA);
     assert.equal(embedded.version, VERSION);
     assert.equal(embedded.sourceCommit, SOURCE_COMMIT);

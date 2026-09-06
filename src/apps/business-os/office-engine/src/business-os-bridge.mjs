@@ -470,7 +470,7 @@ async function flushBridgeSync(value, collectionName, { pushOnly = false } = {})
   await withSyncTimeout(
     async () => {
       if (pushOnly && typeof state.waitForOpenPeerId === 'function' && typeof state.pushToPeer === 'function') {
-        const peerId = await state.waitForOpenPeerId();
+        const peerId = await state.waitForOpenPeerId(60000);
         // Unlike the background all-peer sweep, this rejects transport errors
         // instead of merely scheduling a later retry and resolving early.
         return state.pushToPeer(peerId);

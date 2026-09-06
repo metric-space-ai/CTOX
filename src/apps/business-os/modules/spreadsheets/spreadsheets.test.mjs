@@ -19,6 +19,73 @@ const { __spreadsheetsTestHooks: hooks } = await import(
   `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
 );
 
+test('spreadsheet version reads return locally without starting replication', async () => {
+  const version = { id: 'local' };
+  assert.equal(await hooks.resolveSpreadsheetVersionLocalFirst(async timeoutMs => {
+    assert.equal(timeoutMs, 4500);
+    return version;
+  }, () => assert.fail('must not wait for sync')), version);
+});
+
+test('spreadsheet metadata deadline recovers once with a bounded network read', async () => {
+  const budgets = [];
+  let recoveries = 0;
+  const version = { id: 'reconnected' };
+  assert.equal(await hooks.resolveSpreadsheetVersionLocalFirst(async timeoutMs => {
+    budgets.push(timeoutMs);
+    if (budgets.length === 1) {
+      return hooks.withSpreadsheetVersionTimeout(new Promise(() => {}), 1, 'deadline');
+    }
+    return version;
+  }, async () => { recoveries += 1; }), version);
+  assert.deepEqual(budgets, [4500, 60000]);
+  assert.equal(recoveries, 1);
+});
+
+test('spreadsheet metadata recovery does not relabel integrity or permission failures', async () => {
+  for (const code of ['permission_denied', 'blob_sha256_mismatch']) {
+    const error = Object.assign(new Error(code), { code });
+    assert.equal(hooks.isTransientSpreadsheetVersionReadError(error), false);
+    await assert.rejects(hooks.resolveSpreadsheetVersionLocalFirst(
+      () => hooks.withSpreadsheetVersionTimeout(Promise.reject(error), 100, 'deadline'),
+      () => assert.fail('must not recover non-transient failure'),
+    ), actual => actual === error);
+  }
+});
+
+test('spreadsheet recovery resolves a pending direct bridge and waits only for its peer', async () => {
+  const events = [];
+  await hooks.awaitSpreadsheetVersionReplication({ sync: {
+    async startCollection(name, options) {
+      assert.equal(name, 'spreadsheet_versions');
+      assert.deepEqual(options, { forceDirect: true });
+      events.push('direct');
+      return { ready: Promise.resolve({ state: {
+        async waitForOpenPeerId(timeoutMs) {
+          assert.equal(timeoutMs, 60000);
+          events.push('native-peer');
+          return 'native';
+        },
+        async awaitInitialReplication() { assert.fail('no full collection download'); },
+        async awaitInSync() { assert.fail('no full collection synchronization'); },
+      } }) };
+    },
+  } });
+  assert.deepEqual(events, ['direct', 'native-peer']);
+});
+
+test('spreadsheet recovery propagates a refused direct channel without another read', async () => {
+  let reads = 0;
+  let starts = 0;
+  const refused = new Error('forbidden');
+  await assert.rejects(hooks.resolveSpreadsheetVersionLocalFirst(async () => { reads += 1; return null; },
+    () => hooks.awaitSpreadsheetVersionReplication({ sync: {
+      async startCollection() { starts += 1; throw refused; },
+    } })), actual => actual === refused);
+  assert.equal(reads, 1);
+  assert.equal(starts, 1);
+});
+
 test('spreadsheet chrome is a two-pane file manager without a right runbook column', async () => {
   const [source, html, manifest] = await Promise.all([
     fs.readFile(new URL('./index.js', import.meta.url), 'utf8'),

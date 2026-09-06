@@ -424,6 +424,20 @@ export function assertNoCustomerReleaseContent(files) {
   }
 }
 
+export function stampShellDocument(data, { version, sourceCommit }) {
+  validateSemVer(version);
+  validateSourceCommit(sourceCommit);
+  const html = data.toString('utf8');
+  const heads = html.match(/<head(?:\s[^>]*)?>/gi) || [];
+  if (heads.length !== 1 || /name\s*=\s*["']ctox-shell-(?:version|source-commit)["']/i.test(html)) {
+    throw new Error('Shell document must have one head and no preexisting release identity');
+  }
+  const identity = `\n<meta name="ctox-shell-version" content="${version}">\n<meta name="ctox-shell-source-commit" content="${sourceCommit}">`;
+  const stamped = Buffer.from(html.replace(/<head(?:\s[^>]*)?>/i, (head) => head + identity));
+  if (stamped.length > MAX_RUNTIME_FILE_BYTES) throw new Error('Stamped shell document exceeds runtime file size limit');
+  return stamped;
+}
+
 export function createEmbeddedManifest({ version, sourceCommit, archiveRoot, files }) {
   validateSemVer(version);
   validateSourceCommit(sourceCommit);
@@ -486,6 +500,11 @@ export async function buildShellArtifact({ sourceRoot, outputDir, version, sourc
   const manifestFilename = `${archiveRoot}.manifest.json`;
   const checksumFilename = `${archiveFilename}.sha256`;
   const payload = await collectRuntimePayload(sourceRoot);
+  // Identity is part of the signed document and its inventory hash. Reading a
+  // mutable manifest URL later cannot identify the document already loaded.
+  payload.files = payload.files.map((file) => file.path === 'index.html'
+    ? { ...file, data: stampShellDocument(file.data, { version, sourceCommit }) }
+    : file);
   assertNoCustomerReleaseContent(payload.files);
   const embeddedManifest = createEmbeddedManifest({ version, sourceCommit, archiveRoot, files: payload.files });
   const embeddedManifestBytes = Buffer.from(`${JSON.stringify(embeddedManifest, null, 2)}\n`);
