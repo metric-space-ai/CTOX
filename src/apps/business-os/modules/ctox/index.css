@@ -17,6 +17,16 @@
 .shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-title { margin-top: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.1; }
 .shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-filterbar { min-height: var(--shell-v2-header-row-size, 37px); height: var(--shell-v2-header-row-size, 37px); box-sizing: border-box; padding: 0; flex-wrap: nowrap; overflow-x: auto; }
 
+/* The shell frame stays dark; light module text needs its matching surface. */
+[data-theme="light"] .shell-window[data-shell-contract="v2"] .ctox-harness-app,
+[data-theme="light"] .shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane {
+  background: var(--surface);
+}
+[data-theme="light"] .shell-window[data-shell-contract="v2"] .ctox-harness-app .ctox-pane-header {
+  background: var(--surface-2);
+  border-bottom-color: var(--line);
+}
+
 .ctox-harness-app {
   /* custom: workflow canvas + SVG state machine tokens (no kit equivalent) */
   --ctox-left-width: 340px;

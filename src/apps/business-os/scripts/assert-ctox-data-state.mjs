@@ -94,8 +94,20 @@ try {
           .waitFor({ state: "visible" });
       const geometry = await page
         .locator("[data-ctox-main]")
-        .evaluate((el) => ({ width: el.clientWidth, height: el.clientHeight }));
+        .evaluate((el) => {
+          const luminance = (value) => {
+            const channels = value.match(/[\d.]+/g).slice(0, 3).map(Number).map(v => {
+              v /= 255;
+              return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4;
+            });
+            return channels[0] * .2126 + channels[1] * .7152 + channels[2] * .0722;
+          };
+          const text = luminance(getComputedStyle(el.querySelector('.ctox-pane-title')).color);
+          const surface = luminance(getComputedStyle(el.querySelector('.ctox-pane-header')).backgroundColor);
+          return { width: el.clientWidth, height: el.clientHeight, titleContrast: (Math.max(text, surface) + .05) / (Math.min(text, surface) + .05) };
+        });
       assert.ok(geometry.width > 300 && geometry.height > 400);
+      assert.ok(geometry.titleContrast >= 4.5, `${theme}: title contrast ${geometry.titleContrast}`);
       await page.screenshot({
         path: path.join(output, `${state}-${theme}.png`),
       });
