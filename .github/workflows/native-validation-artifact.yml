@@ -2,6 +2,11 @@ name: Native validation artifact
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/native-validation-artifact.yml
+      - src/core/business_os/**
+      - src/core/rxdb/**
 
 permissions:
   contents: read
@@ -12,7 +17,6 @@ concurrency:
 
 jobs:
   macos-arm64:
-    if: github.ref == 'refs/heads/main'
     runs-on: macos-latest
     timeout-minutes: 60
     env:
