@@ -30,7 +30,7 @@
     "shell:artifact": "node scripts/build-shell-artifact.mjs",
     "shell:sign-release": "node scripts/sign-shell-release.mjs",
     "shell:sbom": "node scripts/build-shell-sbom.mjs",
-    "test:shell-artifact": "node --test scripts/build-shell-artifact.test.mjs scripts/build-shell-sbom.test.mjs scripts/sign-shell-release.test.mjs",
+    "test:shell-artifact": "node --test scripts/build-shell-artifact.test.mjs scripts/build-shell-sbom.test.mjs scripts/sign-shell-release.test.mjs && node scripts/shell-asset-routing.browser.mjs",
     "test:shared": "node --test shared/*.test.mjs",
     "test:app-store": "node modules/app-store/app-store.test.mjs",
     "test:app-stories": "node scripts/run-app-story-tests.mjs",
