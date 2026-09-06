@@ -251,6 +251,7 @@ fn crew_prose_normalizes_injection_and_rejects_credential_and_path_patterns() {
         "und/oder 24/7 prüfen",
         "@Milo: Ergebnisse prüfen",
         "Schlüssel im Store verwalten",
+        "Task-Liste prüfen",
     ] {
         assert!(safe_prose(text, 400), "{text}");
     }
@@ -263,6 +264,7 @@ fn crew_prose_normalizes_injection_and_rejects_credential_and_path_patterns() {
         "Bearer abc",
         "/Users/owner/file",
         "/home/user/file",
+        "/etc/config",
         "C:\\data",
         "~/file",
         "./file",
