@@ -995,29 +995,29 @@ async function loadSelectedVersion(state) {
     ? state.requestedVersionId
     : '';
   const targetVersionId = requestedVersionId || record.current_version_id;
-  const readLocalVersion = async () => {
+  const readLocalVersion = async (timeoutMs = 4500) => {
     let localDoc = targetVersionId
-      ? await withTimeout(
+      ? await withDocumentVersionTimeout(
         documentCollection(state.ctx, 'document_versions').findOne(targetVersionId).exec(),
-        4500,
+        timeoutMs,
         `Version ${targetVersionId} konnte nicht geladen werden.`,
       )
       : null;
     if (localDoc) return localDoc;
-    const fallback = await withTimeout(
+    const fallback = await withDocumentVersionTimeout(
       documentCollection(state.ctx, 'document_versions').find({
         selector: { document_id: record.id },
         sort: [{ updated_at_ms: 'desc' }],
         limit: 1,
       }).exec(),
-      4500,
+      timeoutMs,
       `Keine Versionen für ${record.id} gefunden.`,
     );
     return fallback[0] || null;
   };
   const doc = await resolveLocalFirst(
     readLocalVersion,
-    () => awaitDocumentVersionReplication(replication),
+    () => awaitDocumentVersionReplication(replication, state.ctx),
   );
   if (!canApply()) return null;
   if (doc && !requestedVersionId && doc.toJSON().id !== targetVersionId) {
@@ -1039,37 +1039,60 @@ async function startDocumentVersionReplication(ctx) {
   return ctx.sync.startCollection('document_versions');
 }
 
-async function awaitDocumentVersionReplication(bridge) {
-  const replication = bridge?.state || bridge || null;
-  if (!replication) return;
-  if (typeof replication.awaitInitialReplication === 'function') {
-    await withTimeout(
-      replication.awaitInitialReplication(),
-      120000,
+async function awaitDocumentVersionReplication(bridge, ctx) {
+  if (typeof ctx?.sync?.startCollection === 'function') {
+    bridge = await withTimeout(
+      ctx.sync.startCollection('document_versions', { forceDirect: true }),
+      60000,
       'Dokumentversionen konnten nicht rechtzeitig synchronisiert werden.',
-    );
+    ) || bridge;
   }
-  if (typeof replication.awaitInSync === 'function') {
+  if (bridge?.ready) {
+    bridge = await withTimeout(
+      typeof bridge.ready === 'function' ? bridge.ready() : bridge.ready,
+      60000,
+      'Dokumentversionen konnten nicht rechtzeitig synchronisiert werden.',
+    ) || bridge;
+  }
+  const replication = bridge?.state || bridge;
+  if (typeof replication?.waitForOpenPeerId === 'function') {
     await withTimeout(
-      replication.awaitInSync(),
-      120000,
+      replication.waitForOpenPeerId(60000),
+      60000,
       'Dokumentversionen konnten nicht vollständig synchronisiert werden.',
     );
   }
 }
 
+async function withDocumentVersionTimeout(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(message), {
+          code: 'document_version_read_timeout',
+        })), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function resolveLocalFirst(readLocal, awaitReplication) {
   try {
-    const localValue = await readLocal();
+    const localValue = await readLocal(4500);
     if (localValue) return localValue;
   } catch (error) {
     if (!isTransientDocumentReadError(error)) throw error;
   }
   await awaitReplication();
-  return readLocal();
+  return readLocal(60000);
 }
 
 function isTransientDocumentReadError(error) {
+  if (error?.code === 'document_version_read_timeout') return true;
   const message = String(error?.message || error || '').toLowerCase();
   return message.includes('webrtc replication cancelled')
     || message.includes('query_cancelled')
@@ -4571,6 +4594,8 @@ function ensureSuperDocStyles() {
 }
 
 export const __documentsTestHooks = {
+  withDocumentVersionTimeout,
+  awaitDocumentVersionReplication,
   documentKnowledgeLink,
   documentBySourceSha,
   isDocumentKnowledgeStale,

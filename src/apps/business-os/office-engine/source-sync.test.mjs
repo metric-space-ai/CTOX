@@ -22,7 +22,7 @@ for (const kind of ['document', 'spreadsheet']) {
         async startCollection(name, options) {
           assert.deepEqual(options, { pin: false, forceDirect: true });
           return { state: {
-            async waitForOpenPeerId() { return 'native'; },
+            async waitForOpenPeerId(timeoutMs) { assert.equal(timeoutMs, 60000); return 'native'; },
             async pushToPeer(peer) {
               assert.equal(peer, 'native');
               if (name === names[0]) { started(); await held; }

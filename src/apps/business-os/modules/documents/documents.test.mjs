@@ -193,6 +193,66 @@ test('missing or transient local document versions wait for replication once', a
   assert.deepEqual(events, ['local-1', 'sync', 'local-2']);
 });
 
+test('document metadata deadlines recover once with a bounded network read', async () => {
+  const budgets = [];
+  let recoveries = 0;
+  const version = { id: 'reconnected_version' };
+  const result = await hooks.resolveLocalFirst(async (timeoutMs) => {
+    budgets.push(timeoutMs);
+    if (budgets.length === 1) {
+      return hooks.withDocumentVersionTimeout(new Promise(() => {}), 1, 'metadata deadline');
+    }
+    return version;
+  }, async () => { recoveries += 1; });
+  assert.equal(result, version);
+  assert.deepEqual(budgets, [4500, 60000]);
+  assert.equal(recoveries, 1);
+});
+
+test('document metadata timeout does not relabel permission or integrity errors', async () => {
+  const error = Object.assign(new Error('permission denied'), { code: 'permission_denied' });
+  let recoveries = 0;
+  await assert.rejects(hooks.resolveLocalFirst(
+    () => hooks.withDocumentVersionTimeout(Promise.reject(error), 100, 'deadline'),
+    async () => { recoveries += 1; },
+  ), actual => actual === error);
+  assert.equal(recoveries, 0);
+});
+
+test('document recovery upgrades a follower and waits for its native peer, not full replication', async () => {
+  const events = [];
+  const direct = { state: {
+    async waitForOpenPeerId(timeoutMs) {
+      assert.equal(timeoutMs, 60000);
+      events.push('native-peer');
+      return 'native';
+    },
+    async awaitInitialReplication() { assert.fail('no full collection download'); },
+    async awaitInSync() { assert.fail('no full collection synchronization'); },
+  } };
+  await hooks.awaitDocumentVersionReplication({ mode: 'follower' }, { sync: {
+    async startCollection(name, options) {
+      assert.equal(name, 'document_versions');
+      assert.deepEqual(options, { forceDirect: true });
+      events.push('direct');
+      return { ready: Promise.resolve(direct) };
+    },
+  } });
+  assert.deepEqual(events, ['direct', 'native-peer']);
+});
+
+test('document recovery propagates a refused channel without another metadata read', async () => {
+  let reads = 0;
+  let starts = 0;
+  const refused = Object.assign(new Error('forbidden'), { code: 'permission_denied' });
+  await assert.rejects(hooks.resolveLocalFirst(async () => { reads += 1; return null; },
+    () => hooks.awaitDocumentVersionReplication(null, { sync: {
+      async startCollection() { starts += 1; throw refused; },
+    } })), actual => actual === refused);
+  assert.equal(reads, 1);
+  assert.equal(starts, 1);
+});
+
 test('non-retryable Office load failures fail closed without reinitialization', async () => {
   let initializeCalls = 0;
   let retryCalls = 0;
