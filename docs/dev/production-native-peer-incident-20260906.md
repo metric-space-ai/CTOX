@@ -1,5 +1,38 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Fresh-browser shell boot regression
+
+The unchanged canonical browser/native command fixture was run twice against
+the running release's exact native executable `branch-main-20260906T120734Z/bin/ctox-real`,
+with isolated roots, synthetic stores, loopback signaling and a fresh pinned
+Chromium headless shell (Playwright 1.60.0). Neither run reached command timing:
+
+- `ctox-sync-browser-timing-baseline-20260906.service`: raw main-derived shell
+  source; failed during boot.
+- `ctox-sync-browser-timing-signed-20260906.service`: independently downloaded,
+  signature-verified and activated `0.1.46-beta.13` in the isolated test root;
+  failed at the same imports.
+
+The native server returned HTTP 500 for `shared/command-bus.js` and
+`shared/sync-contract.js` with the internal v338 revision, reporting
+`active Business OS index.html does not declare a shell generation`.
+The entry document uses `20260906-office-page-exit`, while the native resolver
+recognizes only tokens containing `-shell-v2-`. The signed release reproduces
+the failure, so it is not explained by an incomplete source fixture or a stale
+browser cache. No production activation or production state mutation was used
+for either reproduction.
+
+An isolated candidate now addresses signed shell files by immutable release
+paths and pins the document base to that admitted release. It preserves a
+separate path for runtime-installed apps. This candidate is **not deployed or
+accepted**. Its first full `cargo check --tests` was killed at the explicit
+3 GiB memory limit; that is not a passing compiler result. A previous check
+started before the source transfer completed and was stopped; it is also not
+candidate evidence. The subsequent run verified all nine source hashes first.
+The existing static Shell V2 guard passed for 37 apps; the real-browser geometry
+lab passed CTOX, Documents and Spreadsheets at 1180 and 720 pixels (six cases).
+Those layout checks do not prove bootstrap, persistence or performance.
+
 ## Combined candidate regression and native latency diagnosis
 
 The safety candidate in
