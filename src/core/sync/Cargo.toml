@@ -5,11 +5,15 @@ edition = "2021"
 publish = false
 description = "CTOX Sync execution authority, portable checkpoints and local IPC contracts"
 
+[[example]]
+name = "host_cli_acceptance"
+required-features = ["webrtc"]
 [features]
-webrtc = ["dep:rxdb", "dep:futures-util"]
+webrtc = ["dep:rxdb", "dep:futures-util", "dep:url"]
 
 [dependencies]
 futures-util = { version = "0.3", optional = true }
+url = { version = "2.5", optional = true }
 rxdb = { package = "ctox-rxdb", path = "../rxdb", optional = true }
 openraft = { version = "=0.9.25", features = ["serde", "storage-v2"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "net", "process"] }

@@ -84,10 +84,56 @@ keine Business-OS-Session und darf keine Business-OS-Zugangsdaten übernehmen.
 Worker erhalten keinen Raft-Speicherpfad. Eine gespeicherte Worker-Konfiguration
 ist ausdrücklich kein bestätigter Mitgliedschaftsbeleg.
 
-Das Format ist native interne Persistenz, kein neuer Wire-Vertrag. Der konkrete
-CTOX-Service-Aufruf, die lokale Secret-Store-Anbindung und produktive
-Signaling-Zulassung sind noch nicht implementiert. Die Oberfläche darf daher aus
-einer gespeicherten Konfiguration noch keinen betriebsbereiten Worker ableiten.
+Die Host-Setup-Typen stammen jetzt ebenfalls aus der kanonischen Fixture:
+`SyncHostConfiguration`, `SyncHostMember`, `SyncHostTiming`, `ExecutionPeer`,
+`SyncHostTransport` und `SyncHostIceServer`. Rust-Definitionen, TypeScript und
+Effect-Schemas werden gemeinsam generiert. Die bisherigen handgeschriebenen
+Rust-Strukturen sind durch diese Typen ersetzt. Die Formprüfung ersetzt nicht
+die native Prüfung der unterschiedlichen Pins und zulässigen Mitgliedschaft.
+
+## Konkreter CTOX-Host-Anschluss
+
+Der CTOX-Service ruft vor seinen Business-OS-Workern `start_if_configured` auf.
+Ein konfigurierter Host muss erfolgreich starten; ein Fehler bricht den
+Service-Start ab. Ohne Konfiguration bleibt dieser Anschluss inaktiv. Dieselbe
+native Laufzeit ist als `ctox sync run --root <installation>` eigenständig
+prüfbar. Sie startet keine Business-Worker und öffnet keine Business-Collections.
+Der volle CTOX-Service-Ablauf ist damit noch nicht abgenommen.
+
+Lokale administrative CLI-Schritte:
+
+1. `ctox sync init --root <installation>` erzeugt eine stabile lokale Identität;
+   ein erneuter Aufruf behält sie. `identity` gibt ausschließlich den Public-Key
+   aus. `import-key <public-identity>` übernimmt Base64-PKCS#8 über stdin und
+   prüft den erwarteten Schlüssel; eine andere bestehende Identität wird nicht
+   ersetzt. Insbesondere bleiben Workjet-Schlüssel im PKCS#8-v1-Format erhalten.
+2. `configure` liest die öffentliche `SyncHostConfiguration` als JSON über stdin
+   und speichert sie in `runtime/ctox-runtime.sqlite3`.
+3. `transport` liest `SyncHostTransport` über stdin und speichert es verschlüsselt
+   unter dem Secret-Scope `ctox-sync-host`. `signalingUrls` und `iceServers`
+   sind explizit anzugeben. ICE-Einträge enthalten `urls`, `username` und
+   `credential`, bei Bedarf leere Strings. Leere ICE-Konfiguration wählt keine
+   öffentlichen STUN-Defaults; Signaling kann sein authentifiziertes ICE-Bootstrap
+   liefern. Neue URLs werden beim nächsten Reconnect gelesen, ICE beim Neustart.
+4. `run` hält Session und privaten lokalen IPC-Listener bis SIGINT/SIGTERM.
+   `status` prüft den veröffentlichten Listener mit dem generierten `hello`-
+   Vertrag gegen Node, Scope und Protokoll. Ein aktiver Listener bedeutet keine
+   bestätigte Mitgliedschaft, erreichbare Mehrheit oder ausführbaren Harness.
+
+Der Host hält vor dem Öffnen seiner Stores einen exklusiven Prozess-Lock.
+Ein zweiter Host für denselben Installationsroot wird abgelehnt. Der private
+Socketpfad wird getrennt vom dauerhaften Datenpfad erzeugt; der veröffentlichte
+Deskriptor wird bei Shutdown entzogen und niemals aus einem Invite übernommen.
+Bei unerwartetem Ende der nativen Laufzeit verschwindet der Listener. Es gibt
+keine zusätzliche Retry-/Supervisor-Schleife neben dem bestehenden Sync-Lifecycle.
+
+Der Transport verlangt die passende native Rolle und TLS, ausgenommen lokales
+Loopback-Signaling. Bekannte Business-OS-Grant-Felder werden abgewiesen; der Host
+liest keine Business-OS-Zugangsdaten als Ersatz. Die produktive Signaling-
+Zulassung dieses Ausführungsnetzes ist weiterhin offen. Der aktuelle öffentliche
+Business-OS-Signaling-Vertrag reicht dafür nicht aus. Die CLI ist deshalb noch
+kein abgeschlossener öffentlicher SSH-/QR-Aufnahmeablauf. Windows-Hosting bleibt
+ausdrücklich nicht unterstützt.
 
 ## Operationen und genaue Bedeutung
 

@@ -7,6 +7,49 @@ noch aktiv. Ihre Entfernung gehört ausdrücklich zur Abnahme.
 
 ## Aktueller Abnahmestand
 
+### Gemeinsamer nativer CLI-/Service-Host
+
+`src/core/sync_host/` verbindet den vorhandenen CTOX-Service und die neue lokale
+`ctox sync`-CLI mit derselben `host_runtime`-Funktion. Der Adapter lädt die
+unveränderlichen Host-Pins aus der vorhandenen Runtime-SQLite-Datenbank und
+Schlüssel sowie gesonderte Transportkonfiguration aus dem verschlüsselten
+Secret-Store. Ein gemeinsamer Prozess-Lock schützt die Stores bereits vor ihrem
+Öffnen. Der Host startet den bestehenden nativen Sync-Lifecycle mit einem
+eigenen leeren Kontroll-DB-Handle; Business-Collections werden auch dann
+abgewiesen, wenn ihre Replikationsliste leer ist. Der tatsächliche IPC-Endpunkt
+wird veröffentlicht, aktiv auf Identität/Protokoll geprüft und beim Ende der
+Laufzeit entzogen. Der lokale Status behauptet ausschließlich Listener-Liveness.
+
+Die öffentlich eingelesenen Host-Setup-Typen sind nun Teil der bestehenden
+kanonischen Fixture mit generierten Rust-, TypeScript- und Effect-Definitionen.
+Die bisherigen handgeschriebenen Rust-Typen entfallen. IPC-Version 1 und native
+Kontrollversion 5 bleiben unverändert. Die Transportkonfiguration verlangt
+explizite ICE-Einstellungen und eigene Signaling-Zugangsdaten; sie verwendet
+keine Business-OS-Grant-Felder als Ersatz. Eine Suche nach einem alten Secret-Key
+legt auf einer frischen Installation keine Business-Datenbank mehr an. Bereits
+vorhandene Legacy-Key-Daten bleiben im bestehenden Migrationspfad.
+
+Der erste CLI-Abnahmeversuch endete mit einer unlokalisierten Deadline
+(`host-runtime-cli.json`). Der ergänzte Kontext lokalisierte den Abbruch beim
+ersten `sync init` (`host-runtime-cli-diagnostic-fixed.json`). Ein separater
+Prozess-Sample zeigte ausschließlich `_dyld_start`, also noch keinen CTOX-Code;
+dieser Probeprozess beendete `init` anschließend erfolgreich nach 11,42 Sekunden.
+Das erklärt einen beobachteten Startverzug, beweist aber nicht rückwirkend die
+Ursache jedes Timeouts. Die CLI-Prüfung behält ihre 20-Sekunden-Startgrenze.
+
+Die gemeinsame Signaling-Fixture ist aus den bestehenden WebRTC-Tests
+extrahiert; derselbe lokale Server wird für die separate Vier-Prozess-Abnahme
+verwendet. Diese ruft das tatsächlich gebaute CTOX-Programm auf und prüft
+Legacy-Key-Migration, importierten Workjet-Key, exklusiven Host-Besitz, aktuellen
+Listener, Aufnahme, Reconnect, Worker-Neustart und Widerruf. Sie führt keinen
+Coding-Harness aus. Aktuelle Endergebnisse werden nach Abschluss dieses Laufs
+hier ergänzt; bisherige grüne Kernprüfungen ersetzen diese Abnahme nicht.
+
+Offen bleiben produktive Signaling-Grants, vollständige CTOX-Service-Abnahme,
+Windows-Listener, Workjets produktive SSH-/QR-Aufnahme und echte Harness-Ausführung.
+Details und administrative CLI-Schritte stehen im
+[Host-Vertrag](ctox-sync-worker-host-contract.md).
+
 ### Dauerhafte native Host-Pins
 
 `host_config.rs` definiert die lokale native Konfiguration und speichert sie in
@@ -55,8 +98,9 @@ Diff-Prüfung bestehen ebenfalls. Browser-/Wire-Suite und CTOX-Gesamtcheck wurde
 für diese ausschließlich native Konfigurationsänderung nicht erneut ausgeführt;
 ihre unten genannten Ergebnisse gehören zum vorherigen Quellstand.
 
-Das ist noch kein produktiver Host-Anschluss: Service-Aufruf, Secret-Store-
-Anbindung, Signaling-Zulassung und sichtbare SSH-/QR-Aufnahme bleiben offen.
+Dieser vorherige Abnahmestand umfasste noch keinen produktiven Host-Anschluss.
+Der nachfolgende CLI-/Service-Adapter ist oben beschrieben; Signaling-Zulassung
+und sichtbare SSH-/QR-Aufnahme bleiben offen.
 Es wird keine zertifizierte Harness-Wiederherstellung oder Migration behauptet.
 
 ### Wiedererkennung von Votern nach Adresswechsel

@@ -43,9 +43,20 @@ deployable replacement daemon. Business records still replicate through RxDB.
   database path must not become a Unix socket path. The existing listener owns
   path-length, ownership, permissions and process-lock validation.
   A worker record is local configuration, never a quorum admission receipt.
-  This is a native internal persistence schema, not a second Rust/TypeScript wire
-  contract. Product service startup, secret-store access and signaling grants
-  remain to be connected.
+  Host setup types now come from the same generated Rust/TypeScript contract
+  as IPC. Native validation additionally enforces distinct pins and membership
+  constraints; schema decoding alone never proves admission.
+- `host_runtime.rs`: one foreground lifecycle for the CTOX service and `ctox sync
+  run`. It validates the configured control-only database, starts the existing
+  native session/attachment, publishes the actual listener, supervises it and
+  shuts down the session before its caller closes storage.
+- `../sync_host/`: the CTOX CLI/service adapter. Signing keys and explicit
+  transport settings use the encrypted CTOX secret store; public pins use the
+  runtime SQLite store. A common process lease precedes opening Raft or RxDB.
+  `sync status` actively verifies the local listener's identity and protocol;
+  it does not report membership or execution readiness. Production signaling
+  grants and Workjet SSH/QR integration remain open. See the
+  [host setup contract](../../../docs/dev/ctox-sync-worker-host-contract.md).
 - `authority/node.rs`: pinned OpenRaft 0.9.25 adapter. Three configured peers
   confirm job ownership and generation. `local_job` is a projection;
   `validate_ownership` requires a linearizable quorum read.
@@ -196,6 +207,7 @@ check free capacity before starting a build:
 
 ```sh
 node src/core/sync/tools/generate-contracts.mjs --check --workjet-root ../workjet
+node src/core/sync/tools/assert-host-contracts.mjs ../workjet
 TMPDIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/tmp CARGO_TARGET_DIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/cargo-target cargo test --manifest-path src/core/sync/Cargo.toml --features webrtc -j 1
 TMPDIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/tmp CARGO_TARGET_DIR=/Volumes/tmp/dev-artifacts/ctox/sync-core-offensive/cargo-target cargo clippy --manifest-path src/core/sync/Cargo.toml --features webrtc --all-targets -- -D warnings
 ```
@@ -215,8 +227,12 @@ a worker as a production instance fails. They retain the signed-key checks and
 denial of business-record access. The group still requires exactly three voting
 peers, and host admission is a fixture. Additional enrolled workers use the
 confirmed worker directory separately from that three-voter configuration.
+The `host_cli_acceptance` example accepts an actual CTOX binary and a private
+fixture work directory. It runs separate processes with generated keys and
+local signaling; it never executes a coding harness or uses production state.
+
 This is not certification of WAN,
 harness export/import, credentials, a mobile host or the production signaling
-admission path. Provisioning, production host lifecycle integration, continuous process supervision,
+admission path. Provisioning, full production-service acceptance, continuous process supervision,
 gateway/tool fencing, real Codex/Claude resume and coordinated migrations remain
 required before replacing active Workjet execution and mailbox paths.
