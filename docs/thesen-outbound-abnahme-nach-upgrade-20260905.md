@@ -191,3 +191,19 @@ Nachweis steht aus, bis der Eigentümer neu lädt.
 
 Upgrade 5 gestartet 06:46 UTC (main `f3a2aa7fd`: Plan-Normalisierung, Wiederholungsklasse, Writeback-Fehlerdetail).
 Danach: App 1.0.104 ausliefern, offene Leads in kleinen Gruppen nachstarten, Feldtabelle messen.
+
+## 07.09., 07:16–08:35 UTC: Upgrade 5 (Harness-Fixes), Sync-Ursache gefunden, Upgrade 6 gestartet
+
+| Ereignis | Befund |
+|---|---|
+| Upgrade 5, 1. Anlauf 06:46 | Installer scheiterte: `src/core/coding_agents/pi-sidecar/dist` war als Dev-Symlink eingecheckt (`7f1209e37`, Crew-Cockpit-Merge) → esbuild „dist: file exists". Entfernt mit `6d933a8f1`. |
+| Upgrade 5, 2. Anlauf 07:03 → 07:16 | Release `branch-main-20260907T064620Z`. Wartungsfreigabe **ohne Browser-Ack** um 07:26:20 („Freigabe ohne Browser-Bestätigung") — der Grace-Pfad aus `c69119697` hat gegriffen, weil alle Kollektionen im Browser auf `pending`/`stalled-waiting-for-peer` standen. |
+| Nach dem Neustart | Worker-Starts scheitern reihenweise mit `thread/start failed: … ctox-business-os: timed out handshaking with MCP server` (Aeroxon, Cereda ×2, BOOMEX ×2, Dr. Kurt Richter); Threads: tokio-runtime 83 %, cockpit-projections 72 %; `[ctox direct-session] lagged: dropped 472 events`. Kapazität 4 → 2 gesenkt (08:00). |
+| Wiederholungsklasse | `80561cbc9` wirkt (failure_class `technical` für „plan is incomplete"), aber drei Handshake-Timeouts erschöpfen das Budget → terminal `failed`. |
+| Writebacks nach Neustart | BOOMEX 32× `no_match`, Cereda 31× `no_match` + 1 `action_required`, jeweils **0 Quellen, 0 Belege** — vom Daemon angenommen; Cereda verlor damit seine 4 zuvor verifizierten Felder. Wiederholungsversuch ohne Kontext nach dem Neustart. |
+| Skill-Einhaltung (Richter, Calvatis) | Zwei-Quellen-Regel bei verifizierten Feldern eingehalten (16/17, 9/9), Belege mit URL+Zitat, Konflikte gemeldet, Login-Quellen als `action_required`. Verstöße: Calvatis ohne Personendatensatz trotz Geschäftsführer im Impressum; Richter 23 statt 32 Felder, `person_titel` mit einer Quelle; keine `person_email_validation`. |
+| Kampagnen-Knopf | 1.0.104 live: „Alle recherchieren" wählt die Variante je Lead automatisch. ANGUS und Beiersdorf (Sellify-Kampagnen-Import) und Carbosulf brauchen Nachrecherche. |
+| Sync-Ursache (Codex-Thread 01a06de4, 07:28–08:22) | Im Rework `f972b3ed6` (06.09.) konnte eine kleine priorisierte Antwort in der nativen WebRTC-Sendewarteschlange den laufenden Großtransfer einer anderen Kollektion abbrechen („WebRTC send queue result dropped"). Fix `1a58665ca` / PR #65 (`67e1671fb`): Regressionstest deterministisch, Browser-Fixture 21/21 Kollektionen, Reloads 16–28 s, Revision 23 + 17 Löschmarken kommen an. Doku `docs/dev/ctox-sync-interleaved-receipt-20260907.md`. |
+| Meine Fixes für Upgrade 6 (`304536098`) | Cockpit-Pump: höchstens ein Refresh je Root alle 3 s (Wakes werden gebündelt). Writeback-Guard: belegfreie Writebacks (nichts verifiziert, keine Quelle, kein Versuch) werden mit erklärender Meldung abgewiesen; 2 Tests. |
+
+Upgrade 6 gestartet 08:35 UTC (main `304536098`). Abnahme danach: Reload → 21/21 Kollektionen in < 60 s; MCP-Handshake der Worker; Cockpit-Thread < 20 %; Nachstart aller unvollständigen Leads; Feldtabelle.
