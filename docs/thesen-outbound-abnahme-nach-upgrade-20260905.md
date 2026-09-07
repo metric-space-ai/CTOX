@@ -240,3 +240,11 @@ Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
 | Kampagnenstart 13:28 („Alle recherchieren (10)") | alle 10 Aufträge in 10 min angelegt (App 1.0.105 + stabiler Sync). |
 | Stand 13:40 | 10 von 19 Leads mit Ergebnis, 96 Felder: Destilla 15, Aeroxon 15, Richter 13, Additiv 13, Chemotechnik 12, Dreidoppel 11, Calvatis 9, ANGUS 6, BNT 1, Carbosulf 1. Aeroxon vollständig regelkonform (Register, Impressum, 2 Personen mit LinkedIn, Mitarbeiter verifiziert). Kennzahlen (WZ/Umsatz/Mitarbeiter aus D&B Hoovers) weiterhin offen: Anmeldeanforderung liegt beim Eigentümer. |
 | Eigene Falle | Monitore 11:36–12:43 blind: `timeout` existiert auf macOS nicht (Memory `macos-kein-timeout`). |
+
+## 07.09., 13:40–14:10 UTC: Zusammenführungsfehler bei Folge-Writebacks, Upgrade 10
+
+| Messung | Wert |
+|---|---|
+| Stand 13:58 | 11 Leads mit Ergebnis (BEWI RAW 19, Destilla 15, Aeroxon 15, Richter 13, Additiv 13, Chemotechnik 12, Dreidoppel 11, Calvatis 9, BNT/Carbosulf/ANGUS 1). Seit Upgrade 9: 25 angenommene, 1 abgewiesene Writebacks (Feldschlüssel auf oberster Ebene). |
+| **Defekt: Folge-Writeback ersetzt statt zusammenzuführen** | ANGUS 13:58:44: ein Lückenschluss-Writeback mit **einem** Feld (`firma_name`) ersetzte `field_status` (verifiziert 6 → 1) und `payload.researched_field_keys` (→ `["firma_name"]`); `data` (6 Felder) und `contacts` (4 Personen) blieben. Ursache `handle_research_writeback`: `lead["field_status"] = request.field_status` und der Outcome-Patch setzt die Schlüssellisten nur aus dem aktuellen Ergebnis. |
+| Fix `2bfddd2fe` (Upgrade 10, 14:08) | `merge_field_status` (Feld für Feld, neuer Eintrag gewinnt) und `union_research_keys` (researched/verified/unverified vereinigt, verifiziert verlässt unverified). Test `follow_up_writeback_keeps_previous_field_status_and_unions_keys`. Bereits geschrumpfte Leads (ANGUS) füllen sich mit dem nächsten vollständigen Writeback wieder. |
