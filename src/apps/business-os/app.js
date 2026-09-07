@@ -1,14 +1,14 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260903-shell-v2-crew-bar-v338';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260903-shell-v2-crew-bar-v338';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260903-shell-v2-crew-bar-v338';
-import { createAppActions } from './shared/app-actions.js?v=20260903-shell-v2-crew-bar-v338';
+import { CtoxResizer } from './shared/resizer.js?v=20260907-shell-v2-crew-home-v340';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260907-shell-v2-crew-home-v340';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260907-shell-v2-crew-home-v340';
+import { createAppActions } from './shared/app-actions.js?v=20260907-shell-v2-crew-home-v340';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/app-lifecycle.js?v=20260907-shell-v2-crew-home-v340';
 import {
   BusinessOsPermissions,
   businessActorFromSession,
@@ -16,20 +16,20 @@ import {
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/permissions.js?v=20260907-shell-v2-crew-home-v340';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260903-shell-v2-crew-bar-v338';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/branding.js?v=20260907-shell-v2-crew-home-v340';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260907-shell-v2-crew-home-v340';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/presentation.js?v=20260907-shell-v2-crew-home-v340';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -40,9 +40,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260903-shell-v2-crew-bar-v338';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260903-shell-v2-crew-bar-v338';
-import { createDocumentsFacade } from './shared/documents.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/shell-permissions-ui.js?v=20260907-shell-v2-crew-home-v340';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260907-shell-v2-crew-home-v340';
+import { createDocumentsFacade } from './shared/documents.js?v=20260907-shell-v2-crew-home-v340';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -50,16 +50,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/maintenance-state.js?v=20260907-shell-v2-crew-home-v340';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/workspace-session.js?v=20260907-shell-v2-crew-home-v340';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260903-shell-v2-crew-bar-v338';
+} from './shared/taskbar-pins.js?v=20260907-shell-v2-crew-home-v340';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
@@ -67,9 +67,9 @@ import {
   workjetCategoryForModule,
   workjetCategoryForTarget,
 } from './shared/workjet-theme.js?v=20260903-entertainment-import-v336';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260903-shell-v2-crew-bar-v338';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260903-shell-v2-crew-bar-v338';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260903-shell-v2-crew-bar-v338';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260907-shell-v2-crew-home-v340';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260907-shell-v2-crew-home-v340';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260907-shell-v2-crew-home-v340';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -84,7 +84,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260906-shell-v2-crew-home-v339';
+const APP_BUILD = '20260907-shell-v2-crew-home-v340';
 const WORKJET_UI_CONTRACT_BUILD = '5173a1155a9a5f1f28ed43afcb004693dd95c073cabfae8157cd01c7e8830419';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -2435,7 +2435,11 @@ function wireShellActions() {
     els.tabs.classList.remove('is-drop-end');
     moveModuleToUngrouped(moduleId);
   });
-  window.addEventListener('beforeunload', () => {
+  window.addEventListener('pagehide', (event) => {
+    // beforeunload is cancellable: closing here left every mounted app with
+    // dead IndexedDB handles when the operator chose to stay. Cached pages
+    // also keep their database so back/forward restoration remains usable.
+    if (event.persisted) return;
     if (state.ctoxHealthTimer) window.clearInterval(state.ctoxHealthTimer);
     state.db?.close?.();
   });
@@ -6346,13 +6350,22 @@ window.addEventListener('online', () => {
   moduleScriptPreloadHealthySinceMs = 0;
 });
 
+function instanceModuleAssetPath(relative) {
+  // Installed and local apps belong to the instance, outside the signed slot.
+  return /^(installed-modules|local-modules)\//.test(relative)
+    && new URL(import.meta.url).pathname.startsWith('/business-os/_shell/')
+    ? `../../${relative}`
+    : relative;
+}
+
 function moduleBasePath(mod) {
   const entry = String(mod.entry || `modules/${mod.id}/index.html`)
     .replace(/^\.?\//, '')
     .split('?')[0]
     .split('#')[0];
   const slash = entry.lastIndexOf('/');
-  return slash >= 0 ? entry.slice(0, slash) : `modules/${mod.id}`;
+  const base = slash >= 0 ? entry.slice(0, slash) : `modules/${mod.id}`;
+  return instanceModuleAssetPath(base);
 }
 
 function documentsWorkspaceAppId() {
@@ -8030,8 +8043,9 @@ function ensureModuleStylesheet(moduleLike) {
   const base = moduleBasePath(moduleLike);
   const revision = moduleRevisionQuery(moduleLike);
   const href = new URL(`${base}/index.css?v=${APP_BUILD}${revision}`, document.baseURI).href;
+  const pathname = new URL(href).pathname;
   const existing = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
-    .filter((link) => link.href.includes(`/${base}/index.css`));
+    .filter((link) => new URL(link.href).pathname === pathname);
   if (existing.some((link) => link.href === href)) return;
   existing.forEach((link) => link.remove());
   const link = document.createElement('link');
@@ -9444,8 +9458,8 @@ function moduleIconAssetPath(mod) {
   if (!iconPath || iconPath.includes('..') || /^[a-z][a-z0-9+.-]*:/i.test(iconPath)) return '';
   const cleanPath = iconPath.replace(/^\.?\//, '').split('?')[0].split('#')[0];
   if (!cleanPath || cleanPath.includes('..')) return '';
-  if (cleanPath.startsWith('modules/') || cleanPath.startsWith('installed-modules/')) {
-    return cleanPath;
+  if (/^(modules|installed-modules|local-modules)\//.test(cleanPath)) {
+    return instanceModuleAssetPath(cleanPath);
   }
   return `${moduleBasePath(mod)}/${cleanPath}`;
 }
@@ -11676,7 +11690,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "min_height": 480
       },
       "category": "System",
-      "version": "1.1.1",
+      "version": "1.1.2",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [

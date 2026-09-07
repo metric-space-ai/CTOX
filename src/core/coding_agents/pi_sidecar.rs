@@ -743,7 +743,7 @@ fn run_module_coding_turn_inner(
     let mut request = serde_json::json!({
         "id": module_id,
         "prompt": prompt,
-        "files": files,
+        "files": files.clone(),
         "maxAssistantTurns": 8,
         // The agent gets the Business OS app skill so it edits modules the way
         // the shell/kit/data-boundary contract requires (not as a generic web page).
@@ -773,7 +773,7 @@ fn run_module_coding_turn_inner(
         .get("snapshot")
         .and_then(Value::as_array)
         .unwrap_or(&empty);
-    let applied = apply_turn_snapshot(root, module_id, snapshot)?;
+    let applied = apply_changed_turn_snapshot(root, module_id, &files, snapshot)?;
     let message_count = response
         .get("messages")
         .and_then(Value::as_array)
@@ -796,7 +796,83 @@ fn run_module_coding_turn_inner(
         "module_id": module_id,
         "applied_files": applied,
         "message_count": message_count,
+        "assistant_text": coding_turn_assistant_text(&response),
     }))
+}
+
+fn apply_changed_turn_snapshot(
+    root: &Path,
+    module_id: &str,
+    baseline: &serde_json::Map<String, Value>,
+    snapshot: &[Value],
+) -> anyhow::Result<Vec<String>> {
+    let mut changed = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for entry in snapshot {
+        if entry.get("kind").and_then(Value::as_str) != Some("file") {
+            continue;
+        }
+        let (Some(raw_path), Some(content)) = (
+            entry.get("path").and_then(Value::as_str),
+            entry.get("content").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let path = raw_path
+            .strip_prefix("/workspace/")
+            .unwrap_or_else(|| raw_path.trim_start_matches('/'));
+        anyhow::ensure!(seen.insert(path), "duplicate coding snapshot path: {path}");
+        let before = baseline.get(path).and_then(Value::as_str);
+        if before == Some(content) {
+            continue;
+        }
+        // Validate the complete proposed change set before applying any file.
+        // A stale source projection must not replace a newer on-disk release.
+        crate::business_os::store::ensure_module_source_record_current(
+            root, module_id, path, before,
+        )?;
+        changed.push((path, content, before));
+    }
+    let mut applied = Vec::new();
+    for (path, content, before) in changed {
+        crate::business_os::store::save_module_source_record_if_current(
+            root,
+            crate::business_os::store::ModuleSourceSaveMutation {
+                module_id: module_id.to_string(),
+                path: path.to_string(),
+                content: content.to_string(),
+            },
+            before,
+        )?;
+        applied.push(path.to_string());
+    }
+    Ok(applied)
+}
+
+fn coding_turn_assistant_text(response: &Value) -> String {
+    let mut text = Vec::new();
+    for message in response
+        .get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if let Some(content) = message.get("content").and_then(Value::as_str) {
+            text.push(content);
+        } else if let Some(content) = message.get("content").and_then(Value::as_array) {
+            for block in content {
+                if block.get("type").and_then(Value::as_str) == Some("text") {
+                    if let Some(value) = block.get("text").and_then(Value::as_str) {
+                        text.push(value);
+                    }
+                }
+            }
+        }
+    }
+    text.join("\n")
 }
 
 #[cfg(test)]
@@ -1091,7 +1167,91 @@ mod tests {
             Some("export const v = 2;\n"),
             "a real edit round-trips project -> apply to the same module path ({key})"
         );
+        let next = vec![serde_json::json!({
+            "path": format!("/workspace/{key}"),
+            "kind": "file",
+            "content": "export const v = 3;\n"
+        })];
+        let applied = apply_changed_turn_snapshot(root, "widget", &after, &next)?;
+        assert_eq!(applied, vec![key.clone()]);
+        assert_eq!(
+            project_module_source(root, "widget")?[&key],
+            "export const v = 3;\n"
+        );
         Ok(())
+    }
+
+    #[test]
+    fn unchanged_coding_snapshot_does_not_restore_stale_source() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let live = temp.path().join("live.js");
+        std::fs::write(&live, "new release")?;
+        let baseline = serde_json::json!({"live.js":"old projection"});
+        let snapshot = vec![
+            serde_json::json!({"kind":"file","path":"/workspace/live.js","content":"old projection"}),
+        ];
+        let applied = apply_changed_turn_snapshot(
+            temp.path(),
+            "widget",
+            baseline.as_object().unwrap(),
+            &snapshot,
+        )?;
+        assert!(
+            applied.is_empty(),
+            "a read-only turn must not write any source"
+        );
+        assert_eq!(std::fs::read_to_string(live)?, "new release");
+        Ok(())
+    }
+
+    #[test]
+    fn changed_coding_snapshot_rejects_stale_files_before_any_write() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let app = temp.path().join("src/apps/business-os");
+        let module = app.join("modules/widget");
+        std::fs::create_dir_all(&module)?;
+        std::fs::write(app.join("index.html"), "<!doctype html>")?;
+        std::fs::write(
+            module.join("module.json"),
+            r#"{"id":"widget","title":"Widget","entry":"modules/widget/index.html"}"#,
+        )?;
+        std::fs::write(module.join("index.js"), "before")?;
+        std::fs::write(module.join("other.js"), "newer live version")?;
+        let baseline = serde_json::json!({"index.js":"before", "other.js":"stale"});
+        let snapshot = vec![
+            serde_json::json!({"kind":"file","path":"/workspace/index.js","content":"proposed first edit"}),
+            serde_json::json!({"kind":"file","path":"/workspace/other.js","content":"proposed stale edit"}),
+        ];
+        let result = apply_changed_turn_snapshot(
+            temp.path(),
+            "widget",
+            baseline.as_object().unwrap(),
+            &snapshot,
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("coding source conflict"));
+        assert_eq!(std::fs::read_to_string(module.join("index.js"))?, "before");
+        assert_eq!(
+            std::fs::read_to_string(module.join("other.js"))?,
+            "newer live version"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn coding_turn_returns_only_assistant_text_not_reasoning_or_tools() {
+        let response = serde_json::json!({"messages":[
+            {"role":"user","content":"private prompt"},
+            {"role":"toolResult","content":[{"type":"text","text":"tool output"}]},
+            {"role":"assistant","content":[{"type":"thinking","thinking":"internal reasoning"},{"type":"text","text":"review result"}]},
+            {"role":"assistant","content":"final result"}
+        ]});
+        assert_eq!(
+            coding_turn_assistant_text(&response),
+            "review result\nfinal result"
+        );
     }
 
     #[test]

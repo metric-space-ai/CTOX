@@ -8,12 +8,14 @@ import { chromium } from 'playwright';
 const MODULE_HTML = new URL('./index.html', import.meta.url);
 const MODULE_CSS = new URL('./index.css', import.meta.url);
 const RESIZER_JS = new URL('../../shared/resizer.js', import.meta.url);
+const OFFICE_CSS = new URL('../../shared/office-workspace.css', import.meta.url);
 
 async function startFixtureServer() {
-  const [moduleHtml, moduleCss, resizerSource] = await Promise.all([
+  const [moduleHtml, moduleCss, resizerSource, officeCss] = await Promise.all([
     readFile(MODULE_HTML, 'utf8'),
     readFile(MODULE_CSS, 'utf8'),
     readFile(RESIZER_JS, 'utf8'),
+    readFile(OFFICE_CSS, 'utf8'),
   ]);
   const pageHtml = `<!doctype html>
     <html>
@@ -52,15 +54,8 @@ async function startFixtureServer() {
               maxWidth: Number(handle.dataset.resizerMax),
             });
           }
-          window.setActionsOpen = (open) => {
-            root.classList.toggle('is-actions-open', open);
-            const drawer = root.querySelector('[data-documents-actions-drawer]');
-            const resizer = root.querySelector('[data-documents-actions-resizer]');
-            drawer.hidden = !open;
-            resizer.hidden = !open;
-          };
-          window.setActionsOverlay = (overlay) => root.classList.toggle('is-actions-overlay', overlay);
           window.setCompact = (compact) => root.classList.toggle('is-compact', compact);
+          window.setLibraryOpen = (open) => root.classList.toggle('is-library-open', open);
         </script>
       </body>
     </html>`;
@@ -70,7 +65,9 @@ async function startFixtureServer() {
       ? moduleCss
       : path === '/resizer.js'
         ? resizerSource
-        : pageHtml;
+        : path === '/shared/office-workspace.css'
+          ? officeCss
+          : pageHtml;
     response.writeHead(200, {
       'content-type': path.endsWith('.css')
         ? 'text/css; charset=utf-8'
@@ -94,7 +91,7 @@ async function startFixtureServer() {
   };
 }
 
-test('Documents columns resize and the optional actions column becomes a compact overlay', async () => {
+test('Documents has only a resizable file library and editor, with a left library overlay on narrow screens', async () => {
   const fixture = await startFixtureServer();
   let browser;
   try {
@@ -108,48 +105,53 @@ test('Documents columns resize and the optional actions column becomes a compact
     await page.goto(fixture.url, { waitUntil: 'networkidle' });
     const root = page.locator('[data-documents-module]');
     const leftResizer = page.locator('[data-resizer="left"]');
-    const rightResizer = page.locator('[data-documents-actions-resizer]');
-    const drawer = page.locator('[data-documents-actions-drawer]');
+    const library = page.locator('.documents-library-pane');
+    const editor = page.locator('.documents-workbench');
+    const assertNoRightColumn = async () => {
+      assert.equal(await page.locator('[data-documents-actions-drawer], [data-documents-actions-resizer], [data-documents-actions-toggle], [data-resizer="right"]').count(), 0,
+        'Documents must not render any right actions column, drawer, resizer or toggle');
+    };
 
-    await expectHidden(rightResizer);
+    await assertNoRightColumn();
+    assert.equal(await root.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length), 3);
     await leftResizer.focus();
+    await leftResizer.press('Home');
+    assert.equal(await root.evaluate((element) => element.style.getPropertyValue('--shell-col-left')), '300px');
     await leftResizer.press('ArrowRight');
-    assert.equal(await root.evaluate((element) => element.style.getPropertyValue('--documents-library-width')), '324px');
-
-    await page.evaluate(() => window.setActionsOpen(true));
-    await leftResizer.focus();
+    assert.equal(await root.evaluate((element) => element.style.getPropertyValue('--shell-col-left')), '324px');
     await leftResizer.press('End');
-    await rightResizer.focus();
-    await rightResizer.press('Home');
-    await rightResizer.press('End');
-    assert.equal(await root.evaluate((element) => element.style.getPropertyValue('--documents-library-width')), '560px');
-    assert.equal(await root.evaluate((element) => element.style.getPropertyValue('--documents-actions-width')), '560px');
-    assert.equal(await drawer.evaluate((element) => getComputedStyle(element).position), 'relative');
-    assert.equal(Math.round((await drawer.boundingBox()).width), 560);
+    assert.equal(await root.evaluate((element) => element.style.getPropertyValue('--shell-col-left')), '560px');
+    assert.equal(Math.round((await library.boundingBox()).width), 560);
     assert.ok(
-      Math.round((await page.locator('.documents-workbench').boundingBox()).width) >= 480,
-      'the editor must retain its minimum width with both side columns maximized',
+      Math.round((await editor.boundingBox()).width) >= 480,
+      'the editor must retain usable width with the library maximized',
     );
 
     await page.setViewportSize({ width: 1180, height: 800 });
-    await page.evaluate(() => window.setActionsOverlay(true));
-    assert.equal(await drawer.evaluate((element) => getComputedStyle(element).position), 'absolute');
+    await assertNoRightColumn();
     assert.ok(
-      Math.round((await page.locator('.documents-workbench').boundingBox()).width) >= 480,
-      'the editor must retain its minimum width while the actions drawer is open',
+      Math.round((await editor.boundingBox()).width) >= 480,
+      'the editor must retain usable width at the narrower desktop size',
     );
 
+    await page.setViewportSize({ width: 720, height: 800 });
     await page.evaluate(() => window.setCompact(true));
+    await assertNoRightColumn();
     assert.equal(await root.evaluate((element) => getComputedStyle(element).gridTemplateColumns.split(' ').length), 1);
-    assert.equal(await drawer.evaluate((element) => getComputedStyle(element).position), 'absolute');
-    assert.equal(Math.round((await drawer.boundingBox()).width), 560);
+    assert.equal(await library.evaluate((element) => getComputedStyle(element).display), 'none');
+    assert.equal(await leftResizer.evaluate((element) => getComputedStyle(element).display), 'none');
+    assert.equal(Math.round((await editor.boundingBox()).width), 720);
+    await page.evaluate(() => window.setLibraryOpen(true));
+    assert.equal(await library.evaluate((element) => getComputedStyle(element).position), 'absolute');
+    const libraryBox = await library.boundingBox();
+    assert.equal(Math.round(libraryBox.x), 0, 'the compact library opens from the left');
+    assert.ok(libraryBox.width >= 300 && libraryBox.width <= 720 - 32);
+    assert.equal(Math.round((await editor.boundingBox()).width), 720, 'the overlay does not squeeze the editor');
+    await assertNoRightColumn();
+    await page.evaluate(() => window.setLibraryOpen(false));
+    assert.equal(await library.evaluate((element) => getComputedStyle(element).display), 'none');
   } finally {
     await browser?.close();
     await fixture.close();
   }
 });
-
-async function expectHidden(locator) {
-  assert.equal(await locator.getAttribute('hidden'), '');
-  assert.equal(await locator.evaluate((element) => getComputedStyle(element).display), 'none');
-}

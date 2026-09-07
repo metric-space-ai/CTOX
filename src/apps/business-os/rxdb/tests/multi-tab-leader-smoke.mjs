@@ -1,4 +1,6 @@
 import { createMultiTabSyncCoordinator } from '../src/multi-tab-sync-coordinator.mjs';
+import { __ctoxSyncTestHooks } from '../../shared/sync.js';
+import { RXDB_BUNDLE_URL } from '../../shared/rxdb-runtime.js';
 
 const room = `room-${process.pid}-${Date.now()}`;
 const first = createMultiTabSyncCoordinator({ databaseName: 'multi-tab-test', room, tabId: 'tab-a' });
@@ -46,6 +48,32 @@ unsubscribeFrozen();
 await second.close();
 await first.close();
 assert(first.isClosed() && second.isClosed(), 'coordinator close must release reusable registry entries');
+
+// beta.8 and beta.9 shipped different DB bundles under the same shell build.
+// A frozen older tab must not retain local authority over the corrected runtime.
+const releaseRoom = `rolling-release-${process.pid}-${Date.now()}`;
+assert(
+  __ctoxSyncTestHooks.multiTabCoordinatorRoom(releaseRoom).includes(RXDB_BUNDLE_URL),
+  'coordinator identity must use the canonical DB bundle even when the shell build is unchanged',
+);
+const legacy = createMultiTabSyncCoordinator({
+  databaseName: 'rolling-release-test', tabId: 'tab-a',
+  room: `${releaseRoom}|release=20260906-shell-v2-ctox-kit-v340`,
+});
+const current = createMultiTabSyncCoordinator({
+  databaseName: 'rolling-release-test', tabId: 'tab-b',
+  room: __ctoxSyncTestHooks.multiTabCoordinatorRoom(releaseRoom),
+});
+try {
+  await legacy.start();
+  await current.start();
+  await delay(80);
+  assert(legacy.isLeader(), 'the old tab retains its own runtime coordinator');
+  assert(current.isLeader(), 'the corrected DB runtime must not follow the older shell-only coordinator');
+} finally {
+  await current.close();
+  await legacy.close();
+}
 
 console.log('ctox-rxdb multi-tab leader smoke OK');
 

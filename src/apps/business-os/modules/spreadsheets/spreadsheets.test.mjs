@@ -19,6 +19,241 @@ const { __spreadsheetsTestHooks: hooks } = await import(
   `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
 );
 
+test('spreadsheet chunk refresh does not re-query the file library or runbooks', async () => {
+  const queried = [];
+  const state = { spreadsheets: [], selectedId: '', ctx: {
+    host: { querySelector: () => null },
+    db: { collection(name) { queried.push(name); return { find: () => ({ exec: async () => [] }) }; } },
+  } };
+  await hooks.refreshSpreadsheetsFromLocal(state, new Set(['spreadsheet_blob_chunks']));
+  assert.deepEqual(queried, []);
+  await hooks.refreshSpreadsheetsFromLocal(state, new Set(['spreadsheets']));
+  assert.deepEqual(queried, ['spreadsheets']);
+});
+
+test('spreadsheet background refresh does not render after disposal during a read', async () => {
+  let active = true;
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const state = { spreadsheets: [], selectedId: '', ctx: {
+    host: { querySelector: () => assert.fail('disposed app must not render') },
+    db: { collection() { return { find: () => ({ exec: () => held }) }; } },
+  } };
+  const pending = hooks.refreshSpreadsheetsFromLocal(state, new Set(['spreadsheets']), () => active);
+  active = false;
+  release([]);
+  await pending;
+});
+
+test('spreadsheet version reads return locally without starting replication', async () => {
+  const version = { id: 'local' };
+  assert.equal(await hooks.resolveSpreadsheetVersionLocalFirst(async timeoutMs => {
+    assert.equal(timeoutMs, 4500);
+    return version;
+  }, () => assert.fail('must not wait for sync')), version);
+});
+
+test('spreadsheet metadata deadline recovers once with a bounded network read', async () => {
+  const budgets = [];
+  let recoveries = 0;
+  const version = { id: 'reconnected' };
+  assert.equal(await hooks.resolveSpreadsheetVersionLocalFirst(async timeoutMs => {
+    budgets.push(timeoutMs);
+    if (budgets.length === 1) {
+      return hooks.withSpreadsheetVersionTimeout(new Promise(() => {}), 1, 'deadline');
+    }
+    return version;
+  }, async () => { recoveries += 1; }), version);
+  assert.deepEqual(budgets, [4500, 60000]);
+  assert.equal(recoveries, 1);
+});
+
+test('spreadsheet metadata recovery does not relabel integrity or permission failures', async () => {
+  for (const code of ['permission_denied', 'blob_sha256_mismatch']) {
+    const error = Object.assign(new Error(code), { code });
+    assert.equal(hooks.isTransientSpreadsheetVersionReadError(error), false);
+    await assert.rejects(hooks.resolveSpreadsheetVersionLocalFirst(
+      () => hooks.withSpreadsheetVersionTimeout(Promise.reject(error), 100, 'deadline'),
+      () => assert.fail('must not recover non-transient failure'),
+    ), actual => actual === error);
+  }
+});
+
+for (const failures of [1, 2, 3]) {
+  test(`spreadsheet peer-reopen failure is bounded after ${failures} reads`, async () => {
+    const error = new Error('Timed out waiting for WebRTC peer reopen for spreadsheet_versions');
+    const version = { id: 'reopened' };
+    const budgets = [];
+    let recoveries = 0;
+    const pending = hooks.resolveSpreadsheetVersionLocalFirst(async budget => {
+      budgets.push(budget);
+      if (budgets.length <= failures) throw error;
+      return version;
+    }, async () => { recoveries += 1; });
+    if (failures === 3) await assert.rejects(pending, actual => actual === error);
+    else assert.equal(await pending, version);
+    assert.deepEqual(budgets, failures === 1 ? [4500, 60000] : [4500, 60000, 60000]);
+    assert.equal(recoveries, Math.min(failures, 2));
+  });
+}
+
+test('spreadsheet metadata absence remains absence after successful recovery', async () => {
+  let reads = 0;
+  let recoveries = 0;
+  assert.equal(await hooks.resolveSpreadsheetVersionLocalFirst(async () => {
+    reads += 1;
+    return null;
+  }, async () => { recoveries += 1; }), null);
+  assert.equal(reads, 2);
+  assert.equal(recoveries, 1);
+});
+
+test('spreadsheet terminal codes override a misleading transport error message', async () => {
+  for (const code of ['permission_denied', 'schema_validation_failed', 'blob_sha256_mismatch']) {
+    const error = Object.assign(new Error('Timed out waiting for WebRTC peer reopen for spreadsheet_versions'), { code });
+    assert.equal(hooks.isTransientSpreadsheetVersionReadError(error), false);
+    await assert.rejects(hooks.resolveSpreadsheetVersionLocalFirst(async () => { throw error; },
+      () => assert.fail('terminal error must not reconnect')), actual => actual === error);
+  }
+});
+
+for (const boundary of ['before-read', 'read-result', 'read-error', 'recovery-result', 'recovery-error']) {
+  test(`spreadsheet supersession at ${boundary} cancels without applying or retrying`, async () => {
+    let current = boundary !== 'before-read';
+    let reads = 0;
+    let recoveries = 0;
+    const result = await hooks.resolveSpreadsheetVersionLocalFirst(async () => {
+      reads += 1;
+      if (boundary === 'read-result') { current = false; return { id: 'stale' }; }
+      if (boundary === 'read-error') current = false;
+      if (reads === 1) throw new Error('query_cancelled');
+      return { id: 'stale' };
+    }, async () => {
+      recoveries += 1;
+      current = false;
+      if (boundary === 'recovery-error') throw new Error('query_cancelled');
+    }, { isCurrent: () => current });
+    assert.equal(result, null);
+    assert.equal(reads, boundary === 'before-read' ? 0 : 1);
+    assert.equal(recoveries, boundary.startsWith('recovery') ? 1 : 0);
+  });
+}
+
+test('spreadsheet recovery resolves a pending direct bridge and waits only for its peer', async () => {
+  const events = [];
+  await hooks.awaitSpreadsheetVersionReplication({ sync: {
+    async startCollection(name, options) {
+      assert.equal(name, 'spreadsheet_versions');
+      assert.deepEqual(options, { forceDirect: true });
+      events.push('direct');
+      return { ready: Promise.resolve({ state: {
+        async waitForOpenPeerId(timeoutMs) {
+          assert.equal(timeoutMs, 60000);
+          events.push('native-peer');
+          return 'native';
+        },
+        async awaitInitialReplication() { assert.fail('no full collection download'); },
+        async awaitInSync() { assert.fail('no full collection synchronization'); },
+      } }) };
+    },
+  } });
+  assert.deepEqual(events, ['direct', 'native-peer']);
+});
+
+test('spreadsheet recovery propagates a refused direct channel without another read', async () => {
+  let reads = 0;
+  let starts = 0;
+  const refused = new Error('forbidden');
+  await assert.rejects(hooks.resolveSpreadsheetVersionLocalFirst(async () => { reads += 1; return null; },
+    () => hooks.awaitSpreadsheetVersionReplication({ sync: {
+      async startCollection() { starts += 1; throw refused; },
+    } })), actual => actual === refused);
+  assert.equal(reads, 1);
+  assert.equal(starts, 1);
+});
+
+test('spreadsheet failed reconnect attempts consume the bounded recovery budget', async () => {
+  let recoveries = 0;
+  let reads = 0;
+  const error = new Error('Timed out waiting for WebRTC peer reopen for spreadsheet_versions');
+  await assert.rejects(hooks.resolveSpreadsheetVersionLocalFirst(async () => {
+    reads += 1;
+    return null;
+  }, async () => { recoveries += 1; throw error; }), actual => actual === error);
+  assert.equal(reads, 1);
+  assert.equal(recoveries, 2);
+});
+
+test('spreadsheet cancelled direct bridge never continues to readiness or peer wait', async () => {
+  for (const boundary of ['start', 'ready']) {
+    let current = true;
+    await hooks.awaitSpreadsheetVersionReplication({ sync: {
+      async startCollection() {
+        if (boundary === 'start') current = false;
+        return { ready() {
+          assert.equal(boundary, 'ready');
+          current = false;
+          return Promise.resolve({ state: {
+            waitForOpenPeerId() { assert.fail('cancelled readiness must not wait for peer'); },
+          } });
+        } };
+      },
+    } }, () => current);
+  }
+});
+
+function versionState(read) {
+  return {
+    selectedId: 'sheet', selectedVersion: null, editorHandle: null,
+    spreadsheets: [{ id: 'sheet', current_version_id: 'version' }],
+    dirty: false, saving: false,
+    ctx: { db: { collection() { return {
+      findOne: () => ({ exec: read }),
+      find: () => ({ exec: async () => [] }),
+    }; } }, sync: { startCollection: async () => ({}) } },
+  };
+}
+
+test('spreadsheet loader distinguishes failed transport, missing metadata, and ready version', async t => {
+  t.mock.method(console, 'warn', () => {});
+  const error = new Error('Timed out waiting for WebRTC peer reopen for spreadsheet_versions');
+  const state = versionState(async () => { throw error; });
+  await hooks.loadSelectedVersion(state);
+  assert.equal(hooks.currentSpreadsheetVersionLoad(state).status, 'error');
+  assert.equal(state.versionLoad.error, error);
+  assert.equal(state.selectedVersion, null);
+  const absent = versionState(async () => null);
+  await hooks.loadSelectedVersion(absent);
+  assert.equal(hooks.currentSpreadsheetVersionLoad(absent).status, 'missing');
+  const version = { id: 'version' };
+  const ready = versionState(async () => ({ toJSON: () => version }));
+  await hooks.loadSelectedVersion(ready);
+  assert.equal(hooks.currentSpreadsheetVersionLoad(ready).status, 'ready');
+  assert.equal(ready.selectedVersion, version);
+});
+
+for (const change of ['selection', 'dispose', 'draft']) {
+  test(`spreadsheet loader cannot commit or retry after concurrent ${change}`, async () => {
+    let release;
+    let reads = 0;
+    const held = new Promise(resolve => { release = resolve; });
+    const state = versionState(async () => { reads += 1; return held; });
+    const pending = hooks.loadSelectedVersion(state);
+    if (change === 'selection') state.selectedId = 'other';
+    if (change === 'dispose') state.disposed = true;
+    if (change === 'draft') {
+      state.dirty = true;
+      state.editorHandle = { kind: 'ctox-spreadsheets', recordId: 'sheet', activity: 1 };
+    }
+    release({ toJSON: () => ({ id: 'stale' }) });
+    assert.equal(await pending, null);
+    assert.equal(state.selectedVersion, null);
+    assert.equal(reads, 1);
+    assert.equal(state.dirty, change === 'draft');
+    assert.equal(hooks.currentSpreadsheetVersionLoad(state), null);
+  });
+}
+
 test('spreadsheet chrome is a two-pane file manager without a right runbook column', async () => {
   const [source, html, manifest] = await Promise.all([
     fs.readFile(new URL('./index.js', import.meta.url), 'utf8'),

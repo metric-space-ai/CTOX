@@ -1,5 +1,6 @@
 import { showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { loadModuleMessages } from '../../shared/i18n.js';
+import { createCoalescedRefresh } from '../../office-engine/src/coalesced-refresh.mjs';
 import { autoWirePaneGrammar } from '../../shared/pane-grammar.js';
 import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
 
@@ -105,6 +106,8 @@ export async function mount(ctx) {
     runbooks: [],
     selectedId: '',
     selectedVersion: null,
+    versionLoad: null,
+    disposed: false,
     editorHandle: null,
     spreadsheetContainer: null,
     renderSerial: 0,
@@ -152,7 +155,7 @@ export async function mount(ctx) {
       }
       return true;
     } catch (error) {
-      state.ctx.notifications?.error?.(String(error?.message || error));
+      state.ctx.notifications?.show?.({ type: 'error', message: String(error?.message || error) });
       return false;
     }
   });
@@ -193,6 +196,7 @@ export async function mount(ctx) {
 
   return () => {
     disposed = true;
+    state.disposed = true;
     window.removeEventListener('beforeunload', onBeforeUnload);
     unregisterCloseGuard?.();
     state.contextMenuCleanup?.();
@@ -231,7 +235,7 @@ function enqueueSpreadsheetOpenFile(state, input) {
     .then(() => openSpreadsheetFile(state, input))
     .catch((error) => {
       console.error('[spreadsheets] opening file from Files failed', error);
-      state.ctx.notifications?.error?.(String(error?.message || error));
+      state.ctx.notifications?.show?.({ type: 'error', message: String(error?.message || error) });
       if (!state.editorHandle) renderSpreadsheetOpenError(state, error);
       return null;
     });
@@ -298,22 +302,16 @@ function wireModule(state) {
 
 function wireLocalRealtime(state) {
   const collections = ['spreadsheets', 'spreadsheet_versions', 'spreadsheet_runbooks', 'spreadsheet_blob_chunks'];
-  let timer = null;
-  const schedule = () => {
-    if (timer) return;
-    timer = window.setTimeout(() => {
-      timer = null;
-      refreshSpreadsheetsFromLocal(state).catch((error) => {
-        console.warn('[spreadsheets] local realtime render failed', error);
-      });
-    }, SPREADSHEET_RENDER_DEBOUNCE_MS);
-  };
+  const refresh = createCoalescedRefresh({
+    delayMs: SPREADSHEET_RENDER_DEBOUNCE_MS,
+    refresh: (changed, isActive) => refreshSpreadsheetsFromLocal(state, changed, isActive),
+    onError: (error) => console.warn('[spreadsheets] local realtime render failed', error),
+  });
   const subscriptions = collections
-    .map((collectionName) => spreadsheetCollection(state.ctx, collectionName)?.$?.subscribe?.(schedule) || null)
+    .map((collectionName) => spreadsheetCollection(state.ctx, collectionName)?.$?.subscribe?.(() => refresh.notify(collectionName)) || null)
     .filter(Boolean);
   return () => {
-    if (timer) window.clearTimeout(timer);
-    timer = null;
+    refresh.dispose();
     for (const sub of subscriptions) {
       try { sub.unsubscribe?.(); } catch {}
     }
@@ -357,7 +355,7 @@ function spreadsheetDraftProtected(state) {
   const handle = state.editorHandle;
   return handle?.kind === 'ctox-spreadsheets'
     && handle.recordId === state.selectedId
-    && Boolean(state.dirty || handle.saving);
+    && Boolean(state.dirty || state.saving || handle.saving);
 }
 
 async function saveSpreadsheetBeforeLeaving(state) {
@@ -377,20 +375,29 @@ async function saveSpreadsheetBeforeLeaving(state) {
   return true;
 }
 
-async function refreshSpreadsheetsFromLocal(state) {
+async function refreshSpreadsheetsFromLocal(state, changed = null, isActive = () => true) {
+  if (!isActive()) return;
+  const all = changed === null;
   try {
     await Promise.all([
-      refreshRunbooks(state).catch((err) => console.warn('[spreadsheets] background refreshRunbooks failed', err)),
-      refreshSpreadsheets(state).catch((err) => console.warn('[spreadsheets] background refreshSpreadsheets failed', err)),
+      (all || changed.has('spreadsheet_runbooks'))
+        ? refreshRunbooks(state).catch((err) => console.warn('[spreadsheets] background refreshRunbooks failed', err)) : null,
+      (all || changed.has('spreadsheets'))
+        ? refreshSpreadsheets(state).catch((err) => console.warn('[spreadsheets] background refreshSpreadsheets failed', err)) : null,
     ]);
   } catch (error) {
     console.warn('[spreadsheets] background refresh from local failed', error);
   }
-  if (state.selectedId && !spreadsheetDraftProtected(state)
+  if (!isActive()) return;
+  if ((all || changed.has('spreadsheets') || changed.has('spreadsheet_versions') || changed.has('spreadsheet_blob_chunks'))
+    && state.selectedId && !spreadsheetDraftProtected(state)
     && state.selectedVersion?.id !== selectedRecord(state)?.current_version_id) {
-    const version = await loadSelectedVersion(state);
-    if (version) await renderCenter(state);
+    const load = currentSpreadsheetVersionLoad(state);
+    const version = load?.status === 'error' ? null : await loadSelectedVersion(state, isActive);
+    if (!isActive()) return;
+    if (version || currentSpreadsheetVersionLoad(state)?.status === 'error') await renderCenter(state);
   }
+  if (!isActive()) return;
   renderLeft(state);
   renderRight(state);
 }
@@ -552,10 +559,10 @@ async function requestBlankSpreadsheet(state) {
   state.creatingBlankSpreadsheet = true;
   try {
     await createNewSpreadsheet(state);
-    state.ctx.notifications?.success?.(state.t('blankSpreadsheetCreated', 'Leere Tabelle erstellt.'));
+    state.ctx.notifications?.show?.({ type: 'success', message: state.t('blankSpreadsheetCreated', 'Leere Tabelle erstellt.') });
   } catch (error) {
     console.error('[spreadsheets] blank spreadsheet creation failed', error);
-    state.ctx.notifications?.error?.(`${state.t('spreadsheetCreateFailed', 'Tabelle konnte nicht erstellt werden:')} ${error?.message || error}`);
+    state.ctx.notifications?.show?.({ type: 'error', message: `${state.t('spreadsheetCreateFailed', 'Tabelle konnte nicht erstellt werden:')} ${error?.message || error}` });
   } finally {
     state.creatingBlankSpreadsheet = false;
   }
@@ -931,7 +938,91 @@ function parseCSVContent(text, delimiter = ',') {
   return lines;
 }
 
-async function loadSelectedVersion(state) {
+async function withSpreadsheetVersionTimeout(promise, ms, message) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(Object.assign(new Error(message), {
+          code: 'spreadsheet_version_read_timeout',
+        })), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function isTransientSpreadsheetVersionReadError(error) {
+  const code = String(error?.code || '').toLowerCase();
+  const message = String(error?.message || error || '').toLowerCase();
+  const diagnostic = `${code} ${message}`;
+  // Permission, schema and integrity failures must never become reconnects,
+  // even when a wrapped diagnostic also contains transport timeout wording.
+  if (/(permission|forbidden|unauthori[sz]ed|authentication|authorization|access.denied|schema|integrity|sha256|checksum|validation)/.test(diagnostic)) return false;
+  return code === 'spreadsheet_version_read_timeout'
+    || code === 'webrtc_peer_reopen_timeout'
+    || (/\bwebrtc\b/.test(diagnostic) && /\bpeer\b/.test(message)
+      && /(re.?open|open)/.test(message) && /(timeout|timed out|time out)/.test(message))
+    || message.includes('webrtc replication cancelled')
+    || message.includes('query_cancelled')
+    || message.includes('replication-cancel')
+    || message.includes('database connection is closing')
+    || (message.includes('idbdatabase') && message.includes('closing'));
+}
+
+async function resolveSpreadsheetVersionLocalFirst(readLocal, recover, { isCurrent = () => true } = {}) {
+  // At most two recoveries, including failed bridge bring-up. A successful
+  // recovered read returning null establishes absence; transport failure does not.
+  for (let round = 0; round <= 2; round += 1) {
+    if (!isCurrent()) return null;
+    if (round > 0) {
+      try {
+        await recover();
+      } catch (error) {
+        if (!isCurrent()) return null;
+        if (!isTransientSpreadsheetVersionReadError(error) || round === 2) throw error;
+        continue;
+      }
+      if (!isCurrent()) return null;
+    }
+    try {
+      const doc = await readLocal(round === 0 ? 4500 : 60000);
+      if (!isCurrent()) return null;
+      if (doc) return doc;
+      if (round > 0) return null;
+    } catch (error) {
+      if (!isCurrent()) return null;
+      if (!isTransientSpreadsheetVersionReadError(error) || round === 2) throw error;
+    }
+  }
+  return null;
+}
+
+async function awaitSpreadsheetVersionReplication(ctx, isCurrent = () => true) {
+  if (!isCurrent()) return;
+  if (typeof ctx?.sync?.startCollection !== 'function') return;
+  const message = ctx.t?.('spreadsheetVersionReplicationTimeout') || 'spreadsheet_version_replication_timeout';
+  let bridge = await withSpreadsheetVersionTimeout(
+    ctx.sync.startCollection('spreadsheet_versions', { forceDirect: true }),
+    60000,
+    message,
+  );
+  if (!isCurrent()) return;
+  if (bridge?.ready) {
+    const ready = typeof bridge.ready === 'function' ? bridge.ready() : bridge.ready;
+    bridge = (await withSpreadsheetVersionTimeout(ready, 60000, message)) || bridge;
+    if (!isCurrent()) return;
+  }
+  const state = bridge?.state || bridge;
+  if (typeof state?.waitForOpenPeerId === 'function') {
+    await withSpreadsheetVersionTimeout(state.waitForOpenPeerId(60000), 60000, message);
+  }
+}
+
+async function loadSelectedVersion(state, isActive = () => true) {
+  if (state.disposed || !isActive()) return null;
   if (spreadsheetDraftProtected(state)) return null;
   const record = selectedRecord(state);
   if (!record) {
@@ -947,35 +1038,43 @@ async function loadSelectedVersion(state) {
   const selectedVersion = state.selectedVersion;
   const selectedVersionId = selectedVersion?.id;
   const versionId = record.current_version_id;
-  const isCurrent = () => state.selectedId === selection
+  const load = { selection, versionId, status: 'loading', error: null };
+  state.versionLoad = load;
+  const isCurrent = () => !state.disposed && isActive()
+    && state.versionLoad === load && state.selectedId === selection
     && state.editorHandle === handle && handle?.activity === activity
     && state.selectedVersion === selectedVersion && state.selectedVersion?.id === selectedVersionId
     && selectedRecord(state)?.current_version_id === versionId
     && !spreadsheetDraftProtected(state);
   try {
-    let doc = record.current_version_id
-      ? await withTimeout(
-        spreadsheetCollection(state.ctx, 'spreadsheet_versions').findOne(record.current_version_id).exec(),
-        4500,
-        `Version ${record.current_version_id} konnte nicht geladen werden.`,
-      )
-      : null;
-    if (!isCurrent()) return null;
-    if (!doc) {
-      const fallback = await withTimeout(
-        spreadsheetCollection(state.ctx, 'spreadsheet_versions').find({
-          selector: { spreadsheet_id: record.id },
-          sort: [{ updated_at_ms: 'desc' }],
-          limit: 1,
-        }).exec(),
-        4500,
-        `Keine Versionen für ${record.id} gefunden.`,
-      );
+    const doc = await resolveSpreadsheetVersionLocalFirst(async (timeoutMs) => {
       if (!isCurrent()) return null;
-      doc = fallback[0] || null;
-    }
+      let doc = record.current_version_id
+        ? await withSpreadsheetVersionTimeout(
+          spreadsheetCollection(state.ctx, 'spreadsheet_versions').findOne(record.current_version_id).exec(),
+          timeoutMs,
+          `Version ${record.current_version_id} konnte nicht geladen werden.`,
+        )
+        : null;
+      if (!isCurrent()) return null;
+      if (!doc) {
+        const fallback = await withSpreadsheetVersionTimeout(
+          spreadsheetCollection(state.ctx, 'spreadsheet_versions').find({
+            selector: { spreadsheet_id: record.id },
+            sort: [{ updated_at_ms: 'desc' }],
+            limit: 1,
+          }).exec(),
+          timeoutMs,
+          `Keine Versionen für ${record.id} gefunden.`,
+        );
+        if (!isCurrent()) return null;
+        doc = fallback[0] || null;
+      }
+      return doc || null;
+    }, () => awaitSpreadsheetVersionReplication(state.ctx, isCurrent), { isCurrent });
     if (!isCurrent()) return null;
     if (!doc) {
+      load.status = 'missing';
       if (handle?.recordId !== selection) {
         state.selectedVersion = null;
         state.dirty = false;
@@ -984,17 +1083,24 @@ async function loadSelectedVersion(state) {
       return null;
     }
     state.selectedVersion = doc.toJSON();
+    load.status = 'ready';
     state.dirty = false;
     state.saving = false;
     return state.selectedVersion;
   } catch (err) {
+    if (!isCurrent()) return null;
+    load.status = 'error';
+    load.error = err;
     console.warn('[spreadsheets] loadSelectedVersion failed gracefully', err);
-    if (isCurrent() && handle?.recordId !== selection) {
+    if (handle?.recordId !== selection) {
       state.selectedVersion = null;
       state.dirty = false;
       state.saving = false;
     }
     return null;
+  } finally {
+    // Superseded reads must not leave a permanent loading state behind.
+    if (load.status === 'loading' && state.versionLoad === load) state.versionLoad = null;
   }
 }
 
@@ -1204,7 +1310,7 @@ function bindLeftControls(state, wrap) {
           await renderCenter(state);
           renderRight(state);
         })().catch((error) => {
-          state.ctx.notifications?.error?.(String(error?.message || error));
+          state.ctx.notifications?.show?.({ type: 'error', message: String(error?.message || error) });
         });
       }
       return;
@@ -1345,14 +1451,23 @@ function visibleSpreadsheets(state) {
   return result;
 }
 
+function currentSpreadsheetVersionLoad(state) {
+  const load = state.versionLoad;
+  const record = selectedRecord(state);
+  return !state.disposed && record && load?.selection === state.selectedId
+    && load.versionId === record.current_version_id ? load : null;
+}
+
 async function renderCenter(state) {
-  if (!state.ctx.host.isConnected) return;
+  if (state.disposed || !state.ctx.host.isConnected) return;
   const record = selectedRecord(state);
   const shell = state.ctx.host.querySelector('[data-spreadsheets-editor]');
   if (!shell) return;
   const handle = state.editorHandle;
+  const load = currentSpreadsheetVersionLoad(state);
   if (record && handle?.kind === 'ctox-spreadsheets' && handle.recordId === record.id
-    && (spreadsheetDraftProtected(state) || handle.versionId === state.selectedVersion?.id)) {
+    && (spreadsheetDraftProtected(state)
+      || ((!load || load.status === 'ready') && handle.versionId === state.selectedVersion?.id))) {
     return handle;
   }
   if (handle?.kind === 'ctox-spreadsheets') {
@@ -1394,6 +1509,8 @@ async function renderCenter(state) {
   }
   const badge = head.querySelector('[data-spreadsheets-dirty-indicator]');
   if (badge) {
+    // A save status is meaningful only after a version has actually loaded.
+    badge.hidden = !state.selectedVersion || Boolean(load && load.status !== 'ready');
     badge.classList.toggle('is-dirty', state.dirty);
     badge.classList.toggle('is-saving', state.saving);
     badge.querySelector('[data-spreadsheets-dirty-label]').textContent = saveLabel;
@@ -1417,7 +1534,27 @@ async function renderCenter(state) {
     canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('unsupportedSpreadsheetFormat', 'Nicht unterstütztes Tabellenformat.'))}</strong><span>${escapeHtml(state.t('supportedSpreadsheetFormats', 'Bitte XLSX, CSV oder TSV verwenden.'))}</span></div>`;
     return;
   }
-  if (!state.selectedVersion) {
+  if (load?.status === 'loading' || (!load && !state.selectedVersion)) return;
+  if (load?.status === 'error') {
+    canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('editorLoadFailed', 'Editor konnte nicht geladen werden:'))}</strong><span>${escapeHtml(load.error?.message || load.error)}</span></div>`;
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.setAttribute('data-spreadsheets-retry-version', '');
+    retry.textContent = state.t('retry', 'Erneut versuchen');
+    retry.addEventListener('click', async () => {
+      if (currentSpreadsheetVersionLoad(state) !== load || spreadsheetDraftProtected(state)) return;
+      retry.disabled = true;
+      const pending = loadSelectedVersion(state);
+      const attempt = state.versionLoad;
+      await renderCenter(state);
+      await pending;
+      if (currentSpreadsheetVersionLoad(state) === attempt && attempt.status !== 'loading'
+        && !spreadsheetDraftProtected(state)) await renderCenter(state);
+    });
+    canvas.firstElementChild.append(retry);
+    return;
+  }
+  if (load?.status === 'missing' || !state.selectedVersion) {
     canvas.innerHTML = `<div class="ctox-empty spreadsheets-error"><strong>${escapeHtml(state.t('noSavedVersionFound', 'Zu dieser Tabelle wurde keine gespeicherte Version gefunden.'))}</strong></div>`;
     return;
   }
@@ -1507,7 +1644,10 @@ async function mountCtoxSpreadsheets(state, host, record, version) {
     }, 900);
   }
   function onError(error) {
-    console.error('[spreadsheets] editor save failed', error);
+    const detail = error?.error || error;
+    const code = String(detail?.code || error?.code || '');
+    const message = String(error?.message || detail?.message || error);
+    console.error('[spreadsheets] editor save failed', `code=${code}`, `message=${message}`, error);
     if (!isCurrent()) return;
     errorReported = true;
     handle.activity += 1;
@@ -1515,7 +1655,10 @@ async function mountCtoxSpreadsheets(state, host, record, version) {
     handle.saving = false;
     state.saving = false;
     markSpreadsheetAsDirty(state);
-    state.ctx.notifications?.error?.(String(error?.message || error?.error?.message || error));
+    state.ctx.notifications?.show?.({
+      type: 'error', message, time: 0,
+      action: { label: state.t('close', 'Schließen'), callback: () => {} },
+    });
     // No automatic retry after errors (in particular version conflicts).
   }
   state.editorHandle = handle;
@@ -1777,10 +1920,10 @@ function openNewSpreadsheetDrawer(state) {
       }
       state.ctx.closeDrawers();
       await createNewSpreadsheet(state, input);
-      state.ctx.notifications?.success?.(state.t('draftCreated', 'Tabellenentwurf erstellt.'));
+      state.ctx.notifications?.show?.({ type: 'success', message: state.t('draftCreated', 'Tabellenentwurf erstellt.') });
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Erstellen: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Erstellen: ${err.message}` });
     }
   });
 
@@ -1830,10 +1973,10 @@ function openImportModal(state) {
     state.ctx.closeDrawers();
     try {
       await importSpreadsheetFile(state, file, tags);
-      state.ctx.notifications?.success?.(`Datei ${file.name} erfolgreich importiert.`);
+      state.ctx.notifications?.show?.({ type: 'success', message: `Datei ${file.name} erfolgreich importiert.` });
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Importieren: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Importieren: ${err.message}` });
     }
   });
 
@@ -1880,10 +2023,10 @@ function openExportModal(state) {
       const bytes = await state.editorHandle.export();
       const downloadName = ensureExtension(slugFilename(record.title || 'export'), '.xlsx');
       downloadBlob(bytes, XLSX_MIME, downloadName, state.ctx.host);
-      state.ctx.notifications?.success?.(`Export abgeschlossen: ${downloadName}`);
+      state.ctx.notifications?.show?.({ type: 'success', message: `Export abgeschlossen: ${downloadName}` });
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Exportieren: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Exportieren: ${err.message}` });
     }
   });
 
@@ -1950,7 +2093,7 @@ async function openManageDrawer(state, id) {
         updated_at_ms: Date.now()
       });
       state.ctx.closeDrawers();
-      state.ctx.notifications?.success?.('Änderungen erfolgreich gespeichert.');
+      state.ctx.notifications?.show?.({ type: 'success', message: 'Änderungen erfolgreich gespeichert.' });
       await refreshSpreadsheets(state);
       renderLeft(state);
       if (state.selectedId === id) {
@@ -1958,7 +2101,7 @@ async function openManageDrawer(state, id) {
       }
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Speichern: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Speichern: ${err.message}` });
     }
   });
 
@@ -1973,7 +2116,7 @@ async function openManageDrawer(state, id) {
     try {
       await doc.incrementalPatch({ is_deleted: true, updated_at_ms: Date.now() });
       state.ctx.closeDrawers();
-      state.ctx.notifications?.success?.('Tabelle erfolgreich gelöscht.');
+      state.ctx.notifications?.show?.({ type: 'success', message: 'Tabelle erfolgreich gelöscht.' });
 
       if (state.selectedId === id) {
         state.selectedId = '';
@@ -1988,7 +2131,7 @@ async function openManageDrawer(state, id) {
       renderCenter(state);
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Löschen: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Löschen: ${err.message}` });
     }
   });
 
@@ -2311,6 +2454,15 @@ async function withTimeout(promise, ms, message) {
 }
 
 export const __spreadsheetsTestHooks = {
+  wireLocalRealtime,
+  refreshSpreadsheetsFromLocal,
+  withSpreadsheetVersionTimeout,
+  isTransientSpreadsheetVersionReadError,
+  resolveSpreadsheetVersionLocalFirst,
+  awaitSpreadsheetVersionReplication,
+  loadSelectedVersion,
+  currentSpreadsheetVersionLoad,
+  renderCenter,
   ensureSpreadsheetRuntimeReady,
   openSpreadsheetFile,
   hasActiveListFilters,

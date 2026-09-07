@@ -144,7 +144,7 @@ struct SubscriptionAuthStartRequest {
 }
 
 pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow::Result<()> {
-    let app_root = resolve_business_os_app_root(root);
+    let app_root = resolve_business_os_app_root(root)?;
     if !app_root.join("index.html").is_file() {
         anyhow::bail!(
             "native Business OS app is missing at {}",
@@ -228,18 +228,18 @@ pub fn serve_business_os(root: &Path, options: BusinessOsServeOptions) -> anyhow
     Ok(())
 }
 
-fn resolve_business_os_app_root(root: &Path) -> PathBuf {
-    if let Ok(Some(active)) = super::shell_update::active_shell_root(root) {
-        return active;
+fn resolve_business_os_app_root(root: &Path) -> anyhow::Result<PathBuf> {
+    // A selected release is authoritative. Verification failure must not boot
+    // an unrelated source tree under the same instance URL.
+    if let Some(active) = super::shell_update::active_shell_root(root)
+        .context("selected Business OS shell could not be verified")?
+    {
+        return Ok(active);
     }
-    [
-        root.join("business-os"),
-        root.join("src/apps/business-os"),
-        root.join("archive/2026-05-18-cleanup/generated/business-os"),
-    ]
-    .into_iter()
-    .find(|candidate| candidate.join("index.html").is_file())
-    .unwrap_or_else(|| root.join("business-os"))
+    [root.join("business-os"), root.join("src/apps/business-os")]
+        .into_iter()
+        .find(|candidate| candidate.join("index.html").is_file())
+        .context("no Business OS shell is installed")
 }
 
 fn resolve_business_os_installed_app_root(root: &Path) -> PathBuf {
@@ -3368,7 +3368,7 @@ fn file_modified_label(path: &Path) -> String {
 }
 
 fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> anyhow::Result<()> {
-    let raw_rel = if path == "/" {
+    let raw_rel = if matches!(path, "/" | "/business-os" | "/business-os/") {
         "index.html"
     } else {
         path.trim_start_matches('/')
@@ -3383,12 +3383,33 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
     {
         return respond_status(request, 403, "forbidden");
     }
-    if !runtime_module_static_authorized(root, rel) {
-        // Do not reveal whether a customer package exists on this instance.
-        return respond_status(request, 404, "not found");
-    }
+    let release_request = match super::shell_assets::parse_request(rel) {
+        Ok(value) => value,
+        Err(_) => return respond_status(request, 400, "invalid shell release asset URL"),
+    };
+    let release = match release_request.as_ref() {
+        Some(address) => match super::shell_update::verified_release(root, &address.version) {
+            Ok(Some(release)) => Some(release),
+            Ok(None) => {
+                return respond_status(request, 410, "requested shell release is not available")
+            }
+            Err(_) => {
+                return respond_status(request, 503, "requested shell release failed verification")
+            }
+        },
+        None if rel == "index.html" => {
+            super::shell_update::verified_release_for_root(root, app_root)?
+        }
+        None => None,
+    };
+    let rel = release_request
+        .as_ref()
+        .map(|address| address.relative.as_str())
+        .unwrap_or(rel);
     let mut selected_app_root = app_root.to_path_buf();
-    if let Some((requested, active)) =
+    if let Some(release) = release.as_ref() {
+        selected_app_root = release.root.clone();
+    } else if let Some((requested, active)) =
         business_os_shell_generation_mismatch(app_root, rel, request.url())?
     {
         match super::shell_update::verified_shell_root_for_build(root, &requested)? {
@@ -3396,21 +3417,49 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
             None => return respond_shell_generation_mismatch(request, &requested, &active),
         }
     }
-    let file = resolve_business_os_static_file(root, &selected_app_root, rel);
+    if !runtime_module_static_authorized(root, &selected_app_root, rel, release.as_deref()) {
+        // Do not reveal whether a customer package exists on this instance.
+        return respond_status(request, 404, "not found");
+    }
+    let file = if release.is_some() {
+        selected_app_root.join(rel)
+    } else {
+        resolve_business_os_static_file(root, &selected_app_root, rel)
+    };
     let target = if file.is_dir() {
         file.join("index.html")
     } else {
         file
     };
-    let target = if !target.is_file() && should_serve_app_shell(rel) {
+    let target = if release.is_none() && !target.is_file() && should_serve_app_shell(rel) {
         selected_app_root.join("index.html")
     } else {
         target
     };
-    if !target.is_file() {
+    if release.is_none() && !target.is_file() {
         return respond_status(request, 404, "not found");
     }
-    let mut bytes = fs::read(&target)?;
+    let mut bytes = if let Some(release) = release.as_ref() {
+        match release.read(rel) {
+            Ok(Some((_name, bytes))) => bytes,
+            Ok(None) => {
+                return respond_status(
+                    request,
+                    404,
+                    "asset is not part of the requested shell release",
+                )
+            }
+            Err(_) => {
+                return respond_status(
+                    request,
+                    503,
+                    "requested shell asset failed integrity verification",
+                )
+            }
+        }
+    } else {
+        fs::read(&target)?
+    };
     let mime = mime_for(&target);
     let is_index = target == selected_app_root.join("index.html");
     if is_index {
@@ -3441,6 +3490,10 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
             None
         };
         let html = String::from_utf8(bytes).context("Business OS index.html is not UTF-8")?;
+        let html = match release.as_ref() {
+            Some(release) => super::shell_assets::pin_document(html, &release.version)?,
+            None => html,
+        };
         let design_templates = load_design_template_manifests(root)?;
         bytes = inject_launch_context(
             html,
@@ -3451,7 +3504,11 @@ fn serve_static(root: &Path, app_root: &Path, request: Request, path: &str) -> a
         )?
         .into_bytes();
     }
-    let cache_control = business_os_static_cache_control(is_index, &rel, request.url());
+    let cache_control = if release.is_some() && !is_index {
+        "public, max-age=31536000, immutable"
+    } else {
+        business_os_static_cache_control(is_index, &rel, request.url())
+    };
     if is_index {
         // Personalized per session: no ETag sharing across users.
         respond_static_success(request, &bytes, mime, cache_control, None)?;
@@ -3543,7 +3600,12 @@ fn shell_generation_mismatch_response(
     response
 }
 
-fn runtime_module_static_authorized(root: &Path, rel: &str) -> bool {
+fn runtime_module_static_authorized(
+    root: &Path,
+    app_root: &Path,
+    rel: &str,
+    release: Option<&super::shell_assets::VerifiedRelease>,
+) -> bool {
     // The packaged registry is shell metadata, not a module directory. Treating
     // its file name as a module id makes a fresh Shell-V2 boot fail at the
     // mandatory catalog fetch even though the signed slot contains the file.
@@ -3557,13 +3619,18 @@ fn runtime_module_static_authorized(root: &Path, rel: &str) -> bool {
         if module_id.is_empty() {
             return false;
         }
-        let module_dir = match store::resolve_business_os_app_root(root) {
-            Ok(app_root) => app_root.join("modules").join(module_id),
-            Err(_) => return false,
+        let module_dir = app_root.join("modules").join(module_id);
+        let manifest_bytes = if let Some(release) = release {
+            release
+                .read(&format!("modules/{module_id}/module.json"))
+                .ok()
+                .flatten()
+                .map(|(_, bytes)| bytes)
+        } else {
+            fs::read(module_dir.join("module.json")).ok()
         };
-        let manifest = fs::read(module_dir.join("module.json"))
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+        let manifest =
+            manifest_bytes.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
         return manifest.is_some_and(|manifest| {
             super::customer_apps::authorize_global_module(&module_dir, &manifest).is_ok()
         });
@@ -3628,9 +3695,11 @@ fn inject_launch_context(
 }
 
 fn business_os_static_cache_control(is_index: bool, rel: &str, request_url: &str) -> &'static str {
-    if is_index {
-        // The shell document carries the per-session launch context again, so
-        // it must not be shared between users by any cache.
+    if is_index || rel == "ctox-shell-manifest.json" {
+        // The shell document carries per-session launch context. The manifest
+        // is an active-slot pointer at a stable URL: a cached response can name
+        // a different release after activation. Neither may be shared or served
+        // stale. Immutable artifact files retain their own cache policy below.
         return "no-store";
     }
 
@@ -4067,6 +4136,54 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shell_root_rejects_invalid_selected_slot_even_when_source_exists() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("src/apps/business-os");
+        fs::create_dir_all(&source)?;
+        fs::write(source.join("index.html"), "unrelated source shell")?;
+        let mut state =
+            serde_json::to_value(super::super::shell_update::ShellUpdateState::default())?;
+        state["currentSlot"] = serde_json::json!("1.2.3");
+        state["activeVersion"] = serde_json::json!("1.2.3");
+        let conn = store::open_store(root.path())?;
+        conn.execute_batch(
+            "CREATE TABLE business_os_shell_update_state (
+                singleton INTEGER PRIMARY KEY, state_json TEXT NOT NULL, updated_at TEXT NOT NULL
+             );",
+        )?;
+        conn.execute(
+            "INSERT INTO business_os_shell_update_state VALUES (1, ?1, 'test')",
+            [state.to_string()],
+        )?;
+        drop(conn);
+        let error = resolve_business_os_app_root(root.path()).unwrap_err();
+        assert!(error.to_string().contains("selected Business OS shell"));
+        Ok(())
+    }
+
+    #[test]
+    fn shell_root_never_boots_an_archived_tree() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let archived = root
+            .path()
+            .join("archive/2026-05-18-cleanup/generated/business-os");
+        fs::create_dir_all(&archived)?;
+        fs::write(archived.join("index.html"), "obsolete archived shell")?;
+        assert!(resolve_business_os_app_root(root.path()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn shell_root_allows_source_install_without_selected_release() -> anyhow::Result<()> {
+        let root = tempfile::tempdir()?;
+        let source = root.path().join("src/apps/business-os");
+        fs::create_dir_all(&source)?;
+        fs::write(source.join("index.html"), "source installation")?;
+        assert_eq!(resolve_business_os_app_root(root.path())?, source);
+        Ok(())
+    }
+
+    #[test]
     fn subscription_auth_control_request_accepts_only_public_provider_selectors() {
         let request: SubscriptionAuthStartRequest = serde_json::from_value(serde_json::json!({
             "provider": "codex",
@@ -4224,7 +4341,9 @@ mod tests {
         fs::write(private.join("index.js"), "private")?;
         assert!(!runtime_module_static_authorized(
             root.path(),
-            "installed-modules/rem-private/index.js"
+            &root.path().join("src/apps/business-os"),
+            "installed-modules/rem-private/index.js",
+            None
         ));
 
         let public = root
@@ -4238,7 +4357,9 @@ mod tests {
         fs::write(public.join("index.js"), "public")?;
         assert!(runtime_module_static_authorized(
             root.path(),
-            "installed-modules/public-app/index.js"
+            &root.path().join("src/apps/business-os"),
+            "installed-modules/public-app/index.js",
+            None
         ));
 
         let source_root = root.path().join("src/apps/business-os");
@@ -4250,11 +4371,15 @@ mod tests {
         )?;
         assert!(runtime_module_static_authorized(
             root.path(),
-            "modules/registry.json"
+            &source_root,
+            "modules/registry.json",
+            None
         ));
         assert!(!runtime_module_static_authorized(
             root.path(),
-            "modules/rem-source/index.js"
+            &source_root,
+            "modules/rem-source/index.js",
+            None
         ));
         Ok(())
     }
@@ -4593,10 +4718,10 @@ mod tests {
     }
 
     #[test]
-    fn static_index_revalidates_with_a_bodyless_304() {
+    fn static_index_is_never_cached_and_304_writer_is_bodyless() {
         assert_eq!(
             business_os_static_cache_control(true, "index.html", "/"),
-            "no-cache, must-revalidate"
+            "no-store"
         );
         let mut response = Vec::new();
         write_static_not_modified_response(
@@ -4620,6 +4745,21 @@ mod tests {
         assert!(is_compressible("image/svg+xml"));
         assert!(!is_compressible("image/png"));
         assert!(!is_compressible("font/woff2"));
+    }
+
+    #[test]
+    fn active_shell_manifest_is_never_cached_across_activation() {
+        for url in [
+            "/ctox-shell-manifest.json",
+            "/business-os/ctox-shell-manifest.json",
+            "/ctox-shell-manifest.json?v=release-shell-v2-test",
+        ] {
+            assert_eq!(
+                business_os_static_cache_control(false, "ctox-shell-manifest.json", url),
+                "no-store",
+                "active-slot identity must not use a stale response: {url}"
+            );
+        }
     }
 
     #[test]

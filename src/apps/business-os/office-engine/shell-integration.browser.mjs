@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import { tmpdir } from 'node:os';
 import { crc32 } from 'node:zlib';
+import { createHash } from 'node:crypto';
 import { chromium } from '../node_modules/playwright/index.mjs';
 
 // Serve the repository root on port 8766 before running this harness. It uses
@@ -28,6 +29,7 @@ const formulas = process.argv.includes('--formulas');
 const importRoundtrip = process.argv.includes('--import-roundtrip');
 const formatting = process.argv.includes('--formatting');
 const worksheets = process.argv.includes('--worksheets');
+const uiExport = process.argv.includes('--ui-export');
 const selectedKind = process.argv.find(value=>value.startsWith('--kind='))?.slice('--kind='.length);
 assert.ok(!selectedKind || ['document','spreadsheet'].includes(selectedKind), 'Unknown test kind');
 
@@ -61,6 +63,19 @@ let activeErrors;
 try {
   for (const kind of selectedKind ? [selectedKind] : ['spreadsheet', 'document']) {
     const context = await browser.newContext({ viewport: { width: 1440, height: 960 } });
+    await context.exposeBinding('officeLabExport', async (_, requestedKind, editorData, sourceData) => {
+      assert.equal(requestedKind,kind);
+      const directory=await mkdtemp(path.join(temporary,'ui-export-'));
+      const binary=path.join(directory,'editor.bin'),sourcePath=path.join(directory,'source.input'),exported=path.join(directory,'exported.zip');
+      let source=Buffer.from(sourceData,'base64');
+      if(kind==='spreadsheet' && source.subarray(0,2).toString()!=='PK') {
+        assert.match(source.toString(),/^[,\r\n]*$/);source=emptyWorkbook();
+      }
+      await writeFile(binary,Buffer.from(editorData,'base64'));await writeFile(sourcePath,source);
+      await run(engineBin,['export',kind,binary,sourcePath,exported]);
+      const bytes=await readFile(exported);
+      return {data:bytes.toString('base64'),sha256:createHash('sha256').update(bytes).digest('hex')};
+    });
     await context.exposeBinding('officeLabPrepare', async (_, requestedKind, encoded) => {
       assert.equal(requestedKind, kind);
       let source = Buffer.from(encoded, 'base64');
@@ -230,10 +245,26 @@ try {
       await editor.locator('#ce-cell-content').fill('CTOX_SECOND_SHEET_SAVED');await editor.locator('#ce-cell-content').press('Enter');
       await editor.locator('#statusbar li.list-item').filter({hasText:originalSheetName}).click();
     }
-    await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
-    if(duringSave) {
-      assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0,'Continued editing must occur before the first save is acknowledged');
-      await page.evaluate(()=>window.officeLab.releaseFirstCommit());
+    if(uiExport) {
+      await page.locator(`[data-${prefix}-export]`).click();
+      const downloadPromise=page.waitForEvent('download',{timeout:30000});
+      await page.locator('#lab-drawer button[type="submit"]').click();
+      if(duringSave) {
+        assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0);
+        await page.evaluate(()=>window.officeLab.releaseFirstCommit());
+      }
+      const download=await downloadPromise;
+      const file=path.join(temporary,`${kind}-ui-export.${kind==='document'?'docx':'xlsx'}`);
+      await download.saveAs(file);
+      const xml=await run('unzip',['-p',file,kind==='document'?'word/document.xml':'xl/sharedStrings.xml']);
+      assert.ok(xml.stdout.replace(/<[^>]+>/g,'').includes(replacement),'UI export must contain the latest edits without requiring a separate Save click');
+      if(duringSave && kind==='spreadsheet') assert.ok(xml.stdout.includes('DURING_SAVE'),'UI export must not use the stale version while a save is pending');
+    } else {
+      await editor.getByRole('button',{name:'Speichern (⌘+S)',exact:true}).click();
+      if(duringSave) {
+        assert.equal(await page.evaluate(()=>window.officeLab.completedCommits.length),0,'Continued editing must occur before the first save is acknowledged');
+        await page.evaluate(()=>window.officeLab.releaseFirstCommit());
+      }
     }
     await page.waitForFunction(()=>window.officeLab.commands.some(command=>command.type.endsWith('.commit')),null,{timeout:15000});
     await page.waitForFunction(expected=>window.officeLab.completedCommits.length>=expected,duringSave?2:1,{timeout:20000});

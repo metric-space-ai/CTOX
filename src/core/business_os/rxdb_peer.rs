@@ -2661,7 +2661,7 @@ async fn run_native_peer(
     if repaired_revisions > 0 {
         eprintln!("[business-os] repaired {repaired_revisions} legacy business_commands revisions");
     }
-    let clamped_documents = clamp_oversized_projected_documents(&database_path)
+    let clamped_documents = clamp_oversized_projected_documents(&root, &database_path)
         .context("clamp oversized projected Business OS documents")?;
     if clamped_documents > 0 {
         eprintln!(
@@ -3885,7 +3885,7 @@ fn open_native_peer_lock_file(root: &Path) -> anyhow::Result<File> {
         })
 }
 
-fn acquire_native_peer_process_lock(root: &Path) -> anyhow::Result<Option<File>> {
+pub(super) fn acquire_native_peer_process_lock(root: &Path) -> anyhow::Result<Option<File>> {
     let lock_file = open_native_peer_lock_file(root)?;
     match lock_file.try_lock() {
         Ok(()) => Ok(Some(lock_file)),
@@ -5967,7 +5967,22 @@ fn projection_normalized_value_for_schema_field(
             ProjectionValueNormalization::Remove
         }
     };
-    match property.schema_type.as_deref() {
+    let declared_type = match property.schema_type.as_ref() {
+        Some(declared) if declared.single_type().is_none() => {
+            if !declared.matches_value(value) {
+                return fallback();
+            }
+            // A valid union member must not be coerced to another member.
+            // Strings still pass through the existing maxLength enforcement.
+            if value.is_string() {
+                Some("string")
+            } else {
+                return ProjectionValueNormalization::Keep;
+            }
+        }
+        declared => declared.and_then(|declared| declared.single_type()),
+    };
+    match declared_type {
         Some("number") => {
             if value.is_number() {
                 ProjectionValueNormalization::Keep
@@ -6123,7 +6138,12 @@ fn projection_default_value_for_field(
     if field.ends_with("_at_ms") || field == "createdAt" {
         return Value::from(timestamp_default);
     }
-    match property.schema_type.as_deref() {
+    match property
+        .schema_type
+        .as_ref()
+        .and_then(|declared| declared.default_type())
+    {
+        Some("null") => Value::Null,
         Some("array") => Value::Array(Vec::new()),
         Some("boolean") => Value::Bool(false),
         Some("integer") | Some("number") => Value::from(0),
@@ -6167,7 +6187,7 @@ pub(super) async fn upsert_business_record_projection_tombstone(
 
     let Some(previous) = existing else {
         let mut write_data = document;
-        prepare_projection_tombstone_document(schema, &mut write_data);
+        prepare_projection_tombstone_document(&schema.json_schema, &mut write_data);
         let write_data = fill_object_data_before_insert(schema, write_data)
             .map_err(|err| anyhow::anyhow!("fill projection tombstone envelope: {err}"))?;
         collection
@@ -6191,7 +6211,7 @@ pub(super) async fn upsert_business_record_projection_tombstone(
     } else {
         next = document;
     }
-    prepare_projection_tombstone_document(schema, &mut next);
+    prepare_projection_tombstone_document(&schema.json_schema, &mut next);
 
     let result = collection
         .storage_instance
@@ -6210,23 +6230,34 @@ pub(super) async fn upsert_business_record_projection_tombstone(
     Ok(())
 }
 
-fn prepare_projection_tombstone_document(schema: &rxdb::rx_schema::RxSchema, document: &mut Value) {
+fn prepare_projection_tombstone_document(schema: &RxJsonSchema, document: &mut Value) {
     let Some(object) = document.as_object_mut() else {
         return;
     };
     object.insert("_deleted".to_string(), Value::Bool(true));
-    if schema.json_schema.properties.contains_key("is_deleted") {
+    if schema.properties.contains_key("is_deleted") {
         object.insert("is_deleted".to_string(), Value::Bool(true));
     }
-    for field in &schema.json_schema.required {
+    for field in &schema.required {
         if field.starts_with('_') {
             continue;
         }
         let missing = object.get(field).map(Value::is_null).unwrap_or(true);
-        if missing {
+        // Legacy wire-budget clamping could leave an omission object where
+        // a deleted chunk requires a string. Keeping that invalid value makes
+        // the tombstone fail validation on every projection pass. Repair only
+        // this deletion representation; valid stored values stay unchanged.
+        let invalid_type = object.get(field).is_some_and(|value| {
+            schema
+                .properties
+                .get(field)
+                .and_then(|property| property.schema_type.as_ref())
+                .is_some_and(|declared| !declared.matches_value(value))
+        });
+        if missing || invalid_type {
             object.insert(
                 field.clone(),
-                projection_tombstone_required_default(&schema.json_schema, field),
+                projection_tombstone_required_default(schema, field),
             );
         }
     }
@@ -6239,7 +6270,12 @@ fn projection_tombstone_required_default(schema: &RxJsonSchema, field: &str) -> 
     if let Some(default) = &property.default {
         return default.clone();
     }
-    match property.schema_type.as_deref() {
+    match property
+        .schema_type
+        .as_ref()
+        .and_then(|declared| declared.default_type())
+    {
+        Some("null") => Value::Null,
         Some("boolean") => Value::Bool(false),
         Some("number") | Some("integer") => Value::from(0),
         Some("array") => Value::Array(Vec::new()),
@@ -6247,6 +6283,85 @@ fn projection_tombstone_required_default(schema: &RxJsonSchema, field: &str) -> 
         _ => Value::String(String::new()),
     }
 }
+
+#[cfg(test)]
+mod projection_schema_union_tests {
+    use super::*;
+
+    fn nullable_property() -> JsonSchema {
+        serde_json::from_value(serde_json::json!({"type":["string","null"],"maxLength":4})).unwrap()
+    }
+
+    #[test]
+    fn union_projection_preserves_members_and_string_constraints() {
+        let property = nullable_property();
+        for value in [Value::Null, Value::String("task".into())] {
+            assert!(matches!(
+                projection_normalized_value_for_schema_field(
+                    "active_task_id",
+                    &property,
+                    &value,
+                    true,
+                    123
+                ),
+                ProjectionValueNormalization::Keep
+            ));
+        }
+        assert!(
+            matches!(projection_normalized_value_for_schema_field("active_task_id", &property, &Value::String("task-long".into()), true, 123), ProjectionValueNormalization::Replace(Value::String(value)) if value == "task")
+        );
+    }
+
+    #[test]
+    fn invalid_union_values_use_typed_fallbacks_not_arbitrary_coercion() {
+        let property = nullable_property();
+        assert!(matches!(
+            projection_normalized_value_for_schema_field(
+                "active_task_id",
+                &property,
+                &Value::from(7),
+                true,
+                123
+            ),
+            ProjectionValueNormalization::Replace(Value::Null)
+        ));
+        assert!(matches!(
+            projection_normalized_value_for_schema_field(
+                "active_task_id",
+                &property,
+                &Value::from(7),
+                false,
+                123
+            ),
+            ProjectionValueNormalization::Remove
+        ));
+    }
+
+    #[test]
+    fn projection_and_tombstone_defaults_honor_explicit_nullability() {
+        let schema: RxJsonSchema = serde_json::from_value(serde_json::json!({"version":0,"primaryKey":"id","type":"object","properties":{"id":{"type":"string"},"active_task_id":{"type":["string","null"]}},"required":["id","active_task_id"]})).unwrap();
+        assert_eq!(
+            projection_default_value_for_field(
+                "active_task_id",
+                &schema.properties["active_task_id"],
+                123
+            ),
+            Value::Null
+        );
+        assert_eq!(
+            projection_tombstone_required_default(&schema, "active_task_id"),
+            Value::Null
+        );
+        assert_eq!(
+            projection_tombstone_required_default(&schema, "id"),
+            Value::String(String::new())
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "rxdb_peer_projection_tombstone_tests.rs"]
+mod projection_tombstone_tests;
 
 #[derive(Debug)]
 struct ChannelStateProjection {
@@ -7971,10 +8086,15 @@ fn repair_legacy_business_command_revisions(database_path: &Path) -> anyhow::Res
 /// Runs once per peer bring-up, next to the legacy-revision repair, and uses
 /// the same revision contract: `revision` column and `data._rev` are written
 /// together, with the height incremented so peers pull the trimmed document.
-fn clamp_oversized_projected_documents(database_path: &Path) -> anyhow::Result<usize> {
+fn clamp_oversized_projected_documents(root: &Path, database_path: &Path) -> anyhow::Result<usize> {
     if !database_path.is_file() {
         return Ok(0);
     }
+    let file_storage_collections: HashSet<String> =
+        super::rxdb_peer_demand_files::demand_file_source_configs(root)
+            .into_iter()
+            .map(|source| source.storage_collection)
+            .collect();
     let mut conn = Connection::open(database_path)?;
     let tables = {
         let mut statement = conn.prepare(
@@ -7987,6 +8107,18 @@ fn clamp_oversized_projected_documents(database_path: &Path) -> anyhow::Result<u
     let transaction = conn.transaction()?;
     let mut clamped = 0usize;
     for table in tables {
+        let collection = table
+            .strip_prefix("ctox_business_os__")
+            .and_then(|name| name.rsplit_once("__v"))
+            .map(|(collection, _)| collection);
+        // Legacy startup repair must never rewrite typed source text or make an
+        // oversized historical source record fatal to peer bring-up. New source
+        // writes have explicit admission; existing bytes remain recoverable.
+        if collection.is_some_and(|name| {
+            file_storage_collections.contains(name) || name == "business_module_source_files"
+        }) {
+            continue;
+        }
         let quoted = sqlite_quote_identifier(&table);
         let rows = {
             let Ok(mut statement) = transaction.prepare(&format!(
@@ -8014,7 +8146,7 @@ fn clamp_oversized_projected_documents(database_path: &Path) -> anyhow::Result<u
             let Ok(mut document) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
-            store::clamp_projected_document_to_wire_budget(&table, &id, &mut document);
+            store::clamp_projected_document_to_wire_budget(&table, &id, &mut document)?;
             let trimmed = serde_json::to_string(&document)?;
             if trimmed.len() >= raw.len() {
                 continue;
@@ -8944,7 +9076,7 @@ fn normalize_schema_indexes(value: &mut Value) {
     }
 }
 
-fn business_os_schema_contract() -> &'static HashMap<String, Value> {
+pub(super) fn business_os_schema_contract() -> &'static HashMap<String, Value> {
     static CONTRACT: OnceLock<HashMap<String, Value>> = OnceLock::new();
     CONTRACT.get_or_init(|| {
         serde_json::from_str(include_str!("business_os_schema_contract.json"))
@@ -9552,6 +9684,73 @@ pub(in crate::business_os) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn projection_union_types_preserve_values_and_use_valid_repair_defaults() {
+        for (declared, accepted, rejected) in [
+            (
+                json!(["string", "null"]),
+                vec![json!("task"), Value::Null],
+                json!(7),
+            ),
+            (
+                json!(["integer", "boolean"]),
+                vec![json!(7), json!(false)],
+                json!("7"),
+            ),
+        ] {
+            let property: JsonSchema = serde_json::from_value(json!({
+                "type": declared,
+                "maxLength": 8
+            }))
+            .unwrap();
+            for value in accepted {
+                assert!(matches!(
+                    projection_normalized_value_for_schema_field(
+                        "value", &property, &value, true, 0
+                    ),
+                    ProjectionValueNormalization::Keep
+                ));
+            }
+            assert!(matches!(
+                projection_normalized_value_for_schema_field(
+                    "value", &property, &rejected, false, 0
+                ),
+                ProjectionValueNormalization::Remove
+            ));
+            let ProjectionValueNormalization::Replace(repaired) =
+                projection_normalized_value_for_schema_field(
+                    "value", &property, &rejected, true, 0,
+                )
+            else {
+                panic!("required invalid field must receive a valid repair default")
+            };
+            assert!(property
+                .schema_type
+                .as_ref()
+                .unwrap()
+                .matches_value(&repaired));
+            let schema = schema_from_json(json!({
+                "version": 0, "primaryKey": "id", "type": "object",
+                "properties": {"id": {"type":"string", "maxLength":64}, "value": property},
+                "required": ["id", "value"]
+            }));
+            let tombstone_default = projection_tombstone_required_default(&schema, "value");
+            assert!(schema.properties["value"]
+                .schema_type
+                .as_ref()
+                .unwrap()
+                .matches_value(&tombstone_default));
+        }
+        let property: JsonSchema = serde_json::from_value(json!({
+            "type": ["string", "null"], "maxLength": 4
+        }))
+        .unwrap();
+        assert!(matches!(
+            projection_normalized_value_for_schema_field("value", &property, &json!("abcdef"), true, 0),
+            ProjectionValueNormalization::Replace(Value::String(value)) if value == "abcd"
+        ));
+    }
 
     #[test]
     fn bound_peer_capability_requires_fresh_matching_p256_proof() -> anyhow::Result<()> {
@@ -11301,6 +11500,97 @@ pub(in crate::business_os) mod tests {
         assert!(schema.properties.contains_key("title"));
         assert!(!schema.properties.contains_key("schema"));
         assert!(!schema.properties.contains_key("conflictStrategy"));
+        Ok(())
+    }
+
+    #[test]
+    fn demand_file_wire_budget_preserves_bytes_on_write_and_restart() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let root = temp.path();
+        let mut extras = serde_json::Map::new();
+        extras.insert("syncProfile".to_owned(), json!("demand-chunks"));
+        write_sync_profile_chunk_module(root, &extras, demand_chunk_schema_properties())?;
+        let path = store::rxdb_store_path(root);
+        fs::create_dir_all(path.parent().expect("database parent"))?;
+        let conn = Connection::open(&path)?;
+        let collections: HashSet<_> =
+            super::super::rxdb_peer_demand_files::demand_file_source_configs(root)
+                .into_iter()
+                .map(|source| source.storage_collection)
+                .collect();
+        assert!(collections.contains("camscan_blob_chunks"));
+        assert!(!collections.contains("desktop_files"));
+        let bytes = "A".repeat(store::MAX_PROJECTED_DOCUMENT_BYTES + 65_536);
+        let mut snapshots = Vec::new();
+        for collection in collections {
+            let table = format!("ctox_business_os__{collection}__v0");
+            conn.execute_batch(&format!(
+                "CREATE TABLE {table} (id TEXT PRIMARY KEY, revision TEXT,
+                 data TEXT NOT NULL, lastWriteTime REAL NOT NULL, deleted INTEGER)"
+            ))?;
+            store::upsert_rxdb_collection_record(
+                root,
+                &collection,
+                "preserved-chunk",
+                1,
+                json!({"id":"preserved-chunk", "data":bytes, "idx":0,
+                       "blob_id":"preserved", "file_id":"preserved"}),
+            )?;
+            let raw: String = conn.query_row(
+                &format!("SELECT data FROM {table} WHERE id = 'preserved-chunk'"),
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(serde_json::from_str::<Value>(&raw)?["data"], bytes);
+            snapshots.push((table, raw));
+        }
+        drop(conn);
+        assert_eq!(clamp_oversized_projected_documents(root, &path)?, 0);
+        let reopened = Connection::open(&path)?;
+        for (table, before) in snapshots {
+            let after: String = reopened.query_row(
+                &format!("SELECT data FROM {table} WHERE id = 'preserved-chunk'"),
+                [],
+                |row| row.get(0),
+            )?;
+            assert_eq!(after, before, "{table}: restart changed stored file bytes");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn startup_repair_preserves_oversized_historical_source_without_aborting() -> anyhow::Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("legacy-source.sqlite3");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(
+            "CREATE TABLE ctox_business_os__business_module_source_files__v0
+             (id TEXT PRIMARY KEY, revision TEXT, data TEXT NOT NULL,
+              lastWriteTime REAL NOT NULL, deleted INTEGER)",
+        )?;
+        let raw = serde_json::to_string(&json!({
+            "id": "legacy:large.js",
+            "content": "x".repeat(2 * 1024 * 1024),
+            "_rev": "7-preserved",
+            "_meta": {"lwt": 1234.0},
+            "_deleted": false
+        }))?;
+        conn.execute(
+            "INSERT INTO ctox_business_os__business_module_source_files__v0
+             VALUES (?1, '7-preserved', ?2, 1234.0, 0)",
+            params!["legacy:large.js", raw],
+        )?;
+        drop(conn);
+        assert_eq!(clamp_oversized_projected_documents(temp.path(), &path)?, 0);
+        let conn = Connection::open(&path)?;
+        let after: (String, String, f64) = conn.query_row(
+            "SELECT data, revision, lastWriteTime
+             FROM ctox_business_os__business_module_source_files__v0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(after, (raw, "7-preserved".to_owned(), 1234.0));
         Ok(())
     }
 

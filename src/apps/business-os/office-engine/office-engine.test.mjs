@@ -196,7 +196,7 @@ test('bridge preserves native stale-base conflicts without waiting for full meta
       async leaseCollection(name, reason) {
         events.push(`lease:${name}:${reason}`);
         return {
-          bridge: { state: { async awaitInSync() { events.push(`synced:${name}`); } } },
+          bridge: { state: { async awaitInSync() { events.push(`synced:${name}`); }, async pushToRemotePeers() { events.push(`push:${name}`); } } },
           async release() { events.push(`release:${name}`); },
         };
       },
@@ -210,6 +210,13 @@ test('bridge preserves native stale-base conflicts without waiting for full meta
     (error) => error.code === 'version_conflict');
   assert.deepEqual(events, [
     'lease:spreadsheet_blob_chunks:spreadsheets-prepare',
+    'push:spreadsheet_blob_chunks',
+    'lease:spreadsheet_versions:spreadsheets-prepare-source',
+    'push:spreadsheet_versions',
+    'release:spreadsheet_versions',
+    'lease:spreadsheets:spreadsheets-prepare-source',
+    'push:spreadsheets',
+    'release:spreadsheets',
     'dispatch',
     'release:spreadsheet_blob_chunks',
   ]);
@@ -298,7 +305,10 @@ test('Business OS bridge reads versions and dispatches typed office commands', a
   assert.equal(commands[2].command.type, 'office.document.export');
   assert.deepEqual(leases, [
     'lease:document_blob_chunks:documents-load-version', 'release:document_blob_chunks',
-    'lease:document_blob_chunks:documents-prepare', 'release:document_blob_chunks',
+    'lease:document_blob_chunks:documents-prepare', 'push:document_blob_chunks',
+    'lease:document_versions:documents-prepare-source', 'push:document_versions', 'release:document_versions',
+    'lease:documents:documents-prepare-source', 'push:documents', 'release:documents',
+    'release:document_blob_chunks',
     'lease:document_blob_chunks:documents-commit', 'push:document_blob_chunks', 'release:document_blob_chunks',
     'lease:document_blob_chunks:documents-export', 'release:document_blob_chunks',
   ]);
@@ -446,7 +456,7 @@ test('prepare result is immediately readable before the native version projectio
       async startCollection() { return { state: { async awaitInSync() {} } }; },
       async leaseCollection() {
         return {
-          bridge: { state: { async awaitInSync() {}, demandFileLoader: fileLoader } },
+          bridge: { state: { async awaitInSync() {}, async pushToRemotePeers() {}, demandFileLoader: fileLoader } },
           async release() {},
         };
       },
@@ -497,6 +507,7 @@ test('demand-file chunk leases do not wait for complete collection replication',
             state: {
               demandFileLoader: { async fetchFile() { return []; } },
               async awaitInSync() { awaitedFullReplication += 1; },
+              async pushToRemotePeers() {},
             },
           },
           async release() { released += 1; },
@@ -517,7 +528,7 @@ test('demand-file chunk leases do not wait for complete collection replication',
   assert.equal(awaitedFullReplication, 0);
   assert.equal(metadataStarts, 0);
   assert.equal(dispatched, 1);
-  assert.equal(released, 1);
+  assert.equal(released, 3);
 });
 
 test('pending demand-file leases wait for a direct bridge before opening a document', async () => {
@@ -657,7 +668,7 @@ test('office bridge resumes an inserted command after a retryable push timeout',
     sync: {
       async startCollection() { return { state: { async awaitInSync() {} } }; },
       async leaseCollection() {
-        return { bridge: { state: { async awaitInSync() {} } }, async release() {} };
+        return { bridge: { state: { async awaitInSync() {}, async pushToRemotePeers() {} } }, async release() {} };
       },
     },
     commandBus: {
@@ -725,7 +736,7 @@ test('Business OS bridge releases a demand-only chunk lease after an operation f
       async startCollection() { return { state: { async awaitInSync() {} } }; },
       async leaseCollection() {
         return {
-          bridge: { state: { async awaitInSync() {} } },
+          bridge: { state: { async awaitInSync() {}, async pushToRemotePeers() {} } },
           async release() { released += 1; },
         };
       },
@@ -733,7 +744,7 @@ test('Business OS bridge releases a demand-only chunk lease after an operation f
     commandBus: { async dispatch() { throw new Error('native command failed'); } },
   }, 'document');
   await assert.rejects(bridge.prepare({ recordId: 'doc_1', versionId: 'v1' }), /native command failed/);
-  assert.equal(released, 1);
+  assert.equal(released, 3);
 });
 
 test('Office RPC budgets all storage-backed editor operations for live replication latency', async () => {
@@ -1244,6 +1255,7 @@ test('CTOX Spreadsheets comparison config matches the pinned Oracle view contrac
     help: false,
     plugins: false,
     macros: false,
+    autosave: false,
     compactHeader: true,
     toolbarHideFileName: true,
     compactToolbar: false,
@@ -1349,6 +1361,22 @@ test('document edit/save differential uses measured geometry and the CTOX Docume
   assert.match(flow, /state\/document\.edit-save/);
   assert.match(runtime, /asc_nativeGetFile2\(\)/);
   assert.doesNotMatch(runtime, /fetch\([^\n]*downloadas/);
+});
+
+test('both editor themes include provenance-tracked white header icons', async () => {
+  const root = new URL('../vendor/ctox-office/', import.meta.url);
+  const provenance = JSON.parse(await readFile(new URL('provenance.json', root), 'utf8'));
+  for (const kind of ['document', 'spreadsheet']) {
+    const prefix = `upstream/web-apps/apps/common/main/resources/img/header/icon-${kind}`;
+    const source = await readFile(new URL(`${prefix}.svg`, root), 'utf8');
+    const white = await readFile(new URL(`${prefix}-white.svg`, root), 'utf8');
+    assert.equal(white, source.replaceAll(/fill="#[0-9a-f]{6}"/gi, 'fill="#ffffff"'));
+    assert.match(white, /fill="#ffffff"/);
+    const input = provenance.upstream_static_inputs.find((entry) => entry.staged_path === `${prefix}-white.svg`);
+    assert.equal(input?.derived_from, `${prefix}.svg`);
+    assert.equal(input?.transformation, 'solid-svg-fills-to-white-v1');
+    assert.equal(input?.sha256, createHash('sha256').update(white).digest('hex'));
+  }
 });
 
 test('document undo/clipboard differential uses CTOX Documents and complete font closure', async () => {

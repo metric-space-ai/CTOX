@@ -59,6 +59,27 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `channel=${channel}\n`);
           NODE
 
+      - name: Install pinned browser test dependencies
+        run: npm ci --prefix src/apps/business-os
+
+      - name: Guard CTOX harness rendering
+        run: node src/apps/business-os/modules/ctox/test.js
+
+      - name: Install pinned layout test browser
+        working-directory: src/apps/business-os
+        run: npx playwright install --with-deps chromium
+
+      - name: Guard visible harness layout and loaded document identity
+        run: node src/apps/business-os/modules/ctox/tests/layout.browser.mjs
+
+      - name: Run Office bridge regressions
+        run: node --test src/apps/business-os/office-engine/office-engine.test.mjs src/apps/business-os/office-engine/office-commit-upload.test.mjs src/apps/business-os/office-engine/save-lifecycle.test.mjs
+
+      - name: Guard mobile Office editor height
+        run: npm --prefix src/apps/business-os run qa:shell-office-height -- --output-dir "${RUNNER_TEMP}/ctox-shell-office-height"
+      - name: Guard Office notification contract
+        run: npm --prefix src/apps/business-os run qa:office-notifications -- --output-dir "${RUNNER_TEMP}/ctox-office-notifications"
+
       - name: Run focused shell artifact tests
         run: npm run test:shell-artifact --prefix src/apps/business-os
 

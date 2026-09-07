@@ -1,4 +1,8 @@
 {
+  "dataState_loading": "Wird geladen…",
+  "dataState_offline": "Nicht verbunden · letzter lokaler Stand",
+  "dataState_error": "Laden fehlgeschlagen",
+  "dataState_idle": "Keine aktive Aufgabe",
   "now": "Jetzt",
   "loadingRuntime": "CTOX Runtime wird geladen",
   "loadingRuntimeDetail": "Flow, Queue und Status werden aktualisiert.",
@@ -184,7 +188,6 @@
   "laneCommunication": "Kommunikation mit dem Owner",
   "laneQueue": "Warteschlange und Ausführung",
   "laneEvidence": "Nachweisprüfung",
-  "loadFailed": "Laden fehlgeschlagen",
   "retryLoad": "Erneut laden",
   "syncDisconnected": "Sync nicht verbunden – Anzeige kann veraltet sein",
   "openInChat": "Im Chat öffnen",

@@ -1,0 +1,82 @@
+{
+  "schema": "ctox.shell.release-http-probe.v1",
+  "binarySha256": "580887fe5133089d77dc6dd1a44c0e865e539c9a1d22285738ce6ee8d602790c",
+  "root": "/home/ctox/.cache/ctox/file-preservation-fbeca32b7/browser-timing-release-final-20260906",
+  "passed": true,
+  "latencyBudgetMs": 5000,
+  "latencyBudgetPassed": true,
+  "results": [
+    {
+      "url": "/",
+      "status": 200,
+      "bytes": 174389,
+      "elapsedMs": 3467.622435
+    },
+    {
+      "url": "/index.html",
+      "status": 200,
+      "bytes": 174393,
+      "elapsedMs": 78.22671700000001
+    },
+    {
+      "url": "/business-os",
+      "status": 200,
+      "bytes": 174393,
+      "elapsedMs": 30.885207999999693
+    },
+    {
+      "url": "/business-os/",
+      "status": 200,
+      "bytes": 174393,
+      "elapsedMs": 28.303608000000168
+    },
+    {
+      "url": "/business-os/_shell/0.1.46-beta.13/app.css?v=unrelated-shell-v2-token",
+      "status": 200,
+      "bytes": 249842,
+      "elapsedMs": 4.883845000000292
+    },
+    {
+      "url": "/business-os/_shell/9.9.999/app.js",
+      "status": 410,
+      "bytes": 40,
+      "elapsedMs": 8.399825999999848
+    },
+    {
+      "url": "/business-os/_shell/0.1.46-beta.13/%00app.js",
+      "status": 400,
+      "bytes": 31,
+      "elapsedMs": 0.6533439999998336
+    },
+    {
+      "url": "/business-os/_shell/0.1.46-beta.13/does-not-exist.js",
+      "status": 404,
+      "bytes": 48,
+      "elapsedMs": 1.5906720000002679
+    },
+    {
+      "url": "/business-os/_shell/0.1.46-beta.13/app.css",
+      "status": 503,
+      "bytes": 51,
+      "elapsedMs": 0.929721999999856
+    },
+    {
+      "url": "/business-os/_shell/0.1.46-beta.13/app.css",
+      "status": 200,
+      "bytes": 249842,
+      "elapsedMs": 3.7604180000003
+    },
+    {
+      "url": "/business-os/_shell/0.1.46-beta.13/app.css",
+      "status": 503,
+      "bytes": 51,
+      "elapsedMs": 1.3425069999998414
+    },
+    {
+      "url": "/business-os/_shell/0.1.46-beta.13/app.css",
+      "status": 200,
+      "bytes": 249842,
+      "elapsedMs": 3.4369830000000547
+    }
+  ]
+}

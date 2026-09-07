@@ -1,8 +1,8 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
-import { loadModuleMessages } from '../../shared/i18n.js';
 import { renderListOrState } from '../../shared/list-state.js';
-import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260906-crew-home-v339';
+import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260907-shell-v2-crew-home-v340';
 import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
+import { workspaceDataState } from './data-state.js?v=20260906-data-state-v1';
 
 const FLOW_WIDTH = 1760;
 const FLOW_HEIGHT = 1050;
@@ -20,7 +20,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260906-crew-home-v339';
+const CTOX_STYLE_BUILD = '20260907-shell-v2-crew-home-v340';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -76,7 +76,6 @@ const labels = {
     shape_blob: "Tropfen",
     shape_square: "eckig",
     shape_triangle: "Dreieck",
-    loadFailed: "Laden fehlgeschlagen",
     retryLoad: "Erneut laden",
     syncDisconnected: "Sync nicht verbunden – Anzeige kann veraltet sein",
     openInChat: "Im Chat öffnen",
@@ -351,7 +350,6 @@ const labels = {
     shape_blob: "blob",
     shape_square: "square",
     shape_triangle: "triangle",
-    loadFailed: "Loading failed",
     retryLoad: "Reload",
     syncDisconnected: "Sync not connected – the view may be stale",
     openInChat: "Open in chat",
@@ -693,6 +691,8 @@ export async function mount(ctx) {
     zoom: DEFAULT_ZOOM,
     statusMessage: '',
     runtimeStatus: 'Loading status',
+    dataLoaded: false,
+    dataError: '',
     focusTask: launchFocusTask || readFocusTask(),
     detailDrawer: null,
     taskSearch: '',
@@ -758,7 +758,8 @@ export async function mount(ctx) {
     state.interactionGuardCleanup = wireMainInteractionGuard(state);
     // A cold RxDB/WebRTC lease must not block the OS window from becoming
     // operable. Hydrate in the background while the compact loading workspace is
-    // already visible; from then on RxDB change subscriptions drive every render.
+    // already visible; from then on RxDB change subscriptions drive every render
+    // (no poll loop). A failed first read is shown, never swallowed.
     void renderFromLocalCache(state).catch((error) => {
       if (!state.disposed) console.warn('[ctox] initial local render failed', error);
     });
@@ -767,7 +768,7 @@ export async function mount(ctx) {
     // worse than a loading/partial harness for transient wiring failures.
     if (!state.disposed) console.warn('[ctox] mount wiring failed; keeping harness shell', error);
     try {
-      renderLoading(state);
+      showDataError(state, error);
     } catch {}
   }
   return () => {
@@ -784,7 +785,9 @@ export async function mount(ctx) {
 
 async function loadCtoxMessages(lang) {
   const language = lang === 'en' ? 'en' : 'de';
-  labels[language] = await loadModuleMessages(import.meta.url, language, labels);
+  const response = await fetch(moduleAssetUrl(`./locales/${language}.json`));
+  if (!response.ok) throw new Error(`CTOX locale: HTTP ${response.status}`);
+  labels[language] = { ...labels[language], ...await response.json() };
 }
 
 async function renderFromLocalCache(state) {
@@ -796,15 +799,12 @@ async function renderFromLocalCache(state) {
   state.refreshInFlight = true;
   try {
     await hydrateFromLocal(state);
-    state.loadError = '';
+    state.dataError = '';
   } catch (error) {
     if (state.disposed) return;
-    state.loadError = String(error?.message || error || 'unknown');
-    if (state.model) {
-      render(state);
-    } else {
-      renderLoading(state);
-    }
+    // Keep the last successful model, selection and task list; the footer
+    // (or the empty workspace) names the failure and offers a retry.
+    showDataError(state, error);
     throw error;
   } finally {
     state.refreshInFlight = false;
@@ -822,9 +822,12 @@ async function renderFromLocalCache(state) {
 // One load path. Every collection is a bounded RxDB read; there is no HTTP
 // fallback and no poll loop — subscriptions (wireLocalRealtime) call this.
 async function hydrateFromLocal(state) {
+  // The two task sources fail loudly: a failed read must never look like an
+  // idle harness (showDataError keeps the last good model). Secondary sources
+  // degrade quietly.
   const [commands, queueTasks, bugReports, webStack, blobFlow, crewMembers, harnessStatus] = await Promise.all([
-    loadLocalCommands(state.ctx).catch(() => []),
-    loadLocalQueueTasks(state.ctx).catch(() => []),
+    loadLocalCommands(state.ctx),
+    loadLocalQueueTasks(state.ctx),
     loadLocalBugReports(state.ctx).catch(() => []),
     loadLocalWebStackOverview(state.ctx).catch((error) => ({ ok: false, error: error.message || String(error) })),
     loadHarnessFlowSnapshot(state.ctx).catch(() => emptyHarnessFlow('harness_flow_unavailable')),
@@ -846,6 +849,8 @@ async function hydrateFromLocal(state) {
   // swaps in the selected task's own event stream when the blob is not about it.
   state.flow = state.blobFlow;
   state.model = buildHarnessModel(state.bundle, state.flow, state.lang);
+  state.dataLoaded = true;
+  state.dataError = '';
   state.focusTask = state.focusTaskConsumed ? null : readFocusTask();
   reconcileSelection(state);
   const selected = getSelectedTask(state);
@@ -891,6 +896,7 @@ function wireLocalRealtime(state) {
       renderTimer = null;
       renderFromLocalCache(state).catch((error) => {
         console.warn('[ctox] local realtime render failed', error);
+        showDataError(state, error);
       });
     }, LOCAL_RENDER_DEBOUNCE_MS);
   };
@@ -914,6 +920,45 @@ function wireLocalRealtime(state) {
   };
 }
 
+function dataState(state) {
+  let available = false;
+  let error = state.dataError;
+  try {
+    available = Boolean(ctoxCollection(state.ctx, 'business_commands') && ctoxCollection(state.ctx, 'ctox_queue_tasks'));
+  } catch (failure) {
+    error ||= failure?.message || String(failure);
+  }
+  return workspaceDataState({
+    error,
+    available,
+    readiness: taskSourceReadiness(state),
+    loaded: state.dataLoaded,
+    tasks: state.model?.tasks || [],
+  });
+}
+
+function dataStatusMarkup(state) {
+  const status = dataState(state);
+  if (status.kind === 'ready') return '';
+  const message = labels[state.lang]['dataState_' + status.kind] || labels[state.lang].loadingRuntime;
+  const retry = status.kind === 'error'
+    ? ` <button type="button" class="ctox-button is-small" data-ctox-retry-load>${escapeHtml(labels[state.lang].retryLoad)}</button>`
+    : '';
+  return `<span data-ctox-data-state="${status.kind}" role="${status.kind === 'error' ? 'alert' : 'status'}">${escapeHtml(message)}${status.reason ? `: ${escapeHtml(status.reason)}` : ''}</span>${retry}`;
+}
+
+function showDataError(state, error) {
+  if (state.disposed) return;
+  state.dataError = error?.message || String(error);
+  // Keep the last successful model, selection and task list when a read fails.
+  if (state.model) render(state);
+  else renderLoading(state);
+}
+
+function dataPlaceholderMarkup() {
+  return '<div class="ctox-data-placeholder" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M32 7c15 0 26 10 26 25S48 58 32 58 7 48 7 32 17 7 32 7Z"/><path class="ctox-data-placeholder-eyes" d="M21 32q5 5 10 0M36 32q5 5 10 0"/></svg></div>';
+}
+
 function renderLoading(state) {
   const t = labels[state.lang];
   const main = state.ctx.host.querySelector('[data-ctox-main]');
@@ -930,12 +975,17 @@ function renderLoading(state) {
         </div>
       </header>
       <div class="ctox-pane-body ctox-flow-well">
-        <section class="ctox-empty" aria-live="polite" aria-busy="true">
-          <div><strong>${escapeHtml(t.loadingRuntime)}</strong><span>${escapeHtml(t.loadingRuntimeDetail)}</span></div>
+        <section class="ctox-empty" aria-busy="${dataState(state).kind === 'loading'}">
+          ${dataPlaceholderMarkup()}
+          ${dataStatusMarkup(state)}
         </section>
       </div>
-      <footer class="ctox-harness-footer">${escapeHtml(t.loadingRuntime)}</footer>
+      <footer class="ctox-harness-footer"></footer>
     `;
+    main.querySelector('[data-ctox-retry-load]')?.addEventListener('click', () => {
+      state.dataError = '';
+      renderFromLocalCache(state).catch(() => {});
+    });
   }
 }
 
@@ -2114,9 +2164,6 @@ function renderMain(state) {
     || (taskStepView
       ? taskStepView.node
       : model.timeline[timelineIndex] || model.nodes.find((node) => node.id === model.activeNodeId) || model.nodes[0]);
-  // Wo steht der ausgewaehlte Task GERADE im Loop? Dieser Knoten wird markiert,
-  // damit die Frage "wo steckt er" ohne Suchen beantwortet ist.
-  const standortNodeId = selectedTask ? (taskCrewNodeId(selectedTask, model) || '') : '';
   const visibleTrace = selectedNodeOverride
     ? buildVisibleTraceWindow([selectedNodeOverride])
     : taskStepView
@@ -2160,7 +2207,7 @@ function renderMain(state) {
       ${metricCard(t.elapsed, elapsedSeconds, 'seconds', state.lang, { live })}
     </section>
     ${executionProgressBar(metrics, state)}
-    ${state.loadError ? loadErrorMarkup(state) : shouldShowCrewHome(state) ? crewHomeMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
+    ${shouldShowCrewHome(state) ? crewHomeMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
       <div class="ctox-flow-toolbar" aria-label="${escapeAttr(t.flowControls)}" data-flow-control>
         <button type="button" class="ctox-pane-icon" data-zoom="-" aria-label="${escapeAttr(t.zoomOut)}" title="${escapeAttr(t.zoomOut)}" ${state.zoom <= MIN_ZOOM ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
         <span>${Math.round(state.zoom * 100)}%</span>
@@ -2173,7 +2220,7 @@ function renderMain(state) {
       </div>
     </div>`}
     ${timelinePanel(state, selectedTask, selectedNode, metrics)}
-    <footer class="ctox-harness-footer ${syncIsConnected(state) ? '' : 'is-disconnected'}" data-harness-health-tooltip>${syncIsConnected(state) ? '' : `<span class="ctox-footer-hint">${escapeHtml(t.syncDisconnected)}</span> · `}${escapeHtml(selectedTask ? taskDisplayTitle(selectedTask, state) : t.flowFooterEmpty)} · ${escapeHtml(flowSource.mode)} · ${escapeHtml(flowSource.status)}${live ? ` · ${escapeHtml(t.live)}` : ''}</footer>
+    <footer class="ctox-harness-footer ${syncIsConnected(state) ? '' : 'is-disconnected'}" data-harness-health-tooltip>${dataStatusMarkup(state) || `${syncIsConnected(state) ? '' : `<span class="ctox-footer-hint">${escapeHtml(t.syncDisconnected)}</span> · `}${escapeHtml(selectedTask ? taskDisplayTitle(selectedTask, state) : t.flowFooterEmpty)} · ${escapeHtml(flowSource.mode)} · ${escapeHtml(flowSource.status)}${live ? ` · ${escapeHtml(t.live)}` : ''}`}</footer>
   `;
   restoreFlowViewport(state, previousViewport);
   main.querySelector('[data-harness-pause]')?.addEventListener('click', () => {
@@ -2191,7 +2238,7 @@ function renderMain(state) {
   });
   wireCrewHome(state, main);
   main.querySelector('[data-ctox-retry-load]')?.addEventListener('click', () => {
-    state.loadError = '';
+    state.dataError = '';
     renderFromLocalCache(state).catch(() => {});
   });
   main.querySelector('[data-open-selected-task]')?.addEventListener('click', () => {
@@ -2365,6 +2412,9 @@ function flowSvg(model, selectedNode, visibleTrace, selectedTask, state, taskSte
   const t = labels[state?.lang] || labels.de;
   const communicationOnly = isCommunicationFlow(selectedTask, state);
   const harnessOffsetY = reviewHarnessOffsetY(selectedTask, state);
+  // Wo steht der ausgewaehlte Task GERADE im Loop? Dieser Knoten wird markiert,
+  // damit die Frage "wo steckt er" ohne Suchen beantwortet ist.
+  const standortNodeId = selectedTask ? (taskCrewNodeId(selectedTask, model) || '') : '';
   return `
     <svg class="ctox-flow-diagram" viewBox="0 ${viewBox.y} ${FLOW_WIDTH} ${viewBox.height}" preserveAspectRatio="xMidYMin meet" role="img" aria-label="${escapeAttr(t.flowDiagram)}">
       <defs>
@@ -2707,6 +2757,10 @@ function flowCrewSvg(model, selectedTask, state) {
     return taskCrewStatus(task) === 'running';
   });
   if (!tasks.length && selectedTask) tasks.push(selectedTask);
+  if (!tasks.length && state.ctx) {
+    const node = model.nodeMap.get('queued');
+    if (node) return `<foreignObject x="${node.x - 82}" y="${node.y - NODE_HEIGHT / 2 - 62}" width="56" height="56" aria-hidden="true"><div xmlns="http://www.w3.org/1999/xhtml">${dataPlaceholderMarkup()}</div></foreignObject>`;
+  }
   const occupied = new Map();
   return tasks.map((task) => {
     const nodeId = taskCrewNodeId(task, model);
@@ -2719,8 +2773,9 @@ function flowCrewSvg(model, selectedTask, state) {
     const x = node.x - 82 + column * 42;
     const y = node.y - NODE_HEIGHT / 2 - 52 - row * 40;
     const selected = task.id === selectedTask?.id;
-    // Without a live channel nothing on screen is current: the crew sleeps.
-    const status = syncIsConnected(state) || !state?.ctx ? taskCrewStatus(task) : 'idle';
+    // Without a live channel, or before the first complete read, nothing on
+    // screen is current: the crew sleeps.
+    const status = state?.ctx && (!syncIsConnected(state) || dataState(state).kind !== 'ready') ? 'queued' : taskCrewStatus(task);
     // Der Knoten, auf dem das ausgewaehlte Wesen steht, ist der Schritt, an dem
     // der Task GERADE arbeitet. Er wird markiert, damit die Karte die Frage
     // "wo steckt er im Loop" ohne Suchen beantwortet.
@@ -4596,20 +4651,6 @@ function syncIsConnected(state) {
   return true;
 }
 
-function loadErrorMarkup(state) {
-  const t = labels[state.lang];
-  return `
-    <div class="ctox-canvas-container ctox-flow-well">
-      <section class="ctox-empty ctox-load-error" role="alert">
-        <div>
-          <strong>${escapeHtml(t.loadFailed)}</strong>
-          <span>${escapeHtml(String(state.loadError || ''))}</span>
-          <button type="button" class="ctox-button is-primary" data-ctox-retry-load>${escapeHtml(t.retryLoad)}</button>
-        </div>
-      </section>
-    </div>`;
-}
-
 function mainIsBusy(state) {
   if (state.mainInteracting) return true;
   const main = state.ctx?.host?.querySelector?.('[data-ctox-main]');
@@ -6420,6 +6461,7 @@ export const __ctoxTestHooks = {
   clampMetric,
   deriveHarnessHealth,
   eventToNodeId,
+  flowSvg,
   flowSourceView,
   formatRelativeAge,
   friendlyWebStackStatus,
@@ -6440,6 +6482,7 @@ export const __ctoxTestHooks = {
   taskColumnMarkup,
   taskListInner,
   renderTaskList,
+  renderMain,
   applyTaskSelection,
   webStackPanel,
   taskPipelineStage,

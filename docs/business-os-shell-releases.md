@@ -17,6 +17,60 @@ Instanzverbindung weiterleiten. ctox.dev besitzt keine Standard-Shell, liest
 keine Shell-Dateien aus Source-/Runtime-Verzeichnissen und überschreibt weder
 HTML noch Modul-Registry oder Cache-Policy.
 
+### Befund und Teilkorrektur vom 2026-09-06
+
+Der zunächst geprüfte ältere lokale ctox.dev-Handler reichte erfolgreiche
+Antworten weiter, verwandelte Versionskonflikte jedoch in HTTP 502. Der Abgleich
+mit ctox.dev-main `ccaec625edd6204cee9056303e196b3fd0ffe2dd` zeigt zusätzlich
+einen expliziten Fallback: `fetchTenantBusinessOsStaticAsset` wiederholt nach
+einem typisierten 409 die Anfrage mit leerem `search`. Damit entfernt der Proxy
+die angeforderte Generation und kann eine Datei aus dem aktuellen Instanz-Slot
+liefern. Das verletzt die obige Auslieferungsgrenze, auch ohne eine zentrale
+Shell-Kopie. Der Fallback muss entfallen; Status und Generation-Header der
+Instanz müssen erhalten bleiben.
+
+Auf Welsch lieferte der native Asset-Pfad das aktive Manifest außerdem mit
+`public, max-age=300, stale-while-revalidate=86400`. Ein Manifest unter einer
+gleichbleibenden URL kann nach einer Aktivierung damit eine andere Version
+als das bereits geladene Dokument beschreiben.
+
+Neue Artefakte tragen Version und Source-Commit deshalb direkt als
+`ctox-shell-version` und `ctox-shell-source-commit` im HTML. Diese Bytes gehören
+zur signierten Dateiinventur. Die Browseranzeige liest diese Dokumentidentität
+und lädt kein separates Manifest zur nachträglichen Identifikation. Fehlende
+oder mehrdeutige Metadaten werden ausdrücklich als Recovery angezeigt. Der
+native Server behandelt den veränderlichen Manifest-Pointer wie das
+personalisierte HTML mit `no-store`; diese Änderung benötigt ein natives
+Runtime-Update und wird durch ein Shell-Update allein nicht ausgerollt.
+
+**Die atomare Bindung aller Komponenten ist damit noch nicht umgesetzt.**
+Der bestehende Generation-Guard prüft nur ausgewählte Asset-Pfade mit einer
+`?v=`-Kennung, die `-shell-v2-` enthält. Wiederverwendete manuelle Build-Kennungen
+können unterschiedliche Releases bezeichnen. Die Dokumentidentität beweist
+daher nicht, dass sämtliche nachgeladenen Dateien aus demselben Release
+stammen. Die Architekturabnahme verlangt weiterhin einen instanzeigenen
+Resolver mit unveränderlicher Release-Identität für die gesamte
+Abhängigkeitskette und einen Browsertest mit Aktivierung während des Ladens.
+App-Katalog und installierte Apps behalten ihre eigenen Resolver. ctox.dev
+darf bei fehlenden Assets keine Ersatz-Shell auswählen.
+
+Der [native Browser-Wechseltest vom 2026-09-06](dev/shell-generation-native-reproduction-20260906.md)
+reproduziert eine weitere Lücke ohne ctox.dev: zehn alte Testdokumente laden
+nach dem Wechsel über den echten nativen HTTP-Server das neue RxDB-Bundle.
+Der Test bleibt rot, bis die Generation erhalten bleibt. Seine genaue
+Binärprovenienz, begrenzte Reichweite, Einzelmessungen und die noch fehlende
+Prüfung signierter Slots sind im Befund dokumentiert.
+
+### Produktionsrücknahme und weiterer Native-Ausfall
+
+Die Entfernung des Proxy-Fallbacks wurde wegen eines realen Startfehlers mit
+ctox.dev-main `63eb444` zurückgenommen. Die Rücknahme bleibt aktiv, bis die
+vollständige Bindung der Abhängigkeiten geprüft ist. Der
+[Incident-Bericht vom 2026-09-06](dev/production-native-peer-incident-20260906.md)
+dokumentiert außerdem den späteren nativen Schema-Absturz, die vorübergehende
+Rückstellung ausschließlich des Dienstprogramms und die weiterhin offenen
+Office-/Schema-Fehler. Die Instanzen gelten dadurch nicht als produktionsreif.
+
 ## Vertrauenskette
 
 Der Release-Workflow baut ein deterministisches USTAR/Gzip-Artefakt, prüft den

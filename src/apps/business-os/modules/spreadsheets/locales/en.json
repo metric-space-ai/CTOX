@@ -37,6 +37,7 @@
   "loadingEditor": "Loading editor",
   "documentPreparing": "Preparing spreadsheet.",
   "editorLoadFailed": "Editor failed to load:",
+  "retry": "Retry",
   "noSavedVersionFound": "No saved version found for this spreadsheet. Please re-import or manage the record.",
   "loadVersionRepairPrompt": "Please re-import or manage the record.",
   "loadVersionFailed": "Spreadsheet version failed to load:",

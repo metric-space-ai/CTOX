@@ -14,6 +14,32 @@ Two implementations, one contract:
 | Daemon | `rxdb-rs` (crate `ctox-rxdb`, lib name `rxdb`) | `src/core/rxdb/` + `src/core/business_os/rxdb_peer.rs` |
 
 ---
+## Shell artifact boundary
+
+The native instance selects and verifies its signed Business OS release.
+For a selected slot, the root document receives the base URL
+`/business-os/_shell/<release-version>/` before its first asset. Relative
+scripts, styles, packaged module documents and their imports therefore resolve
+inside one release; an asset's `?v=` cache key is not its release identity.
+
+`src/core/business_os/shell_assets.rs` validates these addresses and checks
+each read against the admitted file size and SHA256. `shell_update.rs` owns
+signature, compatibility and complete inventory admission. Missing retained
+releases return 410; invalid addresses return 400; failed verification returns
+503. These requests never fall through to another release or an installed app.
+Installed module assets keep their separate instance path.
+
+A selected slot that fails verification prevents native shell startup.
+`server.rs` no longer silently chooses the archived Business OS tree.
+Source installations without a selected slot can still use their explicit
+`business-os` or `src/apps/business-os` tree. Legacy unversioned request
+handling remains for previously loaded clients and is a tracked removal item.
+
+This is the HTTP static-artifact boundary only: business records, command
+results, runtime projections and files continue through CTOX Sync/WebRTC.
+The immutable address mechanism alone does not certify bootstrap performance,
+mobile suspend/resume, or full runtime compatibility across all hosts.
+
 
 ## 1. What CTOX Sync Engine is
 
@@ -459,6 +485,13 @@ observe a disconnect and rebuild cleanly, instead of parking half-dead.
 
 ### 5.4 Per-collection replication
 
+Replacing a browser collection registration invalidates the previous catch-up
+generation and starts a fresh one against the already authenticated room.
+A replacement is not another room reference. The retired state's cancellation
+is owner-checked: delayed cleanup may not unregister its successor or close the
+successor's shared connection. The replacement-registration and unregister-
+invalidation regression tests pin both directions of this lifecycle boundary.
+
 - **Master path (native, normally):** one master-change relay task per
   collection per peer, emitting `masterChangeStream$:{collection}` responses
   — but only while that collection is in the peer's active set
@@ -494,6 +527,18 @@ wire-compatible. Methods: `token`, `ctoxProtocol`, `masterChangesSince`,
 `masterWrite`; server-push uses response id
 `masterChangeStream$:{collection}` (bare `masterChangeStream$` is still
 accepted from V1 peers — `webrtc-native.mjs::masterChangeStreamCollection`).
+
+Live changes use the same collection byte budget as pull responses. An oversized
+storage event emits the existing `Resync` signal; the receiver retrieves the
+unchanged durable documents through bounded `masterChangesSince` pages. The
+checkpoint advances only with the corresponding pull page.
+
+Module-source projections preserve `content` as a string up to the existing
+1 MiB serialized-document admission bound. Larger inline source projections
+are explicitly rejected without truncating the bytes; they require a future
+chunked-source contract. Startup applies the same admission and must not replace
+source text with an `_omitted` object. See
+[the recovery verification](dev/lossless-source-projection-recovery.md).
 
 ### 6.2 Control frame: active collections
 
@@ -609,6 +654,16 @@ the file viewer opens `desktop_files`, then uses `rxdb.file.fetch` against the
 and loaded by deterministic chunk ids, so opening a file does not scan or
 replicate the full chunk store into IndexedDB. Browser-side chunk writes (for
 uploads/attachments) may still use the chunk collection push path.
+
+Chunk storage is authoritative file data and must never be reduced to
+projection omission markers. Both direct native writes and startup projection
+maintenance exclude storage collections resolved by the canonical demand-file
+registry, including runtime-declared sources. This exemption follows the
+storage collection, so `desktop_files` metadata retains its projection policy.
+Wire frame/chunk limits govern transport; they must not destructively rewrite
+persisted bytes. The native regression
+`demand_file_wire_budget_preserves_bytes_on_write_and_restart` checks oversized
+chunks in actual SQLite tables across writes and reopened startup maintenance.
 
 Runtime-installed modules can declare the same treatment for their own
 collections (SYNC-32): in `collections.schema.json` a collection entry's
@@ -1009,8 +1064,17 @@ npx -y esbuild@0.28.0 src/apps/business-os/rxdb/src/index.mjs \
 **Cache-buster discipline.** The only bundle URL lives in
 `src/apps/business-os/shared/rxdb-runtime.js`. Both `shared/db.js` and
 `shared/sync.js` import that loader with the **same literal APP_BUILD query
-buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The data-plane guard checks both
-values against each other and the shell build.
+buster** (`./rxdb-runtime.js?v=<APP_BUILD>`). The bundle query revision and
+the HTML entry's `app.js` query must also equal APP_BUILD. The data-plane
+guard checks this entire chain: shared static assets can remain fresh in
+browser/CDN caches for four hours, so changing only the bundle URL inside
+an unchanged loader URL does not deliver the new runtime to existing users.
+
+Cancelled replication transfers must re-check their lifetime after asynchronous
+storage reads, dirty-marker updates, and transport responses. A retired state
+must not issue another write through its detached peer or advance checkpoints;
+the current state owns retry and acknowledgement. The cancelled-boundaries
+smoke covers these races independently from collection-handshake cancellation.
 
 App modules do **not** import the bundle directly — they receive the database
 handle from the shell facade (`setBusinessOsDatabaseContext`). The matching
@@ -1020,8 +1084,9 @@ facade, so it carries no buster and is no longer checked by the guard.
 A different loader URL can create a second module instance; an unversioned
 loader can keep an old bundle cached after a deployment. After any runtime
 `src/` change, rebuild dist with the command above and bump the single bundle
-buster in `rxdb-runtime.js`. Keep both loader import busters aligned with
-APP_BUILD. The shared promise resets after import rejection, so a later call
+buster in `rxdb-runtime.js`, APP_BUILD, the HTML entry and both loader imports
+to the same new revision. Shell-only build revisions also advance the canonical
+bundle URL even when its bytes are unchanged. The shared promise resets after import rejection, so a later call
 can retry the same URL without creating a second bundle identity.
 
 `src/scripts/vendor-builds/build-ctox-rxdb-js.mjs` does **not** build

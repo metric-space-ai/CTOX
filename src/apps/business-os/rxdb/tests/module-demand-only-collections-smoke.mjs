@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createSyncRuntime, __ctoxSyncTestHooks } from '../../shared/sync.js';
+import { createMultiTabSyncCoordinator } from '../src/multi-tab-sync-coordinator.mjs';
 
 const {
   DEMAND_ONLY_COLLECTION_START_ERROR,
@@ -201,7 +202,7 @@ function createMockReplicationState(collection = 'desktop_file_chunks') {
   };
 }
 
-function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
+function createMockSyncRuntime({ emitProtocolCallback = true, coordinator = null } = {}) {
   const browserToken = 'browser-role-token';
   const starts = [];
   const cancels = [];
@@ -211,6 +212,7 @@ function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
       desktop_file_chunks: { name: 'desktop_file_chunks' },
     },
     rxdb: {
+      ...(coordinator ? { getMultiTabSyncCoordinator: () => coordinator } : {}),
       getConnectionHandlerSimplePeer() {
         return {};
       },
@@ -324,6 +326,32 @@ function createMockSyncRuntime({ emitProtocolCallback = true } = {}) {
     'final release stops the resumed demand-only bridge',
   );
   await runtime.stop();
+}
+
+{
+  const room = `direct-acquisition-${process.pid}-${Date.now()}`;
+  const leader = createMultiTabSyncCoordinator({ databaseName: 'direct-acquisition-test', room, tabId: 'tab-a' });
+  const follower = createMultiTabSyncCoordinator({ databaseName: 'direct-acquisition-test', room, tabId: 'tab-b' });
+  await leader.start();
+  await follower.start();
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  const { runtime, starts, cancels } = createMockSyncRuntime({ coordinator: follower });
+  let lease;
+  try {
+    assert.equal(follower.isLeader(), false);
+    lease = await runtime.leaseCollection('desktop_file_chunks', 'active-file-transfer');
+    const direct = await runtime.startCollection('desktop_file_chunks', { forceDirect: true });
+    const acquired = await runtime.startCollection('desktop_file_chunks', { pin: false });
+    assert.equal(acquired === direct, true, 'ordinary acquisition must retain the direct bridge serving an active transfer');
+    assert.equal(await runtime.startCollection('desktop_file_chunks', { forceDirect: true }), direct);
+    assert.equal(starts.length, 1, 'reacquisition must not replace the native registration');
+    assert.equal(cancels.length, 0, 'reacquisition must not cancel an in-flight file transfer');
+  } finally {
+    await lease?.release();
+    await runtime.stop();
+    await follower.close();
+    await leader.close();
+  }
 }
 
 console.log('ctox-rxdb module demand-only collections smoke OK');

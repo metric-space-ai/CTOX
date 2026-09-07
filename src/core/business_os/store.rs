@@ -3756,6 +3756,58 @@ pub fn save_module_source_record(
     root: &Path,
     mutation: ModuleSourceSaveMutation,
 ) -> anyhow::Result<Value> {
+    save_module_source_record_inner(root, mutation, None)
+}
+
+pub(crate) fn ensure_module_source_record_current(
+    root: &Path,
+    module_id: &str,
+    path: &str,
+    expected_content: Option<&str>,
+) -> anyhow::Result<()> {
+    let app_root = resolve_business_os_app_root(root)?;
+    let module_id = source_sanitize_slug(module_id);
+    anyhow::ensure!(!module_id.is_empty(), "module_id is required");
+    let (module_root, _) = resolve_module_source_root_for_root(root, &app_root, &module_id)?;
+    let rel = normalize_source_relative_path(path)?;
+    anyhow::ensure!(
+        is_allowed_source_path(&rel),
+        "source file type is not editable: {}",
+        rel.display()
+    );
+    ensure_source_path_has_no_symlink_components(&module_root, &rel)?;
+    let current = match fs::read_to_string(module_root.join(&rel)) {
+        Ok(content) => Some(content),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        current.as_deref() == expected_content,
+        "coding source conflict for {}: live source differs from the turn baseline; reload before editing",
+        rel.display()
+    );
+    Ok(())
+}
+
+pub(crate) fn save_module_source_record_if_current(
+    root: &Path,
+    mutation: ModuleSourceSaveMutation,
+    expected_content: Option<&str>,
+) -> anyhow::Result<Value> {
+    ensure_module_source_record_current(
+        root,
+        &mutation.module_id,
+        &mutation.path,
+        expected_content,
+    )?;
+    save_module_source_record_inner(root, mutation, Some(expected_content))
+}
+
+fn save_module_source_record_inner(
+    root: &Path,
+    mutation: ModuleSourceSaveMutation,
+    expected_content: Option<Option<&str>>,
+) -> anyhow::Result<Value> {
     let app_root = resolve_business_os_app_root(root)?;
     let module_id = source_sanitize_slug(&mutation.module_id);
     anyhow::ensure!(!module_id.is_empty(), "module_id is required");
@@ -3774,6 +3826,13 @@ pub fn save_module_source_record(
             .with_context(|| format!("failed to create source directory {}", parent.display()))?;
     }
     let previous_content = fs::read_to_string(&target).ok();
+    if let Some(expected_content) = expected_content {
+        anyhow::ensure!(
+            previous_content.as_deref() == expected_content,
+            "coding source conflict for {}: live source changed before write",
+            rel.display()
+        );
+    }
     let previous_sha256 = previous_content
         .as_deref()
         .map(|content| hex_sha256(content.as_bytes()));
@@ -10869,6 +10928,7 @@ struct RxdbCollectionWriter {
     database_path: PathBuf,
     table: String,
     columns: HashSet<String>,
+    demand_file_storage: bool,
     last_replication_lwt: i64,
 }
 
@@ -10915,6 +10975,9 @@ impl RxdbCollectionWriter {
             database_path: path,
             table,
             columns,
+            demand_file_storage: super::rxdb_peer_demand_files::is_demand_file_storage_collection(
+                root, collection,
+            ),
             last_replication_lwt,
         }))
     }
@@ -10933,6 +10996,7 @@ impl RxdbCollectionWriter {
             updated_at_ms,
             updated_at_ms,
             payload,
+            self.demand_file_storage,
             false,
         )?;
         self.notify_committed_change();
@@ -10971,6 +11035,7 @@ impl RxdbCollectionWriter {
             source_updated_at_ms,
             replication_lwt,
             payload,
+            self.demand_file_storage,
             false,
         )?;
         self.notify_committed_change();
@@ -10997,6 +11062,7 @@ impl RxdbCollectionWriter {
                 "is_deleted": true,
                 "_deleted": true,
             }),
+            self.demand_file_storage,
             true,
         )?;
         self.notify_committed_change();
@@ -11023,6 +11089,7 @@ fn upsert_rxdb_collection_record_with_writer(
     payload_updated_at_ms: i64,
     replication_lwt_ms: i64,
     mut payload: Value,
+    demand_file_storage: bool,
     deleted: bool,
 ) -> anyhow::Result<()> {
     let mut previous_revision = None;
@@ -11062,7 +11129,19 @@ fn upsert_rxdb_collection_record_with_writer(
     // record is scrubbed too. The verified token lives only in the native
     // business_commands.client_context_json column, which peers never receive.
     redact_document_client_context_secrets(&mut payload);
-    clamp_projected_document_to_wire_budget(table, record_id, &mut payload);
+    // An old omitted byte field is not valid in a replicated tombstone either.
+    // The explicit repair preserves the original evidence before deletion.
+    if deleted
+        && demand_file_storage
+        && payload.get("data").and_then(|v| v.get("_omitted")) == Some(&Value::Bool(true))
+    {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("data".to_string(), Value::String(String::new()));
+        }
+    }
+    if !demand_file_storage {
+        clamp_projected_document_to_wire_budget(table, record_id, &mut payload)?;
+    }
     let mut columns = vec!["id".to_string(), "data".to_string()];
     let mut values = vec![
         SqlValue::Text(record_id.to_string()),
@@ -22692,15 +22771,30 @@ pub(super) fn clamp_projected_document_to_wire_budget(
     table: &str,
     record_id: &str,
     payload: &mut Value,
-) {
+) -> anyhow::Result<()> {
     let total = serde_json::to_vec(&*payload)
         .map(|raw| raw.len())
         .unwrap_or(0);
     if total <= MAX_PROJECTED_DOCUMENT_BYTES {
-        return;
+        return Ok(());
+    }
+    // Source content is a typed string, not an optional diagnostic payload.
+    // The master already bounds pull responses by bytes; preserving a source
+    // record within that existing bound does not increase the wire contract.
+    if table
+        .strip_prefix("ctox_business_os__business_module_source_files__v")
+        .is_some_and(|version| version.parse::<u32>().is_ok())
+    {
+        anyhow::ensure!(
+            payload.get("content").is_some_and(Value::is_string),
+            "invalid module source content for {record_id}; restore its canonical projection"
+        );
+        anyhow::ensure!(total <= rxdb::collection_policy::DEFAULT_MASTER_RESPONSE_CEILING_BYTES,
+            "module source {record_id} exceeds the lossless inline projection limit; content was not truncated");
+        return Ok(());
     }
     let Some(object) = payload.as_object_mut() else {
-        return;
+        return Ok(());
     };
     // Largest field first: trimming one huge `result` usually suffices, and
     // trimming the fewest fields keeps the most information on the wire.
@@ -22737,12 +22831,13 @@ pub(super) fn clamp_projected_document_to_wire_budget(
         trimmed.push(key);
     }
     if trimmed.is_empty() {
-        return;
+        return Ok(());
     }
     eprintln!(
         "[business-os] trimmed oversized projected document {record_id} in {table}: {total} bytes exceeded the {MAX_PROJECTED_DOCUMENT_BYTES} byte wire budget; replaced fields [{}] with a marker so the collection keeps replicating",
         trimmed.join(", ")
     );
+    Ok(())
 }
 
 pub(super) fn redact_document_client_context_secrets(payload: &mut Value) {
@@ -37539,6 +37634,61 @@ pub(super) mod tests {
                 .pointer("/collections/business_commands/table")
                 .and_then(Value::as_str),
             Some("ctox_business_os__business_commands__v1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn module_source_projection_preserves_large_content() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("runtime"))?;
+        let table = "ctox_business_os__business_module_source_files__v0";
+        let conn = Connection::open(rxdb_store_path(root))?;
+        conn.execute(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY, revision TEXT, deleted INTEGER NOT NULL DEFAULT 0, lastWriteTime REAL NOT NULL DEFAULT 0, data TEXT NOT NULL)"), [])?;
+        let content = "export const source = \"αβ\";\n".repeat(16_000);
+        let original = serde_json::json!({"id":"probe:index.js", "module_id":"probe", "path":"index.js",
+            "content":content, "sha256":hex_sha256(content.as_bytes()), "updated_at_ms":1000});
+        assert!(serde_json::to_vec(&original)?.len() > MAX_PROJECTED_DOCUMENT_BYTES);
+        let mut old = original.clone();
+        old["content"] = serde_json::json!({"_omitted":true});
+        conn.execute(
+            &format!("INSERT INTO {table} (id,revision,data) VALUES (?1,'1-old',?2)"),
+            params!["probe:index.js", serde_json::to_string(&old)?],
+        )?;
+        let mut writer = BusinessProjectionWriter::open(root)?;
+        writer.upsert_source_projection(
+            "business_module_source_files",
+            "probe:index.js",
+            1000,
+            original.clone(),
+        )?;
+        assert!(writer.delivered_to_rxdb("business_module_source_files"));
+        let raw: String = conn.query_row(
+            &format!("SELECT data FROM {table} WHERE id='probe:index.js'"),
+            [],
+            |r| r.get(0),
+        )?;
+        let mut projected: Value = serde_json::from_str(&raw)?;
+        assert_eq!(projected["content"], original["content"]);
+        assert_eq!(projected["sha256"], original["sha256"]);
+        // Native restart applies the same admission and must preserve the bytes.
+        clamp_projected_document_to_wire_budget(table, "probe:index.js", &mut projected)?;
+        assert_eq!(projected["content"], original["content"]);
+        let canonical =
+            pull_collection_record(root, "business_module_source_files", "probe:index.js")?
+                .unwrap();
+        assert_eq!(canonical["content"], original["content"]);
+        let mut too_large = original.clone();
+        too_large["content"] = serde_json::json!("x".repeat(2 * 1024 * 1024));
+        let unchanged = too_large.clone();
+        assert!(
+            clamp_projected_document_to_wire_budget(table, "probe:index.js", &mut too_large)
+                .is_err()
+        );
+        assert_eq!(
+            too_large, unchanged,
+            "rejection must preserve bytes for recovery"
         );
         Ok(())
     }

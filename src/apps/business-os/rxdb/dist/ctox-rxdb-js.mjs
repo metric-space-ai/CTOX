@@ -9296,9 +9296,20 @@ var SharedRoomPeer = class {
     return first.done ? null : this.collections.get(first.value);
   }
   register(collection, registration) {
-    const isNewCollection = !this.collections.has(collection);
+    const previous = this.collections.get(collection);
+    const isNewCollection = !previous;
+    if (previous && previous !== registration) {
+      const obsolete = this.collectionCatchUps.get(collection);
+      obsolete?.invalidate?.();
+      if (this.collectionCatchUps.get(collection) === obsolete) {
+        this.collectionCatchUps.delete(collection);
+      }
+    }
     this.collections.set(collection, registration);
-    this.refCount += 1;
+    if (isNewCollection) this.refCount += 1;
+    if (previous?.state && previous.state !== registration.state) {
+      Promise.resolve(previous.state.cancel?.()).catch((error) => registration.state?.emitError?.(error));
+    }
     if (isNewCollection) {
       this.handshakeMetrics.collectionRegistrations += 1;
       this.schemaMismatchCollections.delete(collection);
@@ -9443,7 +9454,8 @@ var SharedRoomPeer = class {
     });
     return this.negotiationCatchUp;
   }
-  unregister(collection) {
+  unregister(collection, ownerState = null) {
+    if (ownerState && this.collections.get(collection)?.state !== ownerState) return false;
     this.collections.delete(collection);
     const catchUp = this.collectionCatchUps.get(collection);
     this.collectionCatchUpGenerations.set(
@@ -10138,9 +10150,11 @@ var CtoxWebRtcReplicationState = class {
     this.demandStatus.peerCapabilityQueryFetchV1 = queryFetchCapable === true;
     const validityKey = checkpointValidityKeyFromProtocol(normalizedRemoteProtocol);
     const localCheckpoint = await this.collection.storageCollection.replicationCheckpointStatus(this.schemaHashValue);
+    if (this.cancelled) return;
     const localValidityKey = localCheckpointValidityKey(localCheckpoint);
     this.localCheckpointValidityKey = localValidityKey;
     const readPermissionDigest = await this.resolveReadPermissionDigest();
+    if (this.cancelled) return;
     const retained = this.retainedCheckpoints;
     if (retained && validityKey) {
       if (retained.validityKey === validityKey && retained.localValidityKey && retained.localValidityKey === localValidityKey && readPermissionDigestMatches(retained.permissionDigest, readPermissionDigest)) {
@@ -10174,6 +10188,7 @@ var CtoxWebRtcReplicationState = class {
         this.error$.next(error);
       }
     }
+    if (this.cancelled) return;
     this.ctox?.onPeerCapabilityNegotiated?.({
       peerId,
       queryFetchCapable,
@@ -10183,6 +10198,7 @@ var CtoxWebRtcReplicationState = class {
     try {
       this.initialReplication = this.pullFromRemotePeers().then(() => this.pushToRemotePeers());
       await this.initialReplication;
+      if (this.cancelled) return;
       this.resolveInitialReplication();
     } catch (error) {
       this.rejectInitialReplication(error);
@@ -10191,7 +10207,7 @@ var CtoxWebRtcReplicationState = class {
   }
   // ----- pull / push (collection-tagged over the shared peer) -------------
   async pullFromRemotePeers() {
-    if (!this.pull) return;
+    if (!this.pull || this.cancelled) return;
     if (this.pullInProgressPromise) {
       this.pullAgainAfterCurrent = true;
       return this.pullInProgressPromise;
@@ -10259,6 +10275,7 @@ var CtoxWebRtcReplicationState = class {
     let checkpoint = this.pullCheckpointsByPeer.get(activePeerId) || null;
     while (!this.cancelled) {
       const response = await this.requestMasterChangesSince(activePeerId, checkpoint, batchSize);
+      if (this.cancelled) return;
       activePeerId = response.peerId || activePeerId;
       const result = response.result || {};
       const documents = Array.isArray(result?.documents) ? result.documents : [];
@@ -10266,7 +10283,9 @@ var CtoxWebRtcReplicationState = class {
         await this.collection.storageCollection.bulkWrite(documents, {
           replicationOrigin: this.replicationOriginForPeer(activePeerId)
         });
+        if (this.cancelled) return;
         await this.invalidateDemandCacheForRemoteWrite(documents);
+        if (this.cancelled) return;
       }
       checkpoint = result?.checkpoint || checkpoint;
       this.pullCheckpointsByPeer.set(activePeerId, checkpoint);
@@ -10304,7 +10323,7 @@ var CtoxWebRtcReplicationState = class {
     throw lastError;
   }
   async pushToRemotePeers() {
-    if (!this.push) return;
+    if (!this.push || this.cancelled) return;
     if (this.pushInProgressPromise) {
       this.pushAgainAfterCurrent = true;
       return this.pushInProgressPromise;
@@ -10377,11 +10396,13 @@ var CtoxWebRtcReplicationState = class {
         batchSize,
         this.changedDocumentReadOptionsForPeer(peerId)
       );
+      if (this.cancelled) return;
       const documents = Array.isArray(result?.documents) ? result.documents : [];
       this.recordLocalPushChangedSinceRead(result, documents);
       for (const document2 of documents) {
         const id = primaryValue(document2, this.collection.schema.primaryPath);
         if (id) await this.demandSidecar?.markDirty?.(this.collection.name, id, true);
+        if (this.cancelled) return;
       }
       if (!documents.length) {
         const nextCheckpoint = result?.checkpoint || checkpoint;
@@ -10402,6 +10423,7 @@ var CtoxWebRtcReplicationState = class {
       }));
       let terminalRejection = null;
       for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (this.cancelled) return;
         const masterWriteResult = await this.peer.request(
           peerId,
           "masterWrite",
@@ -10409,6 +10431,7 @@ var CtoxWebRtcReplicationState = class {
           this.requestTimeoutMsFor("masterWrite"),
           this.collection.name
         );
+        if (this.cancelled) return;
         terminalRejection = terminalPushRejection(masterWriteResult);
         if (terminalRejection) {
           rows = [];
@@ -10439,8 +10462,10 @@ var CtoxWebRtcReplicationState = class {
         }
         rows = await this.absorbMasterStateIntoConflictRows(rows);
       }
+      if (this.cancelled) return;
       if (terminalRejection) {
         await this.reconcileTerminalPushRejection(documents, peerId, terminalRejection);
+        if (this.cancelled) return;
         checkpoint = result?.checkpoint || checkpoint;
         this.pushCheckpointsByPeer.set(peerId, checkpoint);
         await this.persistCheckpointsForPeer(peerId);
@@ -10450,12 +10475,14 @@ var CtoxWebRtcReplicationState = class {
       if (rows.length) {
         rows = await this.absorbAuthoritativeCommandConflicts(rows, peerId);
       }
+      if (this.cancelled) return;
       if (rows.length) {
         throw new Error(`masterWrite conflicts remained for ${this.collection.name}`);
       }
       for (const document2 of documents) {
         const id = primaryValue(document2, this.collection.schema.primaryPath);
         if (id) await this.demandSidecar?.markDirty?.(this.collection.name, id, false);
+        if (this.cancelled) return;
       }
       checkpoint = result?.checkpoint || checkpoint;
       this.pushCheckpointsByPeer.set(peerId, checkpoint);
@@ -10739,7 +10766,7 @@ var CtoxWebRtcReplicationState = class {
     const shared = this.shared;
     this.shared = null;
     try {
-      shared?.unregister?.(this.collection.name);
+      shared?.unregister?.(this.collection.name, this);
     } catch {
     }
     if (this.collection?.demandLoader === this.demandLoader) {
@@ -10781,6 +10808,7 @@ var CtoxWebRtcReplicationState = class {
     databaseName,
     indexedDbAvailable = typeof globalThis.indexedDB === "object" && globalThis.indexedDB
   } = {}) {
+    if (this.cancelled) return null;
     if (this.demandLoaderActive) return this.demandLoader;
     const demandTransport = this.shared?.demandTransport;
     if (!demandTransport) return null;
@@ -10822,6 +10850,7 @@ var CtoxWebRtcReplicationState = class {
     let demandCacheSafetyOperation = "setBudgetBytes";
     try {
       await this.demandSidecar.setBudgetBytes(queryMetaBudgetBytes);
+      if (this.cancelled) return null;
       demandCacheSafetyOperation = "startEvictionScheduler";
       this.demandSidecar.startEvictionScheduler({
         intervalMs: 3e4,
@@ -10829,6 +10858,7 @@ var CtoxWebRtcReplicationState = class {
         shareBudgetBytes: queryMetaBudgetBytes
       });
     } catch (cause) {
+      if (this.cancelled) return null;
       const error = demandCacheSafetyError({
         cause,
         collection: this.collection.name,
