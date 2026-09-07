@@ -2126,6 +2126,13 @@ pub fn hard_runtime_blocker_retry_cooldown_secs(content: &str) -> Option<u64> {
         || lower.contains("connection reset by peer")
         || lower.contains("max_output_tokens")
         || lower.contains("incomplete response returned")
+        // A worker turn that ends with an incomplete durable plan, or whose
+        // plan bookkeeping failed, has not produced a result: the attempt is
+        // recoverable and the plan is durable, so the next attempt continues
+        // the work. Classifying these as terminal killed two customer research
+        // runs on 07.09.2026 after two minutes each.
+        || lower.contains("task execution plan is incomplete")
+        || lower.contains("durable task progress failed")
     {
         return Some(60);
     }
@@ -2651,6 +2658,22 @@ mod tests {
         let large = lcm::estimate_tokens(&"x".repeat(8_000));
         assert!(large > small);
         assert!(large >= 2_000); // ~8000 chars / 4
+    }
+
+    #[test]
+    fn incomplete_or_failed_task_plan_bookkeeping_is_retried() {
+        assert_eq!(
+            hard_runtime_blocker_retry_cooldown_secs(
+                "task execution plan is incomplete (1/3 steps completed)"
+            ),
+            Some(60)
+        );
+        assert_eq!(
+            hard_runtime_blocker_retry_cooldown_secs(
+                "durable task progress failed: task execution steps must be a completed prefix, one active step, then pending steps"
+            ),
+            Some(60)
+        );
     }
 
     #[test]
