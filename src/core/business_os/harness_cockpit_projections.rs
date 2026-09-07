@@ -715,7 +715,8 @@ const CHANGED_EVENT_TASKS_SQL: &str =
             OR julianday(r.updated_at)>=julianday('now','-1 day'))
      ORDER BY e.message_key LIMIT ?4";
 
-const EXCESS_TASK_EVENTS_SQL: &str = "SELECT record_id FROM business_records
+const EXCESS_TASK_EVENTS_SQL: &str =
+    "SELECT record_id FROM business_records INDEXED BY idx_cockpit_event_task_time
      WHERE collection='ctox_harness_events' AND deleted=0
        AND json_extract(payload_json,'$.task_id')=?1
      ORDER BY json_extract(payload_json,'$.created_at_ms') DESC,record_id DESC
