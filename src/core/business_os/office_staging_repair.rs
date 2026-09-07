@@ -19,9 +19,13 @@ fn records(conn: &Connection, collection: &str) -> anyhow::Result<Vec<Value>> {
 
         _ => anyhow::bail!("unsupported staging repair collection"),
     };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT data FROM {table} WHERE deleted=0 ORDER BY id"
-    ))?;
+    // Include invalid deleted chunks: the normal replay validates tombstones.
+    let selection = if collection == "document_blob_chunks" {
+        ""
+    } else {
+        " WHERE deleted=0"
+    };
+    let mut stmt = conn.prepare(&format!("SELECT data FROM {table}{selection} ORDER BY id"))?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     rows.map(|r| Ok(serde_json::from_str(&r?)?)).collect()
 }
@@ -260,7 +264,7 @@ mod tests {
                 id,
                 1000,
                 json!({"id":id,"blob_id":blob,"document_id":"doc","version_id":"v1",
-                    "idx":0,"total":1,"encoding":"base64","data":data,"created_at_ms":1000}),
+                    "idx":0,"total":1,"encoding":"base64","mime_type":"application/octet-stream","data":data,"created_at_ms":1000}),
             )?;
         }
         writer.upsert_source_projection(
@@ -342,6 +346,41 @@ mod tests {
         assert_eq!(conn.query_row(
             "SELECT deleted FROM ctox_business_os__document_blob_chunks__v0 WHERE id='office_document_old_0000'",
             [], |r| r.get::<_,i64>(0))?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn repaired_tombstone_passes_native_projection_replay() -> anyhow::Result<()> {
+        let root = fixture()?;
+        let dry = repair(root.path(), false, None)?;
+        repair(root.path(), true, dry["candidate_sha256"].as_str())?;
+        let conn = Connection::open(rxdb_store_path(root.path()))?;
+        let raw: String = conn.query_row(
+            "SELECT data FROM ctox_business_os__document_blob_chunks__v0 WHERE id='office_document_old_0000'",
+            [], |r| r.get(0))?;
+        let tombstone: Value = serde_json::from_str(&raw)?;
+        assert_eq!(tombstone["data"], "");
+        let schema = super::super::rxdb_peer::business_os_schema("document_blob_chunks", "id");
+        rxdb::rx_schema::validate_write_document(&schema, "id", &tombstone)
+            .map_err(anyhow::Error::msg)?;
+        let db = super::super::rxdb_peer::open_database(rxdb_store_path(root.path())).await?;
+        let creator = rxdb::rx_database::RxCollectionCreator {
+            schema,
+            conflict_handler: None,
+            options: std::collections::HashMap::new(),
+        };
+        db.add_collections(std::collections::HashMap::from([(
+            "document_blob_chunks".to_string(),
+            creator,
+        )]))
+        .await?;
+        let collection = db.collection("document_blob_chunks").unwrap();
+        super::super::rxdb_peer::upsert_business_record_projection_tombstone(
+            &collection,
+            json!({"id":"office_document_old_0000","_deleted":true}),
+        )
+        .await?;
+        db.close().await?;
         Ok(())
     }
 

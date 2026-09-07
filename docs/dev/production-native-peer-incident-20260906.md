@@ -1,5 +1,47 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Applied staging cleanup and subsequent replay failure
+
+At 2026-09-07T00:37:42Z, maintenance unit
+`ctox-sync-office-staging-apply-20260907.service` completed with exit 0.
+It backed up all three stores under
+`/home/ctox/.local/state/ctox-incident-office-staging-20260907`;
+each SQLite quick_check returned ok. The exact candidate digest was
+`ae3f82c8d17337c443032d9e5bf004b335a6fcf2263fbcf42ee31165d8564984`.
+The audited sixteen canonical DOCX/editor payloads remained intact.
+
+A read-only comparison against that fresh backup covered every stored chunk:
+988 desktop, 42 document, 29 spreadsheet records. There were no missing rows;
+only the seven intended staging records changed, from active to deleted.
+All other complete payload hashes were unchanged. The original staging records
+also have a separate durable repair backup.
+
+**This did not yet complete replication acceptance.** After restart the live
+projection loop rejected the historical tombstone's `data` object with schema
+error 422. The direct writer preserved the invalid `_omitted` object when
+deleting; the initial four real-store tests did not exercise the subsequent
+schema-validating native replay. A follow-up now sanitizes this invalid byte
+field only for deleted file chunks, includes invalid historical tombstones in
+the audit, and adds a real native RxDB projection replay test. That follow-up's
+build and operational reapplication are pending at this checkpoint. No
+validator is weakened and no live document payload is rewritten.
+
+A whole-store recursive marker audit also found fourteen active omitted
+`business_module_source_files` records: thirteen
+`black-hole-studio:vendor/chunks/chunk-00.mjs` through `chunk-12.mjs`,
+and `research:index.js`. Each complete canonical content string exists in
+native `business_records` and matches the projected SHA256. These are
+recoverable source projections, not abandoned Office uploads; they have not
+been deleted or repaired yet.
+
+Signed beta16 is now active (separate rollout, activation
+2026-09-07T00:38:02.029726874Z). Only this task's own browser tab was reloaded.
+The new test spreadsheet's missing chunk subsequently reached native RxDB;
+its editor still failed with `Office RPC timed out: editor.open`.
+No save or all-app success is claimed. The service subsequently reported
+NRestarts=0 and approximately 6 GB resident memory; the earlier OOM cause
+remains unresolved.
+
 ## Follow-up, 2026-09-07: font routing, upload failure and guarded cleanup
 
 The independent Office task fixed the gateway classifier for extensionless

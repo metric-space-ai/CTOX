@@ -11129,6 +11129,16 @@ fn upsert_rxdb_collection_record_with_writer(
     // record is scrubbed too. The verified token lives only in the native
     // business_commands.client_context_json column, which peers never receive.
     redact_document_client_context_secrets(&mut payload);
+    // An old omitted byte field is not valid in a replicated tombstone either.
+    // The explicit repair preserves the original evidence before deletion.
+    if deleted
+        && demand_file_storage
+        && payload.get("data").and_then(|v| v.get("_omitted")) == Some(&Value::Bool(true))
+    {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert("data".to_string(), Value::String(String::new()));
+        }
+    }
     if !demand_file_storage {
         clamp_projected_document_to_wire_budget(table, record_id, &mut payload);
     }

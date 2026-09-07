@@ -30,11 +30,18 @@ retain replication evidence; historical staged-upload references remain
 auditable. A final audit requires zero remaining active omitted staging records.
 There is no raw SQL deletion or HTTP data bridge.
 
+The audit also includes already deleted chunks retaining an invalid omission
+object. The file projection writer replaces that invalid byte field with an
+empty string only on deletion, so the tombstone satisfies the ordinary schema.
+The original omitted object remains in the repair backup.
+
 The implementation is `src/core/business_os/office_staging_repair.rs`.
 Its real-store tests cover preservation and backup, repeated empty repair,
 live-peer exclusion, stale digest rejection, missing canonical data, and
-nonterminal command exclusion. Browser replication of the tombstones and
-production file reopening must also be checked after operational use.
+nonterminal command exclusion. A native RxDB integration test additionally
+replays the stored tombstone through the actual projection writer and schema.
+Browser replication and production file reopening must also be checked after
+operational use.
 
 A failed audit is a finding, not permission to bypass its checks. Resolve the
 specific missing or inconsistent evidence before retrying. Restore from the
