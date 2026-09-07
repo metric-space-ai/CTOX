@@ -126,6 +126,11 @@ const CTOX_MAINTENANCE_POLL_MS = 2000;
 // maintenance window starting, and any upgrade started from this shell switches
 // back to the fast cadence immediately.
 const CTOX_MAINTENANCE_IDLE_POLL_MS = 60000;
+// A hidden tab must keep watching a running upgrade: after the service restart
+// the instance stays read-only for EVERY user until some client acknowledges
+// its collections, and on 07.09.2026 the only open tab was hidden, stopped
+// polling and never acknowledged (customer instance read-only for 32 minutes).
+const CTOX_MAINTENANCE_HIDDEN_POLL_MS = 30000;
 
 // modules/registry.json was fetched with `cache: 'no-store'` from several call
 // sites during a single boot — measured five times, ~900 ms each on a managed
@@ -9680,8 +9685,9 @@ function rememberMaintenanceLease(leaseId, expiresAtMs = 0) {
 // the first 34 s of a page load). Poll fast only when there is something to
 // watch, back off when idle, and stop entirely while the tab is hidden.
 function maintenancePollDelay() {
-  if (document.visibilityState === 'hidden') return 0;
-  if (state.maintenance?.active || rememberedMaintenanceLease().leaseId) return CTOX_MAINTENANCE_POLL_MS;
+  const watchingUpgrade = Boolean(state.maintenance?.active || rememberedMaintenanceLease().leaseId);
+  if (document.visibilityState === 'hidden') return watchingUpgrade ? CTOX_MAINTENANCE_HIDDEN_POLL_MS : 0;
+  if (watchingUpgrade) return CTOX_MAINTENANCE_POLL_MS;
   return CTOX_MAINTENANCE_IDLE_POLL_MS;
 }
 
