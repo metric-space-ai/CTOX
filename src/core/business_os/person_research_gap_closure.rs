@@ -37,6 +37,7 @@ struct ResearchWritebackRequest {
     #[serde(default)]
     gap_task_id: String,
     field_status: BTreeMap<String, FieldStatus>,
+    #[serde(default)]
     result: ResearchWritebackResult,
 }
 
@@ -47,7 +48,7 @@ struct FieldStatus {
     value: Value,
     #[serde(default, deserialize_with = "lenient_sources")]
     sources: Vec<FieldSource>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_attempts")]
     attempts: Vec<FieldAttempt>,
     #[serde(default)]
     reason: String,
@@ -125,14 +126,84 @@ struct FieldAttempt {
     at: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResearchWritebackResult {
+    #[serde(default, deserialize_with = "lenient_object")]
     fields: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_values")]
     person_records: Vec<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_values")]
     evidence: Vec<Value>,
+}
+
+/// Live workers send `evidence`/`person_records` as `""` or as one object;
+/// both are unambiguous (empty / one entry). A JSON string holding a list is
+/// parsed. A bare word is still an error.
+fn lenient_values<'de, D>(deserializer: D) -> Result<Vec<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    fn from_value<E: serde::de::Error>(value: Value) -> Result<Vec<Value>, E> {
+        match value {
+            Value::Null => Ok(Vec::new()),
+            Value::Array(items) => Ok(items),
+            Value::Object(_) => Ok(vec![value]),
+            Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let parsed: Value = serde_json::from_str(trimmed).map_err(|error| {
+                    E::custom(format!("expected a list of objects, not a string: {error}"))
+                })?;
+                if parsed.is_string() {
+                    return Err(E::custom("expected a list of objects, not a string"));
+                }
+                from_value(parsed)
+            }
+            other => Err(E::custom(format!(
+                "expected a list of objects, got {other}"
+            ))),
+        }
+    }
+    from_value(Value::deserialize(deserializer)?)
+}
+
+/// `result.fields` as `""`/null means "no fields"; a JSON string holding an
+/// object is parsed.
+fn lenient_object<'de, D>(deserializer: D) -> Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Null => Value::Object(Map::new()),
+        Value::String(text) if text.trim().is_empty() => Value::Object(Map::new()),
+        Value::String(text) => {
+            let parsed: Value = serde_json::from_str(text.trim()).map_err(|error| {
+                D::Error::custom(format!("expected an object, not a string: {error}"))
+            })?;
+            if !parsed.is_object() {
+                return Err(D::Error::custom("expected an object of field entries"));
+            }
+            parsed
+        }
+        other => other,
+    })
+}
+
+fn lenient_attempts<'de, D>(deserializer: D) -> Result<Vec<FieldAttempt>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let values = lenient_values(deserializer)?;
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value::<FieldAttempt>(value).map_err(D::Error::custom))
+        .collect()
 }
 
 pub(super) fn build_gap_closure_prompt(contract: &Value) -> anyhow::Result<String> {
@@ -404,6 +475,40 @@ pub(super) fn enqueue_gap_closure_if_needed(
     Ok(Some(task))
 }
 
+/// Workers regularly send `field_status` alone and forget `result` (or send
+/// `result.fields` empty). The verified values and their sources are already
+/// in `field_status`, so `result.fields` is derived from them instead of
+/// rejecting the run (07.09.2026: eighteen rejections in seven minutes for one
+/// lead, most of them "missing field `result`").
+fn derive_result_fields_from_field_status(request: &mut ResearchWritebackRequest) {
+    let empty = request
+        .result
+        .fields
+        .as_object()
+        .map(|fields| fields.is_empty())
+        .unwrap_or(true);
+    if !empty {
+        return;
+    }
+    let mut fields = Map::new();
+    for (key, status) in &request.field_status {
+        if !status.status.trim().eq_ignore_ascii_case("verified") || status.value.is_null() {
+            continue;
+        }
+        let mut entry = Map::new();
+        entry.insert("value".to_string(), status.value.clone());
+        entry.insert(
+            "sources".to_string(),
+            serde_json::to_value(&status.sources).unwrap_or(Value::Array(Vec::new())),
+        );
+        if let Some(person_key) = status.extra.get("person_key") {
+            entry.insert("person_key".to_string(), person_key.clone());
+        }
+        fields.insert(key.clone(), Value::Object(entry));
+    }
+    request.result.fields = Value::Object(fields);
+}
+
 /// A writeback in which nothing is verified and no field carries a single
 /// source or documented attempt is not a research result. It happened on
 /// 07.09.2026 when a worker attempt resumed after a service restart without
@@ -503,6 +608,7 @@ pub(super) fn handle_research_writeback(
     // Erst retten, dann pruefen: Einzelverstoesse duerfen die Arbeit einer
     // ganzen Firma nicht mehr vernichten (Befund 03.09.2026, 14 von 19).
     let mut request = request;
+    derive_result_fields_from_field_status(&mut request);
     reject_evidence_free_writeback(&request)?;
     let rejections = sanitize_research_writeback(&mut request, &requested_fields)?;
     validate_field_status_keys(&requested_fields, &request.field_status)?;
@@ -2196,6 +2302,41 @@ mod tests {
             "status": "verified", "value": "x", "sources": "northdata"
         }));
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn writeback_without_result_derives_result_fields_from_verified_status() {
+        let mut request: ResearchWritebackRequest = serde_json::from_value(serde_json::json!({
+            "record_id": "lead_x", "module": "outbound-lead-generation",
+            "research_command_id": "leadgen-lead-research-x",
+            "field_status": {
+                "firma_name": {"status": "verified", "value": "Beispiel GmbH",
+                    "sources": [{"source_id": "a.de", "url": "https://a.de/", "quote": "Beispiel GmbH"},
+                                {"source_id": "b.de", "url": "https://b.de/", "quote": "Beispiel GmbH"}]},
+                "firma_domain": {"status": "no_match", "reason": "nicht gefunden", "sources": "", "attempts": ""}
+            }
+        }))
+        .expect("missing result and empty-string lists are tolerated");
+        derive_result_fields_from_field_status(&mut request);
+        let fields = request.result.fields.as_object().unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields["firma_name"]["value"], "Beispiel GmbH");
+        assert_eq!(fields["firma_name"]["sources"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn result_lists_accept_empty_string_and_single_object() {
+        let result: ResearchWritebackResult = serde_json::from_value(serde_json::json!({
+            "fields": "", "person_records": {"person_key": "p1", "person_nachname": "Muster"}, "evidence": ""
+        }))
+        .unwrap();
+        assert!(result.fields.as_object().unwrap().is_empty());
+        assert_eq!(result.person_records.len(), 1);
+        assert!(result.evidence.is_empty());
+        assert!(serde_json::from_value::<ResearchWritebackResult>(
+            serde_json::json!({"fields": {}, "evidence": "northdata"})
+        )
+        .is_err());
     }
 
     #[test]
