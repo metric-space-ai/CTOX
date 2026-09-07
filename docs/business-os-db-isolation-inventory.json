@@ -236,9 +236,15 @@
         "uses_cached_db_handle": false
       },
       "scoped_collections": [
+        "business_chats",
         "business_commands",
         "ctox_bug_reports",
+        "ctox_crew_learnings",
+        "ctox_crew_members",
+        "ctox_harness_events",
+        "ctox_harness_status",
         "ctox_queue_tasks",
+        "ctox_runs",
         "ctox_runtime_settings"
       ],
       "notes": "Scoped system exception: CTOX resolves business_commands, ctox_runtime_settings, ctox_queue_tasks and ctox_bug_reports through the scoped system facade. Browser/Rust dynamic-app smoke denies the registered foreign business_module_catalog collection through collection(), property, raw and collections access and checks the permission/capability facade contract."
@@ -726,6 +732,8 @@
       },
       "scoped_collections": [
         "business_commands",
+        "ctox_crew_members",
+        "ctox_queue_tasks",
         "ctox_ticket_approvals",
         "ctox_ticket_cases",
         "ctox_ticket_clarification_requests",
