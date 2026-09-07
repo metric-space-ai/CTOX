@@ -2236,10 +2236,7 @@ where
     }
     runtime.block_on(async move {
         let database = open_database(database_path).await?;
-        database
-            .add_collections(collection_creators())
-            .await
-            .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
+        register_collections_tolerant(&database, collection_creators()).await?;
         let output = operation(None, Arc::clone(&database)).await?;
         database
             .close()
@@ -9168,6 +9165,34 @@ fn business_record_projection_collections_for_root(root: &Path) -> Vec<String> {
 /// log and skip it instead of tearing down the whole peer. This mirrors the
 /// required-vs-optional knowledge already encoded in
 /// `repair_optional_rxdb_collection_schema_drift`.
+/// Same registration policy as the live peer (FIX 4): a drifted or failing
+/// OPTIONAL collection is logged and skipped, a failing REQUIRED collection
+/// aborts. The temporary databases opened by CLI commands (worker tools such
+/// as `auth-assist-request`, browser automation) used the strict
+/// all-or-nothing registration and failed on the customer instance with RxDB
+/// error DB6 for `workjet_computers` from 02.09.2026 on — no worker could
+/// request a login for a credential source since then.
+pub(crate) async fn register_collections_tolerant(
+    database: &Arc<RxDatabase>,
+    creators: HashMap<String, RxCollectionCreator>,
+) -> anyhow::Result<()> {
+    let (_collections, failed_collections) = database
+        .add_collections_tolerant(creators)
+        .await
+        .map_err(|err| anyhow::anyhow!("register Business OS RxDB collections: {err}"))?;
+    for (collection_name, err) in &failed_collections {
+        anyhow::ensure!(
+            !is_required_native_collection(collection_name),
+            "required Business OS RxDB collection `{collection_name}` failed to register: {err}"
+        );
+        eprintln!(
+            "[business-os] skipping optional Business OS RxDB collection `{collection_name}` \
+            (registration failed: {err})"
+        );
+    }
+    Ok(())
+}
+
 fn is_required_native_collection(collection: &str) -> bool {
     matches!(
         collection,
