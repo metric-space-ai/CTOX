@@ -1734,7 +1734,7 @@ function taskCardMarkup(task, state) {
       <button type="button" class="ctox-task-selector" data-select-task-id="${escapeAttr(task.id)}" aria-label="${escapeAttr(`${t.openTaskDetail}: ${title}`)}">
         <strong>${escapeHtml(title)}</strong>
         <small class="ctox-task-meta">${status ? `<span class="ctox-task-meta-status ${problem ? 'is-problem' : ''}">${escapeHtml(status)}</span>` : ''}${detail}</small>
-        ${reason ? `<small class="ctox-task-reason ${problem ? 'is-problem' : ''}">${escapeHtml(reason)}</small>` : ''}
+        ${reason ? `<small class="ctox-task-reason ${problem ? 'is-problem' : ''}" title="${escapeAttr(reason)}">${escapeHtml(reason)}</small>` : ''}
         ${taskPipelineMarkup(task, state)}
       </button>
       <div class="ctox-task-actions">
@@ -1773,11 +1773,13 @@ function taskPipelineMarkup(task, state, options = {}) {
   const current = taskPipelineStage(task);
   const problem = ['blocked', 'failed', 'cancelled'].includes(normalizeCommandStatus(task.routeStatus || task.status));
   const stages = [t.pipelineQueued, t.pipelineWorking, t.pipelineReview, t.pipelineDone];
+  if (problem) stages[current] = displayStatus(task.routeStatus || task.status, state.lang);
   return `<div class="ctox-task-pipeline ${options.compact ? 'is-compact' : ''} ${problem ? 'is-problem' : ''}" aria-label="${escapeAttr(stages[current])}" data-flow-stage="${current}">${stages.map((label, index) => `<span class="${index < current ? 'is-complete' : index === current ? 'is-current' : 'is-future'}"><i aria-hidden="true"></i><em>${escapeHtml(label)}</em></span>`).join('')}</div>`;
 }
 
 function taskPipelineStage(task) {
   const statuses = taskStatusCandidates(task);
+  if (routingProblemStatus(task)) return Number(task.failureAttemptCount || task.attempt || 0) > 0 ? 1 : 0;
   if (statuses.some((status) => ['completed', 'done', 'sent', 'approved', 'healthy'].includes(status))) return 3;
   if (statuses.some((status) => ['review', 'awaiting-review', 'reviewing', 'validating'].includes(status))) return 2;
   if (statuses.some((status) => ['running', 'leased', 'working', 'drafting'].includes(status))) return 1;
@@ -1825,7 +1827,7 @@ function taskMatchesPrimaryView(task, view) {
   const done = statuses.some((status) => HARNESS_SUCCESS_STATUSES.has(status));
   const working = !done && statuses.some((status) => HARNESS_ACTIVE_STATUSES.has(status));
   if (view === 'working') return working;
-  if (view === 'waiting') return !done && !working;
+  if (view === 'waiting') return !done && !working && !taskIsHarnessTerminal(task);
   if (view === 'done') return done;
   return true;
 }
@@ -2095,6 +2097,9 @@ function wireWebStackPanel(state, root) {
 
 function taskSteps(task, state) {
   if (!task) return [];
+  // A final routing transition can precede command/plan projection delivery.
+  // Show it even when the last plan still has an in-progress step.
+  if (routingProblemStatus(task)) return taskStatusSteps(task, state);
   if (isExactCommunicationFlow(task, state)) return communicationTaskSteps(task, state);
   // The persisted execution plan outranks the audit stream: it is the durable
   // record of what the model actually planned and completed, with a per-step
@@ -2197,7 +2202,7 @@ function flowMatchesTask(flowResult, task) {
 }
 
 function taskStatusSteps(task, state) {
-  const status = normalizeCommandStatus(task.status || task.routeStatus);
+  const status = authoritativeTaskStatus(task) || normalizeCommandStatus(task.routeStatus || task.status);
   const timeline = state.model?.timeline || [];
   const findIndex = (id) => {
     if (!id) return -1;
@@ -2210,7 +2215,7 @@ function taskStatusSteps(task, state) {
     ? {
         id: routeNode,
         label: displayStatus(status, state.lang),
-        detail: taskDetailText(task.resultSummary || task.summary || task.target || task.source || '', state),
+        detail: taskReasonText(task, state) || taskDetailText(task.resultSummary || task.summary || task.target || task.source || '', state),
         active: true,
       }
     : {
@@ -3734,7 +3739,7 @@ function selectedTaskStepView(task, state) {
   const byTimeline = steps.findIndex((step) => step.timelineIndex === selectedTimelineIndex);
   const activeIndex = steps.findIndex((step) => step.active);
   const taskIndex = clampMetric(state.selectedTaskStepIndex || 0, 0, Math.max(steps.length - 1, 0));
-  const index = state.userNavigatedTimeline ? taskIndex : (byTimeline >= 0 ? byTimeline : Math.max(0, activeIndex));
+  const index = state.userNavigatedTimeline ? taskIndex : (activeIndex >= 0 ? activeIndex : Math.max(0, byTimeline));
   const step = steps[index] || steps[0];
   return { steps, index, step, node: state.model.nodeMap.get(step.id) || null };
 }
@@ -3983,7 +3988,7 @@ function mergeBundleWithCommands(bundle, commands, queueTasks = [], bugReports =
     source: doc.source_module || doc.module || 'ctox',
     channel: inferInboundChannel(doc),
     priority: doc.priority || 'normal',
-    status: normalizeCommandStatus(doc.status || doc.task_status || doc.route_status),
+    status: routingProblemStatus(doc) || normalizeCommandStatus(doc.status || doc.task_status || doc.route_status),
     routeStatus: doc.route_status || '',
     target: doc.command_type || doc.thread_key || 'ctox queue',
     browserContextArtifact: doc.browser_context_artifact || null,
@@ -4138,10 +4143,9 @@ function isQueueOverviewItemVisible(item) {
 
 function isTaskOverviewItemVisible(item) {
   const statuses = taskStatusCandidates(item);
-  // Queue documents can retain an old primary `queued` status while route/task
-  // evidence has already reached a terminal failure. Terminal evidence wins so
-  // stale red cards do not stay in the live pipeline forever.
-  if (statuses.some((status) => HARNESS_PROBLEM_TERMINAL_STATUSES.has(status))) return false;
+  // Keep bounded native queue failures inspectable/retryable. Legacy tickets
+  // without routing evidence still follow the existing overview filter.
+  if (statuses.some((status) => HARNESS_PROBLEM_TERMINAL_STATUSES.has(status))) return Boolean(item.routeStatus || item.route_status);
   if (statuses.some((status) => HARNESS_WAITING_STATUSES.has(status) || HARNESS_ACTIVE_STATUSES.has(status))) return true;
   if (statuses.some((status) => HARNESS_SUCCESS_STATUSES.has(status))) return true;
   if (item?.priority === 'urgent') return true;
@@ -4303,8 +4307,15 @@ function isFocusedTask(item, focusTask) {
   );
 }
 
+function routingProblemStatus(task = {}) {
+  const route = normalizeCommandStatus(task?.routeStatus || task?.route_status || '');
+  return HARNESS_PROBLEM_TERMINAL_STATUSES.has(route) ? route : '';
+}
+
 function authoritativeTaskStatus(task = {}) {
   task = task || {};
+  const routing = routingProblemStatus(task);
+  if (routing) return routing;
   const durablePhase = taskExecutionProgress(task)?.phase || '';
   const phase = String(task.executionPhase || task.execution_phase || durablePhase).trim().toLowerCase();
   if (!phase) return '';
@@ -4321,6 +4332,8 @@ function authoritativeTaskStatus(task = {}) {
 
 function authoritativeTaskNodeId(task = {}) {
   task = task || {};
+  const routing = routingProblemStatus(task);
+  if (routing) return routeStatusNodeId(routing);
   const phase = String(task.executionPhase || task.execution_phase || '').trim().toLowerCase();
   if (!phase) return routeStatusNodeId(task.routeStatus || task.status);
   if (['waiting_dependencies', 'waiting-dependencies', 'accepted', 'queued', 'retry_wait', 'retry-wait'].includes(phase)) return 'queued';
