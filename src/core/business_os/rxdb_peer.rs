@@ -8111,7 +8111,12 @@ fn clamp_oversized_projected_documents(root: &Path, database_path: &Path) -> any
             .strip_prefix("ctox_business_os__")
             .and_then(|name| name.rsplit_once("__v"))
             .map(|(collection, _)| collection);
-        if collection.is_some_and(|name| file_storage_collections.contains(name)) {
+        // Legacy startup repair must never rewrite typed source text or make an
+        // oversized historical source record fatal to peer bring-up. New source
+        // writes have explicit admission; existing bytes remain recoverable.
+        if collection.is_some_and(|name| {
+            file_storage_collections.contains(name) || name == "business_module_source_files"
+        }) {
             continue;
         }
         let quoted = sqlite_quote_identifier(&table);
@@ -11550,6 +11555,42 @@ pub(in crate::business_os) mod tests {
             )?;
             assert_eq!(after, before, "{table}: restart changed stored file bytes");
         }
+        Ok(())
+    }
+
+    #[test]
+    fn startup_repair_preserves_oversized_historical_source_without_aborting() -> anyhow::Result<()>
+    {
+        let temp = tempfile::tempdir()?;
+        let path = temp.path().join("legacy-source.sqlite3");
+        let conn = Connection::open(&path)?;
+        conn.execute_batch(
+            "CREATE TABLE ctox_business_os__business_module_source_files__v0
+             (id TEXT PRIMARY KEY, revision TEXT, data TEXT NOT NULL,
+              lastWriteTime REAL NOT NULL, deleted INTEGER)",
+        )?;
+        let raw = serde_json::to_string(&json!({
+            "id": "legacy:large.js",
+            "content": "x".repeat(2 * 1024 * 1024),
+            "_rev": "7-preserved",
+            "_meta": {"lwt": 1234.0},
+            "_deleted": false
+        }))?;
+        conn.execute(
+            "INSERT INTO ctox_business_os__business_module_source_files__v0
+             VALUES (?1, '7-preserved', ?2, 1234.0, 0)",
+            params!["legacy:large.js", raw],
+        )?;
+        drop(conn);
+        assert_eq!(clamp_oversized_projected_documents(temp.path(), &path)?, 0);
+        let conn = Connection::open(&path)?;
+        let after: (String, String, f64) = conn.query_row(
+            "SELECT data, revision, lastWriteTime
+             FROM ctox_business_os__business_module_source_files__v0",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        assert_eq!(after, (raw, "7-preserved".to_owned(), 1234.0));
         Ok(())
     }
 

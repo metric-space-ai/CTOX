@@ -9,7 +9,11 @@ Module source documents now retain their typed content within the existing
 generic master-response ceiling (1 MiB of serialized JSON). Oversized source
 documents fail explicitly without rewriting their content. This does not
 raise a wire limit or introduce a second data path. It does not yet implement
-chunked source files above that admitted inline size.
+chunked source files above that admitted inline size. Legacy startup repair
+skips typed module-source records entirely: an existing oversized source must
+neither be truncated nor abort peer bring-up. A real SQLite startup test
+preserves a 2 MiB historical source, revision and write timestamp byte-for-byte
+(1 passed, 0 failed; 0.10 s).
 
 Large live storage events now emit the existing Resync signal when their
 serialized size exceeds their collection's pull-response budget. Peers drain
@@ -44,6 +48,15 @@ The full native RxDB suite passed 430 tests; the real-store source repair test,
 five Office staging tests, cargo check and formatting passed. The complete JS
 suite passed 119 tests with the freshly rebuilt wire daemon and no skips.
 [Raw E2E measurements](beweise/raw/module-source-lossless-candidate-20260907.json).
+
+The optimized candidate from main cc9a76e6e (SHA256
+`e31b47bc968d651a05c341c2a5adbb3ea6629a688f8c0a0e2cf5b87b2e1eabcd`)
+and signed shell beta17 completed 30/30 warm commands: p50 264.5 ms,
+p95 337.05 ms, min 192 ms, max 406 ms, no reported issues. The debug control
+on beta17 had p50 380 ms and did not meet the 300 ms target. The optimized
+measurement passes the existing local warm-command target, not production WAN
+or boot-p95 acceptance. It predates the startup-only legacy-source safeguard.
+[Raw warm-command measurements](beweise/raw/warm-command-release-20260907.json).
 
 Native production deployment and the fourteen historical source repairs remain
 pending at this checkpoint. The seven Office staging tombstones were repaired
