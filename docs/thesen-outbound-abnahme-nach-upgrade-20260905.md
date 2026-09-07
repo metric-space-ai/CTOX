@@ -207,3 +207,16 @@ Danach: App 1.0.104 ausliefern, offene Leads in kleinen Gruppen nachstarten, Fel
 | Meine Fixes für Upgrade 6 (`304536098`) | Cockpit-Pump: höchstens ein Refresh je Root alle 3 s (Wakes werden gebündelt). Writeback-Guard: belegfreie Writebacks (nichts verifiziert, keine Quelle, kein Versuch) werden mit erklärender Meldung abgewiesen; 2 Tests. |
 
 Upgrade 6 gestartet 08:35 UTC (main `304536098`). Abnahme danach: Reload → 21/21 Kollektionen in < 60 s; MCP-Handshake der Worker; Cockpit-Thread < 20 %; Nachstart aller unvollständigen Leads; Feldtabelle.
+
+## 07.09., 08:56–10:05 UTC: Upgrade 6 gemessen, Lauf über alle 19, Anbieter-Login-Pfad geprüft, Upgrade 7 gestartet
+
+| Messung | Wert |
+|---|---|
+| Upgrade 6 (Release branch-main-20260907T082637Z) | Wartungsfreigabe 09:00:00 per Browser-Ack (33 s); seit 08:56 **0** MCP-Handshake-Fehler bei Kapazität 2; Browser-Erstreplikation nach Reload 12/16 nach 2 min, Richter-Lead zeigt 13/32 (Codex-Sync-Fix PR #65 wirkt). Cockpit-Thread weiter 73–86 % → PR #66 (Ereignis-Cursor) mit Upgrade 7. |
+| App 1.0.105 | Vorabgleich-Antwort „wartet noch auf die Rückmeldung" gilt wie Timeout; vorher brachen Berg, Chemotechnik, Dreidoppel und ein 8er-Batch still ab. „Alle recherchieren (15)" legte danach alle offenen Aufträge an (19 in Queue um 09:46). |
+| Ergebnisse 09:56 | Richter 13, Additiv 13, Destilla 11, Calvatis 9 Felder; Cereda `needs_review` mit 0 (Neulauf eingereiht). Writeback-Ablehnungen jetzt mit Grund („expected a sequence": `sources` als String/Objekt → Fix `c66b2b8ad` akzeptiert alle drei Formen). |
+| Skill-/Prompt-Einhaltung (Schritte 0–4 aus `research_instructions`) | 1 Register ja (Northdata/Handelsregister; GF, Prokura, Status verifiziert), 2 Website ja (Impressum, Domain, E-Mail, Telefon), **3 Kennzahlen bei keinem Lead** (D&B Hoovers/Leadfeeder = Login-Quellen → `no_match`/`action_required`), 4 Personen: Additiv 2, Richter 1, Calvatis 0 trotz GF im Impressum (Verstoß), `person_email_validation` nirgends. Zwei-Quellen-Regel bis auf `person_titel`, `firma_prokura`, `person_geschlecht` eingehalten. |
+| **Anbieter anlegen/freischalten (Login-Quellen)** | Kette App → Secret `OUTBOUND_<QUELLE>_LOGIN` (`ctox.secret.put`) → `credential_secret_name` in `payload.source_policy` (belegt für 6 Quellen) → Worker `auth-assist-request` → Owner-Browser-Stream. **Bruch:** jeder CLI-Aufruf des Workers, der den RxDB-Store öffnet, scheitert seit 02.09. mit RxDB DB6 (`workjet_computers`-Schemadrift; Dienst überspringt optional, CLI-Pfad strikt) → nie eine Anmeldeanforderung. Fix `8de040615` (`register_collections_tolerant`), Upgrade 7. Nebenbefund: alle 14 Adapter `failed` („adapter reconciliation reply must be one strict JSON object"). |
+| Cockpit-Ansicht | „Waiting in queue" bei terminal `failed` (Cereda, 4 Versuche, Handshake-Timeouts) — Live-Flow zeigt den Plan der Vorversuche (8/8, 79 %) neben einem geschönten Routingstatus. An Crew-Cockpit-Thread gemeldet. |
+
+Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
