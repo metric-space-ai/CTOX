@@ -288,3 +288,14 @@ Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
 | **Defekt: unvollständiger Plan bleibt terminal** | CHEMOFAST 18:51:13–18:52:58: Worker endet „task execution plan is incomplete (2/12 steps completed)", Task sofort `failed` (attempt 1, failure_attempt_count 0, kein failure_class). Ursache: `runtime_error_is_transient_api_failure` (service.rs) hat eine eigene Substring-Liste; 80561cbc9 hatte nur den Cooldown-Klassifizierer erweitert. Betroffen heute: CHEMOFAST, AKEMI (0/9, 5/6), BÜFA (8/9), BNT (7/8, 4/7), Dreidoppel (5/6), DrinkStar (4/5). |
 | Fix `e3ab5c7b3` (Upgrade 14, Start 19:03) | Beide Marker passieren das Gate → Technik-Hold mit 5-Versuche-Budget, Plan wird fortgesetzt. Test `incomplete_durable_plan_keeps_queue_work_retryable`. |
 | Offen | CHEMOFAST nach Upgrade 14 neu starten; Auth-Assist handelsregister.de wartet auf Owner. |
+
+## 07.09., 19:43–20:30 UTC: Upgrade 14 live, 18/19, Queue durch Adapter-Abgleich verstopft
+
+| Messung | Wert |
+|---|---|
+| Upgrade 14 (Release branch-main-20260907T190322Z, `e3ab5c7b3`), Wartung per Grace 19:43:14 | Technik-Holds (`failure_class=technical`) statt terminaler Fehler bei „plan is incomplete" — an Cereda (7 Versuche), AKEMI, Adapter-Abgleich sichtbar. |
+| Stand 19:44 | 18/19 mit Ergebnis: ANGUS 1 → 17, BNT 1 → 13, BOOMEX 6 → 14 (completed), BÜFA 21, AKEMI 9. Nur CHEMOFAST 0. |
+| CHEMOFAST-Neustart | 19:45 „Auswahl neu recherchieren (1)": App meldete „CTOX konnte den Task nicht an die Queue übergeben" (business-chat.js: `submitChatMessage` ohne Queue-Annahme), zweiter Klick 19:49; `chat.task` 19:54:20 angenommen, Task pending. Browser-Journal stieg auf 1220 anstehende Schreibungen; Peer-Schleifen nach Dienstneustart (ticket_state 113 s, knowledge_tables 106 s, business_records max 122 s, desktop_file_index max 92 s, business_commands Ø 1 s/Tick) blockieren den Datenkanal minutenlang → an Crew-Thread gemeldet (01a07d6d…). |
+| **Queue verstopft** | 19:56–20:28 lief nur „Recherche-Adapter abgleichen" (urgent, von jedem Recherche-Start neu eingereiht, je 6–7 min, mit Retry nach Plan-Fehler) und erzeugte zehn „repair scrape target …" (high). Die Nachrecherchen (normal) warteten 30 min ohne Hold. Kapazität 3 half nicht: nur zwei Leases gleichzeitig beobachtet. Gemeldet an Crew-Thread (01a07d81…; Queue-Thread 01a07015 ist archiviert). |
+| Gegenmaßnahme 20:29 | `ctox queue reprioritize`: CHEMOFAST/ANGUS/AKEMI → urgent, elf Adapter-/Scraper-Tasks → low. |
+| Offen | Adapterabgleich dedupen und von der chat.task-Parallelität entkoppeln; `cmd_cred_*` „database is locked" (10× in 13 min); Auth-Assist handelsregister.de wartet auf Owner. |
