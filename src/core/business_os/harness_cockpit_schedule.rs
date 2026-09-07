@@ -3,7 +3,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-pub(super) const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+// Keep the three-second spacing introduced by main's incident mitigation.
+pub(super) const MIN_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Default)]
 pub(super) struct Schedule {
@@ -70,7 +71,7 @@ mod tests {
         schedule.mark(root.clone(), 1);
         assert_eq!(schedule.take_ready(now), vec![(root.clone(), 1)]);
         schedule.completed(root.clone(), now);
-        for ms in 0..2000 {
+        for ms in 0..MIN_REFRESH_INTERVAL.as_millis() as u64 {
             schedule.mark(root.clone(), if ms % 2 == 0 { 2 } else { 4 });
             assert!(schedule
                 .take_ready(now + Duration::from_millis(ms))
@@ -98,9 +99,9 @@ mod tests {
             schedule.take_ready(now + Duration::from_secs(5)),
             vec![(PathBuf::from("other"), 2)]
         );
-        assert!(schedule.take_ready(now + Duration::from_secs(6)).is_empty());
+        assert!(schedule.take_ready(now + Duration::from_secs(7)).is_empty());
         assert_eq!(
-            schedule.take_ready(now + Duration::from_secs(7)),
+            schedule.take_ready(now + Duration::from_secs(8)),
             vec![(PathBuf::from("slow"), 31)]
         );
     }

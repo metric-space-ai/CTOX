@@ -360,6 +360,28 @@ pub(super) fn enqueue_gap_closure_if_needed(
     Ok(Some(task))
 }
 
+/// A writeback in which nothing is verified and no field carries a single
+/// source or documented attempt is not a research result. It happened on
+/// 07.09.2026 when a worker attempt resumed after a service restart without
+/// its context and closed two leads with 32x `no_match` and zero evidence; the
+/// skill demands a documented search and two page reads before `no_match`.
+fn reject_evidence_free_writeback(request: &ResearchWritebackRequest) -> anyhow::Result<()> {
+    let any_verified = request
+        .field_status
+        .values()
+        .any(|status| status.status.trim().eq_ignore_ascii_case("verified"));
+    let any_evidence = request
+        .field_status
+        .values()
+        .any(|status| !status.sources.is_empty() || !status.attempts.is_empty())
+        || !request.result.evidence.is_empty();
+    anyhow::ensure!(
+        any_verified || any_evidence,
+        "evidence-free research writeback rejected: no field is verified and no field carries a source or a documented attempt; a `no_match` needs the documented search and page reads that led to it"
+    );
+    Ok(())
+}
+
 pub(super) fn handle_research_writeback(
     root: &Path,
     command: &BusinessCommand,
@@ -437,6 +459,7 @@ pub(super) fn handle_research_writeback(
     // Erst retten, dann pruefen: Einzelverstoesse duerfen die Arbeit einer
     // ganzen Firma nicht mehr vernichten (Befund 03.09.2026, 14 von 19).
     let mut request = request;
+    reject_evidence_free_writeback(&request)?;
     let rejections = sanitize_research_writeback(&mut request, &requested_fields)?;
     validate_field_status_keys(&requested_fields, &request.field_status)?;
     validate_result_shape(&request.result, &requested_fields)?;
@@ -2052,6 +2075,75 @@ mod tests {
     /// Der Befund vom 03.09.2026: EIN fehlerhafter Beleg hat die Recherche einer
     /// ganzen Firma vernichtet. Jetzt bleibt das gute Feld erhalten, das
     /// schlechte faellt begruendet heraus, und der Lead geht in die Pruefung.
+    fn evidence_free_request(sources: usize, verified: bool) -> ResearchWritebackRequest {
+        let mut field_status = BTreeMap::new();
+        field_status.insert(
+            "firma_name".to_string(),
+            FieldStatus {
+                status: if verified { "verified" } else { "no_match" }.to_string(),
+                value: if verified {
+                    Value::String("Beispiel GmbH".to_string())
+                } else {
+                    Value::Null
+                },
+                sources: (0..sources)
+                    .map(|index| FieldSource {
+                        source_id: format!("quelle-{index}"),
+                        url: format!("https://quelle-{index}.example/impressum"),
+                        quote: "Beispiel GmbH".to_string(),
+                        person_key: None,
+                        requires_credential: false,
+                        task_id: String::new(),
+                        command_id: String::new(),
+                    })
+                    .collect(),
+                attempts: Vec::new(),
+                reason: "Keine unabhängige Quelle gefunden.".to_string(),
+                extra: BTreeMap::new(),
+            },
+        );
+        field_status.insert(
+            "firma_domain".to_string(),
+            FieldStatus {
+                status: "no_match".to_string(),
+                value: Value::Null,
+                sources: Vec::new(),
+                attempts: Vec::new(),
+                reason: "Website nicht lesbar.".to_string(),
+                extra: BTreeMap::new(),
+            },
+        );
+        ResearchWritebackRequest {
+            record_id: "lead_test".to_string(),
+            module: "outbound-lead-generation".to_string(),
+            research_command_id: "leadgen-lead-research-test".to_string(),
+            gap_task_id: String::new(),
+            field_status,
+            result: ResearchWritebackResult {
+                fields: serde_json::json!({}),
+                person_records: Vec::new(),
+                evidence: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_writeback_without_any_evidence_is_rejected() {
+        let error = reject_evidence_free_writeback(&evidence_free_request(0, false))
+            .expect_err("32x no_match without a single source must not close a lead");
+        assert!(error
+            .to_string()
+            .contains("evidence-free research writeback rejected"));
+    }
+
+    #[test]
+    fn a_documented_no_match_or_a_verified_field_passes_the_evidence_gate() {
+        reject_evidence_free_writeback(&evidence_free_request(1, false))
+            .expect("one documented source keeps the writeback");
+        reject_evidence_free_writeback(&evidence_free_request(2, true))
+            .expect("a verified field keeps the writeback");
+    }
+
     #[test]
     fn writeback_rettet_gute_felder_und_verwirft_nur_den_fehlerhaften_beleg() -> anyhow::Result<()>
     {
