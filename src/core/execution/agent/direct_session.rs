@@ -88,6 +88,11 @@ const BUSINESS_OS_MCP_SESSION_TOOLS: &[&str] = &[
     "business_os.list_module_actions",
     "business_os.propose_action",
     "business_os.execute_action",
+    // Befund 07.09.2026: the research writeback contract (mechanism
+    // business_command, command_type outbound.lead.research_writeback) can only
+    // be fulfilled through this tool. Without it in the session allowlist every
+    // research task ends in "no successful writeback receipt".
+    "business_os.execute_writeback",
     "business_os.get_command_status",
     "business_os.list_runs",
     "business_os.get_run",
@@ -2373,6 +2378,12 @@ mod tests {
             .expect("enabled tools")
             .iter()
             .any(|tool| tool.as_str() == Some("business_os.upsert_record")));
+        assert!(server
+            .get("enabled_tools")
+            .and_then(JsonValue::as_array)
+            .expect("enabled tools")
+            .iter()
+            .any(|tool| tool.as_str() == Some("business_os.execute_writeback")));
         assert_eq!(
             config.get("features.apps").and_then(JsonValue::as_bool),
             Some(false)

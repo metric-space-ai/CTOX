@@ -28,6 +28,11 @@ const MAINTENANCE_STORE_FILE_NAME: &str = "ctox-maintenance.sqlite3";
 const MAINTENANCE_STATE_ID: &str = "business-os-upgrade";
 const MAINTENANCE_SCHEMA_VERSION: u32 = 1;
 const MAINTENANCE_LEASE_TTL_MS: i64 = 90_000;
+/// How long the post-restart `waiting_collections` phase may wait for a browser
+/// acknowledgement before the instance releases its write protection on its own.
+/// Befund 07.09.2026: a single hidden tab stopped polling, no other client was
+/// open, and the whole customer instance stayed read-only for every user.
+const MAINTENANCE_CLIENT_ACK_GRACE_MS: i64 = 10 * 60 * 1000;
 const MAINTENANCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const MAINTENANCE_READ_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const DEFAULT_INSTALL_ROOT_RELATIVE_PATH: &str = ".local/lib/ctox";
@@ -359,6 +364,10 @@ pub struct MaintenanceState {
     pub service_active: bool,
     pub replication_up: bool,
     pub initial_replication_complete: bool,
+    /// Wall-clock start of the post-restart wait for a browser acknowledgement
+    /// (`waiting_collections`). Zero for states persisted before this field existed.
+    #[serde(default)]
+    pub waiting_collections_since_ms: i64,
     #[serde(default)]
     pub client_readiness: Vec<MaintenanceClientReadiness>,
     pub retryable: bool,
@@ -744,6 +753,7 @@ fn begin_maintenance(layout: &InstallLayout, target_release: &str) -> Result<Mai
         service_active: false,
         replication_up: false,
         initial_replication_complete: false,
+        waiting_collections_since_ms: 0,
         client_readiness: Vec::new(),
         retryable: false,
         retry_action: None,
@@ -957,6 +967,9 @@ fn reconcile_maintenance_runtime(
             } else {
                 "waiting_replication".to_string()
             };
+            if replication_up && state.waiting_collections_since_ms <= 0 {
+                state.waiting_collections_since_ms = current_utc().timestamp_millis();
+            }
             state.progress = MaintenanceProgress {
                 percent: if replication_up { 96 } else { 92 },
                 message: if replication_up {
@@ -992,6 +1005,9 @@ fn reconcile_maintenance_runtime(
         state = update_maintenance(&layout.state_root, &lease_id, |state| {
             state.replication_up = true;
             state.phase = "waiting_collections".to_string();
+            if state.waiting_collections_since_ms <= 0 {
+                state.waiting_collections_since_ms = current_utc().timestamp_millis();
+            }
             state.progress = MaintenanceProgress {
                 percent: 96,
                 message: "App-Daten werden nach dem Update synchronisiert".to_string(),
@@ -1018,6 +1034,40 @@ fn reconcile_maintenance_runtime(
                 state.progress.message = "Upgrade unterbrochen · Wiederholen möglich".to_string();
             })?
         };
+    }
+    // The browser acknowledgement is a courtesy signal for the banner, not a
+    // safety requirement for writes: the service is active and replication is
+    // up. Without any visible client it never arrives, and a stuck
+    // `waiting_collections` phase keeps EVERY user's apps read-only
+    // (`CTOX_MAINTENANCE_READ_ONLY`) - observed on the customer instance on
+    // 07.09.2026 for 32 minutes after a finished upgrade. Release after a
+    // bounded grace period instead.
+    if state.status == "active"
+        && state.phase == "waiting_collections"
+        && state.service_active
+        && state.replication_up
+    {
+        let now_ms = current_utc().timestamp_millis();
+        let lease_id = state.lease_id.clone();
+        if state.waiting_collections_since_ms <= 0 {
+            state = update_maintenance(&layout.state_root, &lease_id, |state| {
+                state.waiting_collections_since_ms = now_ms;
+            })?;
+        } else if now_ms - state.waiting_collections_since_ms > MAINTENANCE_CLIENT_ACK_GRACE_MS {
+            state = update_maintenance(&layout.state_root, &lease_id, |state| {
+                state.phase = "completed".to_string();
+                state.status = "completed".to_string();
+                state.progress = MaintenanceProgress {
+                    percent: 100,
+                    message: "Upgrade abgeschlossen · Freigabe ohne Browser-Bestätigung"
+                        .to_string(),
+                };
+                state.retryable = false;
+                state.retry_action = None;
+                state.last_error = None;
+                state.finished_at = Some(now_rfc3339());
+            })?;
+        }
     }
     Ok(Some(state))
 }
@@ -4863,6 +4913,79 @@ mod tests {
             .unwrap();
         assert_eq!(reconciled.status, "stale");
         assert!(reconciled.retryable);
+    }
+
+    #[test]
+    fn waiting_collections_without_browser_ack_completes_after_grace() {
+        let temp = tempdir().unwrap();
+        // Same root resolution as the status endpoint, so the reconcile and the
+        // projection below read the same persisted state.
+        let layout = InstallLayout::resolve(temp.path()).unwrap();
+        let started = begin_maintenance(&layout, "branch:main").unwrap();
+        let now_ms = current_utc().timestamp_millis();
+        let mut waiting = load_maintenance_state_from_root(&layout.state_root)
+            .unwrap()
+            .unwrap();
+        waiting.service_active = true;
+        waiting.replication_up = true;
+        waiting.phase = "waiting_collections".to_string();
+        waiting.lease_expires_at_ms = now_ms + MAINTENANCE_LEASE_TTL_MS;
+        waiting.waiting_collections_since_ms = now_ms - MAINTENANCE_CLIENT_ACK_GRACE_MS + 30_000;
+        persist_maintenance_state_to_root(&layout.state_root, &waiting).unwrap();
+
+        // Inside the grace period the instance keeps waiting for the browser.
+        let still_waiting = reconcile_maintenance_runtime(temp.path(), &layout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(still_waiting.lease_id, started.lease_id);
+        assert_eq!(still_waiting.status, "active");
+        assert_eq!(still_waiting.phase, "waiting_collections");
+        assert_eq!(
+            business_os_maintenance_status(temp.path()).unwrap()["active"],
+            true
+        );
+
+        let mut overdue = load_maintenance_state_from_root(&layout.state_root)
+            .unwrap()
+            .unwrap();
+        overdue.waiting_collections_since_ms = now_ms - MAINTENANCE_CLIENT_ACK_GRACE_MS - 1;
+        persist_maintenance_state_to_root(&layout.state_root, &overdue).unwrap();
+
+        let released = reconcile_maintenance_runtime(temp.path(), &layout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(released.status, "completed");
+        assert_eq!(released.phase, "completed");
+        assert!(released.finished_at.is_some());
+        // Honest projection: no client ever acknowledged its collections.
+        assert!(!released.initial_replication_complete);
+        assert!(released.client_readiness.is_empty());
+        let payload = business_os_maintenance_status(temp.path()).unwrap();
+        assert_eq!(payload["active"], false);
+        assert_eq!(payload["message"], "");
+    }
+
+    #[test]
+    fn waiting_collections_grace_starts_at_first_observation() {
+        let temp = tempdir().unwrap();
+        let layout = InstallLayout::resolve(temp.path()).unwrap();
+        begin_maintenance(&layout, "branch:main").unwrap();
+        let mut waiting = load_maintenance_state_from_root(&layout.state_root)
+            .unwrap()
+            .unwrap();
+        waiting.service_active = true;
+        waiting.replication_up = true;
+        waiting.phase = "waiting_collections".to_string();
+        waiting.lease_expires_at_ms = current_utc().timestamp_millis() + MAINTENANCE_LEASE_TTL_MS;
+        // A state persisted by an older binary carries no start timestamp.
+        waiting.waiting_collections_since_ms = 0;
+        persist_maintenance_state_to_root(&layout.state_root, &waiting).unwrap();
+
+        let observed = reconcile_maintenance_runtime(temp.path(), &layout)
+            .unwrap()
+            .unwrap();
+        assert_eq!(observed.status, "active");
+        assert!(observed.waiting_collections_since_ms > 0);
     }
 
     #[test]

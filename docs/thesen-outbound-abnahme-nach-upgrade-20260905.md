@@ -87,3 +87,51 @@ ausgelieferten Stand (Sync-Engine 51 Dateien, RxDB 34, Shell 91; darunter „pro
 crash and data-preserving recovery", „rejected cutover and verified production rollback").
 Ein `ctox upgrade --dev` würde das komplett und ungeprüft auf die Kundeninstanz bringen — nur
 für sieben kosmetische Phantome. Entscheidung des Eigentümers.
+
+## Upgrade 3 — 07.09.2026, 23:04 UTC (Release branch-main-20260906T223502Z: Threads-Fix, Skill §7, Reconciler; sync.js-Buster vor dem Umschalten im Release-Verzeichnis gepatcht, byteidentisch zu `d714d887a`)
+
+| Messung | Wert | Bewertung |
+|---|---|---|
+| Shell-Boot | `ready`, Nutzer angemeldet, `sync.js` lädt `command-bus.js`/`sync-contract.js` mit `?v=20260906-office-page-exit` (200) | belegt |
+| Befund 4 Altlast | `projektion_running=0`, `routing_leased=0` — **7 Phantome → 0** (Projektionstabelle jetzt `ctox_queue_tasks__v3`) | belegt |
+| Kapazität | `max_workers 4` | unverändert |
+| Leads | 19/19 mit Ergebnis | unverändert |
+| Recherchestart (Threads-Fenster maximiert, keine Kollektionen ausgesetzt) | Klick 23:39:33 → Befehl angelegt 23:39:42 → Server `accepted` 23:40:50 → Worker gestartet 23:39:49 (Lease 7 s nach Anlage) | **Latenz 15–20 min → 77 s**, davon 47 s Sellify-Vorabgleich |
+| Writeback | Worker recherchierte 32 Felder (18 verifiziert), meldete Erfolg, Task 23:47:20 `failed`: „no successful outbound.lead.research_writeback receipt" — 0× `business_os.execute_writeback`, 3× `propose_action` (alle `success:false`) | **Defekt 2, siehe unten** |
+
+### Defekt 1 (07.09., 23:04–23:36 UTC): Instanz nach dem Upgrade 32 Minuten für ALLE schreibgeschützt
+
+Der erste Recherchestart nach dem Umschalten scheiterte still: `CTOX_MAINTENANCE_READ_ONLY`
+(„CTOX wird aktualisiert – Apps bleiben schreibgeschützt"), unbehandelte Promise-Ablehnung im
+Lead-Schreibpfad, Status fiel von „Wird gestartet" auf „Prüfung nötig" zurück. Ursache im
+Wartungsprotokoll (`src/core/install/mod.rs`, `src/apps/business-os/app.js`):
+
+1. Nach dem Dienst-Neustart steht der Zustand in `ctox-maintenance.sqlite3` auf
+   `waiting_collections` und wird **nur** durch den Business-Command
+   `ctox.maintenance.client_ready` eines Browsers beendet, der alle Pflichtkollektionen seiner
+   offenen Module `complete` sieht (`tryAcknowledgeMaintenanceReadiness`).
+2. Der einzige offene Tab war verdeckt; `maintenancePollDelay()` liefert bei
+   `visibilityState === 'hidden'` 0 → kein Poll, keine Bestätigung — obwohl alle 17
+   Pflichtkollektionen längst `complete` waren.
+3. Serverseitig läuft die Wartezeit unbegrenzt: bei lebendem Peer-Heartbeat wird der Lease
+   nur verlängert („a live peer heartbeat owns the wait"). `lease_expires_at` 23:09:11 war
+   um 23:36 noch `active`.
+
+Sofortmaßnahme: den Retry-Pfad der Shell (`[data-maintenance-retry]`) ausgelöst — derselbe
+Code, den ein sichtbarer Tab bei jedem Poll ausführt; Bestätigung 23:36:15 UTC über den
+WebRTC-Befehlskanal, Zustand `completed`. Fix auf main: (a) Server gibt `waiting_collections`
+nach 10 min ohne Browser-Bestätigung selbst frei (`MAINTENANCE_CLIENT_ACK_GRACE_MS`,
+neues Feld `waiting_collections_since_ms`, Tests), (b) verdeckter Tab pollt alle 30 s
+weiter, solange ein Upgrade läuft (`CTOX_MAINTENANCE_HIDDEN_POLL_MS`).
+
+### Defekt 2 (07.09., 23:47 UTC): Der Recherche-Worker hat das Writeback-Werkzeug nie gesehen
+
+`business_os.execute_writeback` steht im MCP-Katalog der Instanz (75 Werkzeuge), aber die
+Worker-Sitzung bekommt nur die Allowlist `BUSINESS_OS_MCP_SESSION_TOOLS` aus
+`src/core/execution/agent/direct_session.rs` (41 Werkzeuge) — und die enthielt das Werkzeug
+nicht. Befund 5 (`e9a346e38`) hat Katalog und Guard ergänzt, die Sitzungs-Allowlist nicht.
+Folge: **jede** Recherche seit dem Upgrade vom 05.09. endet zwingend im Guard
+(DrinkStar 20:54, Cereda 23:47), unabhängig von Skill und Auftragstext. Die Umstellung
+von Skill §7 (`3cf70ee05`) und App 1.0.102 war richtig, aber nicht hinreichend.
+Fix: Werkzeug in die Allowlist, Test `business_os_mcp_thread_config_is_local_scoped_and_tool_bounded`
+verlangt es ausdrücklich. Auslieferung nur per Binary → Upgrade 4.
