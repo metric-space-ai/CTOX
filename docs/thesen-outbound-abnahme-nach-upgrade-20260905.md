@@ -299,3 +299,11 @@ Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
 | **Queue verstopft** | 19:56–20:28 lief nur „Recherche-Adapter abgleichen" (urgent, von jedem Recherche-Start neu eingereiht, je 6–7 min, mit Retry nach Plan-Fehler) und erzeugte zehn „repair scrape target …" (high). Die Nachrecherchen (normal) warteten 30 min ohne Hold. Kapazität 3 half nicht: nur zwei Leases gleichzeitig beobachtet. Gemeldet an Crew-Thread (01a07d81…; Queue-Thread 01a07015 ist archiviert). |
 | Gegenmaßnahme 20:29 | `ctox queue reprioritize`: CHEMOFAST/ANGUS/AKEMI → urgent, elf Adapter-/Scraper-Tasks → low. |
 | Offen | Adapterabgleich dedupen und von der chat.task-Parallelität entkoppeln; `cmd_cred_*` „database is locked" (10× in 13 min); Auth-Assist handelsregister.de wartet auf Owner. |
+
+## 07.09., 20:36 UTC: 19 von 19 mit Ergebnis
+
+| Messung | Wert |
+|---|---|
+| Nach Reprioritisierung 20:29 | CHEMOFAST geleast 20:30:35, um 20:36 bereits 11 Felder; ANGUS/AKEMI-Nachrecherchen beendet (17 / 9 Felder, unverändert). |
+| Feldtabelle 20:36 (recherchierte Felder) | Carbosulf 22 (completed), BÜFA 21, DrinkStar 20, BEWI RAW 19, ANGUS 17, Aeroxon 16, Destilla 15, Berg 14, BOOMEX 14 (completed), BNT 13, Richter 13, Dreidoppel 13, Chemotechnik 13, Additiv 13, Beiersdorf 12, CHEMOFAST 11, Calvatis 9, AKEMI 9, Cereda 5 (completed). Summe 269 Felder, Ø 14,2 von 32. |
+| Bewertung | Alle 19 haben Ergebnisse; keine Firma vollständig. Umsatz/Mitarbeiter/WZ hängen an Login-Quellen (D&B Hoovers, handelsregister.de: Auth-Assist-Anfragen offen). |
