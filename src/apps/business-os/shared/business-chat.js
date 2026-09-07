@@ -108,7 +108,8 @@ function crewPoolSlotHtml(member, placement = 'fab') {
         : member.state === 'resting_after_failure' ? (german ? 'erholt sich' : 'recovering')
           : (german ? 'zu Hause' : 'at home');
   const domain = member.domain.length ? ` · ${member.domain.join(', ')}` : '';
-  return `<span class="ctox-chat-crew-slot" data-crew-drag="${escapeAttr(member.id)}" title="${escapeAttr(`${member.name} · ${stateText}${domain} · ${german ? 'auf eine App ziehen' : 'drag onto an app'}`)}" aria-label="${escapeAttr(member.name)}">${crewMemberCreatureHtml(member, placement)}</span>`;
+  const focusable = placement === 'fab' ? '' : ' role="button" tabindex="0"';
+  return `<span class="ctox-chat-crew-slot"${focusable} data-crew-drag="${escapeAttr(member.id)}" title="${escapeAttr(`${member.name} · ${stateText}${domain} · ${german ? 'auf eine App ziehen' : 'drag onto an app'}`)}" aria-label="${escapeAttr(member.name)}">${crewMemberCreatureHtml(member, placement)}</span>`;
 }
 
 const CREW_DRAG_THRESHOLD_PX = 6;
@@ -177,6 +178,24 @@ function wireCrewDrag(root, state) {
       cleanup();
     }
   };
+  // Keyboard path (Review-Befund B8): Enter or Space on a focused slot hands
+  // the member to the focused app window, the same way a drop does.
+  root.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return;
+    const slot = event.target?.closest?.('[data-crew-drag][tabindex]');
+    if (!slot || !root.contains(slot)) return;
+    const member = (state.crewMembers || []).find((item) => item.id === slot.dataset.crewDrag);
+    if (!member) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = document.querySelector('.shell-window.is-focused, [data-shell-window].is-focused, .shell-window');
+    const rect = target?.getBoundingClientRect?.();
+    const crew = { id: member.id, name: member.name, shape: member.shape, color: member.color, creatureHtml: crewMemberCreatureHtml(member, 'map') };
+    const opened = rect && rect.width > 0
+      ? window.CTOX_BUSINESS_OS_APP?.openCrewContextMenu?.({ clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, crew })
+      : false;
+    if (!opened) window.dispatchEvent(new CustomEvent('ctox-business-os-crew-drop-missed', { detail: { member_id: member.id } }));
+  });
   root.addEventListener('pointerdown', (event) => {
     const slot = event.target?.closest?.('[data-crew-drag]');
     if (!slot || !root.contains(slot) || event.button !== 0) return;
@@ -2243,6 +2262,16 @@ function crewEyesMarkupForMode(shape, mode = 'working') {
       <g class="ctox-crew-eyes-sleeping">
         <path d="M21 ${y + 2}q5 5 10 0" />
         <path d="M36 ${y + 2}q5 5 10 0" />
+      </g>
+    `;
+  }
+  if (mode === 'review') {
+    // Scrutinising: the eyes narrow into peering arcs, unlike the open
+    // working eyes and the closed sleeping ones (Review-Befund B5).
+    return `
+      <g class="ctox-crew-eyes-review">
+        <path d="M21 ${y + 2}q5 -7 10 0" />
+        <path d="M36 ${y + 2}q5 -7 10 0" />
       </g>
     `;
   }
@@ -5830,6 +5859,7 @@ function installChatStyles() {
       animation: ctoxCrewOops 860ms cubic-bezier(.22,.75,.35,1) 1 both;
     }
     /* Reading: the body leans in a little, the lowered eyes scan the page. */
+    .ctox-crew-eyes-review,
     .ctox-crew-eyes-reading,
     .ctox-crew-eyes-learning {
       fill: none;

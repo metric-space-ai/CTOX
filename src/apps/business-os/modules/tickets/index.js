@@ -109,6 +109,7 @@ const labels = {
     bandPending: 'Wartend',
     bandClosed: 'Closed',
     entries: 'entries',
+    entryOne: 'entry',
     openOps: 'Show operations',
     closeOps: 'Hide operations',
     operations: 'Operations',
@@ -805,7 +806,8 @@ function renderCountsAndFooter() {
     pending: state.t('bandPending', 'Pending'),
     closed: state.t('bandClosed', 'Geschlossen'),
   }[state.band] || state.t('bandAll', 'Alle');
-  const footerText = `${visibleTickets().length} ${state.t('entries', 'Einträge')} · ${scopeLabel}`;
+  const visibleCount = visibleTickets().length;
+  const footerText = `${visibleCount} ${visibleCount === 1 ? state.t('entryOne', 'Eintrag') : state.t('entries', 'Einträge')} · ${scopeLabel}`;
   if (pg && typeof pg.setFooter === 'function') {
     pg.setFooter(footerText);
   } else {
@@ -855,10 +857,15 @@ function renderDetail() {
     headActions.innerHTML = '';
     body.innerHTML = state.loading
       ? renderTicketLoadingState('loading')
-      : renderEmptyState(
-        state.t('selectTicket', 'Wähle links ein Ticket aus.'),
-        state.t('selectTicketDetail', 'Verlauf, Nachweise und Operationen erscheinen danach hier.'),
-      );
+      : (sortedTickets().length
+        ? renderEmptyState(
+          state.t('selectTicket', 'Wähle links ein Ticket aus.'),
+          state.t('selectTicketDetail', 'Verlauf, Nachweise und Operationen erscheinen danach hier.'),
+        )
+        : renderEmptyState(
+          state.t('noTicketsYet', 'Noch keine Tickets.'),
+          state.t('noTicketsYetDetail', 'Neue Tickets erscheinen hier, sobald CTOX oder jemand aus dem Team eines anlegt.'),
+        ));
     return;
   }
   applyTicketContext(detail, ticket, 'detail');

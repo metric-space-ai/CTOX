@@ -80,5 +80,8 @@
   "holdMissingReviewEvidence": "review evidence missing",
   "holdMissingArtifact": "result missing",
   "holdWaitingExternal": "waiting for a reply",
-  "holdAbortedByOwner": "aborted by the owner"
+  "holdAbortedByOwner": "aborted by the owner",
+  "entryOne": "entry",
+  "noTicketsYet": "No tickets yet.",
+  "noTicketsYetDetail": "New tickets appear here as soon as CTOX or someone on the team opens one."
 }

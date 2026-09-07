@@ -214,5 +214,9 @@
   "shape_round": "rund",
   "shape_blob": "Tropfen",
   "shape_square": "eckig",
-  "shape_triangle": "Dreieck"
+  "shape_triangle": "Dreieck",
+  "noLiveMetrics": "keine Live-Messwerte",
+  "noPlanYet": "noch kein Plan",
+  "sourceUnavailable": "Quelle nicht verbunden",
+  "entryOne": "Eintrag"
 }

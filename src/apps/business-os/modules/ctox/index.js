@@ -93,6 +93,11 @@ const labels = {
     atHome: "zu Hause",
     restingAfterFailure: "erholt sich nach einem Fehlschlag",
     readingMemory: "liest sein Gedächtnis",
+    noLiveMetrics: "keine Live-Messwerte",
+    noPlanYet: "noch kein Plan",
+    sourceUnavailable: "Quelle nicht verbunden",
+    retryAt: "Wiederholung um",
+    entryOne: "Eintrag",
     learningFromAssignment: "lernt aus dem Einsatz",
     noCrewMember: "ohne Crew-Zuordnung",
     close: "Schließen",
@@ -200,9 +205,16 @@ const labels = {
     activityTurnSingular: 'Turn',
     activityTurnPlural: 'Turns',
     executionPhases: {
+      work: 'Modellarbeit',
       working: 'Modellarbeit',
+      plan: 'Planung',
+      planning: 'Planung',
       review: 'Review',
+      validation: 'Nachweis',
+      validating: 'Nachweis',
+      rework: 'Nacharbeit',
       completed: 'Abgeschlossen',
+      done: 'Abgeschlossen',
     },
     agentPreparing: 'Agent wird vorbereitet',
     agentWorking: 'Agent arbeitet',
@@ -369,6 +381,11 @@ const labels = {
     atHome: "at home",
     restingAfterFailure: "recovering after a failure",
     readingMemory: "reading its memory",
+    noLiveMetrics: "no live measurements",
+    noPlanYet: "no plan yet",
+    sourceUnavailable: "source not connected",
+    retryAt: "retry at",
+    entryOne: "entry",
     learningFromAssignment: "learning from the assignment",
     noCrewMember: "no crew member",
     close: "Close",
@@ -476,9 +493,16 @@ const labels = {
     activityTurnSingular: 'turn',
     activityTurnPlural: 'turns',
     executionPhases: {
+      work: 'Model work',
       working: 'Model work',
+      plan: 'Planning',
+      planning: 'Planning',
       review: 'Review',
+      validation: 'Evidence',
+      validating: 'Evidence',
+      rework: 'Rework',
       completed: 'Completed',
+      done: 'Completed',
     },
     agentPreparing: 'Preparing agent',
     agentWorking: 'Agent is working',
@@ -600,6 +624,52 @@ const STATE_MACHINE_NODES = [
   { id: 'model-failed', label: 'Work failed', phase: 'ModelFailed', x: 510, y: 880, lines: ['WorkerFailed or exhausted review/validation budget stopped the work.'], tools: ['WorkerFailed', 'ReviewRoundsExhausted', 'ValidatorReworkExhausted'] },
   { id: 'infra-failed', label: 'Service failed', phase: 'InfraFailed', x: 1050, y: 990, lines: ['InfraError, ReviewRetriesExhausted, or ValidatorInfraError stopped the work.'], tools: ['InfraError', 'ReviewRetriesExhausted', 'ValidatorInfraError'] },
 ];
+
+// Owner-facing copy for the flow nodes. The catalog above keeps the machine
+// names for tooltips and tests; what the screen shows comes from here.
+const FLOW_NODE_COPY = {
+  de: {
+    queued: ['Warteschlange', 'Wartet in der Schlange'],
+    leased: ['Übernommen', 'Abgeholt'],
+    running: ['Arbeit', 'Arbeitet'],
+    'awaiting-review': ['Review', 'Bereit fürs Review'],
+    'review-queued': ['Review', 'Review wartet'],
+    reviewing: ['Review', 'Im Review'],
+    'review-passed': ['Review', 'Review bestanden'],
+    'review-rejected': ['Review', 'Review abgelehnt'],
+    'review-unavailable': ['Review', 'Reviewer nicht erreichbar'],
+    'review-retry': ['Review', 'Review wiederholen'],
+    'rework-required': ['Nacharbeit', 'Nacharbeit nötig'],
+    'awaiting-validation': ['Nachweis', 'Nachweis nötig'],
+    validating: ['Nachweis', 'Nachweis wird geprüft'],
+    passed: ['Fertig', 'Nachweis bestätigt'],
+    'model-failed': ['Gescheitert', 'Arbeit gescheitert'],
+    'infra-failed': ['Gescheitert', 'Dienst gescheitert'],
+  },
+  en: {
+    queued: ['Queue', 'Waiting in queue'],
+    leased: ['Leased', 'Picked up'],
+    running: ['Work', 'Working'],
+    'awaiting-review': ['Review', 'Ready for review'],
+    'review-queued': ['Review', 'Review waiting'],
+    reviewing: ['Review', 'Under review'],
+    'review-passed': ['Review', 'Review passed'],
+    'review-rejected': ['Review', 'Review failed'],
+    'review-unavailable': ['Review', 'Review unavailable'],
+    'review-retry': ['Review', 'Retry review'],
+    'rework-required': ['Rework', 'Rework needed'],
+    'awaiting-validation': ['Evidence', 'Needs evidence'],
+    validating: ['Evidence', 'Checking evidence'],
+    passed: ['Done', 'Evidence confirmed'],
+    'model-failed': ['Failed', 'Work failed'],
+    'infra-failed': ['Failed', 'Service failed'],
+  },
+};
+
+function flowNodeCopy(node, lang) {
+  const copy = FLOW_NODE_COPY[lang === 'en' ? 'en' : 'de'][node.id] || FLOW_NODE_COPY.en[node.id];
+  return copy ? { phase: copy[0], label: copy[1] } : { phase: node.phase, label: node.label };
+}
 
 const STATE_MACHINE_EDGES = [
   ['queued', 'leased'], ['leased', 'running'],
@@ -950,7 +1020,7 @@ function dataStatusMarkup(state) {
   const retry = status.kind === 'error'
     ? ` <button type="button" class="ctox-button is-small" data-ctox-retry-load>${escapeHtml(labels[state.lang].retryLoad)}</button>`
     : '';
-  return `<span data-ctox-data-state="${status.kind}" role="${status.kind === 'error' ? 'alert' : 'status'}">${escapeHtml(message)}${status.reason ? `: ${escapeHtml(status.reason)}` : ''}</span>${retry}`;
+  return `<span data-ctox-data-state="${status.kind}" role="${status.kind === 'error' ? 'alert' : 'status'}">${escapeHtml(message)}${status.reason ? ` <small class="ctox-data-state-reason" title="${escapeAttr(status.reason)}">${escapeHtml(status.reason)}</small>` : ''}</span>${retry}`;
 }
 
 function showDataError(state, error) {
@@ -961,8 +1031,25 @@ function showDataError(state, error) {
   else renderLoading(state);
 }
 
-function dataPlaceholderMarkup() {
-  return '<div class="ctox-data-placeholder" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M32 7c15 0 26 10 26 25S48 58 32 58 7 48 7 32 17 7 32 7Z"/><path class="ctox-data-placeholder-eyes" d="M21 32q5 5 10 0M36 32q5 5 10 0"/></svg></div>';
+// Anonymous placeholder: asleep while loading or offline, X eyes on a failure —
+// the two must not look alike (Review-Befund B4).
+function dataPlaceholderMarkup(kind = 'loading') {
+  const eyes = kind === 'error'
+    ? '<path class="ctox-data-placeholder-eyes" d="M22 27l8 10M30 27l-8 10M37 27l8 10M45 27l-8 10"/>'
+    : '<path class="ctox-data-placeholder-eyes" d="M21 32q5 5 10 0M36 32q5 5 10 0"/>';
+  return `<div class="ctox-data-placeholder is-${escapeAttr(kind)}" aria-hidden="true"><svg viewBox="0 0 64 64"><path d="M32 7c15 0 26 10 26 25S48 58 32 58 7 48 7 32 17 7 32 7Z"/>${eyes}</svg></div>`;
+}
+
+// The flow canvas without a selected task and without current data: the state
+// line and the placeholder, never a coloured "waiting in queue" node.
+function emptyWorkspaceMarkup(state) {
+  const kind = dataState(state).kind;
+  return `<div class="ctox-canvas-container ctox-flow-well">
+      <section class="ctox-empty" aria-busy="${kind === 'loading'}">
+        ${dataPlaceholderMarkup(kind)}
+        ${dataStatusMarkup(state)}
+      </section>
+    </div>`;
 }
 
 function renderLoading(state) {
@@ -982,7 +1069,7 @@ function renderLoading(state) {
       </header>
       <div class="ctox-pane-body ctox-flow-well">
         <section class="ctox-empty" aria-busy="${dataState(state).kind === 'loading'}">
-          ${dataPlaceholderMarkup()}
+          ${dataPlaceholderMarkup(dataState(state).kind)}
           ${dataStatusMarkup(state)}
         </section>
       </div>
@@ -1349,7 +1436,7 @@ function renderTaskCountsAndFooter(state, left, tasks) {
   const visibleTasks = filterAndSortTasks(tasks, state);
   const viewLabel = taskPrimaryViewLabel(state.taskPrimaryView, t);
   const scopeLabel = state.taskPinFilter === 'pinned' ? `${viewLabel} · ${t.pinned}` : viewLabel;
-  const footerText = `${visibleTasks.length} ${t.entries} · ${scopeLabel}${state.pinnedTaskIds.size ? ` · ${state.pinnedTaskIds.size} ${t.pinned}` : ''}`;
+  const footerText = `${visibleTasks.length} ${visibleTasks.length === 1 ? t.entryOne : t.entries} · ${scopeLabel}${state.pinnedTaskIds.size ? ` · ${state.pinnedTaskIds.size} ${t.pinned}` : ''}`;
   const pg = left.__ctoxPaneGrammar;
   if (pg?.setCounts) pg.setCounts(counts);
   else for (const [key, value] of Object.entries(counts)) {
@@ -1559,7 +1646,7 @@ function taskColumnMarkup(tasks, state, options = {}) {
   const viewLabel = taskPrimaryViewLabel(state.taskPrimaryView, t);
   const scopeLabel = state.taskPinFilter === 'pinned' ? `${viewLabel} · ${t.pinned}` : viewLabel;
   const visibleCount = filterAndSortTasks(tasks, state).length;
-  const footerText = `${visibleCount} ${t.entries} · ${scopeLabel}${state.pinnedTaskIds.size ? ` · ${state.pinnedTaskIds.size} ${t.pinned}` : ''}`;
+  const footerText = `${visibleCount} ${visibleCount === 1 ? t.entryOne : t.entries} · ${scopeLabel}${state.pinnedTaskIds.size ? ` · ${state.pinnedTaskIds.size} ${t.pinned}` : ''}`;
   const cards = state.taskViewMode !== 'list';
   return `
     <header class="ctox-pane-header ctox-pane-band">
@@ -2012,7 +2099,7 @@ function taskSteps(task, state) {
     const steps = timeline.map((node, index) => ({
       id: node.id,
       label: node.label,
-      detail: clip(cleanUiCopy(node.lines?.[0] || node.phase || itemSummary(task) || ''), 180),
+      detail: clip(cleanUiCopy(node.label || node.phase || itemSummary(task) || ''), 180),
       timestamp: node.timestamp || '',
       metrics: metricsLabel(node, state.lang),
       active: node.status === 'active' || index === timeline.length - 1,
@@ -2190,6 +2277,9 @@ function renderMain(state) {
   const main = state.ctx.host.querySelector('[data-ctox-main]');
   const previousViewport = readFlowViewport(state);
   const viewBox = flowViewBox(selectedTask, state);
+  // Without a selected task and without current data the workspace itself
+  // carries the state line; the footer must not repeat it.
+  const stateInWorkspace = !selectedTask && Boolean(state.ctx) && dataState(state).kind !== 'ready';
   main.innerHTML = `
     <header class="ctox-pane-header ctox-pane-band">
       <div class="ctox-pane-title-row">
@@ -2205,15 +2295,9 @@ function renderMain(state) {
         </div>
       </div>
     </header>
-    <section class="ctox-metrics-strip" aria-label="${escapeAttr(t.measurements)}">
-      ${metricCard(t.inputTokens, metrics.inputTokens, 'tokens', state.lang)}
-      ${metricCard(t.outputTokens, metrics.outputTokens, 'tokens', state.lang)}
-      ${metricCard(t.reasoningTurns, metrics.thinkingTurns, 'count', state.lang)}
-      ${metricCard(t.toolCalls, metrics.toolCalls, 'count', state.lang)}
-      ${metricCard(t.elapsed, elapsedSeconds, 'seconds', state.lang, { live })}
-    </section>
+    ${metricsStripMarkup(metrics, elapsedSeconds, live, state)}
     ${executionProgressBar(metrics, state)}
-    ${shouldShowCrewHome(state) ? crewHomeMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
+    ${shouldShowCrewHome(state) ? crewHomeMarkup(state) : stateInWorkspace ? emptyWorkspaceMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
       <div class="ctox-flow-toolbar" aria-label="${escapeAttr(t.flowControls)}" data-flow-control>
         <button type="button" class="ctox-pane-icon" data-zoom="-" aria-label="${escapeAttr(t.zoomOut)}" title="${escapeAttr(t.zoomOut)}" ${state.zoom <= MIN_ZOOM ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
         <span>${Math.round(state.zoom * 100)}%</span>
@@ -2226,7 +2310,7 @@ function renderMain(state) {
       </div>
     </div>`}
     ${timelinePanel(state, selectedTask, selectedNode, metrics)}
-    <footer class="ctox-harness-footer ${syncIsConnected(state) ? '' : 'is-disconnected'}" data-harness-health-tooltip>${dataStatusMarkup(state) || `${syncIsConnected(state) ? '' : `<span class="ctox-footer-hint">${escapeHtml(t.syncDisconnected)}</span> · `}${escapeHtml(selectedTask ? taskDisplayTitle(selectedTask, state) : t.flowFooterEmpty)} · ${escapeHtml(flowSource.mode)} · ${escapeHtml(flowSource.status)}${live ? ` · ${escapeHtml(t.live)}` : ''}`}</footer>
+    <footer class="ctox-harness-footer ${syncIsConnected(state) ? '' : 'is-disconnected'}" data-harness-health-tooltip>${(stateInWorkspace ? '' : dataStatusMarkup(state)) || `${syncIsConnected(state) ? '' : `<span class="ctox-footer-hint">${escapeHtml(t.syncDisconnected)}</span> · `}${escapeHtml(selectedTask ? taskDisplayTitle(selectedTask, state) : t.flowFooterEmpty)} · ${escapeHtml(flowSource.mode)} · ${escapeHtml(flowSource.status)}${live ? ` · ${escapeHtml(t.live)}` : ''}`}</footer>
   `;
   restoreFlowViewport(state, previousViewport);
   main.querySelector('[data-harness-pause]')?.addEventListener('click', () => {
@@ -2298,6 +2382,12 @@ function renderMain(state) {
   updateLiveIndicators(state);
 }
 
+// A phase the locale does not know is shown as words, never as the enum.
+function humanizePhase(phase) {
+  const words = String(phase || '').replace(/[_\-:]+/g, ' ').trim();
+  return words ? words.charAt(0).toUpperCase() + words.slice(1) : '';
+}
+
 function emptyMetrics() {
   return { inputTokens: null, outputTokens: null, toolCalls: null, seconds: null };
 }
@@ -2314,15 +2404,15 @@ function executionProgressBar(metrics, state) {
   const stepsKnown = Number.isFinite(metrics?.totalSteps) && metrics.totalSteps > 0;
   const stepLabel = stepsKnown
     ? `${t.step} ${clampMetric(metrics.currentStep ?? ((metrics.completedSteps || 0) + 1), 1, metrics.totalSteps)}/${metrics.totalSteps}`
-    : t.notCaptured;
-  const phaseLabel = metrics?.phase ? (t.executionPhases?.[metrics.phase] || metrics.phase) : t.notCaptured;
+    : '';
+  const phaseLabel = metrics?.phase ? (t.executionPhases?.[String(metrics.phase).toLowerCase()] || humanizePhase(metrics.phase)) : '';
   return `
     <section class="ctox-execution-progress ${measured ? '' : 'is-unmeasured'}"
       aria-label="${escapeAttr(t.executionProgress)}"
       style="--execution-progress:${escapeAttr(String(percent))}%">
       <div class="ctox-execution-progress-head">
         <span class="ctox-pane-kicker">${escapeHtml(t.executionProgress)}</span>
-        <strong>${escapeHtml(measured ? `${percent}%` : t.notCaptured)}</strong>
+        <strong>${escapeHtml(measured ? `${percent}%` : '—')}</strong>
       </div>
       <div class="ctox-execution-progress-track"
         role="progressbar"
@@ -2332,7 +2422,7 @@ function executionProgressBar(metrics, state) {
         <i aria-hidden="true"></i>
       </div>
       <div class="ctox-execution-progress-meta">
-        <span>${escapeHtml(stepLabel)}</span>
+        <span>${escapeHtml(stepLabel || (measured ? '' : t.noPlanYet))}</span>
         <span>${escapeHtml(phaseLabel)}</span>
       </div>
     </section>
@@ -2645,7 +2735,9 @@ function outboundEndpointFlowSvg(model, selectedTask, selectedNode, visibleTrace
 function inboundEndpointForTask(task, state) {
   const source = state.flow?.flow?.source || {};
   const channel = task?.channel || task?.inbound_channel || source.source_kind || inferInboundChannel(task || {});
-  const label = task?.channelLabel || inboundChannelLabel(channel);
+  const label = String(channel || '').toLowerCase() === 'unavailable'
+    ? labels[state.lang].sourceUnavailable
+    : (task?.channelLabel || inboundChannelLabel(channel));
   const detail = [
     task?.taskId || task?.commandId || task?.ticketId || source.message_key || source.work_id || '',
     task?.source ? displayWorkSource(task.source) : '',
@@ -2736,7 +2828,7 @@ function flowNodeSvg(node, selectedNode, traceStrength, lang = 'de', standortNod
   return `
     <g class="ctox-flow-node-g is-${escapeAttr(node.status)} ${isVisibleTrace ? 'is-observed is-trace' : 'is-possible'} ${isSelected ? 'is-current is-selected' : ''} ${standortNodeId && node.id === standortNodeId ? 'is-crew-hier' : ''}"
        data-node-id="${escapeAttr(node.id)}" data-context-record-id="${escapeAttr(node.id)}" data-context-record-type="ctox_flow_node" data-context-label="${escapeAttr(node.label)}" role="button" style="--trace-strength:${traceStrength}" tabindex="0" transform="translate(${node.x} ${node.y})">
-      <title>${escapeHtml(`${node.phase}: ${node.label}\n${metricsLabel(node, lang)}\n${node.lines.join('\n')}`)}</title>
+      <title>${escapeHtml(`${node.label} (${node.machinePhase || node.phase})\n${metricsLabel(node, lang)}\n${node.lines.join('\n')}`)}</title>
       ${ring}
       ${shape}
       <text class="ctox-flow-node-phase" x="${-NODE_WIDTH / 2 + 10}" y="${-NODE_HEIGHT / 2 + 16}">${escapeHtml(node.phase)}</text>
@@ -2868,6 +2960,8 @@ function buildHarnessModel(data, flow, lang = 'de') {
     const detail = observed ? detailByNode.get(node.id) : null;
     return {
       ...node,
+      ...flowNodeCopy(node, lang),
+      machinePhase: node.phase,
       status: nodeStatus(node.id, observedIds, activeIndex, liveWork),
       inputTokens: observed ? detail?.inputTokens ?? null : null,
       outputTokens: observed ? detail?.outputTokens ?? null : null,
@@ -6040,8 +6134,27 @@ function aggregateFlowMetrics(flowResult) {
   return metrics;
 }
 
+// Five cards while something is measured; one quiet line when nothing is —
+// the same fact five times in a row was the "nicht erfasst" flood.
+function metricsStripMarkup(metrics, elapsedSeconds, live, state) {
+  const t = labels[state.lang];
+  const values = [metrics.inputTokens, metrics.outputTokens, metrics.thinkingTurns, metrics.toolCalls, elapsedSeconds];
+  const anyMeasured = values.some((value) => value !== null && value !== undefined);
+  if (!anyMeasured) {
+    return `<section class="ctox-metrics-strip is-quiet" aria-label="${escapeAttr(t.measurements)}"><span class="ctox-metrics-quiet">${escapeHtml(t.noLiveMetrics)}</span></section>`;
+  }
+  return `
+    <section class="ctox-metrics-strip" aria-label="${escapeAttr(t.measurements)}">
+      ${metricCard(t.inputTokens, metrics.inputTokens, 'tokens', state.lang)}
+      ${metricCard(t.outputTokens, metrics.outputTokens, 'tokens', state.lang)}
+      ${metricCard(t.reasoningTurns, metrics.thinkingTurns, 'count', state.lang)}
+      ${metricCard(t.toolCalls, metrics.toolCalls, 'count', state.lang)}
+      ${metricCard(t.elapsed, elapsedSeconds, 'seconds', state.lang, { live })}
+    </section>`;
+}
+
 function metricCard(label, value, kind, lang, options = {}) {
-  const display = formatMetricValue(value, kind, lang);
+  const display = value === null || value === undefined ? '—' : formatMetricValue(value, kind, lang);
   return `
     <div class="ctox-metric-card ${value === null || value === undefined ? 'is-empty' : ''} ${options.live ? 'is-live' : ''}">
       <span>${escapeHtml(label)}</span>
@@ -6315,6 +6428,7 @@ function taskReasonText(task, state) {
     const klass = displayFailureClass(task.failureClass, state);
     parts.push(klass ? `${t.failedWord} · ${klass}` : t.failedWord);
     if (attempts) parts.push(`${attempts} ${attempts === 1 ? t.attemptOne : t.attemptMany}`);
+    if (retryAt && new Date(task.retryNotBefore).getTime() > Date.now()) parts.push(`${t.retryAt} ${retryAt}`);
   } else if (status === 'blocked') {
     const reason = displayHoldReason(task.holdReason, state);
     parts.push(reason ? `${t.blockedWord} · ${reason}` : t.blockedWord);

@@ -214,5 +214,9 @@
   "shape_round": "round",
   "shape_blob": "blob",
   "shape_square": "square",
-  "shape_triangle": "triangle"
+  "shape_triangle": "triangle",
+  "noLiveMetrics": "no live measurements",
+  "noPlanYet": "no plan yet",
+  "sourceUnavailable": "source not connected",
+  "entryOne": "entry"
 }
