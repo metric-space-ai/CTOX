@@ -7742,7 +7742,7 @@ button.shell-window-header-meta:focus-visible,
 
   .shell-window.is-mobile-sheet .shell-window-content > .shell-window-module-root {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(200px, auto) auto;
+    grid-template-rows: auto minmax(auto, 1fr) auto;
     align-content: start;
     height: 100%;
     padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
@@ -9324,7 +9324,7 @@ button.shell-window-header-meta:focus-visible,
 
   .shell-window-layer > .shell-window .shell-window-content > .shell-window-module-root {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: auto minmax(200px, auto) auto;
+    grid-template-rows: auto minmax(auto, 1fr) auto;
     align-content: start;
     height: 100%;
     padding-bottom: calc(76px + env(safe-area-inset-bottom, 0px));
