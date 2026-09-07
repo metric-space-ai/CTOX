@@ -96,6 +96,12 @@ export function crewMemberExpressionTtlMs(member, nowMs = Date.now()) {
   return 0;
 }
 
+// What the rendered pool depends on: who is in it and how each one looks.
+function crewPoolSignature(state) {
+  const now = Date.now();
+  return (state?.crewMembers || []).map((member) => `${member.id}:${crewMemberExpression(member, now)}`).join('|');
+}
+
 function crewMemberCreatureHtml(member, placement = 'fab') {
   return crewCreatureHtml({ crewKey: member.id, crewIdentity: { name: member.name, shape: member.shape, color: member.color } }, crewMemberExpression(member), placement);
 }
@@ -1109,9 +1115,14 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   // when the bar must update WITHOUT a full rebuild. The in-place path below
   // refreshes every task-state-dependent part (window class, chip class, status
   // text, and the chip mark icon), so a rebuild would only cause the jump.
+  // The crew pool lives in the FAB and the bar: a new member, a member that
+  // starts reading or learning, or the first pool load after boot needs the
+  // full render — the in-place path does not touch the creatures.
+  const crewPoolUnchanged = (root.dataset.crewPoolSignature || '') === crewPoolSignature(state);
   const canUpdateInPlace = windowShapeUnchanged &&
                            attachmentsUnchanged &&
                            composerShapeUnchanged &&
+                           crewPoolUnchanged &&
                            root.querySelector('[data-chat-dock]') &&
                            wasCollapsed === dockCollapsed &&
                            matchesCurrentDate &&
@@ -1383,6 +1394,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const previousActiveChatId = root.dataset?.activeChatId || '';
   const hadRenderedDock = Boolean(root.querySelector('[data-chat-dock]'));
 
+  root.dataset.crewPoolSignature = crewPoolSignature(state);
   root.innerHTML = `
     <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock>
       <button class="ctox-chat-fab" type="button" data-chat-open aria-label="${dockCollapsed ? (chatUiIsGerman() ? 'Crew öffnen' : 'Open crew') : (chatUiIsGerman() ? 'Crew einklappen' : 'Collapse crew')}">
