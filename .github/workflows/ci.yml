@@ -386,6 +386,10 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test --locked --bin ctox sync_desktop_file_from_path_prunes_stale_chunk_generations
 
+      - name: Business OS deletion projection regressions
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: cargo test --locked --bin ctox projection_tombstone_tests
+
       - name: Business OS file tombstones
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: cargo test --locked --bin ctox sync_desktop_files_from_workspace_root_tombstones_renamed_files
