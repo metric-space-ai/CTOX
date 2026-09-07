@@ -339,6 +339,7 @@ const supportedSmokeModes = [
   'command-browser-to-rust',
   'command-roundtrip-timing-browser-to-rust',
   'module-source-lossless-browser-to-rust',
+  'multiplex-reload-browser-to-rust',
   'tickets-browser-to-rust',
   'tickets-clarification-browser-to-rust',
   'outbound-active-ui',
@@ -4272,7 +4273,7 @@ function ensureCtoxSmokeBinary() {
   if (nativeSchemaDriftFixture) {
     console.log(`native_schema_drift_seed=${JSON.stringify(nativeSchemaDriftFixture)}`);
   }
-  if (smokeMode === 'module-source-lossless-browser-to-rust') {
+  if (smokeMode === 'module-source-lossless-browser-to-rust' || smokeMode === 'multiplex-reload-browser-to-rust') {
     // Fixture files only: never edit the signed shell or production records.
     const sourceRoot = path.join(runtimeRoot, 'runtime/business-os/installed-modules/lossless-source-probe');
     fs.mkdirSync(sourceRoot, { recursive: true });
@@ -4285,6 +4286,9 @@ function ensureCtoxSmokeBinary() {
     for (let index = 0; index < 21; index += 1) {
       const content = `// source fixture ${index}\n` + '// Großes Quelltextstück mit Unicode und "Quotes".\n'.repeat(10000);
       fs.writeFileSync(path.join(sourceRoot, `source-${String(index).padStart(2, '0')}.js`), content);
+    }
+    if (smokeMode === 'multiplex-reload-browser-to-rust') {
+      require('./multiplex_reload_probe.js').seed(sourceRoot, sqlite);
     }
   }
   if (smokeMode === 'business-os-app-release-ui') {
@@ -7764,6 +7768,7 @@ function ensureCtoxSmokeBinary() {
       const commandSmokeMode = smokeMode === 'command-browser-to-rust'
         || smokeMode === 'command-roundtrip-timing-browser-to-rust'
         || smokeMode === 'module-source-lossless-browser-to-rust'
+        || smokeMode === 'multiplex-reload-browser-to-rust'
         || smokeMode === 'migration-version-browser-to-rust'
         || smokeMode === 'command-burst-browser-to-rust'
         || smokeMode === 'command-reload-browser-to-rust'
@@ -15704,7 +15709,7 @@ function ensureCtoxSmokeBinary() {
       }
 
       if (commandSmokeMode) {
-        if (smokeMode === 'module-source-lossless-browser-to-rust') {
+        if (smokeMode === 'module-source-lossless-browser-to-rust' || smokeMode === 'multiplex-reload-browser-to-rust') {
           const state = globalThis.ctoxBusinessOsSmoke?.state;
           if (!state?.commandBus?.dispatch || !state?.sync?.startCollection) {
             throw new Error('source fixture requires the real shell command and sync runtime');
@@ -17766,7 +17771,7 @@ function ensureCtoxSmokeBinary() {
       console.log(`business_os_client_lifecycle_tenant_scope=${result.tenantScope}`);
       if (result.advancedStatusVersion) console.log(`advanced_status=${result.advancedStatusVersion}`);
       if (result.advancedStatusRuntime) console.log(`rxdb_runtime=${JSON.stringify(result.advancedStatusRuntime)}`);
-    } else if (result.mode === 'module-source-lossless-browser-to-rust') {
+    } else if (result.mode === 'module-source-lossless-browser-to-rust' || result.mode === 'multiplex-reload-browser-to-rust') {
       const verifyNativeSources = () => {
         const records = JSON.parse(sqlite("SELECT json_group_array(json(data)) FROM ctox_business_os__business_module_source_files__v0 WHERE deleted=0 AND id LIKE 'lossless-source-probe:source-%';"));
         if (records.length !== 21) throw new Error(`native source count changed: ${records.length}`);
@@ -17786,6 +17791,9 @@ function ensureCtoxSmokeBinary() {
       await waitForNativePeerSyncConfig(60000);
       result.nativeVerifiedAfterRestart = verifyNativeSources();
       result.nativeRestartMs = Date.now() - restartStartedAt;
+      if (result.mode === 'multiplex-reload-browser-to-rust') {
+        result.multiplexReload = await require('./multiplex_reload_probe.js').run(page, sqlite);
+      }
       const output = path.join(runtimeRoot, 'module-source-lossless-report.json');
       fs.writeFileSync(output, JSON.stringify(result, null, 2) + '\n');
       console.log(`module_source_lossless=${JSON.stringify(result)}`);
