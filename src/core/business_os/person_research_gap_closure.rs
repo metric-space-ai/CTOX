@@ -36,9 +36,132 @@ struct ResearchWritebackRequest {
     /// by the harness worker.
     #[serde(default)]
     gap_task_id: String,
+    #[serde(deserialize_with = "lenient_field_status")]
     field_status: BTreeMap<String, FieldStatus>,
     #[serde(default)]
     result: ResearchWritebackResult,
+}
+
+/// Workers keep putting field entries next to `field_status` instead of
+/// inside it ("unknown field `firma_fruehere_namen`", 07.09.2026, several
+/// times). A top-level key that is not part of the envelope and carries an
+/// object with a `status` member is unambiguously a field entry, so it is
+/// moved into `field_status` instead of failing the run.
+fn hoist_top_level_field_entries(mut payload: Value) -> Value {
+    const ENVELOPE: [&str; 6] = [
+        "record_id",
+        "module",
+        "research_command_id",
+        "gap_task_id",
+        "field_status",
+        "result",
+    ];
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    let stray: Vec<String> = object
+        .keys()
+        .filter(|key| !ENVELOPE.contains(&key.as_str()))
+        .filter(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_object)
+                .is_some_and(|entry| entry.contains_key("status"))
+        })
+        .cloned()
+        .collect();
+    // `result` members sent at the top level ("unknown field `person_records`",
+    // 07.09.2026) are moved into `result` the same way.
+    let mut result = match object.remove("result") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    let mut hoisted_result = false;
+    for key in ["fields", "person_records", "evidence"] {
+        if let Some(value) = object.remove(key) {
+            result.entry(key.to_string()).or_insert(value);
+            hoisted_result = true;
+        }
+    }
+    if hoisted_result || !result.is_empty() {
+        object.insert("result".to_string(), Value::Object(result));
+    }
+    if stray.is_empty() {
+        return payload;
+    }
+    let mut field_status = match object.remove("field_status") {
+        Some(Value::Object(map)) => map,
+        Some(Value::String(text)) => serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default(),
+        _ => Map::new(),
+    };
+    for key in stray {
+        if let Some(entry) = object.remove(&key) {
+            field_status.entry(key).or_insert(entry);
+        }
+    }
+    object.insert("field_status".to_string(), Value::Object(field_status));
+    payload
+}
+
+/// `field_status` must be an object keyed by field. Live runs also sent an
+/// empty string or a list where a field entry belongs (07.09.2026, three
+/// rejections "expected struct FieldStatus"), and once a list of entries
+/// carrying their own `field` key. Entries that are not objects are dropped
+/// (the field then shows up as open); a list of objects is keyed by its
+/// `field`/`key`/`name` member; a JSON string is parsed first.
+fn lenient_field_status<'de, D>(deserializer: D) -> Result<BTreeMap<String, FieldStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let mut raw = Value::deserialize(deserializer)?;
+    if let Value::String(text) = &raw {
+        raw = serde_json::from_str(text).map_err(D::Error::custom)?;
+    }
+    let mut entries = BTreeMap::new();
+    match raw {
+        Value::Object(map) => {
+            for (field, status) in map {
+                if !status.is_object() {
+                    continue;
+                }
+                let parsed = serde_json::from_value::<FieldStatus>(status)
+                    .map_err(|error| D::Error::custom(format!("field_status.{field}: {error}")))?;
+                entries.insert(field, parsed);
+            }
+        }
+        Value::Array(list) => {
+            for item in list {
+                let Some(object) = item.as_object() else {
+                    continue;
+                };
+                let Some(field) = ["field", "key", "name", "field_key"]
+                    .iter()
+                    .find_map(|key| object.get(*key).and_then(Value::as_str))
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                let mut status = object.clone();
+                for key in ["field", "key", "name", "field_key"] {
+                    status.remove(key);
+                }
+                let parsed = serde_json::from_value::<FieldStatus>(Value::Object(status))
+                    .map_err(|error| D::Error::custom(format!("field_status.{field}: {error}")))?;
+                entries.insert(field, parsed);
+            }
+        }
+        Value::Null => {}
+        other => {
+            return Err(D::Error::custom(format!(
+                "field_status must be an object keyed by field, got {other}"
+            )));
+        }
+    }
+    Ok(entries)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -200,12 +323,21 @@ where
     })
 }
 
+/// Attempts arrive with missing or oddly typed members ("missing field
+/// `kind`" rejected six writebacks for one lead on 07.09.2026 although every
+/// attempt carried a URL and a result). An attempt is documentation, not a
+/// gate, so every member is optional.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct FieldAttempt {
+    #[serde(default, deserialize_with = "lenient_string")]
     kind: String,
+    #[serde(default, deserialize_with = "lenient_string")]
     query_or_url: String,
+    #[serde(default)]
     result: Value,
+    #[serde(default, deserialize_with = "lenient_string")]
     artifact_path: String,
+    #[serde(default)]
     at: Value,
 }
 
@@ -742,10 +874,10 @@ pub(super) fn handle_research_writeback(
     // The worker only ever sees this message. Without the serde detail it
     // resent the same malformed payload four times on 07.09.2026 (a stray
     // `firma_land` key nested inside another field's status object).
-    let request: ResearchWritebackRequest = serde_json::from_value(command.payload.clone())
-        .map_err(|error| {
-            anyhow::anyhow!("invalid outbound.lead.research_writeback payload: {error}")
-        })?;
+    let request: ResearchWritebackRequest =
+        serde_json::from_value(hoist_top_level_field_entries(command.payload.clone())).map_err(
+            |error| anyhow::anyhow!("invalid outbound.lead.research_writeback payload: {error}"),
+        )?;
     anyhow::ensure!(
         request.module == "outbound-lead-generation" && command.module == request.module,
         "research writeback module must be outbound-lead-generation"
@@ -2734,6 +2866,73 @@ mod tests {
             Some(1)
         );
         Ok(())
+    }
+
+    #[test]
+    fn field_status_drops_non_object_entries_and_accepts_attempts_without_kind() {
+        let request: ResearchWritebackRequest = serde_json::from_value(serde_json::json!({
+            "record_id": "lead-x",
+            "module": "outbound-lead-generation",
+            "research_command_id": "research-x",
+            "field_status": {
+                "firma_name": {
+                    "status": "verified",
+                    "value": "Beispiel GmbH",
+                    "sources": {"item": [{"source_id": "official", "url": "https://beispiel.de/impressum"}]},
+                    "attempts": {"item": [{"query_or_url": "https://beispiel.de/impressum", "result": "Found"}]}
+                },
+                "firma_fax": "",
+                "firma_email": ["nicht", "objekt"],
+                "firma_telefon": null
+            }
+        }))
+        .expect("non-object entries are dropped, attempts without kind accepted");
+        assert_eq!(request.field_status.len(), 1);
+        assert_eq!(request.field_status["firma_name"].attempts.len(), 1);
+        assert_eq!(request.field_status["firma_name"].attempts[0].kind, "");
+
+        let listed: ResearchWritebackRequest = serde_json::from_value(serde_json::json!({
+            "record_id": "lead-x",
+            "module": "outbound-lead-generation",
+            "research_command_id": "research-x",
+            "field_status": [
+                {"field": "firma_domain", "status": "verified", "value": "beispiel.de", "sources": []},
+                {"status": "verified", "value": "ohne Schluessel"}
+            ]
+        }))
+        .expect("a list of entries keyed by `field` is accepted");
+        assert_eq!(listed.field_status.len(), 1);
+        assert_eq!(listed.field_status["firma_domain"].status, "verified");
+    }
+
+    #[test]
+    fn top_level_field_entries_are_hoisted_into_field_status() {
+        let payload = serde_json::json!({
+            "record_id": "lead-x",
+            "module": "outbound-lead-generation",
+            "research_command_id": "research-x",
+            "field_status": {"firma_name": {"status": "verified", "value": "Beispiel GmbH"}},
+            "firma_fruehere_namen": {"status": "no_match", "reason": "keine", "attempts": []},
+            "person_records": [{"person_key": "p1", "name": "Erika Muster"}]
+        });
+        let request: ResearchWritebackRequest =
+            serde_json::from_value(hoist_top_level_field_entries(payload.clone()))
+                .expect("stray field entry is hoisted, not rejected");
+        assert_eq!(request.field_status.len(), 2);
+        assert_eq!(
+            request.field_status["firma_fruehere_namen"].status,
+            "no_match"
+        );
+        assert_eq!(request.result.person_records.len(), 1);
+        // A stray non-field key still fails the envelope check (deny_unknown_fields).
+        let mut with_note = payload;
+        with_note["note"] = serde_json::json!("kein Feld");
+        assert!(
+            serde_json::from_value::<ResearchWritebackRequest>(hoist_top_level_field_entries(
+                with_note
+            ))
+            .is_err()
+        );
     }
 
     #[test]
