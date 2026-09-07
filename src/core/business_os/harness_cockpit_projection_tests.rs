@@ -244,6 +244,131 @@ fn crew_selection_warning_reaches_events_and_status() -> Result<()> {
 use super::*;
 use tempfile::TempDir;
 
+#[test]
+fn correlated_run_lookups_seek_attempt_index_instead_of_scanning_history() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch("INSERT INTO worker_attempt_finalizations VALUES('a','work','failed','failed','2020-01-01T00:00:00Z','2020-01-01T00:01:00Z','2020-01-01T00:01:00Z','timeout',0);
+        WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000)
+        INSERT INTO ctox_harness_flow_events SELECT 'event-'||x,'worker.phase','','','task','work',1,json_object('attempt_id','unrelated-'||x),'2020-01-01T00:00:00Z' FROM n;
+        INSERT INTO ctox_harness_flow_events VALUES('match','worker.phase','','','task','work',1,'{\"attempt_id\":\"a\"}','2020-01-01T00:00:00Z');")?;
+    let indexed = core(root.path())?;
+    // Inspect the production query, including its third correlated EXISTS.
+    let sql = finalized_runs_sql(false);
+    let plan = indexed
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+        .query_map(params!["", 128], |r| r.get::<_, String>(3))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .join("\n");
+    assert_eq!(
+        plan.matches("SEARCH e USING INDEX idx_cockpit_flow_attempt")
+            .count(),
+        3,
+        "{plan}"
+    );
+    assert!(!plan.contains("SCAN e"), "{plan}");
+    let mut production = indexed.prepare(&sql)?;
+    assert_eq!(
+        production.query_row(params!["", 128], |r| r.get::<_, String>(0))?,
+        "a"
+    );
+    assert!(production.get_status(rusqlite::StatementStatus::VmStep) < 1000);
+    for projection in ["e.work_id", "e.message_key"] {
+        let sql = format!(
+            "SELECT (SELECT {projection} FROM ctox_harness_flow_events e
+            WHERE json_extract(e.metadata_json,'$.attempt_id')=+f.attempt_id
+            AND {projection} IS NOT NULL ORDER BY e.created_at LIMIT 1)
+            FROM worker_attempt_finalizations f"
+        );
+        let plan = indexed
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?
+            .query_map([], |r| r.get::<_, String>(3))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .join("\n");
+        assert!(
+            plan.contains("SEARCH e USING INDEX idx_cockpit_flow_attempt"),
+            "{plan}"
+        );
+        assert!(!plan.contains("SCAN e"), "{plan}");
+        let mut statement = indexed.prepare(&sql)?;
+        let value: String = statement.query_row([], |r| r.get(0))?;
+        assert_eq!(
+            value,
+            if projection == "e.work_id" {
+                "work"
+            } else {
+                "task"
+            }
+        );
+        assert!(statement.get_status(rusqlite::StatementStatus::VmStep) < 100);
+    }
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_runs(root.path(), &indexed, &mut writer)?;
+    let run = record(root.path(), "ctox_runs", "a")?;
+    assert_eq!(run["task_id"], "task");
+    assert_eq!(run["work_id"], "work");
+    assert_eq!(run["error_text"], "timeout");
+    Ok(())
+}
+
+#[test]
+#[ignore = "representative 278716-event pump profile; run explicitly with --nocapture"]
+fn profile_all_pump_phases_at_tenant_scale() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch("ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;")?;
+    crate::crew::ensure_schema(&conn)?;
+    conn.execute_batch("BEGIN;")?;
+    for n in 0..600 {
+        let task = format!("task-{n:04}");
+        let attempt = format!("attempt-{n:04}");
+        let status = if n < 3 {
+            "leased"
+        } else if n < 22 {
+            "pending"
+        } else {
+            "failed"
+        };
+        conn.execute("INSERT INTO communication_routing_state(message_key,route_status,updated_at) VALUES(?1,?2,'2020-01-01T00:00:00Z')", params![task, status])?;
+        conn.execute("INSERT INTO worker_attempt_finalizations VALUES(?1,?2,'failed','failed','2020-01-01T00:00:00Z','2020-01-01T00:01:00Z','2020-01-01T00:01:00Z','handshake timeout',0)", params![attempt,task])?;
+        conn.execute("INSERT INTO crew_attempts(attempt_id,task_id,member_id,selected_at,started_at,finalized_at,succeeded) VALUES(?1,?2,'crew-milo','2020-01-01T00:00:00Z','2020-01-01T00:00:00Z','2020-01-01T00:01:00Z',0)",params![attempt,task])?;
+    }
+    {
+        let mut insert = conn.prepare("INSERT INTO ctox_harness_flow_events VALUES(?1,'worker.tool_started','tool','','task-'||printf('%04d',?2),'work',1,?3,'2020-01-01T00:00:00Z')")?;
+        for n in 0..278_716 {
+            insert.execute(params![format!("event-{n:06}"), n % 600,
+                json!({"attempt_id":format!("attempt-{:04}",n%600),"turn_id":format!("turn-{}",n%600),"tool":{"name":"rg","call_id":format!("call-{n}")}}).to_string()])?;
+        }
+    }
+    conn.execute_batch("COMMIT;")?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    for (pass, flags) in [
+        ("cold", ALL | MAINTENANCE),
+        ("warm", ALL),
+        ("unchanged", ALL),
+    ] {
+        let mut timing = ProjectionTiming::new(root.path(), flags);
+        refresh_measured(
+            root.path(),
+            &WorkerSnapshot::default(),
+            &mut writer,
+            flags,
+            &mut timing,
+        )?;
+        for (name, elapsed) in &timing.phases {
+            eprintln!(
+                "PROFILE pass={pass} phase={name} us={}",
+                elapsed.as_micros()
+            );
+        }
+    }
+    assert!(
+        conn.query_row("SELECT COUNT(*) FROM ctox_harness_flow_events", [], |r| r
+            .get::<_, i64>(
+            0
+        ))? >= 278_716
+    );
+    Ok(())
+}
+
 fn setup() -> Result<(TempDir, Connection)> {
     let root = tempfile::tempdir()?;
     std::fs::create_dir_all(root.path().join("runtime"))?;

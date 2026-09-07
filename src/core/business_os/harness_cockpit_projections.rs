@@ -265,19 +265,21 @@ fn pump() -> Option<&'static Pump> {
                             .get(&root)
                             .map(|published| published.snapshot.clone());
                         let started = Instant::now();
+                        let mut timing = ProjectionTiming::new(&root, flags);
                         let outcome = (|| -> Result<()> {
-                            let snapshot = snapshot
+                            let snapshot = timing.phase("snapshot", || snapshot
                                 .map(Ok)
-                                .unwrap_or_else(|| persisted_snapshot(&root))?;
+                                .unwrap_or_else(|| persisted_snapshot(&root)))?;
                             if !writers.contains_key(&root) {
                                 writers
-                                    .insert(root.clone(), BusinessProjectionWriter::open(&root)?);
+                                    .insert(root.clone(), timing.phase("writer_open", || BusinessProjectionWriter::open(&root))?);
                             }
-                            refresh_selected(
+                            refresh_measured(
                                 &root,
                                 &snapshot,
                                 writers.get_mut(&root).expect("inserted writer"),
                                 flags,
+                                &mut timing,
                             )
                         })();
                         let stats = work.entry(root.clone()).or_default();
@@ -472,13 +474,69 @@ fn core(root: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
+#[cfg(test)]
 fn refresh_selected(
     root: &Path,
     snapshot: &WorkerSnapshot,
     writer: &mut BusinessProjectionWriter,
     flags: u8,
 ) -> Result<()> {
-    let conn = core(root)?;
+    let mut timing = ProjectionTiming::new(root, flags);
+    refresh_measured(root, snapshot, writer, flags, &mut timing)
+}
+
+/// Pump-thread wall time, including failed phases. No payloads or task content
+/// enter diagnostics. Coalesced passes report every phase, rather than blaming the
+/// event cursor for work done by status, run joins or store initialization.
+struct ProjectionTiming<'a> {
+    root: &'a Path,
+    flags: u8,
+    started: Instant,
+    phases: Vec<(&'static str, Duration)>,
+}
+impl<'a> ProjectionTiming<'a> {
+    fn new(root: &'a Path, flags: u8) -> Self {
+        Self {
+            root,
+            flags,
+            started: Instant::now(),
+            phases: Vec::new(),
+        }
+    }
+    fn phase<T>(&mut self, name: &'static str, work: impl FnOnce() -> Result<T>) -> Result<T> {
+        let started = Instant::now();
+        let result = work();
+        self.phases.push((name, started.elapsed()));
+        result
+    }
+}
+impl Drop for ProjectionTiming<'_> {
+    fn drop(&mut self) {
+        // The per-root scheduler bounds this to one line per three seconds;
+        // record fast passes too so field measurements have a denominator.
+        let phases = self
+            .phases
+            .iter()
+            .map(|(name, elapsed)| format!("{name}_us={}", elapsed.as_micros()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!(
+            "[ctox cockpit phases] root={} flags={} total_us={} {phases}",
+            self.root.display(),
+            self.flags,
+            self.started.elapsed().as_micros()
+        );
+    }
+}
+
+fn refresh_measured(
+    root: &Path,
+    snapshot: &WorkerSnapshot,
+    writer: &mut BusinessProjectionWriter,
+    flags: u8,
+    timing: &mut ProjectionTiming<'_>,
+) -> Result<()> {
+    let conn = timing.phase("core_open", || core(root))?;
     if !has_table(&conn, "communication_routing_state")? {
         return Ok(());
     }
@@ -486,7 +544,7 @@ fn refresh_selected(
         // Maintenance must never suppress unrelated cockpit projections. Older
         // databases have attempts but no tombstone outbox until their migration.
         let maintenance =
-            (|| -> Result<()> {
+            timing.phase("retain_attempts", || -> Result<()> {
                 if !has_table(&conn, "crew_attempts")?
                     || !has_table(&conn, "crew_projection_tombstones")?
                 {
@@ -511,7 +569,7 @@ fn refresh_selected(
                     }
                 }
                 Ok(())
-            })();
+            });
         match maintenance {
             Ok(()) => writer.crew_maintenance_warned = false,
             Err(_) if !writer.crew_maintenance_warned => {
@@ -522,7 +580,9 @@ fn refresh_selected(
         }
     }
     if flags & STATUS != 0 {
-        project_status(root, &conn, writer, snapshot)?;
+        timing.phase("project_status", || {
+            project_status(root, &conn, writer, snapshot)
+        })?;
     }
     if flags & EVENTS != 0 {
         // The outbox also marks the lifecycle migration: PR-59 attempts do not
@@ -532,18 +592,22 @@ fn refresh_selected(
             && has_table(&conn, "crew_projection_tombstones")?
             && has_table(&conn, "ctox_harness_flow_events")?
         {
-            crate::crew::repair_selection_events(root, &conn)?;
+            timing.phase("repair_selection_events", || {
+                crate::crew::repair_selection_events(root, &conn)
+            })?;
         }
-        project_events_since(root, &conn, writer, flags & MAINTENANCE != 0)?;
+        timing.phase("project_events", || {
+            project_events_since(root, &conn, writer, flags & MAINTENANCE != 0)
+        })?;
     }
     if flags & RUNS != 0 {
-        project_runs(root, &conn, writer)?;
+        timing.phase("project_runs", || project_runs(root, &conn, writer))?;
     }
     if flags & (STATUS | QUEUE) != 0 && has_table(&conn, "crew_members")? {
-        project_crew(root, &conn, writer)?;
+        timing.phase("project_crew", || project_crew(root, &conn, writer))?;
     }
     if flags & CHAT != 0 && has_table(&conn, "ctox_harness_flow_events")? {
-        super::chat::project(root, &conn)?;
+        timing.phase("project_chat", || super::chat::project(root, &conn))?;
     }
     let mut collections = Vec::new();
     if flags & QUEUE != 0 {
@@ -555,13 +619,15 @@ fn refresh_selected(
     if flags & RUNS != 0 {
         collections.push("ctox_runs");
     }
-    retain_selected(
-        root,
-        &conn,
-        writer,
-        Utc::now().timestamp_millis(),
-        &collections,
-    )?;
+    timing.phase("retain_selected", || {
+        retain_selected(
+            root,
+            &conn,
+            writer,
+            Utc::now().timestamp_millis(),
+            &collections,
+        )
+    })?;
     Ok(())
 }
 
@@ -931,6 +997,41 @@ fn event_step_position(
         .map(|position| position + 1)))
 }
 
+fn finalized_runs_sql(crew: bool) -> String {
+    let pending_crew = if crew {
+        "EXISTS(SELECT 1 FROM crew_attempts c WHERE c.attempt_id=f.attempt_id AND c.finalized_at IS NULL) OR"
+    } else {
+        ""
+    };
+    // json_extract has no affinity. The unary + removes the outer TEXT
+    // column's affinity (without changing its value), matching bound-string
+    // attempt lookups and letting SQLite seek idx_cockpit_flow_attempt.
+    // Without it each correlated subquery scans the entire flow ledger.
+    format!(
+        "SELECT f.attempt_id,
+                    (SELECT e.work_id FROM ctox_harness_flow_events e
+                     WHERE json_extract(e.metadata_json,'$.attempt_id')=+f.attempt_id
+                       AND e.work_id IS NOT NULL ORDER BY e.created_at LIMIT 1),
+                    f.status, f.agent_outcome, f.created_at,
+                    COALESCE(f.terminal_at,f.updated_at), f.error_text, f.resumable,
+                    (SELECT e.message_key FROM ctox_harness_flow_events e
+                     WHERE json_extract(e.metadata_json,'$.attempt_id')=+f.attempt_id
+                       AND e.message_key IS NOT NULL ORDER BY e.created_at LIMIT 1)
+             FROM worker_attempt_finalizations f
+             WHERE f.attempt_id>?1 AND f.status!='finalizing'
+               AND ({pending_crew} f.attempt_id IN (
+                        SELECT attempt_id FROM worker_attempt_finalizations
+                        WHERE status!='finalizing'
+                        ORDER BY COALESCE(terminal_at,updated_at) DESC, attempt_id DESC LIMIT 500)
+                    OR EXISTS (
+                        SELECT 1 FROM ctox_harness_flow_events e
+                        JOIN communication_routing_state r ON r.message_key=e.message_key
+                        WHERE json_extract(e.metadata_json,'$.attempt_id')=+f.attempt_id
+                          AND r.route_status NOT IN ('handled','failed','cancelled')))
+             ORDER BY f.attempt_id LIMIT ?2"
+    )
+}
+
 fn project_runs(
     root: &Path,
     conn: &Connection,
@@ -947,34 +1048,8 @@ fn project_runs(
         // The bounded recent set plus an indexed EXISTS retains every active run.
         // Pending identity accounting is independent of the 500 visible-run cap.
         // A long offline interval must not silently lose crew statistics.
-        let pending_crew = if has_table(conn, "crew_attempts")? {
-            "EXISTS(SELECT 1 FROM crew_attempts c WHERE c.attempt_id=f.attempt_id AND c.finalized_at IS NULL) OR"
-        } else {
-            ""
-        };
-        let mut statement = conn.prepare(&format!(
-            "SELECT f.attempt_id,
-                    (SELECT e.work_id FROM ctox_harness_flow_events e
-                     WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
-                       AND e.work_id IS NOT NULL ORDER BY e.created_at LIMIT 1),
-                    f.status, f.agent_outcome, f.created_at,
-                    COALESCE(f.terminal_at,f.updated_at), f.error_text, f.resumable,
-                    (SELECT e.message_key FROM ctox_harness_flow_events e
-                     WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
-                       AND e.message_key IS NOT NULL ORDER BY e.created_at LIMIT 1)
-             FROM worker_attempt_finalizations f
-             WHERE f.attempt_id>?1 AND f.status!='finalizing'
-               AND ({pending_crew} f.attempt_id IN (
-                        SELECT attempt_id FROM worker_attempt_finalizations
-                        WHERE status!='finalizing'
-                        ORDER BY COALESCE(terminal_at,updated_at) DESC, attempt_id DESC LIMIT 500)
-                    OR EXISTS (
-                        SELECT 1 FROM ctox_harness_flow_events e
-                        JOIN communication_routing_state r ON r.message_key=e.message_key
-                        WHERE json_extract(e.metadata_json,'$.attempt_id')=f.attempt_id
-                          AND r.route_status NOT IN ('handled','failed','cancelled')))
-             ORDER BY f.attempt_id LIMIT ?2"
-        ))?;
+        let sql = finalized_runs_sql(has_table(conn, "crew_attempts")?);
+        let mut statement = conn.prepare(&sql)?;
         let rows = statement
             .query_map(params![cursor, PROJECTION_PAGE_SIZE], |r| {
                 Ok((

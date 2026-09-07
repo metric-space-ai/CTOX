@@ -10,7 +10,7 @@ import { chromium } from 'playwright';
 import { stampShellDocument } from '../../../scripts/build-shell-artifact.mjs';
 
 const root = fileURLToPath(new URL('../../../', import.meta.url));
-const out = path.resolve(root, '../../../output/welsch-harness-layout-20260906');
+const out = process.env.CTOX_EVIDENCE_DIR || path.resolve(root, '../../../output/welsch-harness-layout-20260906');
 await mkdir(out, { recursive: true });
 const bundle = await build({ entryPoints: [path.join(root, 'modules/ctox/index.js')], bundle: true, write: false, format: 'esm', platform: 'browser', logLevel: 'silent' });
 const markup = await readFile(path.join(root, 'modules/ctox/index.html'), 'utf8');
@@ -23,9 +23,11 @@ const html = stampShellDocument(Buffer.from(`<!doctype html><html data-theme="da
 import {__ctoxTestHooks as hooks} from '/bundle.js';
 import {readEmbeddedIdentity} from '/shared/shell-release-status.js';
 const host=document.querySelector('[data-module-root]');
-const task={id:'layout-task',title:'Verify the complete source and retain the measured acceptance evidence',status:'failed',executionPhase:'terminal',terminalStatus:'failed',executionProgress:{phase:'failed',percent:90,currentStep:3,completedSteps:3,totalSteps:3,steps:[1,2,3].map(position=>({position,label:'Verify source and retained evidence for this task',status:'completed',activityTurns:2})),activityTurns:{total:6,thinking:2,tools:4},updatedAtMs:1720000000123}};
-const model=hooks.buildHarnessModel({runs:[],queue:[],communications:[],tickets:[],tools:[]},{ok:false},'de');
-model.tasks=[task]; model.activeTask=task; model.activeNodeId='model-failed';
+const data=hooks.mergeBundleWithCommands({runs:[],queue:[],communications:[],tickets:[],tools:[]},
+[{id:'layout-command',command_id:'layout-command',execution_task_id:'layout-task',execution_mode:'queue',execution_phase:'queued',status:'accepted',payload:{title:'Cereda'},execution_progress:{phase:'queued',steps:[]}}],
+[{id:'layout-task',command_id:'layout-command',status:'queued',route_status:'failed',failure_class:'terminal',failure_attempt_count:4,status_note:'thread/start MCP handshake timeout',updated_at_ms:Date.now()}]);
+const model=hooks.buildHarnessModel(data,{ok:false},'de');
+const task=model.tasks.find(task=>task.id==='layout-task');
 const state={ctx:{host},model,lang:'de',flow:{ok:false},selectedTaskId:task.id,selectedStepIndex:0,selectedTaskStepIndex:2,selectedNodeId:'',zoom:1,taskSearch:'',taskViewMode:'cards',taskPrimaryView:'all',taskSourceFilter:'all',taskPinFilter:'all',taskSort:'updated',taskSortDirection:'desc',pinnedTaskIds:new Set(),webStackPanelOpen:false,webStack:{loading:false,data:null,error:''},dataLoaded:true,dataError:'',runtimeStatus:'ready',flowViewport:{left:0,top:0}};
 host.querySelector('[data-ctox-left]').innerHTML=hooks.taskColumnMarkup(model.tasks,state);
 hooks.renderMain(state);
@@ -44,7 +46,7 @@ const server = http.createServer(async (req,res) => {
   }catch{res.writeHead(404).end();}
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-const browser=await chromium.launch({headless:true});
+const browser=await chromium.launch({headless:true, ...(process.env.PLAYWRIGHT_CHANNEL ? {channel:process.env.PLAYWRIGHT_CHANNEL} : {})});
 const results=[];
 try {
   for(const width of [430,630,768,1000,1280]){
@@ -62,10 +64,23 @@ try {
     assert.equal(await page.locator('body').getAttribute('data-loaded-version'),'1.2.3-beta.1');
     assert.ok(!requests.includes('/ctox-shell-manifest.json'),'loaded identity must not require a second manifest request');
     assert.equal(measured.nodes,16);
+    const reason=await page.locator('.ctox-task-reason').textContent();
+    assert.match(reason,/4 Versuche/);
+    assert.match(reason,/thread\/start MCP handshake timeout/);
+    assert.match(await page.locator('[data-pg-band="waiting"]').textContent(),/\(0\)/);
+    assert.equal(await page.locator('.ctox-task-pipeline').getAttribute('aria-label'),'Fehler');
+    assert.equal(await page.locator('[data-task-id="layout-task"][data-creature-node-id="model-failed"]').count(),1);
     assert.ok(measured.height>=200,`Harness collapsed at width ${width}: ${JSON.stringify(measured)}`);
     await page.locator('[data-node-id="queued"]').scrollIntoViewIfNeeded();
     const visible=await page.locator('[data-node-id="queued"]').evaluate(node=>{const r=node.getBoundingClientRect();return document.elementsFromPoint(r.x+r.width/2,r.y+r.height/2).some(e=>e===node||node.contains(e));});
     assert.ok(visible,`Harness node is clipped at width ${width}`);
+    if(width===1280){
+      await page.locator('[data-node-id="model-failed"]').scrollIntoViewIfNeeded();
+      for(const theme of ['dark','light']){
+        await page.locator('html').evaluate((element,theme)=>element.dataset.theme=theme,theme);
+        await page.screenshot({path:path.join(out,`routing-failed-${theme}.png`)});
+      }
+    }
     await page.close();
   }
   console.log(JSON.stringify({passed:results.length,results}));

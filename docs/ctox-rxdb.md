@@ -1449,6 +1449,22 @@ Once per minute, `[ctox cockpit]` logs the root, observation interval,
 snapshot publications/changes, accepted wakes, projection passes and time
 spent projecting. Snapshot counters are copied under the short publication
 lock; logging and all database work run after releasing it.
+Each coalesced pass also emits `[ctox cockpit phases]` with root, dirty flags,
+total microseconds and microseconds for each executed phase: snapshot recovery,
+writer/core opening, attempt retention, status, selection repair, events, runs,
+crew, chat and projection retention. Failed phases are timed too; absent phases
+were not executed. No payload content is logged. The three-second per-root
+interval bounds these lines; the minute counters distinguish publications and
+incoming wakes from actual passes.
+
+Run-to-flow correlated lookups must seek `idx_cockpit_flow_attempt`. JSON
+expressions have no SQLite affinity; comparing one directly with the outer
+TEXT `f.attempt_id` can disable that index and scan the ledger for every run.
+The outer `+f.attempt_id` preserves the identifier value while removing its
+affinity, matching ordinary bound-string lookups. The regression test checks
+EXPLAIN and VM steps, and `profile_all_pump_phases_at_tenant_scale` (explicit
+ignored test with `--nocapture`) measures all phases against 278,716 source
+events and 600 tasks, including unchanged warm passes.
 Malformed `queue.pause` is treated as not paused, logged once until recovery and
 reported in `last_error`; repairing the configuration clears that diagnostic.
 

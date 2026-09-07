@@ -78,6 +78,37 @@ const {
 test('Missing authoritative task telemetry remains a safe empty state', () => {
   assert.equal(authoritativeTaskStatus(null), '');
   assert.equal(authoritativeTaskNodeId(null), '');
+  assert.equal(authoritativeTaskStatus({ routeStatus: 'handled', executionPhase: 'terminal', terminalStatus: 'completed' }), 'completed');
+});
+
+test('Terminal routing failure outranks stale command and plan, remains inspectable with its error', () => {
+  const bundle = mergeBundleWithCommands(
+    { runs: [], queue: [], communications: [], tickets: [], tools: [] },
+    [{ id: 'cmd', command_id: 'cmd', execution_task_id: 'cereda', execution_mode: 'queue',
+      execution_phase: 'queued', terminal_status: 'none', status: 'accepted',
+      payload: { title: 'Cereda' }, execution_progress: { phase: 'queued', steps: [] } }],
+    [{ id: 'cereda', command_id: 'cmd', status: 'queued', route_status: 'failed',
+      failure_class: 'terminal', failure_attempt_count: 4,
+      status_note: 'thread/start MCP handshake timeout', updated_at_ms: Date.now() }],
+  );
+  const model = buildHarnessModel(bundle, { ok: false }, 'en');
+  const task = model.tasks.find((item) => item.id === 'cereda');
+  assert.ok(task, 'failed native task must remain available for inspection/retry');
+  assert.equal(task.status, 'failed');
+  assert.equal(authoritativeTaskStatus(task), 'failed');
+  assert.equal(authoritativeTaskNodeId(task), 'model-failed');
+  assert.equal(taskCrewStatus(task), 'failed');
+  assert.equal(model.activeTask, null);
+  const steps = taskSteps(task, { model, lang: 'en', flow: { ok: false } });
+  assert.equal(steps.find((step) => step.active).id, 'model-failed');
+  assert.match(steps[0].detail, /4 attempts/);
+  assert.match(steps[0].detail, /final/i);
+  assert.match(steps[0].detail, /thread\/start MCP handshake timeout/);
+  assert.doesNotMatch(steps[0].detail, /Waiting in queue/);
+  for (const phase of ['queued', 'running', 'awaiting_review']) {
+    assert.equal(authoritativeTaskStatus({ ...task, executionPhase: phase }), 'failed');
+    assert.equal(authoritativeTaskNodeId({ ...task, executionPhase: phase }), 'model-failed');
+  }
 });
 
 test('Harness diagram renders complete nodes with and without a selected task', () => {
