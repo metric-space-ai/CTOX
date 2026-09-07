@@ -227,16 +227,19 @@ fn pump() -> Option<&'static Pump> {
                         }
                         // Never hold the publication lock while logging: worker
                         // snapshot publication must not wait on the log sink.
-                        let publications = {
+                        let mut publications = {
                             let mut snapshots = snapshots.lock().unwrap_or_else(|e| e.into_inner());
                             snapshots.iter_mut().map(|(root, published)| {
-                                let counts = (root.clone(), published.publications, published.changes);
+                                let counts = (root.clone(), (published.publications, published.changes));
                                 published.publications = 0;
                                 published.changes = 0;
                                 counts
-                            }).collect::<Vec<_>>()
+                            }).collect::<BTreeMap<_, _>>()
                         };
-                        for (root, publication_count, change_count) in publications {
+                        for root in roots.iter().chain(work.keys()) {
+                            publications.entry(root.clone()).or_default();
+                        }
+                        for (root, (publication_count, change_count)) in publications {
                             schedule.mark(root.clone(), ALL | MAINTENANCE);
                             let stats = work.entry(root.clone()).or_default();
                             eprintln!("[ctox cockpit] root={} interval_ms={} snapshot_publications={} snapshot_changes={} wakes={} passes={} projection_ms={}",
@@ -701,6 +704,9 @@ fn event_kind(kind: &str) -> Option<&'static str> {
 // all active tasks/runs when their count exceeds the terminal retention limit.
 const PROJECTION_PAGE_SIZE: i64 = 128;
 
+// Drive from the rowid range, then probe routing by its primary key. Selecting
+// the task/time index to satisfy message-key ordering would rescan history on
+// empty deltas; NOT INDEXED still permits SQLite's integer-primary-key lookup.
 const CHANGED_EVENT_TASKS_SQL: &str =
     "SELECT DISTINCT e.message_key FROM ctox_harness_flow_events e NOT INDEXED
      CROSS JOIN communication_routing_state r ON r.message_key=e.message_key
