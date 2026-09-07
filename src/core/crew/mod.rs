@@ -339,6 +339,33 @@ pub(crate) struct Selection {
     pub member_id: String,
     pub reason: String,
 }
+/// Owner assignment before the lease: the router honours it first. Works on
+/// the transaction or connection the caller holds; the task must be unleased.
+pub(crate) fn assign_member_before_lease(
+    conn: &Connection,
+    task_id: &str,
+    member_id: &str,
+    now: &str,
+) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM crew_members WHERE id=?1 AND archived=0)",
+        [member_id],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        bail!("active member not found");
+    }
+    let changed = conn.execute(
+        "UPDATE communication_routing_state SET crew_assigned_member_id=?2,updated_at=?3
+         WHERE message_key=?1 AND route_status IN ('pending','blocked') AND lease_owner IS NULL",
+        params![task_id, member_id, now],
+    )?;
+    if changed != 1 {
+        bail!("assignment requires an unleased pending or blocked task");
+    }
+    Ok(())
+}
+
 /// No I/O or clock access: every scheduling input is explicit and replayable.
 pub(crate) fn select(
     candidates: &[Member],

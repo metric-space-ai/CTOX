@@ -179,18 +179,7 @@ pub(super) fn control(
             "ctox.crew.assign" => {
                 let task = text(p, "task_id")?;
                 let member = text(p, "member_id")?;
-                let exists: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM crew_members WHERE id=?1 AND archived=0)",
-                    [member],
-                    |r| r.get(0),
-                )?;
-                ensure!(exists, "active member not found");
-                let changed=tx.execute("UPDATE communication_routing_state SET crew_assigned_member_id=?2,updated_at=?3
-                WHERE message_key=?1 AND route_status IN ('pending','blocked') AND lease_owner IS NULL",params![task,member,now])?;
-                ensure!(
-                    changed == 1,
-                    "assignment requires an unleased pending or blocked task"
-                );
+                crew::assign_member_before_lease(&tx, task, member, &now)?;
                 json!({"task_id":task,"member_id":member})
             }
             "ctox.crew.learning.confirm"

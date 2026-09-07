@@ -615,6 +615,14 @@ function installAdvancedStatusInterface() {
   globalThis.workjetSessionControl = workjetSessionControl;
   globalThis.workjetSessionEvents = createWorkjetSessionEvents();
   state.openModule = (moduleId, options = {}) => openModule(moduleId, options);
+  // A crew member dropped from the chat bar onto an app opens the CTOX context
+  // menu at that point with the member standing by (drag-and-drop handoff).
+  state.openCrewContextMenu = ({ clientX, clientY, crew } = {}) => {
+    const target = document.elementFromPoint(Number(clientX) || 0, Number(clientY) || 0);
+    if (!target || !isGlobalCtoxContextSurface(target) || isCtoxContextMenuBypassTarget(target)) return false;
+    openGlobalCtoxContextMenuForTarget(target, clientX, clientY, crew || null);
+    return true;
+  };
 }
 
 async function ensureAdvancedStatusRequiredCollections(requiredCollections, options = {}) {
@@ -7531,6 +7539,7 @@ function createContextActionsFacade(moduleLike) {
           : (context.record_id || moduleId),
         inbound_channel: moduleId,
         payload: {
+          ...(options.payload && typeof options.payload === 'object' ? options.payload : {}),
           title: options.title || prompt.slice(0, 120),
           instruction: prompt,
           prompt,
@@ -14661,7 +14670,7 @@ function handleGlobalContextMenu(event) {
   openGlobalCtoxContextMenuForTarget(target, event.clientX, event.clientY);
 }
 
-function openGlobalCtoxContextMenuForTarget(target, clientX, clientY) {
+function openGlobalCtoxContextMenuForTarget(target, clientX, clientY, crew = null) {
   // Defensive for programmatic opens and early-mounted runtime modules. The
   // initializer is idempotent and ensures the shared menu exists before the
   // target context is resolved.
@@ -14675,7 +14684,7 @@ function openGlobalCtoxContextMenuForTarget(target, clientX, clientY) {
     clientX,
     clientY,
   });
-  showGlobalCtoxContextMenu(context, clientX, clientY);
+  showGlobalCtoxContextMenu(context, clientX, clientY, crew);
 }
 
 function isGlobalCtoxContextSurface(target) {
@@ -14923,8 +14932,9 @@ function deriveLabelFromElement(el) {
   return '';
 }
 
-function showGlobalCtoxContextMenu(context, x, y) {
+function showGlobalCtoxContextMenu(context, x, y, crew = null) {
   if (!globalCtoxContextMenuEl) return;
+  const crewName = String(crew?.name || '').trim();
   removeLegacyCtoxContextMenus();
 
   const mod = state.modules.find((item) => item.id === context.module)
@@ -14954,12 +14964,16 @@ function showGlobalCtoxContextMenu(context, x, y) {
   });
   const lang = shellLang();
 
-  const titleText = shellText('chatToCtox') || (lang === 'de' ? 'An die Crew übergeben' : 'Hand off to crew');
+  const titleText = crewName
+    ? (lang === 'de' ? `${crewName} übernimmt` : `${crewName} takes over`)
+    : (shellText('chatToCtox') || (lang === 'de' ? 'An die Crew übergeben' : 'Hand off to crew'));
   const workDataLabel = shellText('chatWorkDataLabel') || (lang === 'de' ? 'Daten ändern' : 'Change data');
   const answerLabel = shellText('chatAnswerLabel') || (lang === 'de' ? 'Frage stellen' : 'Ask question');
   const modifyAppLabel = shellText('chatModifyAppLabel') || (lang === 'de' ? 'App ändern' : 'Change app');
   const approvalLabel = lang === 'de' ? 'Freigabe einholen' : 'Request approval';
-  const placeholderText = shellText('chatPlaceholder') || (lang === 'de' ? 'Was soll die Crew hier tun oder prüfen?' : 'What should the crew do or check here?');
+  const placeholderText = crewName
+    ? (lang === 'de' ? `Was soll ${crewName} hier tun oder prüfen?` : `What should ${crewName} do or check here?`)
+    : (shellText('chatPlaceholder') || (lang === 'de' ? 'Was soll die Crew hier tun oder prüfen?' : 'What should the crew do or check here?'));
   const dataPlaceholderText = lang === 'de' ? 'Welche Daten sollen geändert werden?' : 'What data should change?';
   const askPlaceholderText = lang === 'de' ? 'Welche Frage soll beantwortet werden?' : 'What question should be answered?';
   const appPlaceholderText = lang === 'de' ? 'Was soll an der App geändert werden?' : 'What should change in the app?';
@@ -14979,7 +14993,8 @@ function showGlobalCtoxContextMenu(context, x, y) {
 
   globalCtoxContextMenuEl.innerHTML = `
     <form class="ctox-context-chat-form" data-stage="actions" novalidate>
-      <header class="ctox-context-header">
+      <header class="ctox-context-header ${crewName ? 'has-crew' : ''}">
+        ${crew?.creatureHtml ? `<span class="ctox-context-crew" aria-hidden="true">${crew.creatureHtml}</span>` : ''}
         <div class="ctox-context-heading">
           <strong>${escapeHtml(titleText)}</strong>
           <span>${escapeHtml(subtitle)}</span>
@@ -15262,6 +15277,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
         context,
         prompt: instruction,
         title,
+        payload: crew?.id ? { crew_member_id: crew.id } : {},
         client_context: {
           source: 'business-os-global-context',
           action: 'context-chat',
@@ -15286,6 +15302,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
         command_id: result?.command_id || result?.id || '',
         thread_key: `business-os/${mod.id}/${context.record_id || 'module'}`,
         reuseActive: false,
+        ...(crew?.id ? { crew_member_id: crew.id, crew_identity: { name: crew.name, shape: crew.shape, color: crew.color } } : {}),
       });
       hideGlobalCtoxContextMenu();
     } catch (error) {

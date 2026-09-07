@@ -22275,6 +22275,34 @@ fn create_ctox_queue_task(
             })),
         },
     )?;
+    // A member the owner dragged onto the record becomes the pre-lease
+    // assignment; the router honours it ahead of its own judgment. Unknown or
+    // archived members are ignored, never a reason to lose the task.
+    if let Some(member_id) = command
+        .payload
+        .get("crew_member_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let assign = || -> anyhow::Result<()> {
+            let conn = rusqlite::Connection::open(crate::paths::core_db(root))?;
+            conn.busy_timeout(crate::persistence::sqlite_busy_timeout_duration())?;
+            crate::crew::ensure_schema(&conn)?;
+            crate::crew::assign_member_before_lease(
+                &conn,
+                &claimed.task.message_key,
+                member_id,
+                &chrono::Utc::now().to_rfc3339(),
+            )
+        };
+        if let Err(error) = assign() {
+            eprintln!(
+                "[ctox crew] pre-lease assignment of {member_id} to {} ignored: {error}",
+                claimed.task.message_key
+            );
+        }
+    }
     Ok(Some(claimed.task))
 }
 

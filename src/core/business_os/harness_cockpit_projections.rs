@@ -919,7 +919,6 @@ fn project_crew(
     writer: &mut BusinessProjectionWriter,
 ) -> Result<()> {
     let now = Utc::now().timestamp_millis();
-    let engine = crate::crew::open_engine(root).ok();
     for mut member in crate::crew::members(conn)? {
         let active: Option<String> = conn
             .query_row(
@@ -964,10 +963,9 @@ fn project_crew(
         };
         // Memory (LCM continuity of the member) and the derived field of work:
         // the modules it succeeded in most, from its finalized attempts.
-        let memory = engine
-            .as_ref()
-            .map(|engine| crate::crew::load_member_memory(engine, &member.id))
-            .unwrap_or_default();
+        // Read through the pump's own connection: no LCM engine (and no
+        // migration write lock) inside the projection pass.
+        let memory = crate::crew::load_member_memory_from_conn(conn, &member.id);
         let domain = conn
             .prepare(
                 "SELECT module FROM crew_attempts

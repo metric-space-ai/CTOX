@@ -48,6 +48,50 @@ pub(crate) fn load_member_memory(engine: &LcmEngine, member_id: &str) -> MemberM
     }
 }
 
+/// Read-only view of the same documents through an existing core connection:
+/// the projection pump must not open the LCM engine (migrations take a write
+/// lock and starve the chat projection on the same database).
+pub(crate) fn load_member_memory_from_conn(conn: &Connection, member_id: &str) -> MemberMemory {
+    let conversation = member_conversation_id(member_id);
+    let read = |kind: &str| -> Option<(String, String)> {
+        conn.query_row(
+            "SELECT c.rendered_text, d.updated_at FROM continuity_documents d
+             JOIN continuity_commits c ON c.commit_id = d.head_commit_id
+             WHERE d.conversation_id = ?1 AND d.kind = ?2",
+            params![conversation, kind],
+            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+        )
+        .ok()
+    };
+    let has_tables: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='continuity_documents')
+                AND EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='continuity_commits')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if !has_tables {
+        return MemberMemory::default();
+    }
+    let anchors = read("anchors");
+    let narrative = read("narrative");
+    MemberMemory {
+        anchors: anchors
+            .as_ref()
+            .map(|(text, _)| text.clone())
+            .unwrap_or_default(),
+        narrative: narrative
+            .as_ref()
+            .map(|(text, _)| text.clone())
+            .unwrap_or_default(),
+        updated_at: std::cmp::max(
+            anchors.map(|(_, at)| at).unwrap_or_default(),
+            narrative.map(|(_, at)| at).unwrap_or_default(),
+        ),
+    }
+}
+
 /// Entries of a continuity document as one dense line each.
 fn entry_lines(
     content: &str,
