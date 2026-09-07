@@ -281,12 +281,12 @@ export async function mount(ctx) {
         state.t('draftSaveTimeout', 'Automatische Draft-Speicherung beim Dokumentwechsel hat zu lange gedauert.'),
       );
       if (hasPendingEditorChanges()) {
-        ctx.notifications?.error?.(state.t('draftSavePending', 'Weitere Änderungen sind noch nicht gespeichert. Bitte nach dem Speichern erneut versuchen, das Dokument zu wechseln.'));
+        ctx.notifications?.show?.({ type: 'error', message: state.t('draftSavePending', 'Weitere Änderungen sind noch nicht gespeichert. Bitte nach dem Speichern erneut versuchen, das Dokument zu wechseln.') });
         return false;
       }
       return true;
     } catch (error) {
-      ctx.notifications?.error?.(error?.message || String(error));
+      ctx.notifications?.show?.({ type: 'error', message: error?.message || String(error) });
       return false;
     }
   });
@@ -873,11 +873,11 @@ async function createBlankWordDocument(state) {
       status: 'Draft',
       title,
     });
-    state.ctx.notifications?.success?.(state.t('blankDocumentCreated', 'Leeres Word-Dokument erstellt.'));
+    state.ctx.notifications?.show?.({ type: 'success', message: state.t('blankDocumentCreated', 'Leeres Word-Dokument erstellt.') });
     return record;
   } catch (error) {
     console.error('[documents] blank Word document creation failed', error);
-    state.ctx.notifications?.error?.(`${state.t('documentCreateFailed', 'Dokument konnte nicht erstellt werden:')} ${error?.message || error}`);
+    state.ctx.notifications?.show?.({ type: 'error', message: `${state.t('documentCreateFailed', 'Dokument konnte nicht erstellt werden:')} ${error?.message || error}` });
     return null;
   } finally {
     state.creatingBlankDocument = false;
@@ -1586,12 +1586,12 @@ async function switchSelectedDocument(state, documentId, options = {}, lifecycle
       );
     } catch (error) {
       if (state.switchSerial !== switchSerial) return;
-      state.ctx.notifications?.error?.(error.message);
+      state.ctx.notifications?.show?.({ type: 'error', message: error.message });
       return;
     }
     if (state.switchSerial !== switchSerial) return;
     if (state.dirty || state.editorHandle?.saving) {
-      state.ctx.notifications?.error?.(state.t('draftSavePending', 'Weitere Änderungen sind noch nicht gespeichert. Bitte nach dem Speichern erneut versuchen, das Dokument zu wechseln.'));
+      state.ctx.notifications?.show?.({ type: 'error', message: state.t('draftSavePending', 'Weitere Änderungen sind noch nicht gespeichert. Bitte nach dem Speichern erneut versuchen, das Dokument zu wechseln.') });
       return;
     }
   }
@@ -3774,7 +3774,10 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial, re
     if (state.superdocSaveTimer) clearTimeout(state.superdocSaveTimer);
     state.superdocSaveTimer = null;
     const error = payload?.error || payload;
-    state.ctx.notifications?.error?.(error?.message || String(error));
+    state.ctx.notifications?.show?.({
+      type: 'error', message: error?.message || String(error), time: 0,
+      action: { label: state.t('close', 'Schließen'), callback: () => {} },
+    });
   });
   const cleanupCallbacks = [removeDirtyListener, removeSavingListener, removeSavedListener, removeErrorListener];
   await openOfficeEditorInstance(
