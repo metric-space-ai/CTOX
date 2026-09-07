@@ -1,5 +1,52 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Verified native candidate and deployment in progress, 2026-09-07
+
+Main fcce197633914c313b8765454c3afcfe75017d83 preserves complete
+module-source content and bounds live replication events through the existing
+Resync/byte-bounded pull contract. Historical source documents are excluded
+from destructive startup clamping. A real SQLite startup regression preserves
+a 2 MiB source document, revision and write timestamp (1 passed).
+
+The verified source artifact covers all 9,846 tracked Git blobs and modes.
+Its optimized binary SHA256 is
+`705d66d3e487b54f48f5a41cae9f2960e342565300ff96530d8e45e9190b1f26`.
+With signed beta17, actual browser/command/native/WebRTC execution preserved
+21 source files and 11,130,431 bytes both before and after native restart.
+Source command: 341.5 ms; complete transfer and hash verification: 1,160.9 ms;
+native restart: 3,170 ms. This is not a production boot-p95 claim.
+[Source flow measurements](beweise/raw/module-source-lossless-final-20260907.json).
+
+The final warm-command run completed 30/30 commands: p50 274.5 ms,
+p95 341.5 ms, min 214 ms, max 379 ms, with no reported issues.
+[Warm-command measurements](beweise/raw/warm-command-final-20260907.json).
+The first sequential warm runner failed its port reservation after the source
+runner exited; no listener remained. The unchanged workload then used fresh
+ports 28987/28986. This setup failure is not hidden as a product pass.
+The earlier debug p50 380 ms remains a failed performance run.
+
+The full JS suite subsequently passed 119/119 with the rebuilt wire daemon and
+no skips, superseding the intermediate 115/4 timeout result below. The native
+RxDB suite passed 430 tests; the source writer and five staging/replay tests
+also passed. These do not certify all live application workflows.
+
+The safe managed updater (SHA256 580887fe…) was launched as
+`ctox-sync-native-fcce19763-update-20260907.service`. It revalidated the
+source tree, test evidence and immutable backups, saved a fresh read-only chunk
+manifest, and is rebuilding the managed release before switching. Production
+activation and the fourteen source-projection repairs are pending at this
+checkpoint. Source backup:
+`/home/ctox/.local/state/ctox-incident-lossless-source-20260907`.
+
+Real beta17 browser checks still fail Office opening with
+`CTOX product sync push timed out: spreadsheet_blob_chunks`. After an own-tab
+reload, lists were empty at a sampled 54 seconds and populated at a sampled
+153 seconds. This is sparse observation, not an exact bootstrap percentile.
+Several schema imports had previously failed; the exact Support schema URL
+subsequently returned HTTP 200 with JavaScript content type. Neither cache
+clearing nor the removal of user application data was used to claim recovery.
+
+
 ## Applied staging cleanup and subsequent replay failure
 
 At 2026-09-07T00:37:42Z, maintenance unit
