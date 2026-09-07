@@ -149,8 +149,12 @@ test('CTOX flow map places the same crew on waiting, working, and failed task no
   }
   const html = workingHtml + waitingHtml + failedHtml;
   assert.match(html, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
-  assert.doesNotMatch(html, /data-task-id="task-waiting"/);
-  assert.doesNotMatch(html, /data-task-id="task-failed"/);
+  assert.match(html, /data-task-id="task-waiting"[^>]+data-creature-node-id="queued"/);
+  assert.match(html, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
+  const noSelectionHtml = flowCrewSvg(model, null, { lang: 'de' });
+  assert.equal((noSelectionHtml.match(/ctox-flow-creature-slot/g) || []).length, 1);
+  assert.doesNotMatch(noSelectionHtml, /data-task-id="task-(waiting|failed)"/);
+  assert.match(noSelectionHtml, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
   const failedSelected = flowCrewSvg(model, failed, { lang: 'de' });
   assert.equal((failedSelected.match(/ctox-flow-creature-slot/g) || []).length, 2);
   assert.match(failedSelected, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
@@ -159,7 +163,9 @@ test('CTOX flow map places the same crew on waiting, working, and failed task no
   assert.match(html, /data-activity-turns="7"/);
   assert.match(html, /data-activity-kind="tool"/);
   assert.match(html, /--ctox-progress-angle:216deg/);
-  assert.doesNotMatch(html, /is-sleeping/);
+  assert.doesNotMatch(workingHtml, /is-sleeping/);
+  assert.doesNotMatch(noSelectionHtml, /is-sleeping/);
+  assert.match(waitingHtml, /is-sleeping/);
   assert.match(failedSelected, /is-failed/);
   assert.equal(taskCrewNodeId(working, model), 'running');
   assert.equal(taskCrewStatus(working), 'running');
