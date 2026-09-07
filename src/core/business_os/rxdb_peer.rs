@@ -3885,7 +3885,7 @@ fn open_native_peer_lock_file(root: &Path) -> anyhow::Result<File> {
         })
 }
 
-fn acquire_native_peer_process_lock(root: &Path) -> anyhow::Result<Option<File>> {
+pub(super) fn acquire_native_peer_process_lock(root: &Path) -> anyhow::Result<Option<File>> {
     let lock_file = open_native_peer_lock_file(root)?;
     match lock_file.try_lock() {
         Ok(()) => Ok(Some(lock_file)),

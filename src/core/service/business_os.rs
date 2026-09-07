@@ -691,6 +691,32 @@ fn build_desktop_invite(root: &Path, args: &[String]) -> anyhow::Result<serde_js
 
 fn handle_business_os_repair(root: &Path, args: &[String]) -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
+        Some("office-staging") => {
+            let mut apply = false;
+            let mut dry_run = false;
+            let mut expected = None;
+            let mut flags = args[1..].iter();
+            while let Some(flag) = flags.next() {
+                match flag.as_str() {
+                    "--apply" => apply = true,
+                    "--dry-run" => dry_run = true,
+                    "--expected-sha256" => {
+                        expected = Some(
+                            flags
+                                .next()
+                                .context("--expected-sha256 requires a digest")?
+                                .as_str(),
+                        )
+                    }
+                    _ => anyhow::bail!("unknown office-staging argument: {flag}"),
+                }
+            }
+            anyhow::ensure!(apply != dry_run && (apply || expected.is_none()),
+                "usage: ctox business-os repair office-staging (--dry-run | --apply --expected-sha256 <digest>)");
+            print_json(&crate::business_os::office_staging_repair::repair(
+                root, apply, expected,
+            )?)
+        }
         Some("queue-projections") => {
             let apply = args.iter().any(|arg| arg == "--apply");
             let dry_run = args.iter().any(|arg| arg == "--dry-run");

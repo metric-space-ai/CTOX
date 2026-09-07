@@ -26,6 +26,7 @@ mod module_lifecycle;
 mod module_manifest_loader;
 pub mod office_cli;
 pub mod office_engine;
+pub(crate) mod office_staging_repair;
 mod person_research_command;
 mod person_research_gap_closure;
 pub mod policy;

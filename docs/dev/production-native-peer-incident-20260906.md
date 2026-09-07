@@ -1,5 +1,52 @@
 # Production incident: native peer recovery, 2026-09-06
 
+## Follow-up, 2026-09-07: font routing, upload failure and guarded cleanup
+
+The independent Office task fixed the gateway classifier for extensionless
+signed-slot font files (ctox-dev main
+`1cebb53e0cf081fceeec7633f67e17223d31b31b`, promoted deployment
+`dpl_FaJ91rpY4RaJoaoez7Lt4TPRPQ31`). Before promotion, the beta15 font
+`vendor/ctox-office/upstream/fonts/000` returned HTTP 200 login HTML
+(3,877 bytes). Afterwards it returned 708,920 binary bytes with SHA256
+`2a6bc04169fc1e273ede5e55ec7c666eb4ebf6da438202cdf61d415a77f83a69`.
+Independent fetches took 11.600 s and 7.425 s; these are not a latency pass.
+The existing spreadsheet grid then visibly rendered in this task's browser.
+
+Creating one blank test spreadsheet through the UI remains reproducibly broken:
+`sheet_4a27209b-66e3-47cf-b147-8a67a2f8230e` (Neue Tabelle 4).
+Its record and v1 metadata reached native RxDB, but none of its blob chunks did.
+The editor reports `CTOX product sync push timed out: spreadsheet_blob_chunks`,
+while the header incorrectly says Gespeichert. Opening another sheet and
+reopening this record repeated the failure. No cell edits were made. This
+test record still requires cleanup through the supported application path.
+
+The production daemon is still aece8a4f, PID 2694536, NRestarts=2. The
+independent task found OOM/SIGKILL entries; current read-only checks confirm
+roughly 10 GB RSS / 11.35 GB cgroup memory. This does not by itself establish
+the cause of Office saving failures. At 2026-09-07T00:24:32Z the native
+command counters showed 263 observations, average observation latency
+30,813 ms and maximum 876,605 ms. These cumulative counters are not the
+isolated warm-command percentile fixture and do not meet production acceptance.
+
+Seven omitted document chunks were identified as old `office_document_*`
+staging uploads belonging to three existing documents. Four versions retain
+staged-upload references; their canonical DOCX and editor blob hashes were
+independently verified. No canonical blob_id/editor_blob_id points at an
+omitted upload. All corresponding persisted commands are terminal.
+
+The new [offline staging repair](office-staging-repair.md) requires an exact
+candidate digest, checks all affected canonical history, excludes a running
+peer, writes a durable backup, and uses normal projection tombstones. Its four
+real-store integration tests passed on the isolated remote source build in
+0.20 s (test compilation 9m33s). Production dry-run/application and replicated
+tombstone verification are still pending at this checkpoint.
+
+Build attempts are not production evidence: the first lacked the generated
+Pi bundle; the second failed linking with SIGBUS and left only 2.3 GB disk
+free. Only this task's failed incremental compiler cache was removed,
+restoring 20 GB. The third build uses no incremental cache and passed the
+four repair tests. No production database was deleted or overwritten.
+
 ## Subsequent live follow-up: beta15 and remaining UI latency
 
 A separate Office rollout activated signed beta15 at
