@@ -749,18 +749,39 @@ missing liveness, review, outcome, or spawn evidence with prompt text.
 
 ## Crew-Identität
 
-Die Core-Migration der Kommunikations-Queue legt vier feste Mitglieder (Milo,
-Nori, Lumi, Pico) idempotent an. Ihre IDs, Formen, Farben und `soul_json` bleiben
-bei Neustarts und Migrationen erhalten. `crew_members` und
-`crew_member_learnings` sind die Autorität; `crew_attempts` bindet ein Mitglied
-an genau eine Attempt-ID und verbucht dessen Ergebnis höchstens einmal.
+Die Crew ist ein Kollektiv in einem seriellen Harness: keine Wesen-Sessions,
+keine Wesen-Threads, kein zweiter Speicher. Die Mitglieder sind Experten im
+Sinn einer Mixture of Experts: Sie existieren, damit Wissen über bestimmte
+Tätigkeiten getrennt verwaltet und gezielt geladen wird. Die Core-Migration der
+Kommunikations-Queue legt vier feste Mitglieder (Milo, Nori, Lumi, Pico)
+idempotent an. Ihre IDs, Formen, Farben und `soul_json` (Persona) bleiben bei
+Neustarts und Migrationen erhalten. `crew_members` ist die Autorität für die
+Persona; das **Gedächtnis eines Mitglieds liegt im LCM**: Continuity-Dokumente
+(Narrative = Erfahrung, Anchors = gesichertes Wissen) der Mitglieds-Konversation
+`crew:<member_id>` (`crew::memory::member_conversation_id`), mit denselben
+Commits, demselben Refresh-Prompt und derselben Kompaktierung wie jede andere
+Konversation. `crew_attempts` bindet ein Mitglied an genau eine Attempt-ID,
+speichert die Aufgaben-Zusammenfassung (`task_summary`) und verbucht das
+Ergebnis höchstens einmal. Die frühere Tabelle `crew_member_learnings` wird beim
+ersten Einsatz eines Mitglieds einmalig in dessen Anchors überführt
+(`migrated_to_lcm`).
 
-Erst nach den fünf Zulassungs-/Hold-/Redirect-Guards wählt `crew::select` als reine Funktion: manuelle
-Zuordnung vor Thread-Kontinuität, danach Spezialitäten, passende Erfolge und
-Fehlschläge der letzten 24 Stunden. Bei Gleichstand entscheiden letzte Aktivität
-und ID. Archivierte Mitglieder werden nicht neu ausgewählt. Ein wiederaufgenommener
+Erst nach den fünf Zulassungs-/Hold-/Redirect-Guards und vor der
+Schreib-Transaktion entscheidet der **Router** (`crew::router`): manuelle
+Zuordnung vor Thread-Kontinuität; sonst ein gebundener, werkzeugfreier
+Modellaufruf (60 s) mit der Aufgabe und je aktivem Mitglied Persona, Lebenslauf,
+letzten Einsätzen mit Ausgang, Anchors und Narrative-Kopf. Regel: ähnlichste
+gut ausgegangene Erfahrung gewinnt; ohne verwandte Erfahrung das Mitglied mit
+den wenigsten Einsätzen, damit sich Wissen im Pool verteilt; wiederholte
+Fehlschläge in der Tätigkeit nur ohne Alternative. Die Antwort ist JSON
+(`member_id`, `reason`); ein unbrauchbares oder unerreichbares Urteil fällt auf
+die deterministische Punktzahl (`crew::select`) zurück, und die Begründung sagt
+das. Archivierte Mitglieder werden nicht neu ausgewählt. Ein wiederaufgenommener
 Versuch behält seine ursprüngliche Identität. Die wörtliche Begründung steht im
-Harness-Flow-Ereignis `crew_selected` und in dessen Cockpit-Projektion.
+Harness-Flow-Ereignis `crew_selected` (`selection_kind` routed/selected/
+assigned/continuity) und in dessen Cockpit-Projektion; das Lesen des
+Gedächtnisses erzeugt `crew.memory_read`. In Tests ist kein Router-Urteil
+aktiv (`cfg!(test)`), damit Zulassung nie von einem Provider abhängt.
 `crew_assigned_member_id` ist eine einmalige Owner-Zuweisung und wird bei der
 erfolgreichen Übernahme geleert; ein Crew-Fehler erhält die manuelle Zuweisung.
 `crew_member_id` beschreibt ausschließlich die tatsächliche
@@ -793,15 +814,20 @@ finalisierte Crew-Attempts plus alle Attempts nichtterminaler Tasks. Löschungen
 alter Schein-Start-Ereignisse werden über eine kleine dauerhafte Tombstone-Outbox
 wiederholbar in die Projektion übertragen.
 
-Der Soul-Block wird deterministisch aus fünf Achsen, Charakter, Stimme und
-Statistik gerendert. Höchstens acht bestätigte und zwei ausdrücklich unbestätigte,
-zum Scope passende Learnings werden angefügt. Unbestätigte Learnings ohne Scope
-werden nie injiziert; gesetzte Modul-/Command-/Thread-Scopes müssen jeweils passen.
-E-Mail-Adressen bleiben in Learnings und Rückblicken verboten, ebenso wie
-Geheimnisse und Dateipfade; reine Erwähnungen wie `@Milo` bleiben zulässig.
-Zeilenumbrüche und Mehrfach-Whitespace werden zu einzelnen Leerzeichen normalisiert. Der Block ist auf 4.000 UTF-8-Bytes
-begrenzt, steht auf dem tatsächlichen Prompt-Pfad nach dem CTO-Systemkontext und
-den Ausführungsregeln und verleiht keine zusätzlichen Befugnisse.
+Die Persona und das Gedächtnis reisen in den Spuren des Kontextvertrags
+(`docs/context-build.md`), nie in der Nutzernachricht. Die **Persona**
+(`crew::memory::render_persona`: Charakter, Stimme, Arbeitsweise in fünf
+Intensitätsstufen je Regler, Erfahrung; höchstens 2.400 Bytes) wird als Suffix
+der Basis-Instruktionen gerendert (`compose_base_instructions`) und ist Teil des
+Sitzungsvertrags: Ein Mitgliedswechsel baut den prozesslokalen Client neu auf,
+der dauerhafte Thread wird mit dem neuen Vertrag fortgesetzt. Das **Gedächtnis**
+(`render_memory_block`: Anchors, jüngste Narrative-Einträge, letzte Einsätze;
+höchstens 6.000 Bytes) ist ein Block im markierten Runtime-Kontext
+(`attach_crew_memory`, Developer-Spur, nach gebundenem Skill) und entfällt,
+wenn es nichts zu wissen gibt. Beide stehen nach dem CTO-Systemkontext und den
+Ausführungsregeln und verleihen keine zusätzlichen Befugnisse. E-Mail-Adressen,
+Geheimnisse und Dateipfade bleiben in Rückblicken und Learnings verboten;
+Whitespace wird normalisiert.
 
 Der bestehende finale Worker-Text darf ein JSON-Objekt `crew_retrospective`
 enthalten (bevorzugt in einem reservierten `ctox-crew`-Codeblock): `retrospective` mit höchstens 300 Zeichen
@@ -813,10 +839,18 @@ Fehlschlag stammen; `preference` benötigt ein wörtliches, belegtes Owner-Zitat
 Der sichtbare Antworttext enthält diesen Metadatenblock nicht; die vollständige
 Nachricht bleibt als Attempt-Evidenz erhalten. Owner-Zitate werden gegen den
 nativ autorisierten Admin/Chef-Command geprüft, nicht gegen die Behauptung des
-Workers. Ungültige Abschlüsse erzeugen keine Learnings. Alles wird zunächst unbestätigt
-gespeichert, ohne zusätzlichen Modellaufruf. Der Projektions-Pump verbucht Stats
-und Rückblick transaktional; Retention lässt höchstens 200 Learnings je Mitglied
-stehen und entfernt zuerst die ältesten unbestätigten.
+Workers. Ungültige Abschlüsse erzeugen keine Learnings. Der Projektions-Pump verbucht
+Stats, Rückblick und die typisierten Learnings (`learning_json`) transaktional
+am Attempt und markiert ihn `learning_due`. Das **Lernen** läuft danach seriell
+im 60-Sekunden-Wartungslauf (`crew::memory::run_learning_tick`, ein Attempt je
+Tick): Die Learnings werden als Hypothese-Anchors in das Gedächtnis des
+Mitglieds geschrieben, der Einsatz wird als Nachricht der Mitglieds-Konversation
+abgelegt, und der bestehende werkzeugbasierte Continuity-Refresh
+(`refresh_member_memory`, Narrative + Anchors) destilliert daraus Erfahrung und
+Wissen. Ergebnis und Fehler stehen im Ereignis `crew.learning`. Der Owner
+kuratiert über `ctox.crew.memory.update` (diff/replace/full auf dieselben
+Dokumente); die Projektion `ctox_crew_members` trägt `memory` (nur für
+Chef/Admin/Founder) und das abgeleitete Fachgebiet `domain`.
 
 `ctox crew list` und `ctox crew show <id>` lesen diese Core-Identität ohne Browser.
 Queue-Zulassung, Review-Gates, Kapazität und Wiederholungssemantik bleiben unverändert.

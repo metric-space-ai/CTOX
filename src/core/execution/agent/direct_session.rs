@@ -88,6 +88,11 @@ const BUSINESS_OS_MCP_SESSION_TOOLS: &[&str] = &[
     "business_os.list_module_actions",
     "business_os.propose_action",
     "business_os.execute_action",
+    // Befund 07.09.2026: the research writeback contract (mechanism
+    // business_command, command_type outbound.lead.research_writeback) can only
+    // be fulfilled through this tool. Without it in the session allowlist every
+    // research task ends in "no successful writeback receipt".
+    "business_os.execute_writeback",
     "business_os.get_command_status",
     "business_os.list_runs",
     "business_os.get_run",
@@ -563,23 +568,35 @@ fn escape_json_fragment(value: &str) -> String {
 /// Sessions that pass an override (completion review, queue repair) own their
 /// entire system prompt. They intentionally do not inherit the worker prompt:
 /// a reviewer must not be instructed to perform worker actions.
+///
+/// A crew persona is identity: it is appended after the complete system prompt
+/// and execution contract (never above them) and becomes part of the session
+/// contract, so a member change rebuilds the process-local client.
 fn compose_base_instructions(
     root: &Path,
     settings: &BTreeMap<String, String>,
     override_prompt: Option<&str>,
+    persona: Option<&str>,
 ) -> Result<String> {
-    if let Some(prompt) = override_prompt
+    let base = if let Some(prompt) = override_prompt
         .map(str::trim)
         .filter(|value| !value.is_empty())
     {
-        return Ok(prompt.to_string());
-    }
-    let system_prompt = live_context::render_system_prompt(root, settings)
-        .context("failed to render CTOX worker system prompt")?;
-    Ok(format!(
-        "{}\n\n{CTOX_DIRECT_SESSION_BASE_INSTRUCTIONS}",
-        system_prompt.trim_end()
-    ))
+        prompt.to_string()
+    } else {
+        let system_prompt = live_context::render_system_prompt(root, settings)
+            .context("failed to render CTOX worker system prompt")?;
+        format!(
+            "{}\n\n{CTOX_DIRECT_SESSION_BASE_INSTRUCTIONS}",
+            system_prompt.trim_end()
+        )
+    };
+    Ok(
+        match persona.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(persona) => format!("{}\n\n{persona}", base.trim_end()),
+            None => base,
+        },
+    )
 }
 
 fn openai_chatgpt_subscription_auth_enabled(settings: &BTreeMap<String, String>) -> bool {
@@ -824,9 +841,13 @@ pub(crate) struct PersistentSession {
 
 impl PersistentSession {
     /// Start or resume the normal persistent worker session.
-    pub fn start(root: &Path, settings: &BTreeMap<String, String>) -> Result<Self> {
+    pub fn start(
+        root: &Path,
+        settings: &BTreeMap<String, String>,
+        persona: Option<&str>,
+    ) -> Result<Self> {
         Self::start_with_instructions_and_tool_mode(
-            root, settings, None, false, false, false, None, false, true,
+            root, settings, None, persona, false, false, false, None, false, true,
         )
     }
 
@@ -836,6 +857,7 @@ impl PersistentSession {
         root: &Path,
         settings: &BTreeMap<String, String>,
         command_session_token: &str,
+        persona: Option<&str>,
     ) -> Result<Self> {
         let addr = settings
             .get(BUSINESS_OS_MCP_ADDR_KEY)
@@ -847,6 +869,7 @@ impl PersistentSession {
             root,
             settings,
             None,
+            persona,
             false,
             false,
             false,
@@ -858,9 +881,13 @@ impl PersistentSession {
 
     /// Start a fresh worker session that cannot resume the process-wide
     /// persistent harness thread.
-    pub(crate) fn start_isolated(root: &Path, settings: &BTreeMap<String, String>) -> Result<Self> {
+    pub(crate) fn start_isolated(
+        root: &Path,
+        settings: &BTreeMap<String, String>,
+        persona: Option<&str>,
+    ) -> Result<Self> {
         Self::start_with_instructions_and_tool_mode(
-            root, settings, None, false, false, false, None, false, false,
+            root, settings, None, persona, false, false, false, None, false, false,
         )
     }
 
@@ -872,11 +899,13 @@ impl PersistentSession {
         root: &Path,
         settings: &BTreeMap<String, String>,
         base_instructions: Option<&str>,
+        persona: Option<&str>,
     ) -> Result<Self> {
         Self::start_with_instructions_and_tool_mode(
             root,
             settings,
             base_instructions,
+            persona,
             false,
             false,
             true,
@@ -900,8 +929,9 @@ impl PersistentSession {
         &self,
         root: &Path,
         settings: &BTreeMap<String, String>,
+        persona: Option<&str>,
     ) -> Result<bool> {
-        let base_instructions = compose_base_instructions(root, settings, None)?;
+        let base_instructions = compose_base_instructions(root, settings, None, persona)?;
         let runtime_model = runtime_kernel::InferenceRuntimeKernel::resolve(root)
             .ok()
             .and_then(|runtime| {
@@ -953,6 +983,7 @@ impl PersistentSession {
             root,
             settings,
             base_instructions,
+            None,
             disable_compaction,
             disable_compaction,
             false,
@@ -977,6 +1008,7 @@ impl PersistentSession {
             root,
             settings,
             base_instructions,
+            None,  // persona: reviewers never carry a crew identity
             true,  // disable_compaction
             false, // disable_active_tools
             true,  // disable_mcp_servers
@@ -1002,6 +1034,7 @@ impl PersistentSession {
             root,
             settings,
             base_instructions,
+            None,  // persona: reviewers never carry a crew identity
             true,  // disable_compaction
             true,  // disable_active_tools
             true,  // disable_mcp_servers
@@ -1011,10 +1044,12 @@ impl PersistentSession {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_with_instructions_and_tool_mode(
         root: &Path,
         settings: &BTreeMap<String, String>,
         base_instructions: Option<&str>,
+        persona: Option<&str>,
         disable_compaction: bool,
         disable_active_tools: bool,
         disable_mcp_servers: bool,
@@ -1029,7 +1064,7 @@ impl PersistentSession {
             .context("failed to start tokio runtime")?;
 
         let composed_base_instructions =
-            compose_base_instructions(root, settings, base_instructions)?;
+            compose_base_instructions(root, settings, base_instructions, persona)?;
         let start_result = rt.block_on(async {
             Self::start_client_and_thread(
                 root,
@@ -2373,6 +2408,12 @@ mod tests {
             .expect("enabled tools")
             .iter()
             .any(|tool| tool.as_str() == Some("business_os.upsert_record")));
+        assert!(server
+            .get("enabled_tools")
+            .and_then(JsonValue::as_array)
+            .expect("enabled tools")
+            .iter()
+            .any(|tool| tool.as_str() == Some("business_os.execute_writeback")));
         assert_eq!(
             config.get("features.apps").and_then(JsonValue::as_bool),
             Some(false)
@@ -2643,8 +2684,8 @@ mod tests {
     #[test]
     fn worker_base_instructions_include_system_prompt_and_durable_outcome_contract() {
         let root = compose_test_root("worker-base");
-        let instructions =
-            compose_base_instructions(&root, &BTreeMap::new(), None).expect("worker instructions");
+        let instructions = compose_base_instructions(&root, &BTreeMap::new(), None, None)
+            .expect("worker instructions");
         // The long CTOX system prompt is the stability layer and must be present.
         assert!(instructions.contains("You are CTOX, the personal CTO agent"));
         assert!(instructions.contains("Secret handling policy:"));
@@ -2663,6 +2704,7 @@ mod tests {
             &root,
             &BTreeMap::new(),
             Some("Act as the external reviewer."),
+            None,
         )
         .expect("override instructions");
         assert!(instructions.contains("Act as the external reviewer."));

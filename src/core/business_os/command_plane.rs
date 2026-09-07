@@ -273,8 +273,9 @@ mod crew_cockpit_tests;
 #[path = "crew_identity_command_tests.rs"]
 mod crew_identity_tests;
 
-pub(super) const EXACT_CONTROL_TYPES: [&str; 87] = [
+pub(super) const EXACT_CONTROL_TYPES: [&str; 88] = [
     "ctox.crew.member.create",
+    "ctox.crew.memory.update",
     "ctox.crew.member.update",
     "ctox.crew.learning.confirm",
     "ctox.crew.learning.update",
@@ -1254,6 +1255,7 @@ fn dispatch_business_command(
     match command.command_type.as_str() {
         "ctox.crew.member.create"
         | "ctox.crew.member.update"
+        | "ctox.crew.memory.update"
         | "ctox.crew.learning.confirm"
         | "ctox.crew.learning.update"
         | "ctox.crew.learning.delete"

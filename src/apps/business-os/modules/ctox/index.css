@@ -369,6 +369,22 @@
   min-width: 0;
 }
 
+/* One sentence of routing truth under the meta line (why it waits, when it
+   retries, who works on it). Inherits the meta typography; problem tone only
+   for failed/blocked. */
+.ctox-task-reason {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted, inherit);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-reason.is-problem { color: var(--danger, inherit); }
+.ctox-task-reason-line { margin: 6px 0 0; font-size: var(--fs-sm, 13px); }
+.ctox-task-lease-line { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 4px; color: var(--muted, inherit); }
+
 .ctox-task-meta > span {
   min-width: 0;
   overflow: hidden;
@@ -699,7 +715,7 @@
    no gap-as-frame trick. */
 .ctox-metrics-strip {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   border-bottom: 1px solid var(--line);
 }
 
@@ -1356,8 +1372,14 @@
   grid-auto-flow: column;
   gap: var(--space-3);
   overflow-x: auto;
+  margin: 0;
   padding: 0 0 calc(var(--space-1) * 0.5);
+  list-style: none;
   scrollbar-width: thin;
+}
+
+.ctox-timeline-scale li {
+  display: contents;
 }
 
 .ctox-timeline-scale button {
@@ -1471,6 +1493,454 @@
   align-items: center;
   gap: var(--space-2);
   min-width: 0;
+}
+
+/* Crew at home (slice 4): the members as the existing map creatures, resting
+   side by side while nothing runs. Same shell as on the map, only larger. */
+.ctox-crew-home {
+  display: grid;
+  place-items: center;
+  padding: 28px 24px;
+}
+.ctox-crew-home-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 28px 34px;
+  max-width: 100%;
+}
+.ctox-crew-home-member {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  min-width: 96px;
+  padding: 10px 8px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.ctox-crew-home-member:hover,
+.ctox-crew-home-member:focus-visible {
+  border-color: var(--line);
+  background: var(--kit-hover, color-mix(in srgb, var(--text) 5%, transparent));
+  outline: none;
+}
+.ctox-crew-home-member:focus-visible {
+  box-shadow: var(--focus-ring, 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent));
+}
+.ctox-crew-home-member strong {
+  font-size: var(--fs-body, 13px);
+  font-weight: 640;
+  line-height: 1.2;
+}
+.ctox-crew-home-member small {
+  max-width: 150px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+  line-height: 1.25;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctox-crew-home-member.is-on_duty strong {
+  color: var(--accent);
+}
+.ctox-crew-home-member.is-resting_after_failure small {
+  color: var(--danger);
+}
+.ctox-crew-home-creature {
+  display: block;
+  width: 72px;
+  height: 72px;
+}
+.ctox-crew-home-member.is-home .ctox-crew-home-creature,
+.ctox-crew-home-member.is-resting_after_failure .ctox-crew-home-creature {
+  opacity: .82;
+}
+
+/* Member portrait inside the task drawer lease line: a small clickable creature. */
+.ctox-task-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 6px 0 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.ctox-task-member:hover,
+.ctox-task-member:focus-visible {
+  color: var(--accent);
+  outline: none;
+}
+.ctox-task-member-portrait {
+  display: inline-block;
+  width: 20px;
+  height: 20px;
+}
+
+/* Member profile drawer */
+.ctox-member-header-identity {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.ctox-member-portrait {
+  display: block;
+  flex: 0 0 56px;
+  width: 56px;
+  height: 56px;
+}
+.ctox-member-header h2 {
+  margin: 0;
+}
+.ctox-member-header small {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-member-soul .ctox-card-body {
+  display: grid;
+  gap: 12px;
+}
+.ctox-soul-axes {
+  display: grid;
+  gap: 8px;
+}
+.ctox-soul-axis {
+  display: grid;
+  grid-template-columns: 5.5em 1fr 5.5em;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--fs-meta, 12px);
+  color: var(--muted);
+}
+.ctox-soul-axis-right {
+  text-align: right;
+}
+.ctox-soul-axis input[type="range"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  height: 18px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+}
+.ctox-soul-axis input[type="range"]:disabled {
+  cursor: default;
+  opacity: .6;
+}
+.ctox-soul-axis input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+.ctox-soul-axis input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--line));
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.ctox-soul-axis input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--line) 76%, transparent);
+}
+.ctox-soul-axis input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 68%, var(--line));
+  border-radius: 999px;
+  background: var(--surface-2);
+}
+.ctox-member-specialties {
+  display: grid;
+  gap: 6px;
+}
+.ctox-member-stats {
+  grid-template-columns: auto 1fr;
+}
+.ctox-member-learnings,
+.ctox-timesheet {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ctox-member-learning {
+  display: grid;
+  gap: 4px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+.ctox-member-learning:last-child {
+  border-bottom: 0;
+}
+.ctox-member-learning p {
+  margin: 0;
+}
+.ctox-member-learning small {
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-member-learning.is-confirmed small {
+  color: var(--success, var(--accent));
+}
+.ctox-member-learning-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+.ctox-member-learning-actions .ctox-button {
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-member-learning-actions .ctox-button.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+  background: transparent;
+}
+.ctox-timesheet-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  column-gap: 10px;
+  row-gap: 2px;
+  align-items: baseline;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-timesheet-row:last-child {
+  border-bottom: 0;
+}
+.ctox-timesheet-row[data-timesheet-task-id] {
+  cursor: pointer;
+}
+.ctox-timesheet-row[data-timesheet-task-id]:hover .ctox-timesheet-title {
+  color: var(--accent);
+}
+.ctox-timesheet-when {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.ctox-timesheet-title {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctox-timesheet-outcome {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.ctox-timesheet-row.is-problem .ctox-timesheet-outcome {
+  color: var(--danger);
+}
+.ctox-timesheet-row small {
+  grid-column: 2 / -1;
+  color: var(--muted);
+}
+
+/* Member memory (H3): the two continuity documents, readable and editable. */
+.ctox-member-memory {
+  display: grid;
+  gap: 10px;
+}
+.ctox-member-memory > .ctox-pane-kicker {
+  margin-top: 4px;
+}
+.ctox-memory-doc > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ctox-memory-entries {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.ctox-memory-entry {
+  display: grid;
+  gap: 3px;
+  padding: 6px 0 8px;
+  border-bottom: 1px solid var(--line);
+}
+.ctox-memory-entry:last-child {
+  border-bottom: 0;
+}
+.ctox-memory-entry p {
+  margin: 0;
+}
+.ctox-memory-entry small {
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-memory-entry.is-confirmed small {
+  color: var(--success, var(--accent));
+}
+.ctox-memory-entry .ctox-button {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 10px;
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-memory-consequence {
+  color: var(--muted);
+}
+.ctox-memory-editor {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+}
+.ctox-memory-editor textarea {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.ctox-crew-home-domain {
+  color: var(--muted);
+}
+.ctox-crew-home-member.is-new {
+  color: var(--muted);
+  border-style: dashed;
+  border-color: var(--line);
+}
+.ctox-crew-home-new-icon {
+  display: grid;
+  place-items: center;
+  width: 72px;
+  height: 72px;
+}
+.ctox-crew-home-new-icon svg {
+  width: 28px;
+  height: 28px;
+}
+.ctox-member-identity-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.ctox-member-archive {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 4px;
+}
+.ctox-member-archive .ctox-button.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+  background: transparent;
+}
+.ctox-task-selection-line {
+  display: block;
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+
+/* Honest states (slice 6) */
+.ctox-load-error div {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+.ctox-load-error span {
+  max-width: 48ch;
+  color: var(--muted);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.ctox-harness-footer.is-disconnected .ctox-footer-hint {
+  color: var(--warning, #d9a441);
+  font-weight: 640;
+}
+
+/* Task controls (slice 2): sit under the status strip, same rhythm as the edit form. */
+.ctox-task-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ctox-task-controls .ctox-button {
+  min-height: 30px;
+  padding: 0 12px;
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-controls .ctox-button.is-danger {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: var(--danger);
+  background: transparent;
+}
+.ctox-task-controls .ctox-button.is-danger:hover:not([disabled]) {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+}
+.ctox-task-control-assign {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctox-task-control-assign .ctox-field-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-controls [data-ctox-task-control-status] {
+  flex: 1 1 100%;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-task-controls [data-ctox-task-control-status]:empty {
+  display: none;
+}
+.ctox-harness-status-line {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctox-harness-capacity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ctox-harness-capacity .ctox-field-label {
+  margin: 0;
+  color: var(--muted);
+  font-size: var(--fs-meta, 12px);
+}
+.ctox-harness-capacity .ctox-select {
+  min-height: 28px;
+  padding: 0 6px;
+}
+.ctox-pane-icon[data-harness-pause].is-active {
+  color: var(--warning, #d9a441);
 }
 
 .ctox-task-status-strip small {
@@ -1746,15 +2216,12 @@
   }
 
   .ctox-metrics-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
   }
 
-  .ctox-metric-card:nth-child(3) {
-    border-left: 0;
-    border-top: 1px solid var(--line);
-  }
-
-  .ctox-metric-card:nth-child(4) {
+  /* Five cards wrap freely here; a hairline above each row and between
+     neighbours keeps the strip a grid whatever the wrap position. */
+  .ctox-metric-card {
     border-top: 1px solid var(--line);
   }
 

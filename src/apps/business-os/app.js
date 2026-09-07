@@ -1,14 +1,14 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260906-office-page-exit';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260906-office-page-exit';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260906-office-page-exit';
-import { createAppActions } from './shared/app-actions.js?v=20260906-office-page-exit';
+import { CtoxResizer } from './shared/resizer.js?v=20260907-shell-v2-crew-home-v340';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260907-shell-v2-crew-home-v340';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260907-shell-v2-crew-home-v340';
+import { createAppActions } from './shared/app-actions.js?v=20260907-shell-v2-crew-home-v340';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260906-office-page-exit';
+} from './shared/app-lifecycle.js?v=20260907-shell-v2-crew-home-v340';
 import {
   BusinessOsPermissions,
   businessActorFromSession,
@@ -16,20 +16,20 @@ import {
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260906-office-page-exit';
+} from './shared/permissions.js?v=20260907-shell-v2-crew-home-v340';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260906-office-page-exit';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260906-office-page-exit';
+} from './shared/branding.js?v=20260907-shell-v2-crew-home-v340';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260907-shell-v2-crew-home-v340';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260906-office-page-exit';
+} from './shared/presentation.js?v=20260907-shell-v2-crew-home-v340';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -40,9 +40,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260906-office-page-exit';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260906-office-page-exit';
-import { createDocumentsFacade } from './shared/documents.js?v=20260906-office-page-exit';
+} from './shared/shell-permissions-ui.js?v=20260907-shell-v2-crew-home-v340';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260907-shell-v2-crew-home-v340';
+import { createDocumentsFacade } from './shared/documents.js?v=20260907-shell-v2-crew-home-v340';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -50,16 +50,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260906-office-page-exit';
+} from './shared/maintenance-state.js?v=20260907-shell-v2-crew-home-v340';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260906-office-page-exit';
+} from './shared/workspace-session.js?v=20260907-shell-v2-crew-home-v340';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260906-office-page-exit';
+} from './shared/taskbar-pins.js?v=20260907-shell-v2-crew-home-v340';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
@@ -67,9 +67,9 @@ import {
   workjetCategoryForModule,
   workjetCategoryForTarget,
 } from './shared/workjet-theme.js?v=20260903-entertainment-import-v336';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260906-office-page-exit';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260906-office-page-exit';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260906-office-page-exit';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260907-shell-v2-crew-home-v340';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260907-shell-v2-crew-home-v340';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260907-shell-v2-crew-home-v340';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -84,7 +84,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260906-office-page-exit';
+const APP_BUILD = '20260907-shell-v2-crew-home-v340';
 const WORKJET_UI_CONTRACT_BUILD = '5173a1155a9a5f1f28ed43afcb004693dd95c073cabfae8157cd01c7e8830419';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -126,6 +126,11 @@ const CTOX_MAINTENANCE_POLL_MS = 2000;
 // maintenance window starting, and any upgrade started from this shell switches
 // back to the fast cadence immediately.
 const CTOX_MAINTENANCE_IDLE_POLL_MS = 60000;
+// A hidden tab must keep watching a running upgrade: after the service restart
+// the instance stays read-only for EVERY user until some client acknowledges
+// its collections, and on 07.09.2026 the only open tab was hidden, stopped
+// polling and never acknowledged (customer instance read-only for 32 minutes).
+const CTOX_MAINTENANCE_HIDDEN_POLL_MS = 30000;
 
 // modules/registry.json was fetched with `cache: 'no-store'` from several call
 // sites during a single boot — measured five times, ~900 ms each on a managed
@@ -615,6 +620,14 @@ function installAdvancedStatusInterface() {
   globalThis.workjetSessionControl = workjetSessionControl;
   globalThis.workjetSessionEvents = createWorkjetSessionEvents();
   state.openModule = (moduleId, options = {}) => openModule(moduleId, options);
+  // A crew member dropped from the chat bar onto an app opens the CTOX context
+  // menu at that point with the member standing by (drag-and-drop handoff).
+  state.openCrewContextMenu = ({ clientX, clientY, crew } = {}) => {
+    const target = document.elementFromPoint(Number(clientX) || 0, Number(clientY) || 0);
+    if (!target || !isGlobalCtoxContextSurface(target) || isCtoxContextMenuBypassTarget(target)) return false;
+    openGlobalCtoxContextMenuForTarget(target, clientX, clientY, crew || null);
+    return true;
+  };
 }
 
 async function ensureAdvancedStatusRequiredCollections(requiredCollections, options = {}) {
@@ -7544,6 +7557,7 @@ function createContextActionsFacade(moduleLike) {
           : (context.record_id || moduleId),
         inbound_channel: moduleId,
         payload: {
+          ...(options.payload && typeof options.payload === 'object' ? options.payload : {}),
           title: options.title || prompt.slice(0, 120),
           instruction: prompt,
           prompt,
@@ -9671,8 +9685,9 @@ function rememberMaintenanceLease(leaseId, expiresAtMs = 0) {
 // the first 34 s of a page load). Poll fast only when there is something to
 // watch, back off when idle, and stop entirely while the tab is hidden.
 function maintenancePollDelay() {
-  if (document.visibilityState === 'hidden') return 0;
-  if (state.maintenance?.active || rememberedMaintenanceLease().leaseId) return CTOX_MAINTENANCE_POLL_MS;
+  const watchingUpgrade = Boolean(state.maintenance?.active || rememberedMaintenanceLease().leaseId);
+  if (document.visibilityState === 'hidden') return watchingUpgrade ? CTOX_MAINTENANCE_HIDDEN_POLL_MS : 0;
+  if (watchingUpgrade) return CTOX_MAINTENANCE_POLL_MS;
   return CTOX_MAINTENANCE_IDLE_POLL_MS;
 }
 
@@ -14675,7 +14690,7 @@ function handleGlobalContextMenu(event) {
   openGlobalCtoxContextMenuForTarget(target, event.clientX, event.clientY);
 }
 
-function openGlobalCtoxContextMenuForTarget(target, clientX, clientY) {
+function openGlobalCtoxContextMenuForTarget(target, clientX, clientY, crew = null) {
   // Defensive for programmatic opens and early-mounted runtime modules. The
   // initializer is idempotent and ensures the shared menu exists before the
   // target context is resolved.
@@ -14689,7 +14704,7 @@ function openGlobalCtoxContextMenuForTarget(target, clientX, clientY) {
     clientX,
     clientY,
   });
-  showGlobalCtoxContextMenu(context, clientX, clientY);
+  showGlobalCtoxContextMenu(context, clientX, clientY, crew);
 }
 
 function isGlobalCtoxContextSurface(target) {
@@ -14937,8 +14952,9 @@ function deriveLabelFromElement(el) {
   return '';
 }
 
-function showGlobalCtoxContextMenu(context, x, y) {
+function showGlobalCtoxContextMenu(context, x, y, crew = null) {
   if (!globalCtoxContextMenuEl) return;
+  const crewName = String(crew?.name || '').trim();
   removeLegacyCtoxContextMenus();
 
   const mod = state.modules.find((item) => item.id === context.module)
@@ -14968,12 +14984,16 @@ function showGlobalCtoxContextMenu(context, x, y) {
   });
   const lang = shellLang();
 
-  const titleText = shellText('chatToCtox') || (lang === 'de' ? 'An die Crew übergeben' : 'Hand off to crew');
+  const titleText = crewName
+    ? (lang === 'de' ? `${crewName} übernimmt` : `${crewName} takes over`)
+    : (shellText('chatToCtox') || (lang === 'de' ? 'An die Crew übergeben' : 'Hand off to crew'));
   const workDataLabel = shellText('chatWorkDataLabel') || (lang === 'de' ? 'Daten ändern' : 'Change data');
   const answerLabel = shellText('chatAnswerLabel') || (lang === 'de' ? 'Frage stellen' : 'Ask question');
   const modifyAppLabel = shellText('chatModifyAppLabel') || (lang === 'de' ? 'App ändern' : 'Change app');
   const approvalLabel = lang === 'de' ? 'Freigabe einholen' : 'Request approval';
-  const placeholderText = shellText('chatPlaceholder') || (lang === 'de' ? 'Was soll die Crew hier tun oder prüfen?' : 'What should the crew do or check here?');
+  const placeholderText = crewName
+    ? (lang === 'de' ? `Was soll ${crewName} hier tun oder prüfen?` : `What should ${crewName} do or check here?`)
+    : (shellText('chatPlaceholder') || (lang === 'de' ? 'Was soll die Crew hier tun oder prüfen?' : 'What should the crew do or check here?'));
   const dataPlaceholderText = lang === 'de' ? 'Welche Daten sollen geändert werden?' : 'What data should change?';
   const askPlaceholderText = lang === 'de' ? 'Welche Frage soll beantwortet werden?' : 'What question should be answered?';
   const appPlaceholderText = lang === 'de' ? 'Was soll an der App geändert werden?' : 'What should change in the app?';
@@ -14993,7 +15013,8 @@ function showGlobalCtoxContextMenu(context, x, y) {
 
   globalCtoxContextMenuEl.innerHTML = `
     <form class="ctox-context-chat-form" data-stage="actions" novalidate>
-      <header class="ctox-context-header">
+      <header class="ctox-context-header ${crewName ? 'has-crew' : ''}">
+        ${crew?.creatureHtml ? `<span class="ctox-context-crew" aria-hidden="true">${crew.creatureHtml}</span>` : ''}
         <div class="ctox-context-heading">
           <strong>${escapeHtml(titleText)}</strong>
           <span>${escapeHtml(subtitle)}</span>
@@ -15276,6 +15297,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
         context,
         prompt: instruction,
         title,
+        payload: crew?.id ? { crew_member_id: crew.id } : {},
         client_context: {
           source: 'business-os-global-context',
           action: 'context-chat',
@@ -15300,6 +15322,7 @@ function showGlobalCtoxContextMenu(context, x, y) {
         command_id: result?.command_id || result?.id || '',
         thread_key: `business-os/${mod.id}/${context.record_id || 'module'}`,
         reuseActive: false,
+        ...(crew?.id ? { crew_member_id: crew.id, crew_identity: { name: crew.name, shape: crew.shape, color: crew.color } } : {}),
       });
       hideGlobalCtoxContextMenu();
     } catch (error) {

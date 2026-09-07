@@ -1,5 +1,7 @@
 import { loadModuleMessages } from '../../shared/i18n.js';
 import { showBusinessPrompt } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
+import { crewCreatureHtml } from '../../shared/business-chat.js?v=20260906-crew-home-v339';
+import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 
 const REFRESH_DEBOUNCE_MS = 80;
 const TICKET_PRIMARY_COLLECTION = 'ctox_ticket_items';
@@ -304,13 +306,16 @@ export function ticketRowHtml(row, opts = {}) {
     + ' data-context-record-type="ticket" data-context-record-id="' + escapeAttr(row.id) + '"'
     + ' data-context-label="' + escapeAttr(row.title || row.key || row.id) + '"'
     + ' data-record-type="ticket" data-record-id="' + escapeAttr(row.id) + '" data-label="' + escapeAttr(row.title || row.key || row.id) + '"';
+  const crew = row.crew && row.crew.html
+    ? '<span class="ctox-flow-creature-shell ticket-row-crew" title="' + escapeAttr([row.crew.name, row.crew.sentence].filter(Boolean).join(' · ')) + '">' + row.crew.html + '</span>'
+    : '';
   if (view === 'list') {
-    return '<div' + attrs + '><span class="ticket-row-title">' + escapeHtml(row.title || row.key || 'Ticket') + '</span>' + badge + '</div>';
+    return '<div' + attrs + '>' + crew + '<span class="ticket-row-title">' + escapeHtml(row.title || row.key || 'Ticket') + '</span>' + badge + '</div>';
   }
   const metaTop = [row.key, row.source || 'ctox'].filter(Boolean).map(escapeHtml).join(' · ');
-  const metaSub = [row.subtitle, row.updated].filter(Boolean).map(escapeHtml).join(' · ');
+  const metaSub = [row.crew ? [row.crew.name, row.crew.sentence].filter(Boolean).join(' · ') : '', row.subtitle, row.updated].filter(Boolean).map(escapeHtml).join(' · ');
   return '<div' + attrs + '>'
-    + '<div class="ticket-row-head"><span class="ticket-row-title">' + escapeHtml(row.title || row.key || 'Ticket') + '</span>' + badge + '</div>'
+    + '<div class="ticket-row-head">' + crew + '<span class="ticket-row-title">' + escapeHtml(row.title || row.key || 'Ticket') + '</span>' + badge + '</div>'
     + (metaTop ? '<div class="ticket-row-meta">' + metaTop + '</div>' : '')
     + (metaSub ? '<div class="ticket-row-meta ticket-row-meta--sub">' + metaSub + '</div>' : '')
     + '</div>';
@@ -526,7 +531,7 @@ function ticketCollection(name) {
 }
 
 function wireRealtime() {
-  const subscriptions = collectionNames
+  const subscriptions = [...collectionNames, 'ctox_queue_tasks', 'ctox_crew_members']
     .map((name) => ticketCollection(name)?.$?.subscribe?.(() => scheduleRefresh()))
     .filter(Boolean);
   return () => subscriptions.forEach((sub) => {
@@ -562,9 +567,142 @@ function scheduleRefresh() {
 async function refreshTickets() {
   const entries = await Promise.all(collectionNames.map(async (name) => [name, await loadCollection(name)]));
   state.data = Object.fromEntries(entries);
+  state.crew = await loadCrewForTickets();
   state.loading = false;
   syncSelectionToVisible();
   render();
+}
+
+// --- Crew on tickets: the member holding a ticket's queue task -----------------
+// Ticket-born work reaches the harness as a queue task carrying `ticket_key`;
+// the task's `crew_member_id` is the member at work, its routing fields say
+// why it waits. Both reads are bounded; nothing here is a second data path.
+async function loadCrewForTickets() {
+  const tasks = ticketCollection('ctox_queue_tasks');
+  const members = ticketCollection('ctox_crew_members');
+  const readBounded = async (collection, selector, limit) => {
+    if (!collection) return [];
+    try {
+      const docs = await collection.find({ selector, limit }).exec();
+      return docs.map((doc) => doc.toJSON());
+    } catch {
+      return [];
+    }
+  };
+  const [taskDocs, memberDocs] = await Promise.all([
+    readBounded(tasks, { ticket_key: { $gt: '' } }, 200),
+    readBounded(members, { archived: false }, 64),
+  ]);
+  return {
+    tasks: taskDocs.filter((doc) => doc && doc.ticket_key),
+    members: memberDocs,
+  };
+}
+
+function taskForTicket(ticketKey) {
+  const key = String(ticketKey || '').trim();
+  if (!key) return null;
+  const tasks = (state.crew?.tasks || []).filter((task) => task.ticket_key === key);
+  tasks.sort((left, right) => Number(right.updated_at_ms || 0) - Number(left.updated_at_ms || 0));
+  return tasks[0] || null;
+}
+
+function crewMemberFor(task) {
+  const id = String(task?.crew_member_id || task?.crew_assigned_member_id || '').trim();
+  return id ? (state.crew?.members || []).find((member) => member.id === id) || null : null;
+}
+
+function crewTaskState(task) {
+  const status = String(task?.route_status || task?.status || '').toLowerCase();
+  if (['leased', 'running', 'processing'].includes(status)) return 'running';
+  if (['failed', 'error', 'cancelled', 'canceled'].includes(status)) return 'failed';
+  if (['handled', 'completed', 'done', 'success'].includes(status)) return 'success';
+  return 'queued';
+}
+
+function crewWaitSentence(task) {
+  if (!task) return '';
+  const t = state.t;
+  const status = String(task.route_status || task.status || '').toLowerCase();
+  const hold = String(task.hold_reason || '');
+  const holdText = {
+    technical: t('holdTechnical', 'technischer Halt'),
+    missing_review_evidence: t('holdMissingReviewEvidence', 'Review-Nachweis fehlt'),
+    missing_artifact: t('holdMissingArtifact', 'Ergebnis fehlt'),
+    waiting_external: t('holdWaitingExternal', 'wartet auf Rückmeldung'),
+    aborted_by_owner: t('holdAbortedByOwner', 'vom Owner abgebrochen'),
+  }[hold] || (hold ? hold.replace(/[_:]+/g, ' ') : '');
+  if (status === 'failed') return `${t('crewFailed', 'gescheitert')}${holdText ? ` · ${holdText}` : ''}`;
+  if (status === 'blocked') {
+    const waits = task.wait_entity_id ? ` ${t('waitsFor', 'wartet auf')} ${task.wait_entity_type || ''} ${task.wait_entity_id}`.replace(/\s+/g, ' ') : '';
+    return `${t('crewBlocked', 'blockiert')}${holdText ? ` · ${holdText}` : ''}${waits}`;
+  }
+  if (task.retry_not_before) {
+    const at = new Date(task.retry_not_before);
+    return `${t('retryAt', 'Wiederholung um')} ${Number.isFinite(at.getTime()) ? at.toLocaleTimeString(state.lang === 'en' ? 'en-GB' : 'de-DE', { hour: '2-digit', minute: '2-digit' }) : ''}`.trim();
+  }
+  if (status === 'leased' || status === 'running') return t('crewWorking', 'im Einsatz');
+  if (status === 'pending' || status === 'queued') return t('crewQueued', 'wartet in der Queue');
+  return displayStatus(status || 'open');
+}
+
+function crewCreatureFor(task, placement = 'map') {
+  const member = crewMemberFor(task);
+  return crewCreatureHtml({
+    crewKey: member ? member.id : (task?.command_id || task?.id || 'crew'),
+    crewIdentity: member ? { name: member.name, shape: member.shape, color: member.color } : null,
+    executionProgress: task?.execution_progress || null,
+  }, crewTaskState(task), placement);
+}
+
+function mayAssignCrew() {
+  return canUseBusinessPermission({
+    session: state.ctx?.session,
+    governance: state.ctx?.governance,
+    permission: BusinessOsPermissions.CrewManage,
+    scopeType: 'record',
+    scopeId: 'ctox.crew.assign',
+  });
+}
+
+function crewCardHtml(ticket) {
+  const task = taskForTicket(ticket.ticket_key);
+  if (!task) return '';
+  const member = crewMemberFor(task);
+  const t = state.t;
+  const status = String(task.route_status || task.status || '').toLowerCase();
+  const assignable = mayAssignCrew() && !task.lease_owner && ['pending', 'queued', 'blocked'].includes(status) && (state.crew?.members || []).length > 0;
+  const taskId = String(task.message_key || task.task_id || task.id || '').replace(/^queue-/, '');
+  return `
+    <section class="ctox-card tickets-crew-card">
+      <header>${escapeHtml(t('crew', 'Crew'))}</header>
+      <div class="ctox-card-body tickets-crew-body">
+        <span class="ctox-flow-creature-shell tickets-crew-portrait">${crewCreatureFor(task)}</span>
+        <div class="tickets-crew-facts">
+          <strong>${escapeHtml(member ? member.name : t('crewUnassigned', 'Crew, noch niemand zugeordnet'))}</strong>
+          <small>${escapeHtml(crewWaitSentence(task))}</small>
+          ${assignable ? `
+            <label class="tickets-crew-assign">
+              <span>${escapeHtml(t('assignMember', 'Zuweisen'))}</span>
+              <select class="ctox-select" data-crew-assign="${escapeAttr(taskId)}">
+                <option value="">${escapeHtml(t('assignChoose', 'Mitglied wählen'))}</option>
+                ${(state.crew.members || []).map((item) => `<option value="${escapeAttr(item.id)}" ${item.id === task.crew_assigned_member_id ? 'selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}
+              </select>
+            </label>` : ''}
+          <small data-crew-assign-status></small>
+        </div>
+      </div>
+    </section>`;
+}
+
+async function assignCrewMember(taskId, memberId, statusNode) {
+  try {
+    await dispatchTicketCommand('ctox.crew.assign', taskId, { task_id: taskId, member_id: memberId });
+    if (statusNode) statusNode.textContent = state.t('assigned', 'Zugewiesen.');
+    await refreshTickets();
+  } catch (error) {
+    if (statusNode) statusNode.textContent = String(error?.message || error);
+  }
 }
 
 async function loadCollection(name) {
@@ -594,9 +732,11 @@ function scopedTickets() {
 
 function shapeTicket(ticket) {
   const label = labelForTicket(ticket.ticket_key);
+  const task = taskForTicket(ticket.ticket_key);
   return {
     id: ticket.id,
     key: ticket.ticket_key || ticket.id,
+    crew: task ? { html: crewCreatureFor(task, 'map'), name: crewMemberFor(task)?.name || '', sentence: crewWaitSentence(task) } : null,
     title: ticket.title || ticket.ticket_key || 'Ticket',
     status: ticket.remote_status || 'open',
     source: ticket.source_system || 'ctox',
@@ -758,6 +898,7 @@ function renderDetail() {
           ${ticket.body_text ? `<p class="tickets-body">${escapeHtml(ticket.body_text)}</p>` : ''}
         </div>
       </section>
+      ${crewCardHtml(ticket)}
       <section class="ctox-card">
         <header>${escapeHtml(state.t('timeline', 'Timeline'))}</header>
         <div class="ctox-card-body">
@@ -767,6 +908,13 @@ function renderDetail() {
       ${evidenceHtml}
     </div>
   `;
+  body.querySelector('[data-crew-assign]')?.addEventListener('change', (event) => {
+    const select = event.currentTarget;
+    const memberId = String(select.value || '');
+    if (!memberId) return;
+    select.setAttribute('disabled', 'disabled');
+    assignCrewMember(select.dataset.crewAssign, memberId, body.querySelector('[data-crew-assign-status]'));
+  });
 }
 
 function renderOps() {

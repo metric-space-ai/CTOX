@@ -3,15 +3,15 @@ mod runtime_support;
 pub(crate) use mission_state::drain_pending_mission_state_clobbers;
 #[cfg(test)]
 pub(crate) use mission_state::drain_pending_mission_state_clobbers_for_test;
-pub use mission_state::{
-    ClosureConfidence, ContinuationMode, MissionStateFields, MissionStatus, TriggerIntensity,
-    count_open_closure_blocking_claims, drain_pending_mission_state_clobber_events_to_governance,
-};
 use mission_state::{
-    OwnerIntentClearGuard, apply_canonical_focus_diff_to_mission_state,
-    apply_imported_focus_diff_controls, import_legacy_mission_state, load_mission_state_with,
-    load_mission_states_with, map_mission_claim_row, map_strategic_directive_row,
-    map_verification_run_row, persist_mission_state_with, render_focus_continuity_from_record,
+    apply_canonical_focus_diff_to_mission_state, apply_imported_focus_diff_controls,
+    import_legacy_mission_state, load_mission_state_with, load_mission_states_with,
+    map_mission_claim_row, map_strategic_directive_row, map_verification_run_row,
+    persist_mission_state_with, render_focus_continuity_from_record, OwnerIntentClearGuard,
+};
+pub use mission_state::{
+    count_open_closure_blocking_claims, drain_pending_mission_state_clobber_events_to_governance,
+    ClosureConfidence, ContinuationMode, MissionStateFields, MissionStatus, TriggerIntensity,
 };
 use mission_state::{focus_semantic_conflicts_local, normalize_mission_text};
 pub(crate) use runtime_support::seed_mission_state_for_queue_with;
@@ -34,9 +34,9 @@ pub use runtime_support::{
 use anyhow::Context;
 use anyhow::Result;
 use regex::Regex;
+use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
-use rusqlite::params;
 use serde::Deserialize;
 use serde::Serialize;
 use sha2::Digest;
@@ -45,10 +45,10 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::AtomicU64;
+use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -5755,41 +5755,117 @@ fn validate_task_execution_steps(
         "task execution plan must contain at least one step"
     );
     let mut steps = Vec::with_capacity(input.len());
-    let mut completed = 0_i64;
-    let mut in_progress = 0_i64;
-    let mut last_rank = 0_i64;
     for step in input {
         let label = collapse_whitespace(&step.label);
         anyhow::ensure!(!label.is_empty(), "task execution step label is required");
         let status = step.status.trim().to_ascii_lowercase();
-        let rank = match status.as_str() {
-            "completed" => {
-                completed = completed.saturating_add(1);
-                0
-            }
-            "in_progress" => {
-                in_progress = in_progress.saturating_add(1);
-                1
-            }
-            "pending" => 2,
-            _ => anyhow::bail!("invalid task execution step status {}", step.status),
-        };
         anyhow::ensure!(
-            rank >= last_rank,
-            "task execution steps must be a completed prefix, one active step, then pending steps"
+            matches!(status.as_str(), "completed" | "in_progress" | "pending"),
+            "invalid task execution step status {}",
+            step.status
         );
-        last_rank = rank;
         steps.push(TaskExecutionPlanStepInput { label, status });
     }
-    anyhow::ensure!(
-        in_progress <= 1,
-        "task execution plan may contain at most one in-progress step"
-    );
-    anyhow::ensure!(
-        completed == i64::try_from(steps.len()).unwrap_or(i64::MAX) || in_progress == 1,
-        "an incomplete task execution plan must contain exactly one in-progress step"
-    );
-    Ok((steps, completed))
+    // Models report progress out of order: a later step finished before an
+    // earlier one, two steps active at once, or nothing active while work is
+    // still open. The plan's meaning is the per-step status; the invariants
+    // "at most one active step" and "an incomplete plan has exactly one active
+    // step" are restored by demotion and promotion. They must never fail the
+    // durable task: on 07.09.2026 a customer research run died after two
+    // minutes with "steps must be a completed prefix" while the worker was
+    // still working.
+    let mut seen_active = false;
+    for step in &mut steps {
+        if step.status == "in_progress" {
+            if seen_active {
+                step.status = "pending".to_string();
+            } else {
+                seen_active = true;
+            }
+        }
+    }
+    let completed = steps
+        .iter()
+        .filter(|step| step.status == "completed")
+        .count();
+    if !seen_active && completed < steps.len() {
+        if let Some(next) = steps.iter_mut().find(|step| step.status == "pending") {
+            next.status = "in_progress".to_string();
+        }
+    }
+    Ok((steps, i64::try_from(completed).unwrap_or(i64::MAX)))
+}
+
+#[cfg(test)]
+mod task_execution_step_tests {
+    use super::{validate_task_execution_steps, TaskExecutionPlanStepInput};
+
+    fn step(label: &str, status: &str) -> TaskExecutionPlanStepInput {
+        TaskExecutionPlanStepInput {
+            label: label.to_string(),
+            status: status.to_string(),
+        }
+    }
+
+    #[test]
+    fn out_of_order_progress_is_accepted_and_counted() {
+        let (steps, completed) = validate_task_execution_steps(&[
+            step("Sellify prüfen", "completed"),
+            step("Quellen sammeln", "pending"),
+            step("Personen recherchieren", "completed"),
+            step("Rückschreiben", "in_progress"),
+        ])
+        .expect("out-of-order progress is normalized, not rejected");
+        assert_eq!(completed, 2);
+        assert_eq!(
+            steps.iter().map(|s| s.status.as_str()).collect::<Vec<_>>(),
+            ["completed", "pending", "completed", "in_progress"]
+        );
+    }
+
+    #[test]
+    fn a_second_active_step_is_demoted_to_pending() {
+        let (steps, completed) = validate_task_execution_steps(&[
+            step("a", "in_progress"),
+            step("b", "in_progress"),
+            step("c", "pending"),
+        ])
+        .unwrap();
+        assert_eq!(completed, 0);
+        assert_eq!(
+            steps.iter().map(|s| s.status.as_str()).collect::<Vec<_>>(),
+            ["in_progress", "pending", "pending"]
+        );
+    }
+
+    #[test]
+    fn an_incomplete_plan_without_active_step_promotes_the_first_pending_step() {
+        let (steps, completed) = validate_task_execution_steps(&[
+            step("a", "completed"),
+            step("b", "pending"),
+            step("c", "pending"),
+        ])
+        .unwrap();
+        assert_eq!(completed, 1);
+        assert_eq!(steps[1].status, "in_progress");
+        assert_eq!(steps[2].status, "pending");
+    }
+
+    #[test]
+    fn a_fully_completed_plan_stays_completed() {
+        let (steps, completed) =
+            validate_task_execution_steps(&[step("a", "completed"), step("b", "completed")])
+                .unwrap();
+        assert_eq!(completed, 2);
+        assert!(steps.iter().all(|s| s.status == "completed"));
+    }
+
+    #[test]
+    fn invalid_status_and_empty_labels_are_still_rejected() {
+        assert!(validate_task_execution_steps(&[step("a", "done")]).is_err());
+        assert!(validate_task_execution_steps(&[step("   ", "pending")]).is_err());
+        assert!(validate_task_execution_steps(&[]).is_err());
+    }
 }
 
 fn task_execution_plan_signature(steps: &[TaskExecutionPlanStepInput]) -> String {

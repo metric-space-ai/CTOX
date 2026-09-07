@@ -36,7 +36,130 @@ const CHAT_LIVE_SYNC_COLLECTIONS = Object.freeze([
   CHAT_COLLECTION,
   'business_commands',
   'ctox_queue_tasks',
+  'ctox_crew_members',
 ]);
+
+// --- The crew pool in the bar: members, draggable onto any app -----------------
+// A member is picked up from the bar, wriggles on the hook while it is carried,
+// and is dropped on a record; the shell then opens the CTOX context menu right
+// there with the member standing by (pre-lease assignment travels with the task).
+async function loadCrewMembers({ state, db }) {
+  const collection = db?.raw?.ctox_crew_members;
+  if (!collection || typeof collection.find !== 'function') return false;
+  try {
+    const docs = await collection.find({ selector: { archived: false }, limit: 64 }).exec();
+    const members = (Array.isArray(docs) ? docs : [])
+      .map((doc) => doc?.toJSON?.() || doc)
+      .filter((doc) => doc && doc.id && doc.name)
+      .map((doc) => ({
+        id: String(doc.id),
+        name: String(doc.name),
+        shape: String(doc.shape || 'round'),
+        color: String(doc.color || '#7d7f84'),
+        state: String(doc.state || 'home'),
+        domain: Array.isArray(doc.domain) ? doc.domain.filter(Boolean) : [],
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    const before = JSON.stringify(state.crewMembers || []);
+    state.crewMembers = members;
+    return before !== JSON.stringify(members);
+  } catch {
+    return false;
+  }
+}
+
+function crewMemberCreatureHtml(member, placement = 'fab') {
+  const taskState = member.state === 'on_duty' ? 'running' : member.state === 'resting_after_failure' ? 'failed' : 'idle';
+  return crewCreatureHtml({ crewKey: member.id, crewIdentity: { name: member.name, shape: member.shape, color: member.color } }, taskState, placement);
+}
+
+function crewPoolSlotHtml(member, placement = 'fab') {
+  const german = chatUiIsGerman();
+  const stateText = member.state === 'on_duty' ? (german ? 'im Einsatz' : 'on duty')
+    : member.state === 'resting_after_failure' ? (german ? 'erholt sich' : 'recovering')
+      : (german ? 'zu Hause' : 'at home');
+  const domain = member.domain.length ? ` · ${member.domain.join(', ')}` : '';
+  return `<span class="ctox-chat-crew-slot" data-crew-drag="${escapeAttr(member.id)}" title="${escapeAttr(`${member.name} · ${stateText}${domain} · ${german ? 'auf eine App ziehen' : 'drag onto an app'}`)}" aria-label="${escapeAttr(member.name)}">${crewMemberCreatureHtml(member, placement)}</span>`;
+}
+
+const CREW_DRAG_THRESHOLD_PX = 6;
+
+function wireCrewDrag(root, state) {
+  if (root.dataset.crewDragWired === '1') return;
+  root.dataset.crewDragWired = '1';
+  let drag = null;
+  const cleanup = () => {
+    if (!drag) return;
+    drag.ghost?.remove();
+    document.body.classList.remove('ctox-crew-dragging');
+    window.removeEventListener('pointermove', onMove);
+    window.removeEventListener('pointerup', onUp);
+    window.removeEventListener('pointercancel', onCancel);
+    window.removeEventListener('keydown', onKey, true);
+    drag = null;
+  };
+  const moveGhost = (x, y) => {
+    if (!drag?.ghost) return;
+    drag.ghost.style.transform = `translate(${Math.round(x - 24)}px, ${Math.round(y + 6)}px)`;
+  };
+  const onMove = (event) => {
+    if (!drag) return;
+    const dx = event.clientX - drag.startX;
+    const dy = event.clientY - drag.startY;
+    if (!drag.active) {
+      if (Math.hypot(dx, dy) < CREW_DRAG_THRESHOLD_PX) return;
+      drag.active = true;
+      document.body.classList.add('ctox-crew-dragging');
+      const ghost = document.createElement('div');
+      ghost.className = 'ctox-crew-drag-ghost';
+      ghost.setAttribute('aria-hidden', 'true');
+      ghost.innerHTML = `<span class="ctox-crew-drag-hook"></span><span class="ctox-crew-drag-body">${crewMemberCreatureHtml(drag.member, 'map')}</span><span class="ctox-crew-drag-name">${escapeHtml(drag.member.name)}</span>`;
+      document.body.appendChild(ghost);
+      drag.ghost = ghost;
+    }
+    moveGhost(event.clientX, event.clientY);
+  };
+  const onUp = (event) => {
+    if (!drag) return;
+    const wasActive = drag.active;
+    const member = drag.member;
+    const x = event.clientX;
+    const y = event.clientY;
+    cleanup();
+    if (!wasActive) return;
+    state.crewDragEndedAt = Date.now();
+    const crew = {
+      id: member.id,
+      name: member.name,
+      shape: member.shape,
+      color: member.color,
+      creatureHtml: crewMemberCreatureHtml(member, 'map'),
+    };
+    const opened = window.CTOX_BUSINESS_OS_APP?.openCrewContextMenu?.({ clientX: x, clientY: y, crew });
+    if (!opened) {
+      // Dropped outside an app surface: nothing to hand over here.
+      window.dispatchEvent(new CustomEvent('ctox-business-os-crew-drop-missed', { detail: { member_id: member.id } }));
+    }
+  };
+  const onCancel = () => cleanup();
+  const onKey = (event) => {
+    if (event.key === 'Escape') {
+      event.stopPropagation();
+      cleanup();
+    }
+  };
+  root.addEventListener('pointerdown', (event) => {
+    const slot = event.target?.closest?.('[data-crew-drag]');
+    if (!slot || !root.contains(slot) || event.button !== 0) return;
+    const member = (state.crewMembers || []).find((item) => item.id === slot.dataset.crewDrag);
+    if (!member) return;
+    drag = { member, startX: event.clientX, startY: event.clientY, active: false, ghost: null };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('keydown', onKey, true);
+  });
+}
 
 export function initBusinessChat({
   session,
@@ -103,6 +226,7 @@ export function initBusinessChat({
     if (!chatOpenButton || !root.contains(chatOpenButton)) return;
     event.preventDefault();
     event.stopPropagation();
+    if (Date.now() - Number(state.crewDragEndedAt || 0) < 500) return;
     toggleChatDock({ root, state, commandBus, db, getActiveModule }).catch((error) => {
       console.warn('[business-chat] chat dock toggle failed', error);
     });
@@ -122,7 +246,8 @@ export function initBusinessChat({
     trackingSyncRunning = true;
     try {
       captureDrafts(root, state);
-      const changed = await syncTrackedMessages({ state, db, sync: syncFacade });
+      const membersChanged = await loadCrewMembers({ state, db }).catch(() => false);
+      const changed = (await syncTrackedMessages({ state, db, sync: syncFacade })) || membersChanged;
       if (changed) persistChatState({ state, db });
       if (changed && ownsChatOpenOwnership(state, presentationTicket)) {
         renderChatRoot({ root, state, commandBus, db, getActiveModule });
@@ -244,10 +369,26 @@ export function initBusinessChat({
     const detail = event.detail || {};
     const presentationTicket = claimChatOpenOwnership(state);
     await hydrateChatsFromRxDb({ state, db, session }).catch(() => false);
+    await loadCrewMembers({ state, db }).catch(() => false);
+    // The pool follows the crew: a new or archived member shows up without a
+    // reload, a member on duty changes its expression in the bar.
+    try {
+      db?.raw?.ctox_crew_members?.$?.subscribe?.(() => {
+        loadCrewMembers({ state, db }).then((changed) => {
+          if (changed) renderChatRoot({ root, state, commandBus, db, getActiveModule });
+        }).catch(() => {});
+      });
+    } catch {}
     if (!ownsChatOpenOwnership(state, presentationTicket)) return;
     state.selectedDate = getLocalDateString(Date.now());
     const chat = resolveChatForOpenDetail(state, session, detail);
     chat.title = String(detail.title || chat.title || 'CTOX').trim() || 'CTOX';
+    const handedMember = String(detail.crew_member_id || detail.crewMemberId || '').trim();
+    if (handedMember) {
+      chat.crew_member_id = handedMember;
+      const identity = detail.crew_identity || detail.crewIdentity || (state.crewMembers || []).find((member) => member.id === handedMember) || null;
+      if (identity?.name) chat.crewIdentity = { name: String(identity.name), shape: String(identity.shape || ''), color: String(identity.color || '') };
+    }
     markChatExpandedByUser(state, chat, presentationTicket);
     focusChatForUser(state, chat);
     chat.maximized = Boolean(detail.maximized);
@@ -392,6 +533,14 @@ export function initBusinessChat({
   root.addEventListener('click', handleRootClick, true);
   window.addEventListener('ctox-business-os-chat-submit', handleExternalSubmit);
   window.addEventListener(CHAT_OPEN_EVENT, handleExternalOpen);
+  const handleOpenForCommand = (event) => {
+    const detail = event?.data?.type === 'ctox-business-os-open-chat' ? event.data : (event?.detail || null);
+    if (!detail) return;
+    if (event?.data && event.origin && event.origin !== window.location.origin) return;
+    openChatForCommand(state, db, session, detail).catch(() => {});
+  };
+  window.addEventListener('ctox-business-os-open-chat', handleOpenForCommand);
+  window.addEventListener('message', handleOpenForCommand);
   root.addEventListener('scroll', handleScroll, true);
   window.addEventListener('resize', handleResize);
   root.addEventListener('wheel', handleWheel, { passive: false });
@@ -418,6 +567,8 @@ export function initBusinessChat({
     root.removeEventListener('click', handleRootClick, true);
     window.removeEventListener('ctox-business-os-chat-submit', handleExternalSubmit);
     window.removeEventListener(CHAT_OPEN_EVENT, handleExternalOpen);
+    window.removeEventListener('ctox-business-os-open-chat', handleOpenForCommand);
+    window.removeEventListener('message', handleOpenForCommand);
     root.removeEventListener('scroll', handleScroll, true);
     window.removeEventListener('resize', handleResize);
     root.removeEventListener('wheel', handleWheel, { passive: false });
@@ -962,7 +1113,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         }
       }
     });
-    root.querySelectorAll('.ctox-chat-fab-creatures .ctox-crew-creature').forEach((creature, index) => {
+    root.querySelectorAll('.ctox-chat-fab-creatures:not(.is-members) .ctox-crew-creature').forEach((creature, index) => {
       const chat = (openChats.length ? openChats : [{ id: 'ctox-crew', title: 'CTOX' }])[index];
       if (chat && syncCrewTelemetryNode(creature, chat)) inPlaceDomChanged = true;
     });
@@ -1157,8 +1308,10 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock>
       <button class="ctox-chat-fab" type="button" data-chat-open aria-label="${dockCollapsed ? (chatUiIsGerman() ? 'Crew öffnen' : 'Open crew') : (chatUiIsGerman() ? 'Crew einklappen' : 'Collapse crew')}">
         <span class="ctox-chat-fab-label">Crew</span>
-        <span class="ctox-chat-fab-creatures" aria-hidden="true">
-          ${(openChats.length ? openChats : [{ id: 'ctox-crew', title: 'CTOX' }]).slice(0, 3).map((chat) => crewCreatureHtml(chat, getTaskState(chat), 'fab')).join('')}
+        <span class="ctox-chat-fab-creatures ${(state.crewMembers || []).length ? 'is-members' : ''}" ${(state.crewMembers || []).length ? '' : 'aria-hidden="true"'}>
+          ${(state.crewMembers || []).length
+            ? state.crewMembers.slice(0, 6).map((member) => crewPoolSlotHtml(member, 'fab')).join('')
+            : (openChats.length ? openChats : [{ id: 'ctox-crew', title: 'CTOX' }]).slice(0, 3).map((chat) => crewCreatureHtml(chat, getTaskState(chat), 'fab')).join('')}
         </span>
       </button>
 
@@ -1175,6 +1328,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         </button>
       </div>
 
+      ${!dockCollapsed && (state.crewMembers || []).length ? `<div class="ctox-chat-crew-pool" data-crew-pool aria-label="${chatUiIsGerman() ? 'Crew: auf eine App ziehen' : 'Crew: drag onto an app'}">${state.crewMembers.map((member) => crewPoolSlotHtml(member, 'fab')).join('')}</div>` : ''}
       ${!dockCollapsed ? `
         ${showChatNav ? `<button class="ctox-chat-nav" type="button" data-chat-prev aria-label="${chatUiIsGerman() ? 'Vorheriges Wesen' : 'Previous crew member'}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
@@ -1320,6 +1474,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
     }
   });
 
+  wireCrewDrag(root, state);
   root.querySelectorAll('[data-chat-focus]').forEach((button) => {
     button.addEventListener('click', async () => {
       const chat = state.chats.find((item) => item.id === button.dataset.chatFocus);
@@ -1980,13 +2135,55 @@ function crewIdentityKey(subject = {}) {
     || 'ctox-crew';
 }
 
+// Identity comes from the crew, never from a hash: a member of
+// `ctox_crew_members` brings its own name, colour and shape. Until the router
+// has decided who takes a task, the owner talks to the crew as a whole — one
+// neutral creature, the same in the chat bar and on the map.
+const NEUTRAL_CREW_IDENTITY = Object.freeze({ name: 'Crew', color: '#7d7f84', shape: 'round' });
+
 function crewIdentity(chat = {}) {
-  const hash = crewHash(crewIdentityKey(chat));
-  return {
-    name: CREW_NAMES[hash % CREW_NAMES.length],
-    color: CREW_COLORS[(hash >>> 3) % CREW_COLORS.length],
-    shape: CREW_SHAPES[(hash >>> 6) % CREW_SHAPES.length],
-  };
+  const explicit = chat?.crewIdentity;
+  if (explicit && typeof explicit === 'object' && String(explicit.name || '').trim()) {
+    return {
+      name: String(explicit.name).trim(),
+      color: /^#[0-9a-f]{6}$/i.test(String(explicit.color || '')) ? String(explicit.color) : NEUTRAL_CREW_IDENTITY.color,
+      shape: CREW_SHAPES.includes(explicit.shape) ? explicit.shape : NEUTRAL_CREW_IDENTITY.shape,
+    };
+  }
+  return { ...NEUTRAL_CREW_IDENTITY };
+}
+
+// The member holding a chat's command, as the harness recorded it; the reason
+// the router gave, as the owner reads it.
+async function findCrewMembersByIds(collection, ids) {
+  return findDocsByIds(collection, ids);
+}
+
+function selectionSentenceFromEventTitle(title, name) {
+  const text = String(title || '');
+  const judged = /^(routed|selected):\s*(.*?)\s*\(([^)]*)\):\s*(.*)$/s.exec(text);
+  if (judged) return judged[4];
+  const pinned = /^(assigned|continuity):\s*(.*?):\s*(.*?)\s*\(([^)]*)\)$/s.exec(text);
+  if (pinned) return pinned[2];
+  return text.replace(new RegExp(`^${name}[:,]?\\s*`), '');
+}
+
+async function crewSelectionReason(events, taskId) {
+  if (!events || !taskId || typeof events.find !== 'function') return '';
+  try {
+    const docs = await events.find({ selector: { task_id: taskId, kind: 'crew_selected' }, limit: 4 }).exec();
+    const rows = (Array.isArray(docs) ? docs : []).map((doc) => doc?.toJSON?.() || doc);
+    rows.sort((a, b) => (Number(b?.created_at_ms) || 0) - (Number(a?.created_at_ms) || 0));
+    return String(rows[0]?.title || '');
+  } catch {
+    return '';
+  }
+}
+
+function takeoverText(name, reasonTitle) {
+  const reason = selectionSentenceFromEventTitle(reasonTitle, name).trim();
+  if (chatUiIsGerman()) return reason ? `${name} übernimmt: ${reason}` : `${name} übernimmt.`;
+  return reason ? `${name} takes over: ${reason}` : `${name} takes over.`;
 }
 
 function crewBodyMarkup(shape) {
@@ -3592,6 +3789,13 @@ async function syncTrackedMessages({ state, db, sync = null }) {
   }
   const taskDocs = await findDocsByIds(queue, taskIds);
   const taskDocsByCommand = await findQueueDocsByCommandIds(queue, commandIds);
+  // Members holding any tracked task, loaded once per sync.
+  const memberIds = new Set();
+  for (const doc of [...taskDocs.values(), ...taskDocsByCommand.values()]) {
+    const memberId = String(doc?.crew_member_id || '').trim();
+    if (memberId) memberIds.add(memberId);
+  }
+  const memberDocs = memberIds.size ? await findCrewMembersByIds(db?.raw?.ctox_crew_members, memberIds) : new Map();
 
   for (const chat of state.chats) {
     let chatChanged = false;
@@ -3607,6 +3811,33 @@ async function syncTrackedMessages({ state, db, sync = null }) {
         || String(taskDocByCommand?.id || '').trim();
       const taskDoc = (resolvedTaskId ? taskDocs.get(resolvedTaskId) || null : null) || taskDocByCommand;
       const nextTaskId = taskId || resolvedTaskId || taskDoc?.id || '';
+      // The creature becomes the member the moment the harness attaches one;
+      // it then stays that member for the whole conversation.
+      const memberId = String(taskDoc?.crew_member_id || '').trim();
+      const member = memberId ? memberDocs.get(memberId) || null : null;
+      if (member && chat.crew_member_id !== memberId) {
+        chat.crew_member_id = memberId;
+        chat.crewIdentity = { name: String(member.name || ''), shape: String(member.shape || ''), color: String(member.color || '') };
+        changed = true;
+        chatChanged = true;
+      }
+      const takeoverKey = nextTaskId || commandId;
+      if (member && takeoverKey && !chat.messages.some((item) => item.takeoverFor === takeoverKey)) {
+        const reasonTitle = await crewSelectionReason(db?.raw?.ctox_harness_events, String(taskDoc?.task_id || taskDoc?.id || nextTaskId).replace(/^queue-/, ''));
+        chat.messages.push({
+          id: `takeover_${crypto.randomUUID()}`,
+          role: 'ctox',
+          text: takeoverText(String(member.name || ''), reasonTitle),
+          takeoverFor: takeoverKey,
+          commandId: commandId || '',
+          taskId: nextTaskId || '',
+          crewMemberId: memberId,
+          status: 'running',
+          createdAt: Date.now(),
+        });
+        changed = true;
+        chatChanged = true;
+      }
       const orphanedTracking = !commandDoc && !taskDoc && isActiveTrackingStatus(message.status) && trackingMessageAgeMs(message) > 10 * 60 * 1000;
       const nextStatus = orphanedTracking ? 'failed' : preferredTrackingStatus(commandDoc, taskDoc, message.status);
       const nextProgress = taskDoc?.execution_progress
@@ -3958,6 +4189,28 @@ async function openCtoxTask(taskId, commandId, taskStatus) {
     await app.openModule('ctox');
   }
   window.dispatchEvent(new CustomEvent('ctox-business-os-focus-task', { detail: focus }));
+  // The module runs in its own frame; the DOM event above never reaches it.
+  for (const frame of document.querySelectorAll('iframe')) {
+    try {
+      if (new URL(frame.getAttribute('src') || frame.src || '', window.location.href).origin !== window.location.origin) continue;
+      frame.contentWindow?.postMessage({ type: 'ctox-business-os-focus-task', focus }, window.location.origin);
+    } catch {}
+  }
+}
+
+// Task -> chat (slice 7): the CTOX app asks for the chat that carries a command.
+async function openChatForCommand(state, db, session, detail = {}) {
+  const commandId = String(detail.commandId || detail.command_id || '').trim();
+  const taskId = String(detail.taskId || detail.task_id || '').trim();
+  if (!commandId && !taskId) return;
+  await hydrateChatsFromRxDb({ state, db, session }).catch(() => false);
+  const chat = (state.chats || []).find((candidate) => Array.isArray(candidate.messages) && candidate.messages.some((message) =>
+    (commandId && (message.commandId === commandId || message.command_id === commandId))
+    || (taskId && (message.taskId === taskId || message.task_id === taskId))));
+  if (!chat) return;
+  markChatExpandedByUser(state, chat, claimChatOpenOwnership(state));
+  focusChatForUser(state, chat);
+  touchChats(state, [chat]);
 }
 
 // Date and Temporal Utilities for Calendar-Scoped Chats
@@ -7435,6 +7688,102 @@ function installChatStyles() {
       flex: 0 0 28px;
       margin-left: -8px;
       filter: saturate(0.9);
+    }
+    .ctox-chat-fab-creatures.is-members .ctox-chat-crew-slot {
+      display: inline-grid;
+      width: 28px;
+      height: 28px;
+      flex: 0 0 28px;
+      margin-left: -8px;
+    }
+    .ctox-chat-fab-creatures.is-members .ctox-crew-creature {
+      margin-left: 0;
+    }
+    /* Crew pool: the members, ready to be picked up and dropped on an app. */
+    .ctox-chat-crew-pool {
+      display: flex;
+      align-items: center;
+      gap: 2px;
+      height: 42px;
+      padding: 0 6px;
+      border-left: 1px solid var(--line);
+    }
+    .ctox-chat-crew-slot {
+      display: inline-grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      border-radius: 50%;
+      cursor: grab;
+      touch-action: none;
+      transition: transform 140ms ease;
+    }
+    .ctox-chat-crew-slot:hover {
+      transform: translateY(-2px) scale(1.06);
+    }
+    .ctox-chat-crew-slot:active {
+      cursor: grabbing;
+    }
+    .ctox-chat-crew-slot .ctox-crew-creature {
+      width: 26px;
+      height: 26px;
+    }
+    /* The carried member: hanging from a hook, wriggling until it is dropped. */
+    .ctox-crew-drag-ghost {
+      position: fixed;
+      left: 0;
+      top: 0;
+      z-index: 4000;
+      display: grid;
+      justify-items: center;
+      gap: 2px;
+      width: 48px;
+      pointer-events: none;
+      transform-origin: 24px 0;
+      animation: ctoxCrewHookSwing 1.1s ease-in-out infinite alternate;
+      filter: drop-shadow(0 6px 10px rgba(0, 0, 0, 0.35));
+    }
+    .ctox-crew-drag-hook {
+      display: block;
+      width: 2px;
+      height: 14px;
+      border-radius: 1px;
+      background: var(--text-strong, currentColor);
+      opacity: 0.7;
+    }
+    .ctox-crew-drag-body {
+      display: block;
+      width: 44px;
+      height: 44px;
+      transform-origin: 50% 0;
+      animation: ctoxCrewHookWriggle 0.42s ease-in-out infinite alternate;
+    }
+    .ctox-crew-drag-body .ctox-crew-creature {
+      width: 100%;
+      height: 100%;
+      transform: none !important;
+    }
+    .ctox-crew-drag-name {
+      color: var(--text-strong);
+      font-size: 11px;
+      font-weight: 700;
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+      white-space: nowrap;
+    }
+    @keyframes ctoxCrewHookSwing {
+      from { rotate: -9deg; }
+      to { rotate: 9deg; }
+    }
+    @keyframes ctoxCrewHookWriggle {
+      0% { transform: rotate(-7deg) scale(1, 0.96); }
+      50% { transform: rotate(4deg) scale(0.97, 1.04); }
+      100% { transform: rotate(8deg) scale(1.02, 0.95); }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .ctox-crew-drag-ghost,
+      .ctox-crew-drag-body {
+        animation: none;
+      }
     }
     .ctox-chat-date-pill {
       height: 42px;

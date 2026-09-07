@@ -262,3 +262,19 @@ und execute_action/propose_action ausdrücklich als Nicht-Writeback benannt — 
 origin/main. Dazu App **1.0.102**: der Auftragstext nennt das Werkzeug. Auslieferung des Skills nur
 per Binary (System-Skills sind eingebettet, `skill_store.rs`, Import bei jedem Start) → zweites
 Upgrade direkt nach dem laufenden.
+
+## 07.09. 00:00–01:00 UTC: Upgrade 3 gemessen — Latenz gelöst, zwei neue Defekte (Wartungssperre, Werkzeug-Allowlist)
+
+Ergebnis und Belege in `docs/thesen-outbound-abnahme-nach-upgrade-20260905.md`
+(Abschnitt „Upgrade 3"). Kurz: Threads-Fix wirkt (Befehl in 77 s statt 15–20 min beim
+Server, Worker-Lease 7 s nach Anlage), Phantome 7 → 0. Neu: (1) die Instanz bleibt nach
+einem Upgrade für alle Nutzer schreibgeschützt, bis irgendein sichtbarer Browser
+`ctox.maintenance.client_ready` sendet — verdeckte Tabs pollen nicht, der Server wartet
+unbegrenzt; (2) `business_os.execute_writeback` fehlte in der Sitzungs-Allowlist des
+Workers (`direct_session.rs`), deshalb schlug jeder Writeback-Guard an. Beide Fixes auf
+main, Upgrade 4 folgt.
+
+Für die Sync-Ingenieure unverändert offen: `ctox_webrtc_incoming_transfer_stalled` in
+Serie für 15 Kollektionen direkt nach dem Reload (84 Fehler, danach Selbstheilung),
+`peer_connect_timeout user_thread_states`, `business_commands` bleibt
+`collectionReadinessState=never-synced` obwohl `initialReplicationState=complete`.

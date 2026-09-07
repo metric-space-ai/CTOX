@@ -119,26 +119,26 @@ pub(crate) fn finalize_attempt(
             }
         }
     });
-    if let Some(r) = &retrospective {
-        for learning in &r.learnings {
-            tx.execute("INSERT OR IGNORE INTO crew_member_learnings
-                (id,member_id,text,normalized_text,kind,scope_json,evidence_run_id,created_at,confirmed_by_owner,archived)
-                VALUES(?1,?2,?3,?4,?5,?6,?7,?8,0,0)",
-                params![format!("crew-learning:{}",uuid::Uuid::new_v4()),member,
-                    learning.text.trim(),normalized(&learning.text),learning.kind,
-                    serde_json::to_string(&learning.scope)?,attempt,finished])?;
-        }
-    }
+    // Learnings no longer get their own store. They wait as typed JSON on the
+    // attempt until the learner (maintenance loop) writes them into the
+    // member's anchors document and refreshes its memory in the LCM.
+    let learning_json = retrospective
+        .as_ref()
+        .map(|r| serde_json::to_string(&r.learnings))
+        .transpose()?
+        .unwrap_or_else(|| "[]".to_string());
     tx.execute(
         "UPDATE crew_attempts SET finalized_at=?2,succeeded=?3,review_passed=?4,
-        elapsed_ms=?5,retrospective=?6 WHERE attempt_id=?1 AND finalized_at IS NULL",
+        elapsed_ms=?5,retrospective=?6,learning_json=?7,learning_due=1
+        WHERE attempt_id=?1 AND finalized_at IS NULL",
         params![
             attempt,
             finished,
             succeeded,
             review_passed,
             elapsed_ms,
-            retrospective.as_ref().map(|r| r.retrospective.as_str())
+            retrospective.as_ref().map(|r| r.retrospective.as_str()),
+            learning_json
         ],
     )?;
     let raw: String = tx.query_row(
@@ -277,15 +277,20 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(
+        // Learnings wait on the attempt for the learner; a failed attempt
+        // keeps no retrospective and therefore no learnings.
+        let learning_json = |id: &str| {
             conn.query_row(
-                "SELECT COUNT(*) FROM crew_member_learnings WHERE confirmed_by_owner=0",
-                [],
-                |r| r.get::<_, i64>(0)
+                "SELECT COALESCE(learning_json,'[]'),learning_due FROM crew_attempts WHERE attempt_id=?1",
+                [id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)),
             )
-            .unwrap(),
-            1
-        );
+            .unwrap()
+        };
+        assert!(learning_json("a").0.contains("Schema prüfen"));
+        assert_eq!(learning_json("a").1, 1);
+        assert_eq!(learning_json("c").0, "[]");
+        assert_eq!(learning_json("c").1, 1);
         assert_eq!(
             members(&conn)
                 .unwrap()

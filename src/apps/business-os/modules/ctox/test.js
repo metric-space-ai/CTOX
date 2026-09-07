@@ -23,6 +23,22 @@ const { __ctoxTestHooks: hooks } = await importBrowserBundle('./index.js');
 
 const {
   aggregateFlowMetrics,
+  aggregateRunMetrics,
+  crewHomeMarkup,
+  confirmAnchorBody,
+  memberDomainLine,
+  memoryEntries,
+  taskSelectionSentence,
+  memberCreatureState,
+  memberIdentity,
+  shouldShowCrewHome,
+  taskCrewMember,
+  changeConcernsSelectedTask,
+  flowForSelectedTask,
+  harnessFlowFromEvents,
+  liveActivityFromEvents,
+  reconcileSelection,
+  withLiveActivity,
   authoritativeTaskNodeId,
   authoritativeTaskStatus,
   applyTaskSelection,
@@ -133,14 +149,18 @@ test('CTOX flow map places the same crew on waiting, working, and failed task no
   }
   const html = workingHtml + waitingHtml + failedHtml;
   assert.match(html, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
-  assert.match(html, /data-task-id="task-waiting"[^>]+data-creature-node-id="queued"/);
-  assert.match(html, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
+  assert.doesNotMatch(html, /data-task-id="task-waiting"/);
+  assert.doesNotMatch(html, /data-task-id="task-failed"/);
+  const failedSelected = flowCrewSvg(model, failed, { lang: 'de' });
+  assert.equal((failedSelected.match(/ctox-flow-creature-slot/g) || []).length, 2);
+  assert.match(failedSelected, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
+  assert.match(failedSelected, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
   assert.match(html, /is-working/);
   assert.match(html, /data-activity-turns="7"/);
   assert.match(html, /data-activity-kind="tool"/);
   assert.match(html, /--ctox-progress-angle:216deg/);
-  assert.match(html, /is-sleeping/);
-  assert.match(html, /is-failed/);
+  assert.doesNotMatch(html, /is-sleeping/);
+  assert.match(failedSelected, /is-failed/);
   assert.equal(taskCrewNodeId(working, model), 'running');
   assert.equal(taskCrewStatus(working), 'running');
   assert.equal(taskCrewStatus(waiting), 'queued');
@@ -559,7 +579,7 @@ test('Compact task rendering shows the four-stage live flow and session pins', (
   assert.match(markup, /data-pin-task-id="task-review"[^>]*aria-pressed="true"/);
   assert.match(markup, /data-context-record-id="task-review"/);
   assert.match(markup, /data-context-record-type="ctox_task"/);
-  assert.match(markup, /data-context-label="Reference grade CTOX console"/);
+  assert.match(markup, /data-context-label="Reference-grade CTOX console"/);
   assert.equal(state.pinnedTaskIds.has('task-review'), true);
 });
 
@@ -618,19 +638,19 @@ test('Web Stack refresh preserves projection-missing diagnostics', () => {
   assert.equal(friendlyWebStackStatus(webStack, labels.de), labels.de.webStackConnecting);
 });
 
-test('Task display copy redacts source code and Web Stack internals', () => {
+test('Task display copy is shown as written (no regex redaction, no underscore mangling)', () => {
+  // Slice 5: the operator's own words stay intact; secrets are never projected
+  // by the server, so the client has nothing to hide and must not rewrite.
   assert.equal(
-    safeTaskDisplayText('```js\nconst token = "secret";\n```', 'de'),
-    labels.de.redactedTechnicalDetail
+    safeTaskDisplayText('Fix src/core/harness_flow.rs for pi-sidecar', 'de'),
+    'Fix src/core/harness_flow.rs for pi-sidecar'
   );
   assert.equal(
-    safeTaskDisplayText('browser_context frame_data capture_script payload', 'en'),
-    labels.en.redactedTechnicalDetail
+    safeTaskDisplayText('```js\nconst token = "x";\n```', 'en'),
+    '```js const token = "x"; ```'
   );
-  assert.equal(
-    safeTaskDisplayText('Queue state is waiting for review', 'en'),
-    'Queue state is waiting for review'
-  );
+  assert.equal(safeTaskDisplayText('   ', 'en', { fallback: '–' }), '–');
+  assert.equal(safeTaskDisplayText('a'.repeat(400), 'en', { max: 20 }), `${'a'.repeat(19)}...`);
 });
 
 test('Queued work with missing flow projection is a critical harness health state', () => {
@@ -920,4 +940,170 @@ test('Single-event timeline is diagnostic and disabled', () => {
   assert.equal(progressPercent(0, 0), 100);
   assert.equal(clampMetric(999, 0, 10), 10);
   assert.equal(formatRelativeAge(30_000, 'de'), 'unter 1 Min.');
+});
+
+// --- Scheibe 3: Live-Daten des gewaehlten Tasks --------------------------------
+
+test('Projected harness events rebuild a ledger-shaped flow for the selected task', () => {
+  const task = { id: 'queue-task-1', taskId: 'task-1', commandId: 'cmd-1', status: 'running', routeStatus: 'running' };
+  const events = [
+    { id: 'e1', task_id: 'task-1', kind: 'phase', title: 'turn started', created_at_ms: 1000 },
+    { id: 'e2', task_id: 'task-1', kind: 'tool_started', title: 'read', tool_name: 'read_file', tool_type: 'function', call_id: 'c1', created_at_ms: 2000 },
+    { id: 'e3', task_id: 'task-1', kind: 'token_usage', title: 'usage', usage: { input: 1200, output: 300, reasoning: 40, total: 1500 }, created_at_ms: 3000 },
+    { id: 'e4', task_id: 'task-1', kind: 'token_usage', title: 'usage', usage: { input: 2400, output: 500, reasoning: 90, total: 2900 }, created_at_ms: 4000 },
+    { id: 'e5', task_id: 'task-1', kind: 'crew_selected', title: 'selected: Milo', created_at_ms: 5000 },
+  ];
+  const flow = harnessFlowFromEvents(task, events);
+  assert.equal(flow.ok, true);
+  assert.equal(flow.flow.source.message_key, 'task-1');
+  assert.equal(flow.flow.ledger_events.length, 5);
+  assert.equal(flow.flow.ledger_events[1].event_kind, 'worker.tool_started');
+  assert.equal(JSON.parse(flow.flow.ledger_events[1].metadata_json).tool.name, 'read_file');
+  assert.equal(JSON.parse(flow.flow.ledger_events[3].metadata_json).metrics_mode, 'cumulative');
+  // Cumulative usage takes the maximum, never the sum.
+  const metrics = aggregateFlowMetrics(flow);
+  assert.equal(metrics.inputTokens, 2400);
+  assert.equal(metrics.outputTokens, 500);
+  assert.equal(eventToNodeId(flow.flow.ledger_events[4].event_kind, flow.flow.ledger_events[4].title), null);
+  assert.equal(harnessFlowFromEvents(task, []), null);
+});
+
+test('Live activity from events refreshes only a newer plan and keeps its steps', () => {
+  const events = [
+    { kind: 'thinking', created_at_ms: 10 },
+    { kind: 'tool_started', created_at_ms: 20 },
+    { kind: 'tool_completed', created_at_ms: 30 },
+    { kind: 'thinking', created_at_ms: 40 },
+  ];
+  assert.deepEqual(liveActivityFromEvents(events), { total: 3, thinking: 2, tools: 1, last_kind: 'thinking', updated_at_ms: 40 });
+  const plan = { phase: 'working', percent: 50, steps: [{ position: 1, label: 'A', status: 'in_progress' }], activity_turns: { total: 1, thinking: 1, tools: 0, last_kind: 'thinking' }, updated_at_ms: 5 };
+  const task = { id: 'queue-task-1', taskId: 'task-1', executionProgress: plan };
+  const live = { key: 'task-1', events, runs: [] };
+  const fresh = withLiveActivity(task, live);
+  assert.equal(fresh.executionProgress.activity_turns.total, 3);
+  assert.equal(fresh.executionProgress.updated_at_ms, 40);
+  assert.equal(fresh.executionProgress.steps.length, 1);
+  // Older events never overwrite a newer plan; a foreign key never applies.
+  assert.equal(withLiveActivity({ ...task, executionProgress: { ...plan, updated_at_ms: 99 } }, live).executionProgress.updated_at_ms, 99);
+  assert.equal(withLiveActivity(task, { ...live, key: 'other' }), task);
+});
+
+test('Run metrics sum finished attempts and ignore unknown values', () => {
+  assert.equal(aggregateRunMetrics([]), null);
+  const runs = [
+    { metrics: { input_tokens: 100, output_tokens: 20, tool_calls: 3, thinking_turns: 2, elapsed_ms: 4000 } },
+    { metrics: { input_tokens: 50, output_tokens: null, tool_calls: 1, thinking_turns: null, elapsed_ms: 2500 } },
+  ];
+  assert.deepEqual(aggregateRunMetrics(runs), { inputTokens: 150, outputTokens: 20, toolCalls: 4, thinkingTurns: 2, seconds: 7 });
+});
+
+test('Selected task never borrows another task\'s flow', () => {
+  const blob = { ok: true, mode: 'ctox_core', flow: { source: { message_key: 'task-other', work_id: null }, ledger_events: [], blocks: [] } };
+  const own = harnessFlowFromEvents({ id: 'queue-task-1', taskId: 'task-1' }, [{ id: 'e1', kind: 'thinking', created_at_ms: 1 }]);
+  const tasks = [{ id: 'queue-task-1', taskId: 'task-1', commandId: 'cmd-1', status: 'queued', routeStatus: 'queued' }];
+  const state = { blobFlow: blob, selectedLive: { key: 'task-1', events: [], runs: [], flow: own }, selectedTaskId: 'queue-task-1', model: { tasks } };
+  assert.equal(flowForSelectedTask(state), own);
+  state.selectedLive = null;
+  assert.equal(flowForSelectedTask(state).ok, false);
+  state.blobFlow = { ...blob, flow: { ...blob.flow, source: { message_key: 'task-1', work_id: null } } };
+  assert.equal(flowForSelectedTask(state), state.blobFlow);
+  // Change events for other tasks do not trigger a rebuild; unknown shapes do.
+  assert.equal(changeConcernsSelectedTask(state, { documentData: { task_id: 'task-1' } }), true);
+  assert.equal(changeConcernsSelectedTask(state, { documentData: { task_id: 'task-9', command_id: 'cmd-9' } }), false);
+  assert.equal(changeConcernsSelectedTask(state, { documentData: { command_id: 'cmd-1' } }), true);
+  assert.equal(changeConcernsSelectedTask(state, 'opaque'), true);
+});
+
+test('A deep-linked task is consumed once it is on screen', () => {
+  const tasks = [
+    { id: 'queue-task-a', taskId: 'task-a', commandId: 'cmd-a', status: 'queued', routeStatus: 'queued' },
+    { id: 'queue-task-b', taskId: 'task-b', commandId: 'cmd-b', status: 'queued', routeStatus: 'queued' },
+  ];
+  const state = { model: { tasks, timeline: [], nodeMap: new Map() }, focusTask: { taskId: 'task-b', commandId: '' }, focusTaskConsumed: false, selectedTaskId: null, selectedStepIndex: 0, userNavigatedTimeline: false };
+  reconcileSelection(state);
+  assert.equal(state.selectedTaskId, 'queue-task-b');
+  assert.equal(state.focusTaskConsumed, true);
+  // After consumption the operator's own choice survives the next data render.
+  state.focusTask = null;
+  state.selectedTaskId = 'queue-task-a';
+  reconcileSelection(state);
+  assert.equal(state.selectedTaskId, 'queue-task-a');
+});
+
+// --- Scheibe 4: Wesen = Mitglieder, Crew zu Hause ---------------------------------
+
+const crewFixture = [
+  { id: 'crew:milo', name: 'Milo', shape: 'blob', color: '#00aa9a', archived: false, state: 'on_duty', active_task_id: 'task-working' },
+  { id: 'crew:nori', name: 'Nori', shape: 'square', color: '#7c6df2', archived: false, state: 'home', active_task_id: null },
+  { id: 'crew:tavi', name: 'Tavi', shape: 'triangle', color: '#e97255', archived: false, state: 'resting_after_failure', active_task_id: null },
+  { id: 'crew:old', name: 'Old', shape: 'round', color: '#7d7f84', archived: true, state: 'home', active_task_id: null },
+];
+
+test('Task creatures carry the crew member identity, unassigned tasks stay neutral', () => {
+  const working = { id: 'queue-task-working', taskId: 'task-working', commandId: 'cmd-working', title: 'Working task', status: 'running', routeStatus: 'running', crewMemberId: 'crew:milo', executionProgress: { phase: 'working', percent: 20, steps: [{ position: 1, label: 'A', status: 'in_progress' }] } };
+  const orphan = { id: 'queue-task-orphan', taskId: 'task-orphan', commandId: 'cmd-orphan', title: 'Orphan', status: 'running', routeStatus: 'running' };
+  const model = { activeTask: working, activeNodeId: 'running', tasks: [working, orphan], nodeMap: new Map([['running', { id: 'running', x: 400, y: 160 }], ['queued', { id: 'queued', x: 100, y: 160 }]]) };
+  const state = { lang: 'de', crewMembers: crewFixture, model };
+  assert.equal(taskCrewMember(working, state).name, 'Milo');
+  assert.equal(taskCrewMember(orphan, state), null);
+  assert.deepEqual(memberIdentity(crewFixture[0]), { name: 'Milo', color: '#00aa9a', shape: 'blob' });
+  const html = flowCrewSvg(model, working, state);
+  assert.match(html, /data-task-id="queue-task-working"[^>]*aria-label="Milo · /);
+  assert.match(html, /--crew-color:#00aa9a/);
+  assert.match(html, /is-blob/);
+  assert.match(html, /data-crew-key="crew:milo:map"/);
+  assert.match(html, /data-task-id="queue-task-orphan"[^>]*aria-label="ohne Crew-Zuordnung · /);
+});
+
+test('Crew at home shows every active member with its state, only while nothing runs', () => {
+  const state = { lang: 'de', crewMembers: crewFixture, model: { liveWork: false, tasks: [{ id: 'queue-task-working', taskId: 'task-working', title: 'Recherche Kunde X', status: 'queued', routeStatus: 'queued' }] } };
+  assert.equal(shouldShowCrewHome(state), true);
+  assert.equal(shouldShowCrewHome({ ...state, model: { ...state.model, liveWork: true } }), false);
+  assert.equal(shouldShowCrewHome({ ...state, crewMembers: [] }), false);
+  const html = crewHomeMarkup(state);
+  assert.equal((html.match(/data-crew-member-id=/g) || []).length, 3);
+  assert.doesNotMatch(html, /crew:old/);
+  assert.match(html, /data-crew-member-id="crew:milo"[^>]*aria-label="Milo: Recherche Kunde X"/);
+  assert.match(html, /data-crew-member-id="crew:nori"[^>]*aria-label="Nori: zu Hause"/);
+  assert.match(html, /data-crew-member-id="crew:tavi"[^>]*aria-label="Tavi: erholt sich nach einem Fehlschlag"/);
+  assert.equal(memberCreatureState(crewFixture[0]), 'running');
+  assert.equal(memberCreatureState(crewFixture[1]), 'idle');
+  assert.equal(memberCreatureState(crewFixture[2]), 'failed');
+  // The expressions are the existing creature modes: working, sleeping, failed (X eyes).
+  assert.match(html, /crew:milo[\s\S]*?is-working/);
+  assert.match(html, /crew:nori[\s\S]*?is-sleeping/);
+  assert.match(html, /crew:tavi[\s\S]*?ctox-crew-eyes-x/);
+});
+
+// --- H3: memory documents, field of work, takeover sentence ---------------------
+
+test('Memory documents render one line per entry and confirmation rewrites only that entry', () => {
+  const anchors = [
+    '# Anchors', '', '## Entries',
+    '- anchor_id: a1', '- anchor_type: hypothesis', '- statement: Vor dem Import das Schema prüfen.', '- scope: module=reports', '- source_ref: attempt-1',
+    '- anchor_id: a2', '- anchor_type: owner_confirmed', '- statement: Nie ohne Backup migrieren.',
+  ].join('\n');
+  const entries = memoryEntries(anchors, 'anchor_id', 'anchor_type', 'statement');
+  assert.equal(entries.length, 2);
+  assert.deepEqual(entries[0], { id: 'a1', tag: 'hypothesis', text: 'Vor dem Import das Schema prüfen.', more: '', scope: 'module=reports', source: 'attempt-1' });
+  const confirmed = confirmAnchorBody(anchors, 'a1');
+  assert.match(confirmed, /anchor_id: a1\n- anchor_type: owner_confirmed/);
+  assert.equal((confirmed.match(/owner_confirmed/g) || []).length, 2);
+  assert.equal(confirmAnchorBody(anchors, 'a2'), anchors);
+  const narrative = memoryEntries('## Entries\n- entry_id: e1\n- event_type: success\n- summary: Import lief.\n- consequence: Schema zuerst.\n', 'entry_id', 'event_type', 'summary', 'consequence');
+  assert.equal(narrative[0].more, 'Schema zuerst.');
+});
+
+test('Field of work is derived, and the takeover sentence reads the router event', () => {
+  const state = { lang: 'de', selectedLive: { key: 'task-1', events: [
+    { kind: 'phase', title: 'x' },
+    { kind: 'crew_selected', title: 'routed: Milo (crew:milo): hat zuletzt drei ähnliche Importe sauber abgeschlossen' },
+  ] } };
+  assert.equal(memberDomainLine({ domain: ['reports', 'imports'], stats: { tasks_total: 14 } }, state), 'Reports, Imports · 14 Einsätze');
+  assert.equal(memberDomainLine({ domain: [], stats: { tasks_total: 0 } }, state), 'noch ohne Fachgebiet');
+  const task = { id: 'queue-task-1', taskId: 'task-1' };
+  assert.equal(taskSelectionSentence(task, state), 'Milo: hat zuletzt drei ähnliche Importe sauber abgeschlossen');
+  assert.equal(taskSelectionSentence({ id: 'queue-task-2', taskId: 'task-2' }, state), '');
+  state.selectedLive.events[1].title = 'assigned: Manuelle Zuordnung vor dem Lease: Nori (crew:nori)';
+  assert.equal(taskSelectionSentence(task, state), 'Nori: Manuelle Zuordnung vor dem Lease');
 });

@@ -599,6 +599,8 @@ fn event_kind(kind: &str) -> Option<&'static str> {
         "worker.phase" | "worker.turn_started" => "phase",
         "crew.selected" | "crew_selected" => "crew_selected",
         "crew_selection_unavailable" => "crew_selection_unavailable",
+        "crew.memory_read" => "memory_read",
+        "crew.learning" => "learning",
         _ => return None,
     })
 }
@@ -645,7 +647,8 @@ fn project_events(
                        'worker.turn_started','worker.tool_started','worker.tool_completed',
                        'worker.thinking_started','worker.thinking','worker.plan_updated',
                        'worker.token_usage','worker.turn_completed','worker.phase',
-                       'crew.selected','crew_selected','crew_selection_unavailable')
+                       'crew.selected','crew_selected','crew_selection_unavailable',
+                       'crew.memory_read','crew.learning')
                  ORDER BY created_at DESC, event_id DESC LIMIT 200",
             )?;
             let events = statement
@@ -958,6 +961,19 @@ fn project_crew(
         } else {
             "home"
         };
+        // Memory (LCM continuity of the member) and the derived field of work:
+        // the modules it succeeded in most, from its finalized attempts.
+        // Read through the pump's own connection: no LCM engine (and no
+        // migration write lock) inside the projection pass.
+        let memory = crate::crew::load_member_memory_from_conn(conn, &member.id);
+        let domain = conn
+            .prepare(
+                "SELECT module FROM crew_attempts
+                 WHERE member_id=?1 AND finalized_at IS NOT NULL AND succeeded=1 AND module IS NOT NULL AND module!=''
+                 GROUP BY module ORDER BY COUNT(*) DESC, module LIMIT 3",
+            )?
+            .query_map([&member.id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         writer.upsert_source_projection(
             "ctox_crew_members",
             &member.id,
@@ -966,6 +982,11 @@ fn project_crew(
                 "id":member.id,"name":member.name,"shape":member.shape,"color":member.color,
                 "archived":member.archived,"state":state,"active_task_id":active,
                 "soul":member.soul,"specialties":member.specialties,"stats":member.stats,
+                "memory":{"anchors":memory.anchors,"narrative":memory.narrative,
+                    "anchor_count":crate::crew::anchor_lines(&memory.anchors).len(),
+                    "experience_count":crate::crew::narrative_lines(&memory.narrative).len(),
+                    "updated_at":memory.updated_at},
+                "domain":domain,
                 "updated_at_ms":updated
             }),
         )?;

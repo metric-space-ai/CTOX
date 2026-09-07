@@ -199,7 +199,8 @@ fn crew_selection_warning_reaches_events_and_status() -> Result<()> {
         None,
         &json!({}),
         None,
-        "Inspect"
+        "Inspect",
+        None,
     )
     .is_none());
     // Fixture ledger has a reduced shape; insert the corresponding durable warning
@@ -478,11 +479,24 @@ fn crew_attempt_projects_timesheet_stats_and_learnings_once() -> Result<()> {
     assert_eq!(member["state"], "on_duty");
     assert_eq!(member["stats"]["tasks_total"], 1);
     assert_eq!(member["stats"]["review_passed"], 1);
-    let learning: String = conn.query_row(
-        "SELECT id FROM crew_member_learnings WHERE member_id='crew-milo'",
+    // Learnings wait on the attempt for the learner; the learner writes them
+    // into the member's memory (LCM anchors) and the projection carries it.
+    let (learning_json, due): (String, i64) = conn.query_row(
+        "SELECT learning_json,learning_due FROM crew_attempts WHERE attempt_id='attempt'",
         [],
-        |r| r.get(0),
+        |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
+    assert!(learning_json.contains("Schema vor dem Import prüfen."));
+    assert_eq!(due, 1);
+    // The learner itself is covered in crew::lifecycle_tests on a full LCM
+    // store; this fixture only carries the projection tables. The member
+    // document still declares its (empty) memory and derived field of work.
+    assert_eq!(member["memory"]["anchor_count"], 0);
+    assert!(member["domain"].is_array());
+    // Legacy learning rows keep their projection until they are migrated.
+    let learning = "legacy-learning".to_string();
+    conn.execute("INSERT INTO crew_member_learnings(id,member_id,text,normalized_text,kind,scope_json,evidence_run_id,created_at) VALUES(?1,'crew-milo','Alt','alt','pitfall','{}','attempt','2026-09-05T12:02:00Z')", [&learning])?;
+    project_crew(root.path(), &conn, &mut writer)?;
     assert_eq!(
         record(root.path(), "ctox_crew_learnings", &learning)?["confirmed_by_owner"],
         false
