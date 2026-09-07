@@ -68,6 +68,15 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
     let mut writer = store::BusinessProjectionWriter::open(root)?;
     business.execute_batch("CREATE TABLE IF NOT EXISTS cockpit_chat_delivery(command_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS cockpit_chat_message_delivery(command_id TEXT NOT NULL, message_id TEXT NOT NULL, PRIMARY KEY(command_id,message_id));")?;
+    // `terminal` marks a delivery made after the task reached a terminal route
+    // status: nothing about that chat changes any more, so later passes skip it
+    // before the expensive projection/progress lookups. Without this every pass
+    // re-projected all 300 retained terminal chats (thesen 07.09.2026:
+    // project_chat 190–345 s per pass, browser replication starved).
+    let _ = business.execute(
+        "ALTER TABLE cockpit_chat_delivery ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
     // Only materialized chats are candidates; projection never creates chats for background work.
     let mut cursor = String::new();
     loop {
@@ -80,6 +89,17 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
         }
         for command_id in commands {
             cursor = command_id.clone();
+            let settled: bool = business
+                .query_row(
+                    "SELECT terminal FROM cockpit_chat_delivery WHERE command_id=?1",
+                    [&command_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()?
+                .is_some_and(|flag| flag != 0);
+            if settled {
+                continue;
+            }
             let command = store::load_business_command(&business, &command_id)?;
             let chat_id = store_projections::business_chat_id(&command, &command_id);
             let raw:Option<String>=business.query_row("SELECT payload_json FROM business_records WHERE collection='business_chats' AND record_id=?1 AND deleted=0",[&chat_id],|row|row.get(0)).optional()?;
@@ -196,6 +216,12 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
                 )
                 .optional()?;
             if delivered.as_deref() == Some(&fingerprint) {
+                if terminal {
+                    business.execute(
+                        "UPDATE cockpit_chat_delivery SET terminal=1 WHERE command_id=?1",
+                        [&command_id],
+                    )?;
+                }
                 continue;
             }
             let Some(messages) = chat.get_mut("messages").and_then(Value::as_array_mut) else {
@@ -244,7 +270,7 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
                     for id in message_receipts {
                         tx.execute("INSERT OR IGNORE INTO cockpit_chat_message_delivery(command_id,message_id) VALUES(?1,?2)",params![command_id,id])?;
                     }
-                    tx.execute("INSERT INTO cockpit_chat_delivery(command_id,fingerprint) VALUES(?1,?2) ON CONFLICT(command_id) DO UPDATE SET fingerprint=excluded.fingerprint",params![command_id,fingerprint])?;
+                    tx.execute("INSERT INTO cockpit_chat_delivery(command_id,fingerprint,terminal) VALUES(?1,?2,?3) ON CONFLICT(command_id) DO UPDATE SET fingerprint=excluded.fingerprint, terminal=excluded.terminal",params![command_id,fingerprint,i64::from(terminal)])?;
                     tx.commit()?;
                 }
             }

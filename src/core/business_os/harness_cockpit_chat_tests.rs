@@ -132,3 +132,80 @@ fn retry_wait_delivers_interim_without_closing_gates_or_replaying_trimmed_status
     }
     Ok(())
 }
+
+#[test]
+fn terminal_chats_are_delivered_once_and_skipped_afterwards() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    let accepted = store::accept_rxdb_business_command(
+        root.path(),
+        json!({
+            "id":"cockpit-chat-terminal","command_id":"cockpit-chat-terminal","module":"research",
+            "command_type":"business_os.chat.task", "record_id":"research",
+            "payload":{"prompt":"Read the fixture", "language":"de"},
+            "client_context":{"source":"business-os-chat","module":"research"}
+        }),
+    )?;
+    let task_id = accepted["task_id"].as_str().expect("queue task");
+    let rxdb = store_projections::tests::create_repair_rxdb_tables(root.path())?;
+    rxdb.execute_batch("CREATE TABLE ctox_business_os__business_chats__v0(id TEXT PRIMARY KEY,revision TEXT,deleted INTEGER DEFAULT 0,lastWriteTime REAL DEFAULT 0,data TEXT NOT NULL);")?;
+    channels::lease_queue_task(root.path(), task_id, "fixture-worker")?;
+    for phase in ["leased", "running"] {
+        channels::transition_business_command_for_task(
+            root.path(),
+            task_id,
+            phase,
+            None,
+            None,
+            None,
+            "fixture worker lifecycle",
+        )?;
+    }
+    crate::service::harness_flow::record_harness_flow_event(
+        root.path(),
+        crate::service::harness_flow::RecordHarnessFlowEventRequest {
+            event_kind: "worker.turn_started",
+            title: "Fixture",
+            body_text: "",
+            message_key: Some(task_id),
+            work_id: None,
+            ticket_key: None,
+            attempt_index: Some(1),
+            metadata: json!({"attempt_id":"fixture-attempt","command_id":"cockpit-chat-terminal"}),
+        },
+    )?;
+    let core = Connection::open(crate::paths::core_db(root.path()))?;
+    let business = store::open_store(root.path())?;
+    // Active task: delivered, not settled.
+    project(root.path(), &core)?;
+    let terminal_flag = |business: &Connection| -> Result<Option<i64>> {
+        Ok(business
+            .query_row(
+                "SELECT terminal FROM cockpit_chat_delivery WHERE command_id='cockpit-chat-terminal'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?)
+    };
+    assert_eq!(terminal_flag(&business)?, Some(0));
+    // The task ends: the next pass delivers the final state and settles the chat.
+    core.execute(
+        "UPDATE communication_routing_state SET route_status='handled' WHERE message_key=?1",
+        [task_id],
+    )?;
+    project(root.path(), &core)?;
+    project(root.path(), &core)?;
+    assert_eq!(terminal_flag(&business)?, Some(1));
+    // A settled chat is skipped before any projection work: a later state change
+    // that would add a status message for an active task leaves it untouched.
+    let command = store::load_business_command(&business, "cockpit-chat-terminal")?;
+    let chat_id = store_projections::business_chat_id(&command, "cockpit-chat-terminal");
+    let before:String=business.query_row("SELECT payload_json FROM business_records WHERE collection='business_chats' AND record_id=?1",[&chat_id],|r|r.get(0))?;
+    core.execute(
+        "UPDATE communication_routing_state SET route_status='pending',hold_reason='Would add a message' WHERE message_key=?1",
+        [task_id],
+    )?;
+    project(root.path(), &core)?;
+    let after:String=business.query_row("SELECT payload_json FROM business_records WHERE collection='business_chats' AND record_id=?1",[&chat_id],|r|r.get(0))?;
+    assert_eq!(before, after, "settled chats must not be re-projected");
+    Ok(())
+}
