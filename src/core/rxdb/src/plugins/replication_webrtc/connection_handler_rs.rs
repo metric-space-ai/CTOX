@@ -526,7 +526,26 @@ struct DrainResetGuard {
     queues: Arc<Mutex<HashMap<WebRTCRsPeer, PeerSendQueue>>>,
     peer: WebRTCRsPeer,
     available: Arc<tokio::sync::Notify>,
+    in_flight: Arc<std::sync::atomic::AtomicBool>,
     armed: bool,
+}
+
+/// A receipt may be delivered by inline preemption while this drainer is
+/// transmitting a different queued message. Finishing the caller is safe only
+/// between complete messages; otherwise select! drops that foreign transfer.
+struct QueuedTransferGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl QueuedTransferGuard {
+    fn new(active: &Arc<std::sync::atomic::AtomicBool>) -> Self {
+        active.store(true, Ordering::SeqCst);
+        Self(Arc::clone(active))
+    }
+}
+
+impl Drop for QueuedTransferGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
 }
 
 impl Drop for DrainResetGuard {
@@ -563,6 +582,7 @@ where
         tokio::pin!(notified);
         // Register before checking the slot so cancellation cannot lose a wakeup.
         notified.as_mut().enable();
+        let in_flight = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let guard = {
             let mut queues_lock = queues.lock();
             queues_lock.get_mut(peer).and_then(|queue| {
@@ -574,6 +594,7 @@ where
                         queues: Arc::clone(queues),
                         peer: peer.clone(),
                         available: Arc::clone(&available),
+                        in_flight: Arc::clone(&in_flight),
                         armed: true,
                     })
                 }
@@ -582,7 +603,13 @@ where
         if let Some(guard) = guard {
             tokio::select! {
                 biased;
-                result = &mut receipt => return result,
+                result = std::future::poll_fn(|cx| {
+                    if in_flight.load(Ordering::SeqCst) {
+                        std::task::Poll::Pending
+                    } else {
+                        std::future::Future::poll(std::pin::Pin::new(&mut receipt), cx)
+                    }
+                }) => return result,
                 () = drain(guard) => {}
             }
         } else {
@@ -2393,6 +2420,7 @@ impl WebRTCRsConnectionHandler {
                     }
                 }
             };
+            let transfer_guard = QueuedTransferGuard::new(&reset_guard.in_flight);
             self.refresh_send_queue_status();
             self.record_status(|status| {
                 status.sent_scheduled_frames = status.sent_scheduled_frames.saturating_add(1);
@@ -2419,6 +2447,7 @@ impl WebRTCRsConnectionHandler {
                 }
             };
             let _ = item.result.send(result);
+            drop(transfer_guard);
             // Let a sender consume its receipt before starting somebody else's
             // transfer. Returning its result must not cancel that later transfer.
             tokio::task::yield_now().await;
@@ -4414,6 +4443,7 @@ mod tests {
             queues: Arc::clone(&queues),
             peer: "p1".to_string(),
             available: available.clone(),
+            in_flight: Arc::default(),
             armed: true,
         });
         assert!(
@@ -4425,6 +4455,7 @@ mod tests {
             queues: Arc::clone(&queues),
             peer: "p1".to_string(),
             available,
+            in_flight: Arc::default(),
             armed: false,
         });
         assert!(
@@ -4483,6 +4514,7 @@ mod tests {
             queues: queues.clone(),
             peer: peer.clone(),
             available: old.drain_available.clone(),
+            in_flight: Arc::default(),
             armed: true,
         };
         queues.lock().insert(peer.clone(), old);
@@ -4561,6 +4593,7 @@ mod tests {
             queues: handler.send_queues.clone(),
             peer: peer.clone(),
             available: old_available.clone(),
+            in_flight: Arc::default(),
             armed: true,
         };
         let finished = tokio::time::timeout(
@@ -4588,6 +4621,192 @@ mod tests {
             rx.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         ));
+    }
+
+    #[tokio::test]
+    async fn interleaved_own_receipt_preserves_the_other_collections_transfer() {
+        // Exercise the real queue, framing, priority interleave and ACK parser.
+        // Only the SCTP link is replaced: each text frame is recorded and ACKed.
+        struct AckChannel {
+            inner: Arc<dyn DataChannel>,
+            handler: Arc<WebRTCRsConnectionHandler>,
+            peer: String,
+            frames: Mutex<Vec<Value>>,
+            totals: Mutex<HashMap<String, usize>>,
+        }
+        #[async_trait]
+        impl DataChannel for AckChannel {
+            async fn label(&self) -> webrtc::error::Result<String> {
+                self.inner.label().await
+            }
+            async fn ordered(&self) -> webrtc::error::Result<bool> {
+                self.inner.ordered().await
+            }
+            async fn max_packet_life_time(&self) -> webrtc::error::Result<Option<u16>> {
+                self.inner.max_packet_life_time().await
+            }
+            async fn max_retransmits(&self) -> webrtc::error::Result<Option<u16>> {
+                self.inner.max_retransmits().await
+            }
+            async fn protocol(&self) -> webrtc::error::Result<String> {
+                self.inner.protocol().await
+            }
+            async fn negotiated(&self) -> webrtc::error::Result<bool> {
+                self.inner.negotiated().await
+            }
+            fn id(&self) -> webrtc::data_channel::RTCDataChannelId {
+                self.inner.id()
+            }
+            async fn ready_state(
+                &self,
+            ) -> webrtc::error::Result<webrtc::data_channel::RTCDataChannelState> {
+                self.inner.ready_state().await
+            }
+            async fn buffered_amount_high_threshold(&self) -> webrtc::error::Result<u32> {
+                self.inner.buffered_amount_high_threshold().await
+            }
+            async fn set_buffered_amount_high_threshold(
+                &self,
+                n: u32,
+            ) -> webrtc::error::Result<()> {
+                self.inner.set_buffered_amount_high_threshold(n).await
+            }
+            async fn buffered_amount_low_threshold(&self) -> webrtc::error::Result<u32> {
+                self.inner.buffered_amount_low_threshold().await
+            }
+            async fn set_buffered_amount_low_threshold(&self, n: u32) -> webrtc::error::Result<()> {
+                self.inner.set_buffered_amount_low_threshold(n).await
+            }
+            async fn send(&self, data: bytes::BytesMut) -> webrtc::error::Result<()> {
+                self.inner.send(data).await
+            }
+            async fn poll(&self) -> Option<DataChannelEvent> {
+                self.inner.poll().await
+            }
+            async fn close(&self) -> webrtc::error::Result<()> {
+                self.inner.close().await
+            }
+            async fn send_text(&self, text: &str) -> webrtc::error::Result<()> {
+                let frame: Value = serde_json::from_str(text).unwrap();
+                self.frames.lock().push(frame.clone());
+                let id = frame["transferId"].as_str().unwrap_or("");
+                match frame["kind"].as_str() {
+                    Some("start") => {
+                        self.totals
+                            .lock()
+                            .insert(id.into(), frame["totalFrames"].as_u64().unwrap() as usize);
+                    }
+                    Some("chunk") => {
+                        let seq = frame["seq"].as_u64().unwrap() as usize;
+                        let total = self.totals.lock()[id];
+                        if (seq + 1) % FRAME_ACK_WINDOW == 0 || seq + 1 == total {
+                            self.handler
+                                .handle_transport_frame(
+                                    &self.peer,
+                                    self.inner.clone(),
+                                    serde_json::json!({
+                                        "ctoxFrame": CTOX_FRAME_PROTOCOL, "kind": "ack",
+                                        "transferId": id, "ackSeq": seq,
+                                        "receivedFrames": seq + 1, "final": seq + 1 == total,
+                                    }),
+                                )
+                                .await
+                                .unwrap();
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(())
+            }
+        }
+
+        let handler = WebRTCRsConnectionHandler::new();
+        let peer = "cross-collection-receipt".to_owned();
+        install_test_connection(&handler, &peer, 1).await;
+        let pc = handler.peers.lock()[&peer].peer_connection.clone();
+        let inner = pc
+            .create_data_channel("receipt-regression", None)
+            .await
+            .unwrap();
+        let channel = Arc::new(AckChannel {
+            inner,
+            handler: handler.clone(),
+            peer: peer.clone(),
+            frames: Mutex::new(Vec::new()),
+            totals: Mutex::new(HashMap::new()),
+        });
+        let large = serde_json::json!({
+            "id": "large-pull", "collection": "user_thread_states",
+            "result": {"documents": [{"id": "thread", "content": "Große Übertragung".repeat(20_000)}]},
+        }).to_string();
+        let queued_large = handler
+            .enqueue_text(
+                &peer,
+                SendFrameClass {
+                    text: large.clone(),
+                    collection: Some("user_thread_states".into()),
+                    intrinsic_high: true,
+                    oversized_write: false,
+                },
+            )
+            .unwrap();
+        let small = serde_json::json!({
+            "id": "small-command", "collection": "business_commands", "result": [],
+        })
+        .to_string();
+        let queued_small = handler
+            .enqueue_text(
+                &peer,
+                SendFrameClass {
+                    text: small,
+                    collection: Some("business_commands".into()),
+                    intrinsic_high: true,
+                    oversized_write: false,
+                },
+            )
+            .unwrap();
+
+        // The small caller owns the drain, but the large response is first in
+        // its priority bucket. Its own receipt is completed by inline preemption.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            handler.finish_send(&peer, channel.clone(), queued_small),
+        )
+        .await
+        .expect("small command receipt must settle")
+        .unwrap();
+        let large_outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            handler.finish_send(&peer, channel.clone(), queued_large),
+        )
+        .await;
+        let frames = channel.frames.lock().clone();
+        handler.close().await.unwrap();
+        large_outcome
+            .expect("large response must settle")
+            .expect("an interleaved receipt must not cancel another collection's response");
+        let content = frames
+            .iter()
+            .filter(|frame| frame["kind"] == "chunk")
+            .map(|frame| frame["data"].as_str().unwrap())
+            .collect::<String>();
+        assert_eq!(
+            content, large,
+            "every byte of the framed response must arrive"
+        );
+        let small_index = frames
+            .iter()
+            .position(|frame| frame["id"] == "small-command")
+            .unwrap();
+        let last_chunk = frames
+            .iter()
+            .rposition(|frame| frame["kind"] == "chunk")
+            .unwrap();
+        assert!(
+            small_index < last_chunk,
+            "small commands must still preempt large transfers"
+        );
+        assert_eq!(handler.transport_status.lock().retry_count, 0);
     }
 
     #[tokio::test]
