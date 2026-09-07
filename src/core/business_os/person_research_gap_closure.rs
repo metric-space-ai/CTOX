@@ -43,6 +43,7 @@ struct ResearchWritebackRequest {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct FieldStatus {
+    #[serde(deserialize_with = "lenient_string")]
     status: String,
     #[serde(default)]
     value: Value,
@@ -50,7 +51,7 @@ struct FieldStatus {
     sources: Vec<FieldSource>,
     #[serde(default, deserialize_with = "lenient_attempts")]
     attempts: Vec<FieldAttempt>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     reason: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -101,6 +102,7 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(from = "RawFieldSource")]
 struct FieldSource {
     source_id: String,
     #[serde(default)]
@@ -115,6 +117,87 @@ struct FieldSource {
     task_id: String,
     #[serde(default)]
     command_id: String,
+}
+
+/// What workers actually send for a source: `source_id` is often missing (only
+/// `url` or `host`/`domain` given), numbers appear where strings are expected
+/// (a quote that is a year, a numeric source id). All of that is unambiguous,
+/// so it is normalized here instead of rejecting the whole writeback
+/// (07.09.2026: 16 rejections "missing field `source_id`", 8 "expected a
+/// string" within one hour).
+#[derive(Debug, Clone, Deserialize)]
+struct RawFieldSource {
+    #[serde(default, deserialize_with = "lenient_string")]
+    source_id: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    host: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    domain: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    url: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    quote: String,
+    #[serde(default)]
+    person_key: Option<String>,
+    #[serde(default)]
+    requires_credential: bool,
+    #[serde(default, deserialize_with = "lenient_string")]
+    task_id: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    command_id: String,
+}
+
+impl From<RawFieldSource> for FieldSource {
+    fn from(raw: RawFieldSource) -> Self {
+        let mut source_id = raw.source_id.trim().to_string();
+        if source_id.is_empty() {
+            source_id = raw.host.trim().to_string();
+        }
+        if source_id.is_empty() {
+            source_id = raw.domain.trim().to_string();
+        }
+        if source_id.is_empty() {
+            source_id = host_of_url(&raw.url);
+        }
+        FieldSource {
+            source_id,
+            url: raw.url,
+            quote: raw.quote,
+            person_key: raw.person_key,
+            requires_credential: raw.requires_credential,
+            task_id: raw.task_id,
+            command_id: raw.command_id,
+        }
+    }
+}
+
+fn host_of_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.");
+    host.to_ascii_lowercase()
+}
+
+/// Strings that arrive as numbers or booleans are rendered; null becomes "".
+fn lenient_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Null => String::new(),
+        Value::String(text) => text,
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        other => return Err(D::Error::custom(format!("expected a string, got {other}"))),
+    })
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2337,6 +2420,25 @@ mod tests {
             serde_json::json!({"fields": {}, "evidence": "northdata"})
         )
         .is_err());
+    }
+
+    #[test]
+    fn field_sources_derive_source_id_and_render_numbers() {
+        let status: FieldStatus = serde_json::from_value(serde_json::json!({
+            "status": "verified", "value": "x",
+            "sources": [
+                {"url": "https://www.northdata.de/Firma", "quote": 2024},
+                {"host": "impressum.example", "url": "https://impressum.example/i", "quote": "x"},
+                {"source_id": 42, "url": "https://a.de/", "quote": "x"}
+            ],
+            "reason": 7
+        }))
+        .unwrap();
+        assert_eq!(status.sources[0].source_id, "northdata.de");
+        assert_eq!(status.sources[0].quote, "2024");
+        assert_eq!(status.sources[1].source_id, "impressum.example");
+        assert_eq!(status.sources[2].source_id, "42");
+        assert_eq!(status.reason, "7");
     }
 
     #[test]
