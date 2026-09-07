@@ -11430,7 +11430,7 @@ const OFFLINE_FALLBACK_CATALOG = {
         "center": "web page"
       },
       "category": "Workspace",
-      "version": "0.2.8",
+      "version": "0.3.0",
       "developer": "CTOX",
       "license": "AGPL-3.0-only",
       "tags": [
@@ -11670,6 +11670,10 @@ const OFFLINE_FALLBACK_CATALOG = {
         "business_workspace_branding",
         "ctox_queue_tasks",
         "ctox_runs",
+        "ctox_crew_members",
+        "ctox_crew_learnings",
+        "ctox_harness_events",
+        "ctox_harness_status",
         "ctox_bug_reports",
         "business_module_acl",
         "business_module_releases",
@@ -11742,7 +11746,7 @@ const OFFLINE_FALLBACK_CATALOG = {
     {
       "id": "documents",
       "title": "Dokumente",
-      "description": "DOCX- und Markdown-Arbeitsbereich mit Dokumentverwaltung, Serienbriefen, Versionen und Runbooks.",
+      "description": "Word- und Markdown-Arbeitsbereich mit einer kompakten Dokumentverwaltung und direktem Editor.",
       "entry": "modules/documents/index.html",
       "collections": [
         "business_commands",
@@ -11763,7 +11767,6 @@ const OFFLINE_FALLBACK_CATALOG = {
         "center": "DOCX viewer/editor workbench",
         "drawers": {
           "left": "document metadata and import settings",
-          "right": "runbook details and generated commands",
           "bottom": "diagnostics, export evidence, and selected document context"
         }
       },
@@ -12184,7 +12187,7 @@ const OFFLINE_FALLBACK_CATALOG = {
     {
       "id": "spreadsheets",
       "title": "CTOX Spreadsheets",
-      "description": "XLSX workspace with the CTOX Spreadsheets fork, explorer, versions, and CTOX runbooks.",
+      "description": "Spreadsheet-Arbeitsbereich mit kompakter Dateiverwaltung und direktem Tabelleneditor.",
       "entry": "modules/spreadsheets/index.html",
       "collections": [
         "business_commands",
@@ -12200,11 +12203,8 @@ const OFFLINE_FALLBACK_CATALOG = {
         "icon_svg": "<svg width=\"24\" height=\"24\" viewBox=\"0 0 24 24\" fill=\"none\" class=\"svg-icon svg-spreadsheets\"><defs><linearGradient id=\"grad-spreadsheets\" x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\"><stop offset=\"0%\" stop-color=\"#10b981\" /><stop offset=\"100%\" stop-color=\"#059669\" /></linearGradient></defs><rect x=\"3\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"url(#grad-spreadsheets)\" fill-opacity=\"0.12\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></rect><line x1=\"9\" y1=\"3\" x2=\"9\" y2=\"21\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"9\" x2=\"21\" y2=\"9\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><line x1=\"3\" y1=\"15\" x2=\"21\" y2=\"15\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></line><path d=\"M5 17l3-3 4 2 4-4\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1.8\" stroke-linecap=\"round\" stroke-linejoin=\"round\"></path><circle cx=\"16\" cy=\"12\" r=\"1.5\" fill=\"#ffffff\" stroke=\"url(#grad-spreadsheets)\" stroke-width=\"1\"></circle></svg>",
         "left": "spreadsheet navigation and explorer",
         "center": "Spreadsheet viewer/editor workbench",
-        "right": "spreadsheet runbooks and automation prompts",
-        "third_pane_justification": "Runbooks and automation prompts are actionable context for the selected spreadsheet, so they belong beside the workbench in wide mode; the pane is hidden by default and opens through the center-header toggle, then stacks below the grid in compact layouts.",
         "drawers": {
           "left": "spreadsheet metadata and import settings",
-          "right": "runbook details and generated commands",
           "bottom": "diagnostics, export evidence, and selected spreadsheet context"
         }
       },
