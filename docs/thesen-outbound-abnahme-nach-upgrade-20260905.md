@@ -277,3 +277,14 @@ Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
 | Fix `d729826b8` (Upgrade 13, Start 18:12) | `cockpit_chat_delivery.terminal` (ALTER TABLE, idempotent): Zustellung für Tasks mit terminalem Routing-Status markiert den Auftrag, spätere Runden überspringen ihn vor jeder Abfrage. Test `terminal_chats_are_delivered_once_and_skipped_afterwards`; Cockpit-Gruppe 35 grün. An Crew-Thread 01a07107 gemeldet (Nachrichten 01a07d06…, 01a07d07…, 01a07d0e…). Mit dabei `c4f34a277` (Feldwerte direkt in `result` → `result.fields`). |
 | Auth-Assist | Worker stellte ~18:00 „web stack auth assist request · handelsregister.de" (wartend, Owner-Browser). |
 | Lokale Falle | Test-Filter: Modulpfad ist `business_os::harness_cockpit::chat::tests`, nicht `harness_cockpit_chat`; Waiter auf `phase=completed` muss den Release-Namen prüfen, sonst matcht der Vorgänger. |
+
+## 07.09., 18:47–19:05 UTC: Upgrade 13 gemessen, Starts belegt, Retry-Lücke bei unvollständigem Plan, Upgrade 14
+
+| Messung | Wert |
+|---|---|
+| Upgrade 13 (Release branch-main-20260907T180804Z, `d729826b8`), Wartung per Grace 18:47:46 | Cockpit-Runden 1,5–2,6 s, `project_chat_us` 0,7–1,4 s (vorher 190–345 s); 169 Chats settled; Thread `cockpit-projections` 0 % CPU; Last 1,2. Browser-Erstreplikation nach Neuladen in 30 s (`business_commands` complete/connected). |
+| Starts 18:49–18:53 | „Alle recherchieren (2)" → CHEMOFAST (Lease 18:51:11), BÜFA (18:50:06); AKEMI per „Auswahl neu recherchieren (1)" (pending 18:55); ANGUS/BNT/BOOMEX per „Auswahl nachrecherchieren (3)" (alle drei pending bis 19:01). Alle serverseitig in `communication_routing_state` belegt. |
+| Stand 19:01 | 17/19 mit Ergebnis: BÜFA neu 16, Cereda 5 (completed); offen CHEMOFAST (0, terminal) und AKEMI (0, pending). |
+| **Defekt: unvollständiger Plan bleibt terminal** | CHEMOFAST 18:51:13–18:52:58: Worker endet „task execution plan is incomplete (2/12 steps completed)", Task sofort `failed` (attempt 1, failure_attempt_count 0, kein failure_class). Ursache: `runtime_error_is_transient_api_failure` (service.rs) hat eine eigene Substring-Liste; 80561cbc9 hatte nur den Cooldown-Klassifizierer erweitert. Betroffen heute: CHEMOFAST, AKEMI (0/9, 5/6), BÜFA (8/9), BNT (7/8, 4/7), Dreidoppel (5/6), DrinkStar (4/5). |
+| Fix `e3ab5c7b3` (Upgrade 14, Start 19:03) | Beide Marker passieren das Gate → Technik-Hold mit 5-Versuche-Budget, Plan wird fortgesetzt. Test `incomplete_durable_plan_keeps_queue_work_retryable`. |
+| Offen | CHEMOFAST nach Upgrade 14 neu starten; Auth-Assist handelsregister.de wartet auf Owner. |
