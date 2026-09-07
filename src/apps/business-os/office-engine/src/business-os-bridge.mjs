@@ -91,7 +91,7 @@ export function createBusinessOsOfficeBridge(ctx, kind) {
           bytes: payloadBytes,
         });
         const editorSha256 = await sha256Hex(payloadBytes);
-        await flushBridgeSync(lease, config.chunks);
+        await flushSourceLease(ctx, lease, config.chunks);
         return dispatch(ctx, config, 'commit', recordId, {
           [`${kind}_id`]: recordId,
           base_version_id: baseVersionId,
