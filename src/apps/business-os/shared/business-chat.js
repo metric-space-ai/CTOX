@@ -1118,7 +1118,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   // The crew pool lives in the FAB and the bar: a new member, a member that
   // starts reading or learning, or the first pool load after boot needs the
   // full render — the in-place path does not touch the creatures.
-  const crewPoolUnchanged = (root.dataset.crewPoolSignature || '') === crewPoolSignature(state);
+  const crewPoolUnchanged = (root.dataset?.crewPoolSignature || '') === crewPoolSignature(state);
   const canUpdateInPlace = windowShapeUnchanged &&
                            attachmentsUnchanged &&
                            composerShapeUnchanged &&
@@ -1394,7 +1394,7 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
   const previousActiveChatId = root.dataset?.activeChatId || '';
   const hadRenderedDock = Boolean(root.querySelector('[data-chat-dock]'));
 
-  root.dataset.crewPoolSignature = crewPoolSignature(state);
+  if (root.dataset) root.dataset.crewPoolSignature = crewPoolSignature(state);
   root.innerHTML = `
     <section class="ctox-chat-dock ${dockStateClass}" data-chat-dock>
       <button class="ctox-chat-fab" type="button" data-chat-open aria-label="${dockCollapsed ? (chatUiIsGerman() ? 'Crew öffnen' : 'Open crew') : (chatUiIsGerman() ? 'Crew einklappen' : 'Collapse crew')}">
