@@ -155,7 +155,7 @@ export async function mount(ctx) {
       }
       return true;
     } catch (error) {
-      state.ctx.notifications?.error?.(String(error?.message || error));
+      state.ctx.notifications?.show?.({ type: 'error', message: String(error?.message || error) });
       return false;
     }
   });
@@ -235,7 +235,7 @@ function enqueueSpreadsheetOpenFile(state, input) {
     .then(() => openSpreadsheetFile(state, input))
     .catch((error) => {
       console.error('[spreadsheets] opening file from Files failed', error);
-      state.ctx.notifications?.error?.(String(error?.message || error));
+      state.ctx.notifications?.show?.({ type: 'error', message: String(error?.message || error) });
       if (!state.editorHandle) renderSpreadsheetOpenError(state, error);
       return null;
     });
@@ -559,10 +559,10 @@ async function requestBlankSpreadsheet(state) {
   state.creatingBlankSpreadsheet = true;
   try {
     await createNewSpreadsheet(state);
-    state.ctx.notifications?.success?.(state.t('blankSpreadsheetCreated', 'Leere Tabelle erstellt.'));
+    state.ctx.notifications?.show?.({ type: 'success', message: state.t('blankSpreadsheetCreated', 'Leere Tabelle erstellt.') });
   } catch (error) {
     console.error('[spreadsheets] blank spreadsheet creation failed', error);
-    state.ctx.notifications?.error?.(`${state.t('spreadsheetCreateFailed', 'Tabelle konnte nicht erstellt werden:')} ${error?.message || error}`);
+    state.ctx.notifications?.show?.({ type: 'error', message: `${state.t('spreadsheetCreateFailed', 'Tabelle konnte nicht erstellt werden:')} ${error?.message || error}` });
   } finally {
     state.creatingBlankSpreadsheet = false;
   }
@@ -1310,7 +1310,7 @@ function bindLeftControls(state, wrap) {
           await renderCenter(state);
           renderRight(state);
         })().catch((error) => {
-          state.ctx.notifications?.error?.(String(error?.message || error));
+          state.ctx.notifications?.show?.({ type: 'error', message: String(error?.message || error) });
         });
       }
       return;
@@ -1644,7 +1644,10 @@ async function mountCtoxSpreadsheets(state, host, record, version) {
     }, 900);
   }
   function onError(error) {
-    console.error('[spreadsheets] editor save failed', error);
+    const detail = error?.error || error;
+    const code = String(detail?.code || error?.code || '');
+    const message = String(error?.message || detail?.message || error);
+    console.error('[spreadsheets] editor save failed', `code=${code}`, `message=${message}`, error);
     if (!isCurrent()) return;
     errorReported = true;
     handle.activity += 1;
@@ -1652,7 +1655,10 @@ async function mountCtoxSpreadsheets(state, host, record, version) {
     handle.saving = false;
     state.saving = false;
     markSpreadsheetAsDirty(state);
-    state.ctx.notifications?.error?.(String(error?.message || error?.error?.message || error));
+    state.ctx.notifications?.show?.({
+      type: 'error', message, time: 0,
+      action: { label: state.t('close', 'Schließen'), callback: () => {} },
+    });
     // No automatic retry after errors (in particular version conflicts).
   }
   state.editorHandle = handle;
@@ -1914,10 +1920,10 @@ function openNewSpreadsheetDrawer(state) {
       }
       state.ctx.closeDrawers();
       await createNewSpreadsheet(state, input);
-      state.ctx.notifications?.success?.(state.t('draftCreated', 'Tabellenentwurf erstellt.'));
+      state.ctx.notifications?.show?.({ type: 'success', message: state.t('draftCreated', 'Tabellenentwurf erstellt.') });
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Erstellen: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Erstellen: ${err.message}` });
     }
   });
 
@@ -1967,10 +1973,10 @@ function openImportModal(state) {
     state.ctx.closeDrawers();
     try {
       await importSpreadsheetFile(state, file, tags);
-      state.ctx.notifications?.success?.(`Datei ${file.name} erfolgreich importiert.`);
+      state.ctx.notifications?.show?.({ type: 'success', message: `Datei ${file.name} erfolgreich importiert.` });
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Importieren: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Importieren: ${err.message}` });
     }
   });
 
@@ -2017,10 +2023,10 @@ function openExportModal(state) {
       const bytes = await state.editorHandle.export();
       const downloadName = ensureExtension(slugFilename(record.title || 'export'), '.xlsx');
       downloadBlob(bytes, XLSX_MIME, downloadName, state.ctx.host);
-      state.ctx.notifications?.success?.(`Export abgeschlossen: ${downloadName}`);
+      state.ctx.notifications?.show?.({ type: 'success', message: `Export abgeschlossen: ${downloadName}` });
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Exportieren: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Exportieren: ${err.message}` });
     }
   });
 
@@ -2087,7 +2093,7 @@ async function openManageDrawer(state, id) {
         updated_at_ms: Date.now()
       });
       state.ctx.closeDrawers();
-      state.ctx.notifications?.success?.('Änderungen erfolgreich gespeichert.');
+      state.ctx.notifications?.show?.({ type: 'success', message: 'Änderungen erfolgreich gespeichert.' });
       await refreshSpreadsheets(state);
       renderLeft(state);
       if (state.selectedId === id) {
@@ -2095,7 +2101,7 @@ async function openManageDrawer(state, id) {
       }
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Speichern: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Speichern: ${err.message}` });
     }
   });
 
@@ -2110,7 +2116,7 @@ async function openManageDrawer(state, id) {
     try {
       await doc.incrementalPatch({ is_deleted: true, updated_at_ms: Date.now() });
       state.ctx.closeDrawers();
-      state.ctx.notifications?.success?.('Tabelle erfolgreich gelöscht.');
+      state.ctx.notifications?.show?.({ type: 'success', message: 'Tabelle erfolgreich gelöscht.' });
 
       if (state.selectedId === id) {
         state.selectedId = '';
@@ -2125,7 +2131,7 @@ async function openManageDrawer(state, id) {
       renderCenter(state);
     } catch (err) {
       console.error(err);
-      state.ctx.notifications?.error?.(`Fehler beim Löschen: ${err.message}`);
+      state.ctx.notifications?.show?.({ type: 'error', message: `Fehler beim Löschen: ${err.message}` });
     }
   });
 

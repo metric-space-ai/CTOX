@@ -183,6 +183,8 @@ jobs:
       - name: Business OS Office mobile height
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: npm --prefix src/apps/business-os run qa:shell-office-height -- --output-dir "${RUNNER_TEMP}/ctox-shell-office-height"
+      - name: Guard Office notification contract
+        run: npm --prefix src/apps/business-os run qa:office-notifications -- --output-dir "${RUNNER_TEMP}/ctox-office-notifications"
 
       - name: Business OS JS tests
         if: matrix.target == 'x86_64-unknown-linux-gnu'

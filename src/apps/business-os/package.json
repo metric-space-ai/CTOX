@@ -27,6 +27,7 @@
     "qa:shell-generation-native": "node scripts/shell-generation-native.browser.mjs",
     "audit:app-quality": "node scripts/audit-app-quality.mjs",
     "qa:shell-office-height": "node scripts/shell-office-height.browser.mjs",
+    "qa:office-notifications": "node scripts/office-notifications.browser.mjs",
     "qa:design-gates": "node scripts/run-design-quality-gates.mjs",
     "shell:artifact": "node scripts/build-shell-artifact.mjs",
     "shell:sign-release": "node scripts/sign-shell-release.mjs",

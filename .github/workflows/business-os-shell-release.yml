@@ -77,6 +77,8 @@ jobs:
 
       - name: Guard mobile Office editor height
         run: npm --prefix src/apps/business-os run qa:shell-office-height -- --output-dir "${RUNNER_TEMP}/ctox-shell-office-height"
+      - name: Guard Office notification contract
+        run: npm --prefix src/apps/business-os run qa:office-notifications -- --output-dir "${RUNNER_TEMP}/ctox-office-notifications"
 
       - name: Run focused shell artifact tests
         run: npm run test:shell-artifact --prefix src/apps/business-os
