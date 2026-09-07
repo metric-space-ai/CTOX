@@ -230,3 +230,13 @@ Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
 | Fortsetzung | Daemon legte heute 32 „Nachrecherche"-Folgeaufträge an; Destilla stieg damit von 11 auf 15 Felder. „Fortsetzen: …" nach Anmeldebestätigung laut Skill §8; freier Chat-Turn trägt den Writeback-Vertrag nicht. |
 | Stand 11:33 | Destilla 15, Richter 13, Additiv 13, Calvatis 9, BNT 1 Felder; 3 Worker, 17 wartend. **Bremse:** Formfehler im Writeback (ANGUS 25 Ablehnungen in 9 min: `result` fehlt, Listen als ""/Objekt, `item`-Hülle, Feldschlüssel oben). |
 | Fix `e582dd595` (Upgrade 8, 11:36) | Empfänger leitet `result.fields` aus verifizierten `field_status`-Einträgen ab, akzeptiert ""/Objekt/JSON-String als Liste (`sources`, `attempts`, `evidence`, `person_records`, `fields`); Werkzeugbeschreibung nennt das exakte Format und die typischen Fehler. 23 Tests. |
+
+## 07.09., 12:05–13:40 UTC: Upgrade 8 und 9 (Writeback-Toleranz), Stand des Laufs
+
+| Messung | Wert |
+|---|---|
+| Upgrade 8 (Release branch-main-20260907T112714Z, 12:05) | Wartung per Grace-Pfad 12:07:20 (kein Client). Danach verbleibende Ablehnungen: „missing field `source_id`" 16, „invalid type: number, expected a string" 8 (in 1 h). Handshake-Fehler nur als Burst bei drei gleichzeitigen Worker-Starts (12:32–12:35) → Kapazität 3 → 2. |
+| Upgrade 9 (Release branch-main-20260907T124810Z, 13:17; `5b4ab72ff`: `source_id` aus Host/URL, Zahlen als Text) | Wartung per Grace-Pfad 13:27:55. **Seit 13:17: 6 Writebacks angenommen, 0 abgewiesen** (11:36–13:17: 20 angenommen, 50 abgewiesen). |
+| Kampagnenstart 13:28 („Alle recherchieren (10)") | alle 10 Aufträge in 10 min angelegt (App 1.0.105 + stabiler Sync). |
+| Stand 13:40 | 10 von 19 Leads mit Ergebnis, 96 Felder: Destilla 15, Aeroxon 15, Richter 13, Additiv 13, Chemotechnik 12, Dreidoppel 11, Calvatis 9, ANGUS 6, BNT 1, Carbosulf 1. Aeroxon vollständig regelkonform (Register, Impressum, 2 Personen mit LinkedIn, Mitarbeiter verifiziert). Kennzahlen (WZ/Umsatz/Mitarbeiter aus D&B Hoovers) weiterhin offen: Anmeldeanforderung liegt beim Eigentümer. |
+| Eigene Falle | Monitore 11:36–12:43 blind: `timeout` existiert auf macOS nicht (Memory `macos-kein-timeout`). |
