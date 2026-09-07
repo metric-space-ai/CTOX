@@ -308,3 +308,13 @@ Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
 | Feldtabelle 20:36 (recherchierte Felder) | Carbosulf 22 (completed), BÜFA 21, DrinkStar 20, BEWI RAW 19, ANGUS 17, Aeroxon 16, Destilla 15, Berg 14, BOOMEX 14 (completed), BNT 13, Richter 13, Dreidoppel 13, Chemotechnik 13, Additiv 13, Beiersdorf 12, CHEMOFAST 11, Calvatis 9, AKEMI 9, Cereda 5 (completed). Summe 269 Felder, Ø 14,2 von 32. |
 | Bewertung | Alle 19 haben Ergebnisse; keine Firma vollständig. Umsatz/Mitarbeiter/WZ hängen an Login-Quellen (D&B Hoovers, handelsregister.de: Auth-Assist-Anfragen offen). |
 | Stand 21:12 | 276 Felder über 19 Leads (Cereda 5 → 12). Laufend: Nachrecherche CHEMOFAST (Lease 21:06), Cereda-Wiederholung 21:22 (Technik-Hold), Adapter-Abgleich, Auth-Assist handelsregister.de (geleast, wartet auf Owner-Login). |
+
+## 07.09., 21:40–22:00 UTC: Nacharbeit an den offenen Punkten
+
+| Punkt | Stand |
+|---|---|
+| Adapter-Abgleich verdrängt Recherchen | App 1.0.106 live (21:46): `outbound.research.adapters.reconcile` mit Priorität `low` statt `urgent`. Daemon `d890ca4df` (nächstes Upgrade): Scrape-Reparaturen und Adapter-Erzeugung `low` statt `high`. Dedupe im Daemon bleibt offen (Crew-Thread 01a07d81…). |
+| 30-Minuten-Session-Limit | `CTOX_CHAT_TURN_TIMEOUT_SECS=1800` in ctox-runtime.sqlite3 (Operator-Einstellung, TUI-Auswahl bis 3600). Nicht geändert: der Shell-Drawer „Runtime" lud den Laufzeitstatus nicht („Runtime nicht geladen", Provider/Modell leer); „Übernehmen" hätte die leere Provider-/Modellwahl mitgeschrieben. Kein CLI-Pfad für einen einzelnen Wert. Owner kann es in der TUI setzen; Timeout-Fortsetzungen existieren (`maybe_enqueue_timeout_continuation`). |
+| `database is locked` | busy_timeout ist bereits 30 s (`persistence::sqlite_busy_timeout_duration`); die Sperren kommen von langen Schreibtransaktionen der Peer-Schleifen (ticket_state/knowledge/business_records je ~110 s nach Neustart). Ursache liegt im Peer, gemeldet (01a07d6d…). |
+| Live-Flow zeigt „Queued" für terminal Fehlgeschlagene | Auf main bevorzugt `routingProblemStatus` (modules/ctox/index.js) den Routing-Status `failed` vor der Phase; der auf thesen aktive Shell-Slot ist älter. Wird mit dem nächsten Shell-Release aus main verifiziert, nicht heute. |
+| Tests | `cargo test -p ctox --bin ctox -- capabilities::scrape store_outbound_commands`: 99 grün, 3 rot — dieselben 3 sind auf unverändertem origin/main rot (adapter_reconciliation_projects_typed_result_without_secrets, …_rejects_invalid_batch_before_any_write, embed_texts_via_local_socket_uses_internal_embedding_contract). Vorbestand, nicht meine Änderung. |
