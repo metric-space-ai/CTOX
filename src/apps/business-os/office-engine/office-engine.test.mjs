@@ -31,7 +31,10 @@ test('blob helper rejects incomplete chunks and rebuilds valid bytes', async () 
   const bytes = new TextEncoder().encode('office-data');
   const rows = [];
   const chunks = {
-    async bulkUpsert(next) { rows.push(...next); },
+    async bulkUpsert(next) {
+      rows.push(...next);
+      return next.map((row) => ({ toJSON: () => ({ ...row, _meta: { lwt: Date.now() } }) }));
+    },
     find({ selector }) {
       return { async exec() { return rows.filter((row) => row.blob_id === selector.blob_id); } };
     },
@@ -235,7 +238,10 @@ test('Business OS bridge reads versions and dispatches typed office commands', a
   const collection = (name) => ({
     findOne(id) { return { async exec() { return docs.get(id) || null; } }; },
     find({ selector }) { return { async exec() { return name === 'document_blob_chunks' ? chunks.filter((row) => row.blob_id === selector.blob_id) : []; } }; },
-    async bulkUpsert(rows) { chunks.push(...rows); },
+    async bulkUpsert(rows) {
+      chunks.push(...rows);
+      return rows.map((row) => ({ toJSON: () => ({ ...row, _meta: { lwt: Date.now() } }) }));
+    },
   });
   const ctx = {
     db: { collection },
@@ -244,7 +250,17 @@ test('Business OS bridge reads versions and dispatches typed office commands', a
       async leaseCollection(name, reason) {
         leases.push(`lease:${name}:${reason}`);
         return {
-          bridge: { state: { async awaitInSync() {}, async pushToRemotePeers() { leases.push(`push:${name}`); } } },
+          bridge: { state: {
+            async awaitInSync() {},
+            async pushToRemotePeers() { leases.push(`push:${name}`); },
+            async waitForOpenPeerId() { return 'native-peer'; },
+            async pushDocumentsToPeer(peerId, rows) {
+              assert.equal(peerId, 'native-peer');
+              assert.ok(rows.length > 0);
+              assert.ok(rows.every((row) => row._meta.lwt > 0));
+              leases.push(`push:${name}`);
+            },
+          } },
           async release() { leases.push(`release:${name}`); },
         };
       },
@@ -693,13 +709,25 @@ test('spreadsheet commit stages XLSX bytes and carries the conflict base through
   const ctx = {
     db: { collection(name) {
       if (name !== 'spreadsheet_blob_chunks') return {};
-      return { async bulkUpsert(rows) { staged.push(...rows); } };
+      return { async bulkUpsert(rows) {
+        staged.push(...rows);
+        return rows.map((row) => ({ toJSON: () => ({ ...row, _meta: { lwt: Date.now() } }) }));
+      } };
     } },
     permissions: { canWriteCollection: () => true },
     sync: {
       async leaseCollection() {
         return {
-          bridge: { state: { async awaitInSync() {}, async pushToRemotePeers() {} } },
+          bridge: { state: {
+            async awaitInSync() {},
+            async pushToRemotePeers() {},
+            async waitForOpenPeerId() { return 'native-peer'; },
+            async pushDocumentsToPeer(peerId, rows) {
+              assert.equal(peerId, 'native-peer');
+              assert.equal(rows.length, staged.length);
+              assert.deepEqual(rows.map(({ _meta, ...row }) => row), staged);
+            },
+          } },
           async release() {},
         };
       },

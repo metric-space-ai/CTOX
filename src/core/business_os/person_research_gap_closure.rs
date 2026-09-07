@@ -364,8 +364,13 @@ pub(super) fn handle_research_writeback(
     root: &Path,
     command: &BusinessCommand,
 ) -> anyhow::Result<Value> {
+    // The worker only ever sees this message. Without the serde detail it
+    // resent the same malformed payload four times on 07.09.2026 (a stray
+    // `firma_land` key nested inside another field's status object).
     let request: ResearchWritebackRequest = serde_json::from_value(command.payload.clone())
-        .context("invalid outbound.lead.research_writeback payload")?;
+        .map_err(|error| {
+            anyhow::anyhow!("invalid outbound.lead.research_writeback payload: {error}")
+        })?;
     anyhow::ensure!(
         request.module == "outbound-lead-generation" && command.module == request.module,
         "research writeback module must be outbound-lead-generation"
