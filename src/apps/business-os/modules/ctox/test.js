@@ -78,6 +78,7 @@ const {
 test('Missing authoritative task telemetry remains a safe empty state', () => {
   assert.equal(authoritativeTaskStatus(null), '');
   assert.equal(authoritativeTaskNodeId(null), '');
+  assert.equal(authoritativeTaskStatus({ routeStatus: 'handled', executionPhase: 'terminal', terminalStatus: 'completed' }), 'completed');
 });
 
 test('Terminal routing failure outranks stale command and plan, remains inspectable with its error', () => {

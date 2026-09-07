@@ -4309,7 +4309,9 @@ function isFocusedTask(item, focusTask) {
 
 function routingProblemStatus(task = {}) {
   const route = normalizeCommandStatus(task?.routeStatus || task?.route_status || '');
-  return HARNESS_PROBLEM_TERMINAL_STATUSES.has(route) ? route : '';
+  // A handled route still needs the command's review/terminal evidence; it
+  // must not mask an explicitly completed command as an unverified outcome.
+  return ['failed', 'cancelled', 'blocked'].includes(route) ? route : '';
 }
 
 function authoritativeTaskStatus(task = {}) {
