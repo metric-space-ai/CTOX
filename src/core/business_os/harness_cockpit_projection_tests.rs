@@ -155,6 +155,25 @@ fn crew_events_only_wake_does_not_read_crew_tables() -> Result<()> {
 }
 
 #[test]
+fn normal_event_wake_skips_selection_repair_scan() -> Result<()> {
+    let (root, conn) = setup()?;
+    // Deliberately incomplete attempts/outbox: probing existence is harmless,
+    // but a repair SELECT would fail. Normal events must not read this history.
+    conn.execute_batch("CREATE TABLE crew_attempts(attempt_id TEXT);
+        CREATE TABLE crew_projection_tombstones(id TEXT);
+        INSERT INTO communication_routing_state VALUES('task','leased','2026-01-01');
+        INSERT INTO ctox_harness_flow_events VALUES('phase','worker.phase','Working','','task',NULL,NULL,'{}','2026-01-01T00:00:00Z');")?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    refresh_selected(root.path(), &WorkerSnapshot::default(), &mut writer, EVENTS)?;
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "phase")?["title"],
+        "Working"
+    );
+    assert!(crate::crew::repair_selection_events(root.path(), &conn).is_err());
+    Ok(())
+}
+
+#[test]
 fn crew_unchanged_source_skips_learning_reads_and_resting_expires() -> Result<()> {
     let (root, conn) = setup()?;
     conn.execute_batch("ALTER TABLE communication_routing_state ADD COLUMN leased_at TEXT;")?;
@@ -869,5 +888,222 @@ fn status_tracks_start_stop_and_persistent_pause_with_no_change_churn() -> Resul
     assert_eq!(stopped["pause_reason"], "operator");
     assert!(stopped["active_task_ids"].as_array().unwrap().is_empty());
     assert!(stopped["active_crew_member_id"].is_null());
+    Ok(())
+}
+#[test]
+fn repeated_worker_snapshots_are_counted_without_repeated_wakes() {
+    let root = Path::new("fixture");
+    let mut latest = BTreeMap::new();
+    assert!(record_snapshot(
+        &mut latest,
+        root,
+        WorkerSnapshot::default()
+    ));
+    for _ in 0..1000 {
+        assert!(!record_snapshot(
+            &mut latest,
+            root,
+            WorkerSnapshot::default()
+        ));
+    }
+    assert!(record_snapshot(
+        &mut latest,
+        root,
+        WorkerSnapshot {
+            busy: true,
+            ..Default::default()
+        }
+    ));
+    assert_eq!(latest[root].publications, 1002);
+    assert_eq!(latest[root].changes, 2);
+    assert!(latest[root].snapshot.busy);
+}
+
+#[test]
+fn only_visible_flow_and_chat_events_wake_the_pump() {
+    for kind in [
+        "router.idle",
+        "queue.polled",
+        "unrelated",
+        "worker.unrecognized",
+    ] {
+        assert_eq!(flow_refresh_flags(kind), 0, "{kind}");
+    }
+    for kind in [
+        "worker.tool_started",
+        "worker.tool_completed",
+        "worker.thinking",
+        "crew.memory_read",
+        "crew.learning",
+    ] {
+        assert_eq!(flow_refresh_flags(kind), EVENTS, "{kind}");
+    }
+    assert_eq!(flow_refresh_flags("crew_selected"), EVENTS | STATUS | QUEUE);
+    assert_eq!(flow_refresh_flags("cockpit.review"), EVENTS | CHAT);
+    assert_eq!(flow_refresh_flags("worker.plan_updated"), EVENTS | CHAT);
+}
+
+#[test]
+fn incremental_events_skip_unchanged_tasks_and_replay_repairs() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch("INSERT INTO communication_routing_state VALUES('a','leased','2026-01-01');
+        INSERT INTO communication_routing_state VALUES('b','leased','2026-01-01');
+        INSERT INTO ctox_harness_flow_events VALUES('a0','worker.phase','A','','a',NULL,NULL,'{}','2026-01-02T00:00:00Z');
+        INSERT INTO ctox_harness_flow_events VALUES('b0','worker.phase','B','','b',NULL,NULL,'{}','2026-01-02T00:00:00Z');")?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_events_since(root.path(), &conn, &mut writer, false)?;
+    assert_eq!(writer.event_cursor, Some(2));
+    // An in-place source repair stays untouched by the incremental hot path.
+    conn.execute(
+        "UPDATE ctox_harness_flow_events SET title='Repaired A' WHERE event_id='a0'",
+        [],
+    )?;
+    project_events_since(root.path(), &conn, &mut writer, false)?;
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "a0")?["title"],
+        "A"
+    );
+    // Backdated insertion must be seen; created_at cannot be the cursor.
+    conn.execute_batch("INSERT INTO ctox_harness_flow_events VALUES('b1','worker.phase','Late B','','b',NULL,NULL,'{}','2026-01-01T00:00:00Z');")?;
+    project_events_since(root.path(), &conn, &mut writer, false)?;
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "b1")?["title"],
+        "Late B"
+    );
+    assert_eq!(writer.event_cursor, Some(3));
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "a0")?["title"],
+        "A"
+    );
+    project_events_since(root.path(), &conn, &mut writer, true)?;
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "a0")?["title"],
+        "Repaired A"
+    );
+    // Reopening the pump starts from durable retained history.
+    let mut restarted = BusinessProjectionWriter::open(root.path())?;
+    assert_eq!(restarted.event_cursor, None);
+    project_events_since(root.path(), &conn, &mut restarted, false)?;
+    assert_eq!(restarted.event_cursor, Some(3));
+    Ok(())
+}
+
+#[test]
+fn event_cursor_waits_for_delivery_and_task_cap_stays_immediate() -> Result<()> {
+    let (root, conn) = setup()?;
+    conn.execute_batch(
+        "INSERT INTO communication_routing_state VALUES('task','leased','2026-01-01');",
+    )?;
+    for n in 0..201 {
+        conn.execute("INSERT INTO ctox_harness_flow_events VALUES(?1,'worker.phase','Phase','','task',NULL,NULL,'{}',?2)",
+            params![format!("event-{n:03}"), format!("2026-01-01T00:{:02}:{:02}Z", n / 60, n % 60)])?;
+    }
+    let rxdb = Connection::open(store::rxdb_store_path(root.path()))?;
+    rxdb.execute_batch(
+        "ALTER TABLE ctox_business_os__ctox_harness_events__v0 RENAME TO hidden_events;",
+    )?;
+    let mut writer = BusinessProjectionWriter::open(root.path())?;
+    project_events_since(root.path(), &conn, &mut writer, false)?;
+    assert_eq!(writer.event_cursor, None);
+    rxdb.execute_batch(
+        "ALTER TABLE hidden_events RENAME TO ctox_business_os__ctox_harness_events__v0;",
+    )?;
+    project_events_since(root.path(), &conn, &mut writer, false)?;
+    assert_eq!(writer.event_cursor, Some(201));
+    conn.execute_batch("INSERT INTO ctox_harness_flow_events VALUES('new','worker.phase','New','','task',NULL,NULL,'{}','2026-01-01T01:00:00Z');")?;
+    project_events_since(root.path(), &conn, &mut writer, false)?;
+    assert_eq!(writer.inner.source_connection().query_row(
+        "SELECT COUNT(*) FROM business_records WHERE collection='ctox_harness_events' AND deleted=0", [], |r| r.get::<_, i64>(0))?, 200);
+    assert_eq!(writer.inner.source_connection().query_row(
+        "SELECT deleted FROM business_records WHERE collection='ctox_harness_events' AND record_id='event-001'", [], |r| r.get::<_, i64>(0))?, 1);
+    assert_eq!(
+        record(root.path(), "ctox_harness_events", "new")?["title"],
+        "New"
+    );
+    Ok(())
+}
+
+#[test]
+fn changed_event_query_and_task_retention_use_bounded_indexes() -> Result<()> {
+    let (root, _fixture) = setup()?;
+    let conn = core(root.path())?;
+    let writer = BusinessProjectionWriter::open(root.path())?;
+    let plan = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {CHANGED_EVENT_TASKS_SQL}"))?
+        .query_map(params![100, 101, "", 128], |row| row.get::<_, String>(3))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .join("\n");
+    assert!(
+        plan.contains("SEARCH e USING INTEGER PRIMARY KEY (rowid>? AND rowid<?)"),
+        "{plan}"
+    );
+    assert!(!plan.contains("SCAN e"), "{plan}");
+    let plan = writer
+        .inner
+        .source_connection()
+        .prepare(&format!("EXPLAIN QUERY PLAN {EXCESS_TASK_EVENTS_SQL}"))?
+        .query_map(["task"], |row| row.get::<_, String>(3))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .join("\n");
+    assert!(plan.contains("idx_cockpit_event_task_time"), "{plan}");
+    assert!(!plan.contains("TEMP B-TREE"), "{plan}");
+    Ok(())
+}
+
+#[test]
+fn idle_event_query_cost_does_not_grow_with_retained_history() -> Result<()> {
+    use rusqlite::StatementStatus;
+    let (root, fixture) = setup()?;
+    fixture.execute_batch("BEGIN;
+        WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<1000)
+        INSERT INTO communication_routing_state SELECT printf('task-%04d',i),'leased','2026-01-01' FROM n;
+        WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<50)
+        INSERT INTO ctox_harness_flow_events
+        SELECT r.message_key||'-'||n.i,'worker.phase','Phase','',r.message_key,NULL,NULL,'{}','2026-01-01T00:00:00Z'
+        FROM communication_routing_state r CROSS JOIN n;
+        COMMIT;")?;
+    let conn = core(root.path())?;
+    let high_water: i64 =
+        conn.query_row("SELECT MAX(rowid) FROM ctox_harness_flow_events", [], |r| {
+            r.get(0)
+        })?;
+    assert_eq!(high_water, 50_000);
+    let mut incremental = conn.prepare(CHANGED_EVENT_TASKS_SQL)?;
+    let unchanged = incremental
+        .query_map(params![high_water, high_water, "", 128], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert!(unchanged.is_empty());
+    let idle_steps = incremental.reset_status(StatementStatus::VmStep);
+    assert!(
+        idle_steps < 100,
+        "idle query visited history: {idle_steps} VM steps"
+    );
+    let changed = incremental
+        .query_map(params![high_water - 1, high_water, "", 128], |r| {
+            r.get::<_, String>(0)
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    assert_eq!(changed.len(), 1);
+    let changed_steps = incremental.get_status(StatementStatus::VmStep);
+    assert!(
+        changed_steps < 150,
+        "single insertion visited history: {changed_steps} VM steps"
+    );
+    // Original per-wake task enumeration alone, before its per-task 200-event
+    // reads and JSON/plan projection. Count VM work, not flaky wall-clock time.
+    let mut baseline = conn.prepare(
+        "SELECT message_key FROM communication_routing_state
+        WHERE message_key > '' AND (route_status NOT IN ('handled','failed','cancelled')
+        OR julianday(updated_at)>=julianday('now','-1 day')) ORDER BY message_key",
+    )?;
+    assert_eq!(
+        baseline.query_map([], |r| r.get::<_, String>(0))?.count(),
+        1000
+    );
+    let baseline_steps = baseline.get_status(StatementStatus::VmStep);
+    assert!(baseline_steps > 100 * idle_steps);
+    eprintln!("cockpit VM benchmark: 1000 tasks/50000 events; baseline task enumeration={baseline_steps}, incremental idle={idle_steps}, one inserted row={changed_steps}");
     Ok(())
 }

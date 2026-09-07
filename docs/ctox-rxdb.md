@@ -1435,6 +1435,20 @@ Queue counters count inbound queue work, matching the existing pressure guard.
 Worker/queue hooks wake a bounded lossy writer independently of the stamp-gated
 runtime-settings loop; a 60-second replay repairs missed delivery. These
 collections have one dedicated producer, excluded from generic record replay.
+The pump coalesces wake flags per root and waits at least two seconds after
+that root's previous pass completes (including failed passes). Other roots
+have independent deadlines. Identical worker snapshots do not wake it, and
+flow kinds that feed neither cockpit events nor chat do not wake it either.
+Normal event passes follow an in-memory ledger `rowid` cursor and read only
+tasks with newly inserted flow rows; backdated events are included. The cursor
+advances after successful delivery. Startup and the 60-second sweep replay
+durable sources, including repaired timestamps and delayed routing rows.
+Selection-event repair, attempt retention and global event expiry run on that
+maintenance sweep; the indexed 200-event cap is enforced per changed task.
+Once per minute, `[ctox cockpit]` logs the root, observation interval,
+snapshot publications/changes, accepted wakes, projection passes and time
+spent projecting. Snapshot counters are copied under the short publication
+lock; logging and all database work run after releasing it.
 Malformed `queue.pause` is treated as not paused, logged once until recovery and
 reported in `last_error`; repairing the configuration clears that diagnostic.
 
