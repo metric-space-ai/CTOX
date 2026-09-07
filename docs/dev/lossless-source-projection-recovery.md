@@ -58,6 +58,10 @@ measurement passes the existing local warm-command target, not production WAN
 or boot-p95 acceptance. It predates the startup-only legacy-source safeguard.
 [Raw warm-command measurements](beweise/raw/warm-command-release-20260907.json).
 
-Native production deployment and the fourteen historical source repairs remain
-pending at this checkpoint. The seven Office staging tombstones were repaired
-separately and are documented in the incident report.
+Native production deployment has now completed. The fourteen historical source
+repairs remain pending. The actual installed binary passed the source/restart
+fixture and the local warm-command p50 target; general projection truncation,
+a worker-schema conflict and slower complete source transfer remain open.
+See [production postflight and architecture acceptance limits](native-sync-postflight-20260907.md).
+The seven Office staging tombstones were repaired separately and are documented
+in the incident report.
