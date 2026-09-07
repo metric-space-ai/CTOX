@@ -141,6 +141,8 @@ const QUEUE: u8 = 8;
 const CHAT: u8 = 16;
 // Core-ledger retention belongs to the periodic pump sweep, not admission wakes.
 const MAINTENANCE: u8 = 32;
+/// Minimum spacing between two projection refreshes of the same root.
+const PROJECTION_MIN_INTERVAL: Duration = Duration::from_secs(3);
 const ALL: u8 = STATUS | EVENTS | RUNS | QUEUE | CHAT;
 
 fn pump() -> Option<&'static Pump> {
@@ -155,6 +157,14 @@ fn pump() -> Option<&'static Pump> {
                 let mut roots = BTreeSet::<PathBuf>::new();
                 let mut writers = BTreeMap::<PathBuf, BusinessProjectionWriter>::new();
                 let mut next_sweep = Instant::now() + Duration::from_secs(60);
+                // Every worker heartbeat, flow event and command saga wakes the
+                // pump, and every wake replays the projection queries. On a
+                // customer instance with four research workers this thread
+                // burned 70-100 % of a core for hours (07.09.2026) and starved
+                // the MCP handshake of new workers. Wakes are coalesced into at
+                // most one refresh per root per interval; nothing is lost, a
+                // later wake refreshes everything the earlier ones asked for.
+                let mut last_refresh = BTreeMap::<PathBuf, Instant>::new();
                 loop {
                     let mut dirty = BTreeMap::<PathBuf, u8>::new();
                     match receive.recv_timeout(next_sweep.saturating_duration_since(Instant::now()))
@@ -167,6 +177,20 @@ fn pump() -> Option<&'static Pump> {
                     }
                     for (root, flags) in receive.try_iter() {
                         *dirty.entry(root).or_default() |= flags;
+                    }
+                    let earliest = dirty
+                        .keys()
+                        .filter_map(|root| last_refresh.get(root))
+                        .map(|at| *at + PROJECTION_MIN_INTERVAL)
+                        .max();
+                    if let Some(earliest) = earliest {
+                        let wait = earliest.saturating_duration_since(Instant::now());
+                        if !wait.is_zero() {
+                            std::thread::sleep(wait);
+                            for (root, flags) in receive.try_iter() {
+                                *dirty.entry(root).or_default() |= flags;
+                            }
+                        }
                     }
                     if Instant::now() >= next_sweep {
                         for root in &roots {
@@ -184,6 +208,7 @@ fn pump() -> Option<&'static Pump> {
                         if roots.insert(root.clone()) {
                             flags |= ALL;
                         }
+                        last_refresh.insert(root.clone(), Instant::now());
                         let snapshot = snapshots
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
