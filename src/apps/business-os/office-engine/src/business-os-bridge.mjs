@@ -84,14 +84,14 @@ export function createBusinessOsOfficeBridge(ctx, kind) {
       const payloadBytes = normalizeBytes(bytes);
       const editorBlobId = `office_${kind}_${crypto.randomUUID()}`;
       return withChunkLease(ctx, config, `${config.module}-commit`, async (lease) => {
-        await saveBlob(collection(config.chunks), config, {
+        const documents = await saveBlob(collection(config.chunks), config, {
           blobId: editorBlobId,
           recordId,
           versionId: baseVersionId,
           bytes: payloadBytes,
         });
         const editorSha256 = await sha256Hex(payloadBytes);
-        await flushSourceLease(ctx, lease, config.chunks);
+        await flushSourceLease(ctx, lease, config.chunks, documents);
         return dispatch(ctx, config, 'commit', recordId, {
           [`${kind}_id`]: recordId,
           base_version_id: baseVersionId,
@@ -332,8 +332,35 @@ async function saveBlob(chunks, config, { blobId, recordId, versionId, bytes }) 
       created_at_ms: now,
     });
   }
-  if (typeof chunks.bulkUpsert === 'function') await chunks.bulkUpsert(rows);
-  else for (const row of rows) await chunks.incrementalUpsert(row);
+  // Keep an independent expectation: persistence must not mutate the input
+  // and then use that mutation as evidence of a successful write.
+  const expected = new Map(rows.map((row) => [row.id, { ...row }]));
+  const stored = [];
+  if (typeof chunks.bulkUpsert === 'function') {
+    const result = await chunks.bulkUpsert(rows);
+    if (Array.isArray(result)) stored.push(...result);
+  } else {
+    for (const row of rows) stored.push(await chunks.incrementalUpsert(row));
+  }
+  const invalid = () => integrityError('CTOX product staged blob rows are invalid', 'blob_staging_invalid');
+  if (!stored.length || stored.length !== expected.size) throw invalid();
+  const documents = [];
+  for (const doc of stored) {
+    if (typeof doc?.toJSON !== 'function') throw invalid();
+    const row = doc.toJSON();
+    const original = expected.get(row?.id);
+    if (!original
+      || Object.keys(original).some((key) => row[key] !== original[key])
+      || row._deleted === true
+      || !row._meta || typeof row._meta !== 'object' || Array.isArray(row._meta)
+      || !Number.isFinite(row._meta.lwt) || row._meta.lwt <= 0) {
+      throw invalid();
+    }
+    expected.delete(row.id);
+    documents.push(row);
+  }
+  if (expected.size) throw invalid();
+  return documents;
 }
 
 function normalizeBytes(value) {
@@ -441,11 +468,75 @@ function demandFileLoaderFromLease(lease) {
   return bridge?.state?.demandFileLoader || lease?.state?.demandFileLoader || null;
 }
 
-async function flushSourceLease(ctx, lease, collectionName) {
+async function flushSourceLease(ctx, lease, collectionName, documents) {
+  if (documents !== undefined) {
+    return flushExactDocuments(ctx, lease, collectionName, documents);
+  }
   if (!lease?.bridge?.state || lease.bridge.mode === 'follower') {
     lease.bridge = await ctx.sync.startCollection(collectionName, { pin: false, forceDirect: true });
   }
   await flushBridgeSync(lease, collectionName, { pushOnly: true });
+}
+
+async function flushExactDocuments(ctx, lease, collectionName, documents) {
+  const unavailable = () => new Error(`CTOX product sync push unavailable: ${collectionName}`);
+  if (!Array.isArray(documents) || !documents.length) throw unavailable();
+  const deadline = Date.now() + 60000;
+  let phase = 'waiting_for_peer';
+  let closed = false;
+  let timer;
+  const timeoutError = () => Object.assign(
+    new Error(`CTOX product sync push timed out (${phase}): ${collectionName}`),
+    { code: 'sync_timeout', phase },
+  );
+  const checkDeadline = () => {
+    if (closed || Date.now() >= deadline) throw timeoutError();
+  };
+  try {
+    return await Promise.race([
+      new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          closed = true;
+          reject(timeoutError());
+        }, 60000);
+      }),
+      Promise.resolve().then(async () => {
+        checkDeadline();
+        let bridge = lease?.bridge;
+        if (!bridge?.state || bridge.mode === 'follower') {
+          bridge = await ctx.sync.startCollection(collectionName, { pin: false, forceDirect: true });
+          checkDeadline();
+          lease.bridge = bridge;
+        }
+        if (!bridge?.state && bridge?.ready) {
+          bridge = await bridge.ready;
+          checkDeadline();
+          lease.bridge = bridge;
+        }
+        const state = bridge?.state;
+        const checkAvailable = () => {
+          if (!state || bridge.mode === 'follower' || state.cancelled
+            || typeof state.waitForOpenPeerId !== 'function'
+            || typeof state.pushDocumentsToPeer !== 'function') throw unavailable();
+        };
+        checkAvailable();
+        checkDeadline();
+        const peerId = await state.waitForOpenPeerId(deadline - Date.now());
+        // Promise.race does not cancel readiness. Never start a late write.
+        checkDeadline();
+        checkAvailable();
+        if (!peerId) throw unavailable();
+        phase = 'uploading';
+        const acknowledged = await state.pushDocumentsToPeer(peerId, documents);
+        checkDeadline();
+        checkAvailable();
+        if (acknowledged === false) throw unavailable();
+      }),
+    ]);
+  } finally {
+    closed = true;
+    clearTimeout(timer);
+  }
 }
 
 async function flushBridgeSync(value, collectionName, { pushOnly = false } = {}) {
