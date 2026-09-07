@@ -4076,6 +4076,18 @@
           "type": "string"
         }
       },
+      "last_memory_read_at_ms": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
+      "last_learning_at_ms": {
+        "type": [
+          "number",
+          "null"
+        ]
+      },
       "updated_at_ms": {
         "type": "number"
       }

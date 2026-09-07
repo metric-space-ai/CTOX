@@ -147,20 +147,18 @@ test('CTOX flow map places the same crew on waiting, working, and failed task no
     assert.match(html, new RegExp(`class="ctox-flow-creature-slot is-selected"[^>]+data-task-id="${id}"`));
     assert.match(html, /data-task-id="task-working"/);
   }
-  const html = workingHtml + waitingHtml + failedHtml;
-  assert.match(html, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
-  assert.doesNotMatch(html, /data-task-id="task-waiting"/);
-  assert.doesNotMatch(html, /data-task-id="task-failed"/);
-  const failedSelected = flowCrewSvg(model, failed, { lang: 'de' });
-  assert.equal((failedSelected.match(/ctox-flow-creature-slot/g) || []).length, 2);
-  assert.match(failedSelected, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
-  assert.match(failedSelected, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
-  assert.match(html, /is-working/);
-  assert.match(html, /data-activity-turns="7"/);
-  assert.match(html, /data-activity-kind="tool"/);
-  assert.match(html, /--ctox-progress-angle:216deg/);
-  assert.doesNotMatch(html, /is-sleeping/);
-  assert.match(failedSelected, /is-failed/);
+  // Only the working selection is free of resting creatures; the failed
+  // selection stands on the failure node next to the running crew.
+  assert.match(workingHtml, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
+  assert.match(failedHtml, /data-task-id="task-failed"[^>]+data-creature-node-id="model-failed"/);
+  assert.match(failedHtml, /data-task-id="task-working"[^>]+data-creature-node-id="running"/);
+  assert.match(workingHtml, /is-working/);
+  assert.match(workingHtml, /data-activity-turns="7"/);
+  assert.match(workingHtml, /data-activity-kind="tool"/);
+  assert.match(workingHtml, /--ctox-progress-angle:216deg/);
+  assert.doesNotMatch(workingHtml, /is-sleeping/);
+  assert.match(waitingHtml, /is-sleeping/);
+  assert.match(failedHtml, /is-failed/);
   assert.equal(taskCrewNodeId(working, model), 'running');
   assert.equal(taskCrewStatus(working), 'running');
   assert.equal(taskCrewStatus(waiting), 'queued');
@@ -1069,6 +1067,20 @@ test('Crew at home shows every active member with its state, only while nothing 
   assert.equal(memberCreatureState(crewFixture[0]), 'running');
   assert.equal(memberCreatureState(crewFixture[1]), 'idle');
   assert.equal(memberCreatureState(crewFixture[2]), 'failed');
+  // Stamps from the projection: reading right after the memory was read (on
+  // duty), learning right after the tick (at home); both decay.
+  const now = Date.now();
+  assert.equal(memberCreatureState({ ...crewFixture[0], last_memory_read_at_ms: now - 5000 }, now), 'reading');
+  assert.equal(memberCreatureState({ ...crewFixture[0], last_memory_read_at_ms: now - 60000 }, now), 'running');
+  assert.equal(memberCreatureState({ ...crewFixture[1], last_learning_at_ms: now - 5000 }, now), 'learning');
+  assert.equal(memberCreatureState({ ...crewFixture[1], last_learning_at_ms: now - 600000 }, now), 'idle');
+  assert.equal(memberCreatureState({ ...crewFixture[2], last_learning_at_ms: now - 5000 }, now), 'failed');
+  const reading = crewHomeMarkup({ ...state, crewMembers: [{ ...crewFixture[0], last_memory_read_at_ms: now - 1000 }] });
+  assert.match(reading, /aria-label="Milo: liest sein Gedächtnis"/);
+  assert.match(reading, /is-reading[\s\S]*?ctox-crew-eyes-reading/);
+  const learning = crewHomeMarkup({ ...state, crewMembers: [{ ...crewFixture[1], last_learning_at_ms: now - 1000 }] });
+  assert.match(learning, /aria-label="Nori: lernt aus dem Einsatz"/);
+  assert.match(learning, /is-learning[\s\S]*?ctox-crew-eyes-learning/);
   // The expressions are the existing creature modes: working, sleeping, failed (X eyes).
   assert.match(html, /crew:milo[\s\S]*?is-working/);
   assert.match(html, /crew:nori[\s\S]*?is-sleeping/);

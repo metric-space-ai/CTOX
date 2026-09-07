@@ -151,6 +151,10 @@ pub(crate) fn ensure_schema(conn: &Connection) -> Result<()> {
         ("crew_attempts", "task_summary"),
         ("crew_attempts", "learning_json"),
         ("crew_member_learnings", "migrated_to_lcm"),
+        // Expression stamps (2026-09-07): when a member last read its memory
+        // and last learned; the app shows "liest"/"lernt" from them.
+        ("crew_members", "last_memory_read_at"),
+        ("crew_members", "last_learning_at"),
     ] {
         let exists: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",

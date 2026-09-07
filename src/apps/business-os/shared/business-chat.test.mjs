@@ -113,6 +113,24 @@ test('crew identities and SVG bodies are stable per work stream', () => {
   assert.match(__businessChatTestInternals.crewCreatureHtml(chat, 'running', 'window'), /<svg viewBox="0 0 64 64"/);
 });
 
+test('crew pool members read and learn from projection stamps, then settle', () => {
+  const { crewMemberExpression, crewPoolSlotHtml } = __businessChatTestInternals;
+  const now = Date.now();
+  const base = { id: 'crew:milo', name: 'Milo', shape: 'round', color: '#7c6df2', state: 'home', domain: [] };
+  assert.equal(crewMemberExpression({ ...base, state: 'on_duty', last_memory_read_at_ms: now - 2000 }, now), 'reading');
+  assert.equal(crewMemberExpression({ ...base, state: 'on_duty', last_memory_read_at_ms: now - 30000 }, now), 'running');
+  assert.equal(crewMemberExpression({ ...base, last_learning_at_ms: now - 2000 }, now), 'learning');
+  assert.equal(crewMemberExpression({ ...base, last_learning_at_ms: now - 120000 }, now), 'idle');
+  assert.equal(crewMemberExpression({ ...base, state: 'resting_after_failure', last_learning_at_ms: now - 2000 }, now), 'failed');
+  const reading = crewPoolSlotHtml({ ...base, state: 'on_duty', last_memory_read_at_ms: now - 2000 });
+  assert.match(reading, /liest sein Gedächtnis|reading its memory/);
+  assert.match(reading, /is-reading/);
+  assert.match(reading, /ctox-crew-eyes-reading/);
+  const learning = crewPoolSlotHtml({ ...base, last_learning_at_ms: now - 2000 });
+  assert.match(learning, /is-learning/);
+  assert.match(learning, /ctox-crew-eyes-learning/);
+});
+
 test('crew creatures sleep when not working and use X eyes only for failures', () => {
   const chat = { id: 'chat-resting', title: 'Warten', messages: [] };
   const idle = __businessChatTestInternals.crewCreatureHtml(chat, 'idle');

@@ -140,6 +140,8 @@
   "resumeHarness": "Resume queue",
   "crewHome": "Crew at home",
   "atHome": "at home",
+  "readingMemory": "reading its memory",
+  "learningFromAssignment": "learning from the assignment",
   "restingAfterFailure": "recovering after a failure",
   "noCrewMember": "no crew member",
   "close": "Close",

@@ -58,6 +58,8 @@ async function loadCrewMembers({ state, db }) {
         color: String(doc.color || '#7d7f84'),
         state: String(doc.state || 'home'),
         domain: Array.isArray(doc.domain) ? doc.domain.filter(Boolean) : [],
+        last_memory_read_at_ms: Number(doc.last_memory_read_at_ms) || 0,
+        last_learning_at_ms: Number(doc.last_learning_at_ms) || 0,
       }))
       .sort((a, b) => a.name.localeCompare(b.name));
     const before = JSON.stringify(state.crewMembers || []);
@@ -68,16 +70,43 @@ async function loadCrewMembers({ state, db }) {
   }
 }
 
+// How long a member visibly reads its memory (attempt start) or learns
+// (after the learning tick). Both are stamps from the projection, not guesses.
+export const CREW_READING_WINDOW_MS = 20 * 1000;
+export const CREW_LEARNING_WINDOW_MS = 90 * 1000;
+
+// The one expression a member wears right now: reading (on duty, memory just
+// read), learning (at home, just learned), running, failed or idle.
+export function crewMemberExpression(member, nowMs = Date.now()) {
+  const readAt = Number(member?.last_memory_read_at_ms) || 0;
+  const learnedAt = Number(member?.last_learning_at_ms) || 0;
+  if (member?.state === 'on_duty') {
+    return readAt && nowMs - readAt >= 0 && nowMs - readAt < CREW_READING_WINDOW_MS ? 'reading' : 'running';
+  }
+  if (member?.state === 'resting_after_failure') return 'failed';
+  return learnedAt && nowMs - learnedAt >= 0 && nowMs - learnedAt < CREW_LEARNING_WINDOW_MS ? 'learning' : 'idle';
+}
+
+// When the current expression ends (ms from now), or 0 when it does not decay.
+export function crewMemberExpressionTtlMs(member, nowMs = Date.now()) {
+  const expression = crewMemberExpression(member, nowMs);
+  if (expression === 'reading') return Math.max(1, Number(member.last_memory_read_at_ms) + CREW_READING_WINDOW_MS - nowMs);
+  if (expression === 'learning') return Math.max(1, Number(member.last_learning_at_ms) + CREW_LEARNING_WINDOW_MS - nowMs);
+  return 0;
+}
+
 function crewMemberCreatureHtml(member, placement = 'fab') {
-  const taskState = member.state === 'on_duty' ? 'running' : member.state === 'resting_after_failure' ? 'failed' : 'idle';
-  return crewCreatureHtml({ crewKey: member.id, crewIdentity: { name: member.name, shape: member.shape, color: member.color } }, taskState, placement);
+  return crewCreatureHtml({ crewKey: member.id, crewIdentity: { name: member.name, shape: member.shape, color: member.color } }, crewMemberExpression(member), placement);
 }
 
 function crewPoolSlotHtml(member, placement = 'fab') {
   const german = chatUiIsGerman();
-  const stateText = member.state === 'on_duty' ? (german ? 'im Einsatz' : 'on duty')
-    : member.state === 'resting_after_failure' ? (german ? 'erholt sich' : 'recovering')
-      : (german ? 'zu Hause' : 'at home');
+  const expression = crewMemberExpression(member);
+  const stateText = expression === 'reading' ? (german ? 'liest sein Gedächtnis' : 'reading its memory')
+    : expression === 'learning' ? (german ? 'lernt aus dem Einsatz' : 'learning from the assignment')
+      : member.state === 'on_duty' ? (german ? 'im Einsatz' : 'on duty')
+        : member.state === 'resting_after_failure' ? (german ? 'erholt sich' : 'recovering')
+          : (german ? 'zu Hause' : 'at home');
   const domain = member.domain.length ? ` · ${member.domain.join(', ')}` : '';
   return `<span class="ctox-chat-crew-slot" data-crew-drag="${escapeAttr(member.id)}" title="${escapeAttr(`${member.name} · ${stateText}${domain} · ${german ? 'auf eine App ziehen' : 'drag onto an app'}`)}" aria-label="${escapeAttr(member.name)}">${crewMemberCreatureHtml(member, placement)}</span>`;
 }
@@ -2217,6 +2246,24 @@ function crewEyesMarkupForMode(shape, mode = 'working') {
       </g>
     `;
   }
+  if (mode === 'reading') {
+    // Lowered gaze: the eyes sit on a page and scan it (CSS moves them).
+    return `
+      <g class="ctox-crew-eyes-reading">
+        <path d="M22 ${y + 2}h8" />
+        <path d="M37 ${y + 2}h8" />
+      </g>
+    `;
+  }
+  if (mode === 'learning') {
+    // Wide, lifted eyes: something just clicked.
+    return `
+      <g class="ctox-crew-eyes-learning">
+        <circle cx="26" cy="${y - 1}" r="3.2" />
+        <circle cx="41" cy="${y - 2}" r="3.2" />
+      </g>
+    `;
+  }
   return `
     <path d="M25 ${y - 3}l3 8" />
     <path d="M40 ${y - 4}l3 8" />
@@ -2242,6 +2289,7 @@ function crewCreatureMode(chat, taskState = getTaskState(chat)) {
       || taskState === 'queued'
       || taskState === 'scheduled'
       || taskState === 'success') return 'sleeping';
+  // reading / learning are member expressions (crewMemberExpression).
   return taskState;
 }
 
@@ -4251,7 +4299,8 @@ function formatGermanDateLabel(dateStr) {
 
 
 function chatUiIsGerman() {
-  return (document.documentElement.lang || 'de').toLowerCase().startsWith('de');
+  const lang = typeof document === 'undefined' ? 'de' : (document.documentElement?.lang || 'de');
+  return String(lang).toLowerCase().startsWith('de');
 }
 
 function chatDateAriaLabel(dateStr, total = 0) {
@@ -5779,6 +5828,49 @@ function installChatStyles() {
     .ctox-crew-creature.is-failed,
     .ctox-chat-window.is-task-failed .ctox-crew-creature {
       animation: ctoxCrewOops 860ms cubic-bezier(.22,.75,.35,1) 1 both;
+    }
+    /* Reading: the body leans in a little, the lowered eyes scan the page. */
+    .ctox-crew-eyes-reading,
+    .ctox-crew-eyes-learning {
+      fill: none;
+      stroke: #090a0c;
+      stroke-width: 5;
+      stroke-linecap: round;
+    }
+    .ctox-crew-eyes-learning circle {
+      fill: #090a0c;
+      stroke: none;
+    }
+    .ctox-crew-creature.is-reading .ctox-crew-body {
+      animation: ctoxCrewReadLean 3.2s ease-in-out infinite;
+    }
+    .ctox-crew-creature.is-reading .ctox-crew-eyes {
+      animation: ctoxCrewReadScan 2.4s ease-in-out infinite;
+    }
+    /* Learning: a slow, content nod with a soft glow of the body. */
+    .ctox-crew-creature.is-learning {
+      animation: ctoxCrewLearnNod 2.6s ease-in-out infinite;
+    }
+    .ctox-crew-creature.is-learning .ctox-crew-body {
+      animation: ctoxCrewLearnGlow 2.6s ease-in-out infinite;
+    }
+    @keyframes ctoxCrewReadLean {
+      0%, 100% { transform: scale(1, 1) rotate(0); }
+      50% { transform: scale(1.02, .985) rotate(2deg); }
+    }
+    @keyframes ctoxCrewReadScan {
+      0%, 100% { transform: translateX(-2px); }
+      45% { transform: translateX(2.5px); }
+      55% { transform: translateX(2.5px); }
+    }
+    @keyframes ctoxCrewLearnNod {
+      0%, 100% { transform: translateY(0) rotate(0); }
+      35% { transform: translateY(-1.5px) rotate(-2deg); }
+      70% { transform: translateY(1px) rotate(1.5deg); }
+    }
+    @keyframes ctoxCrewLearnGlow {
+      0%, 100% { filter: drop-shadow(0 3px 5px color-mix(in srgb, var(--crew-color) 32%, transparent)); }
+      50% { filter: drop-shadow(0 0 9px color-mix(in srgb, var(--crew-color) 78%, transparent)); }
     }
     @keyframes ctoxCrewWorkDrift {
       0%, 19%, 100% { transform: translate3d(0, 0, 0) rotate(-1.5deg); }
@@ -8641,6 +8733,8 @@ async function cancelScheduledChat(state, chat, db, root, commandBus, getActiveM
 }
 
 export const __businessChatTestInternals = Object.freeze({
+  crewMemberExpression,
+  crewPoolSlotHtml,
   clearSchedulerLoop,
   chatAllowsAutoFocus,
   chatContextMetaFromDetail,

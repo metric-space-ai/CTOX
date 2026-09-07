@@ -16,6 +16,8 @@ export const collections = {
       stats: { type: 'object', additionalProperties: true },
       memory: { type: 'object', additionalProperties: true },
       domain: { type: 'array', items: { type: 'string' } },
+      last_memory_read_at_ms: { type: ['number', 'null'] },
+      last_learning_at_ms: { type: ['number', 'null'] },
       updated_at_ms: { type: 'number' }
     },
     required: ['id', 'name', 'shape', 'color', 'archived', 'state', 'updated_at_ms'],

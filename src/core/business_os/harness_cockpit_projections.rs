@@ -974,6 +974,15 @@ fn project_crew(
             )?
             .query_map([&member.id], |r| r.get::<_, String>(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?;
+        // Expression stamps: read at attempt start, learned after the tick.
+        let (last_memory_read_at, last_learning_at): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT last_memory_read_at,last_learning_at FROM crew_members WHERE id=?1",
+                [&member.id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or((None, None));
+        let stamp_ms = |value: Option<String>| value.as_deref().and_then(millis);
         writer.upsert_source_projection(
             "ctox_crew_members",
             &member.id,
@@ -987,6 +996,8 @@ fn project_crew(
                     "experience_count":crate::crew::narrative_lines(&memory.narrative).len(),
                     "updated_at":memory.updated_at},
                 "domain":domain,
+                "last_memory_read_at_ms":stamp_ms(last_memory_read_at),
+                "last_learning_at_ms":stamp_ms(last_learning_at),
                 "updated_at_ms":updated
             }),
         )?;

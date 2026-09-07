@@ -632,7 +632,7 @@ pub(crate) fn run_learning_tick(
     }
     // The projection keys on the member stamp; a changed memory must re-project.
     let _ = conn.execute(
-        "UPDATE crew_members SET updated_at=?2 WHERE id=?1",
+        "UPDATE crew_members SET updated_at=?2,last_learning_at=?2 WHERE id=?1",
         params![member_id, chrono::Utc::now().to_rfc3339()],
     );
     crate::service::harness_flow::record_harness_flow_event_lossy(

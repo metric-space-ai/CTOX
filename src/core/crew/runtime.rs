@@ -367,6 +367,11 @@ pub(crate) fn prepare_attempt(
             },
         );
         if memory_block.is_some() {
+            // The member is reading now: the projection shows it for a moment.
+            let _ = conn.execute(
+                "UPDATE crew_members SET last_memory_read_at=?2,updated_at=?2 WHERE id=?1",
+                params![member.id, now],
+            );
             let anchors = anchor_lines(&member_memory.anchors).len();
             let experiences = narrative_lines(&member_memory.narrative).len();
             let title = format!(

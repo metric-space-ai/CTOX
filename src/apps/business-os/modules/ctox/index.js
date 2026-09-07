@@ -1,6 +1,6 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { renderListOrState } from '../../shared/list-state.js';
-import { crewCreatureHtml, syncCrewProceduralMotion } from '../../shared/business-chat.js?v=20260907-shell-v2-crew-home-v340';
+import { crewCreatureHtml, syncCrewProceduralMotion, crewMemberExpression, crewMemberExpressionTtlMs } from '../../shared/business-chat.js?v=20260907-shell-v2-crew-home-v341';
 import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 import { workspaceDataState } from './data-state.js?v=20260906-data-state-v1';
 
@@ -20,7 +20,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260907-shell-v2-crew-home-v340';
+const CTOX_STYLE_BUILD = '20260907-shell-v2-crew-home-v341';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -92,6 +92,8 @@ const labels = {
     crewHome: "Crew zu Hause",
     atHome: "zu Hause",
     restingAfterFailure: "erholt sich nach einem Fehlschlag",
+    readingMemory: "liest sein Gedächtnis",
+    learningFromAssignment: "lernt aus dem Einsatz",
     noCrewMember: "ohne Crew-Zuordnung",
     close: "Schließen",
     memberName: "Name",
@@ -366,6 +368,8 @@ const labels = {
     crewHome: "Crew at home",
     atHome: "at home",
     restingAfterFailure: "recovering after a failure",
+    readingMemory: "reading its memory",
+    learningFromAssignment: "learning from the assignment",
     noCrewMember: "no crew member",
     close: "Close",
     memberName: "Name",
@@ -774,6 +778,7 @@ export async function mount(ctx) {
   return () => {
     state.disposed = true;
     window.clearInterval(state.liveTicker);
+    window.clearTimeout(state.expressionRefresh);
     try { state.localSubscriptionCleanup?.(); } catch {}
     try { state.interactionGuardCleanup?.(); } catch {}
     try { state.readinessCleanup?.(); } catch {}
@@ -837,6 +842,7 @@ async function hydrateFromLocal(state) {
   if (state.disposed) return;
   state.crewMembers = crewMembers;
   state.harnessStatus = harnessStatus;
+  armExpressionRefresh(state);
   state.webStack = {
     loading: false,
     error: webStack?.ok ? '' : (webStack?.error || 'Web Stack status unavailable'),
@@ -4811,14 +4817,35 @@ function taskByNativeId(state, nativeId) {
   return (state?.model?.tasks || []).find((task) => nativeTaskId(task) === nativeId || task.id === nativeId || task.taskId === nativeId) || null;
 }
 
-function memberCreatureState(member) {
-  if (member?.state === 'on_duty') return 'running';
-  if (member?.state === 'resting_after_failure') return 'failed';
-  return 'idle';
+// Expression from the projection stamps (reading right after the memory was
+// read, learning right after the tick), else the duty state.
+function memberCreatureState(member, nowMs = Date.now()) {
+  return crewMemberExpression(member, nowMs);
+}
+
+// reading/learning decay: re-render the crew when the earliest expression ends.
+function armExpressionRefresh(state) {
+  window.clearTimeout(state.expressionRefresh);
+  state.expressionRefresh = null;
+  if (state.disposed) return;
+  const now = Date.now();
+  const ttl = (state.crewMembers || [])
+    .map((member) => crewMemberExpressionTtlMs(member, now))
+    .filter((value) => value > 0);
+  if (!ttl.length) return;
+  state.expressionRefresh = window.setTimeout(() => {
+    state.expressionRefresh = null;
+    if (state.disposed) return;
+    render(state);
+    armExpressionRefresh(state);
+  }, Math.min(...ttl) + 50);
 }
 
 function memberStateLine(member, state) {
   const t = labels[state.lang];
+  const expression = memberCreatureState(member);
+  if (expression === 'reading') return t.readingMemory;
+  if (expression === 'learning') return t.learningFromAssignment;
   if (member?.state === 'on_duty') {
     const task = taskByNativeId(state, member.active_task_id);
     return task ? taskDisplayTitle(task, state) : t.onDuty;
