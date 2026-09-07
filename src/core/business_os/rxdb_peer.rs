@@ -6187,7 +6187,7 @@ pub(super) async fn upsert_business_record_projection_tombstone(
 
     let Some(previous) = existing else {
         let mut write_data = document;
-        prepare_projection_tombstone_document(schema, &mut write_data);
+        prepare_projection_tombstone_document(&schema.json_schema, &mut write_data);
         let write_data = fill_object_data_before_insert(schema, write_data)
             .map_err(|err| anyhow::anyhow!("fill projection tombstone envelope: {err}"))?;
         collection
@@ -6211,7 +6211,7 @@ pub(super) async fn upsert_business_record_projection_tombstone(
     } else {
         next = document;
     }
-    prepare_projection_tombstone_document(schema, &mut next);
+    prepare_projection_tombstone_document(&schema.json_schema, &mut next);
 
     let result = collection
         .storage_instance
@@ -6230,23 +6230,34 @@ pub(super) async fn upsert_business_record_projection_tombstone(
     Ok(())
 }
 
-fn prepare_projection_tombstone_document(schema: &rxdb::rx_schema::RxSchema, document: &mut Value) {
+fn prepare_projection_tombstone_document(schema: &RxJsonSchema, document: &mut Value) {
     let Some(object) = document.as_object_mut() else {
         return;
     };
     object.insert("_deleted".to_string(), Value::Bool(true));
-    if schema.json_schema.properties.contains_key("is_deleted") {
+    if schema.properties.contains_key("is_deleted") {
         object.insert("is_deleted".to_string(), Value::Bool(true));
     }
-    for field in &schema.json_schema.required {
+    for field in &schema.required {
         if field.starts_with('_') {
             continue;
         }
         let missing = object.get(field).map(Value::is_null).unwrap_or(true);
-        if missing {
+        // Legacy wire-budget clamping could leave an omission object where
+        // a deleted chunk requires a string. Keeping that invalid value makes
+        // the tombstone fail validation on every projection pass. Repair only
+        // this deletion representation; valid stored values stay unchanged.
+        let invalid_type = object.get(field).is_some_and(|value| {
+            schema
+                .properties
+                .get(field)
+                .and_then(|property| property.schema_type.as_ref())
+                .is_some_and(|declared| !declared.matches_value(value))
+        });
+        if missing || invalid_type {
             object.insert(
                 field.clone(),
-                projection_tombstone_required_default(&schema.json_schema, field),
+                projection_tombstone_required_default(schema, field),
             );
         }
     }
@@ -6347,6 +6358,10 @@ mod projection_schema_union_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "rxdb_peer_projection_tombstone_tests.rs"]
+mod projection_tombstone_tests;
 
 #[derive(Debug)]
 struct ChannelStateProjection {
