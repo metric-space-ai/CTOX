@@ -11140,7 +11140,7 @@ fn upsert_rxdb_collection_record_with_writer(
         }
     }
     if !demand_file_storage {
-        clamp_projected_document_to_wire_budget(table, record_id, &mut payload);
+        clamp_projected_document_to_wire_budget(table, record_id, &mut payload)?;
     }
     let mut columns = vec!["id".to_string(), "data".to_string()];
     let mut values = vec![
@@ -22743,15 +22743,30 @@ pub(super) fn clamp_projected_document_to_wire_budget(
     table: &str,
     record_id: &str,
     payload: &mut Value,
-) {
+) -> anyhow::Result<()> {
     let total = serde_json::to_vec(&*payload)
         .map(|raw| raw.len())
         .unwrap_or(0);
     if total <= MAX_PROJECTED_DOCUMENT_BYTES {
-        return;
+        return Ok(());
+    }
+    // Source content is a typed string, not an optional diagnostic payload.
+    // The master already bounds pull responses by bytes; preserving a source
+    // record within that existing bound does not increase the wire contract.
+    if table
+        .strip_prefix("ctox_business_os__business_module_source_files__v")
+        .is_some_and(|version| version.parse::<u32>().is_ok())
+    {
+        anyhow::ensure!(
+            payload.get("content").is_some_and(Value::is_string),
+            "invalid module source content for {record_id}; restore its canonical projection"
+        );
+        anyhow::ensure!(total <= rxdb::collection_policy::DEFAULT_MASTER_RESPONSE_CEILING_BYTES,
+            "module source {record_id} exceeds the lossless inline projection limit; content was not truncated");
+        return Ok(());
     }
     let Some(object) = payload.as_object_mut() else {
-        return;
+        return Ok(());
     };
     // Largest field first: trimming one huge `result` usually suffices, and
     // trimming the fewest fields keeps the most information on the wire.
@@ -22788,12 +22803,13 @@ pub(super) fn clamp_projected_document_to_wire_budget(
         trimmed.push(key);
     }
     if trimmed.is_empty() {
-        return;
+        return Ok(());
     }
     eprintln!(
         "[business-os] trimmed oversized projected document {record_id} in {table}: {total} bytes exceeded the {MAX_PROJECTED_DOCUMENT_BYTES} byte wire budget; replaced fields [{}] with a marker so the collection keeps replicating",
         trimmed.join(", ")
     );
+    Ok(())
 }
 
 pub(super) fn redact_document_client_context_secrets(payload: &mut Value) {
@@ -37590,6 +37606,61 @@ pub(super) mod tests {
                 .pointer("/collections/business_commands/table")
                 .and_then(Value::as_str),
             Some("ctox_business_os__business_commands__v1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn module_source_projection_preserves_large_content() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        fs::create_dir_all(root.join("runtime"))?;
+        let table = "ctox_business_os__business_module_source_files__v0";
+        let conn = Connection::open(rxdb_store_path(root))?;
+        conn.execute(&format!("CREATE TABLE {table} (id TEXT PRIMARY KEY, revision TEXT, deleted INTEGER NOT NULL DEFAULT 0, lastWriteTime REAL NOT NULL DEFAULT 0, data TEXT NOT NULL)"), [])?;
+        let content = "export const source = \"αβ\";\n".repeat(16_000);
+        let original = serde_json::json!({"id":"probe:index.js", "module_id":"probe", "path":"index.js",
+            "content":content, "sha256":hex_sha256(content.as_bytes()), "updated_at_ms":1000});
+        assert!(serde_json::to_vec(&original)?.len() > MAX_PROJECTED_DOCUMENT_BYTES);
+        let mut old = original.clone();
+        old["content"] = serde_json::json!({"_omitted":true});
+        conn.execute(
+            &format!("INSERT INTO {table} (id,revision,data) VALUES (?1,'1-old',?2)"),
+            params!["probe:index.js", serde_json::to_string(&old)?],
+        )?;
+        let mut writer = BusinessProjectionWriter::open(root)?;
+        writer.upsert_source_projection(
+            "business_module_source_files",
+            "probe:index.js",
+            1000,
+            original.clone(),
+        )?;
+        assert!(writer.delivered_to_rxdb("business_module_source_files"));
+        let raw: String = conn.query_row(
+            &format!("SELECT data FROM {table} WHERE id='probe:index.js'"),
+            [],
+            |r| r.get(0),
+        )?;
+        let mut projected: Value = serde_json::from_str(&raw)?;
+        assert_eq!(projected["content"], original["content"]);
+        assert_eq!(projected["sha256"], original["sha256"]);
+        // Native restart applies the same admission and must preserve the bytes.
+        clamp_projected_document_to_wire_budget(table, "probe:index.js", &mut projected)?;
+        assert_eq!(projected["content"], original["content"]);
+        let canonical =
+            pull_collection_record(root, "business_module_source_files", "probe:index.js")?
+                .unwrap();
+        assert_eq!(canonical["content"], original["content"]);
+        let mut too_large = original.clone();
+        too_large["content"] = serde_json::json!("x".repeat(2 * 1024 * 1024));
+        let unchanged = too_large.clone();
+        assert!(
+            clamp_projected_document_to_wire_budget(table, "probe:index.js", &mut too_large)
+                .is_err()
+        );
+        assert_eq!(
+            too_large, unchanged,
+            "rejection must preserve bytes for recovery"
         );
         Ok(())
     }

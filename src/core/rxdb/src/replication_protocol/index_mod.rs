@@ -246,6 +246,8 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
         }
         let has_attachments = self.instance.schema().extra.contains_key("attachments");
         let keep_meta = self.keep_meta;
+        let max_event_bytes = crate::collection_policy::collection_policy()
+            .master_response_ceiling_bytes(self.instance.collection_name());
         let stream = self.instance.change_stream();
         Box::pin(stream.map(move |event_bulk| {
             if event_bulk.is_rxsubject_lagged() {
@@ -260,7 +262,7 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
                     })
                 })
                 .collect();
-            crate::types::RxReplicationMasterChange::Documents(
+            let change = crate::types::RxReplicationMasterChange::Documents(
                 crate::types::DocumentsWithCheckpoint {
                     documents,
                     checkpoint: event_bulk
@@ -268,7 +270,15 @@ impl crate::types::RxReplicationHandler for StorageReplicationHandler {
                         .clone()
                         .unwrap_or(serde_json::Value::Null),
                 },
-            )
+            );
+            // A live storage burst must obey the same bound as catch-up.
+            // Resync retains the durable checkpoint and drains the unchanged
+            // documents through byte-bounded master_changes_since pages.
+            if serde_json::to_vec(&change).map_or(true, |bytes| bytes.len() > max_event_bytes) {
+                crate::types::RxReplicationMasterChange::Resync
+            } else {
+                change
+            }
         }))
     }
 
@@ -686,6 +696,83 @@ mod tests {
             .await
             .expect("idle must resolve after activity ends")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn large_live_burst_resyncs_and_drains_every_byte_before_small_live_updates() {
+        let state = idle_test_state("large-live-burst").await;
+        let handler = &state.input.replication_handler;
+        let mut stream = handler.master_change_stream();
+        let expected: Vec<Value> = (0..21).map(|index| json!({
+            "id":format!("source-{index:02}"), "content":"export const α = \"value\";\n".repeat(18_000),
+            "_rev":"1-source", "_deleted":false, "_meta":{"lwt":index+1}, "_attachments":{}
+        })).collect();
+        assert!(serde_json::to_vec(&expected).unwrap().len() > WIRE_TRANSFER_LIMIT_BYTES);
+        let result = state
+            .input
+            .fork_instance
+            .bulk_write(
+                expected
+                    .iter()
+                    .map(|doc| BulkWriteRow {
+                        previous: None,
+                        document: doc.clone(),
+                    })
+                    .collect(),
+                "large-live-fixture",
+            )
+            .await
+            .unwrap();
+        assert!(result.error.is_empty());
+        let event = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(event, RxReplicationMasterChange::Resync));
+        let mut checkpoint = None;
+        let mut received = BTreeSet::new();
+        loop {
+            let page = handler
+                .master_changes_since(checkpoint.clone(), 20)
+                .await
+                .unwrap();
+            assert!(serde_json::to_vec(&page).unwrap().len() < 1024 * 1024 + 1024);
+            if page.documents.is_empty() {
+                break;
+            }
+            assert_ne!(checkpoint.as_ref(), Some(&page.checkpoint));
+            for doc in page.documents {
+                let original = expected.iter().find(|v| v["id"] == doc["id"]).unwrap();
+                assert_eq!(doc["content"], original["content"]);
+                assert!(received.insert(doc["id"].as_str().unwrap().to_owned()));
+            }
+            checkpoint = Some(page.checkpoint);
+        }
+        assert_eq!(received.len(), expected.len());
+        let small = json!({"id":"after-burst", "content":"ok", "_rev":"1-small",
+            "_deleted":false, "_meta":{"lwt":22}, "_attachments":{}});
+        assert!(state
+            .input
+            .fork_instance
+            .bulk_write(
+                vec![BulkWriteRow {
+                    previous: None,
+                    document: small
+                }],
+                "small-live-fixture"
+            )
+            .await
+            .unwrap()
+            .error
+            .is_empty());
+        let event = timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap();
+        let RxReplicationMasterChange::Documents(page) = event else {
+            panic!("small update should stream directly")
+        };
+        assert_eq!(page.documents[0]["id"], "after-burst");
     }
 
     #[test]

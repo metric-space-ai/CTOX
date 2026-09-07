@@ -528,6 +528,18 @@ wire-compatible. Methods: `token`, `ctoxProtocol`, `masterChangesSince`,
 `masterChangeStream$:{collection}` (bare `masterChangeStream$` is still
 accepted from V1 peers — `webrtc-native.mjs::masterChangeStreamCollection`).
 
+Live changes use the same collection byte budget as pull responses. An oversized
+storage event emits the existing `Resync` signal; the receiver retrieves the
+unchanged durable documents through bounded `masterChangesSince` pages. The
+checkpoint advances only with the corresponding pull page.
+
+Module-source projections preserve `content` as a string up to the existing
+1 MiB serialized-document admission bound. Larger inline source projections
+are explicitly rejected without truncating the bytes; they require a future
+chunked-source contract. Startup applies the same admission and must not replace
+source text with an `_omitted` object. See
+[the recovery verification](dev/lossless-source-projection-recovery.md).
+
 ### 6.2 Control frame: active collections
 
 `rxdb.activeCollections` with params `[[collectionName, …]]`

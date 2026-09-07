@@ -8141,7 +8141,7 @@ fn clamp_oversized_projected_documents(root: &Path, database_path: &Path) -> any
             let Ok(mut document) = serde_json::from_str::<Value>(&raw) else {
                 continue;
             };
-            store::clamp_projected_document_to_wire_budget(&table, &id, &mut document);
+            store::clamp_projected_document_to_wire_budget(&table, &id, &mut document)?;
             let trimmed = serde_json::to_string(&document)?;
             if trimmed.len() >= raw.len() {
                 continue;
