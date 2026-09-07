@@ -83,6 +83,31 @@ fn hoist_top_level_field_entries(mut payload: Value) -> Value {
             hoisted_result = true;
         }
     }
+    // Field values placed directly in `result` ("unknown field `person_vorname`,
+    // expected one of `fields`, ...", 07.09.2026) belong into `result.fields`.
+    let stray_result_keys: Vec<String> = result
+        .keys()
+        .filter(|key| !["fields", "person_records", "evidence"].contains(&key.as_str()))
+        .cloned()
+        .collect();
+    if !stray_result_keys.is_empty() {
+        let mut fields = match result.remove("fields") {
+            Some(Value::Object(map)) => map,
+            _ => Map::new(),
+        };
+        for key in stray_result_keys {
+            if let Some(value) = result.remove(&key) {
+                let entry = if value.is_object() {
+                    value
+                } else {
+                    serde_json::json!({ "value": value })
+                };
+                fields.entry(key).or_insert(entry);
+            }
+        }
+        result.insert("fields".to_string(), Value::Object(fields));
+        hoisted_result = true;
+    }
     if hoisted_result || !result.is_empty() {
         object.insert("result".to_string(), Value::Object(result));
     }
@@ -2924,6 +2949,25 @@ mod tests {
             "no_match"
         );
         assert_eq!(request.result.person_records.len(), 1);
+
+        let stray_in_result: ResearchWritebackRequest = serde_json::from_value(
+            hoist_top_level_field_entries(serde_json::json!({
+                "record_id": "lead-x",
+                "module": "outbound-lead-generation",
+                "research_command_id": "research-x",
+                "field_status": {"person_vorname": {"status": "verified", "value": "Erika"}},
+                "result": {"person_vorname": "Erika", "fields": {"firma_name": {"value": "Beispiel GmbH"}}}
+            })),
+        )
+        .expect("a field value placed directly in result moves into result.fields");
+        assert_eq!(
+            stray_in_result.result.fields["person_vorname"]["value"],
+            "Erika"
+        );
+        assert_eq!(
+            stray_in_result.result.fields["firma_name"]["value"],
+            "Beispiel GmbH"
+        );
         // A stray non-field key still fails the envelope check (deny_unknown_fields).
         let mut with_note = payload;
         with_note["note"] = serde_json::json!("kein Feld");
