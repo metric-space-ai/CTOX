@@ -558,6 +558,87 @@ pub(super) fn enqueue_gap_closure_if_needed(
     Ok(Some(task))
 }
 
+/// The previous `researched_field_keys` / `verified_field_keys` /
+/// `unverified_field_keys` of a lead, captured before a writeback patch.
+fn previous_research_keys(lead: &Value) -> BTreeMap<String, Vec<String>> {
+    [
+        "researched_field_keys",
+        "verified_field_keys",
+        "unverified_field_keys",
+    ]
+    .iter()
+    .map(|name| {
+        let keys = lead
+            .pointer(&format!("/payload/{name}"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        ((*name).to_string(), keys)
+    })
+    .collect()
+}
+
+/// A follow-up writeback (gap closure, continuation, a worker reporting the
+/// one field it worked) must not shrink what the lead already carries. On
+/// 07.09.2026 a one-field gap writeback replaced the lead's field status and
+/// its researched keys (6 verified fields → 1) while the data itself stayed.
+/// Statuses are merged per field (new entry wins for its own field), key lists
+/// are unioned, and a key that is now verified leaves the unverified list.
+fn union_research_keys(lead: &mut Value, previous: &BTreeMap<String, Vec<String>>) {
+    let Some(payload) = lead.get_mut("payload").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let mut union = |name: &str| -> Vec<String> {
+        let mut keys = previous.get(name).cloned().unwrap_or_default();
+        for key in payload
+            .get(name)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.to_string());
+            }
+        }
+        keys
+    };
+    let researched = union("researched_field_keys");
+    let verified = union("verified_field_keys");
+    let unverified = union("unverified_field_keys")
+        .into_iter()
+        .filter(|key| !verified.contains(key))
+        .collect::<Vec<_>>();
+    payload.insert(
+        "researched_field_keys".to_string(),
+        Value::Array(researched.into_iter().map(Value::String).collect()),
+    );
+    payload.insert(
+        "verified_field_keys".to_string(),
+        Value::Array(verified.into_iter().map(Value::String).collect()),
+    );
+    payload.insert(
+        "unverified_field_keys".to_string(),
+        Value::Array(unverified.into_iter().map(Value::String).collect()),
+    );
+}
+
+fn merge_field_status(existing: Option<&Value>, incoming: Value) -> Value {
+    let mut merged = existing
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(incoming) = incoming.as_object() {
+        for (field, status) in incoming {
+            merged.insert(field.clone(), status.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
 /// Workers regularly send `field_status` alone and forget `result` (or send
 /// `result.fields` empty). The verified values and their sources are already
 /// in `field_status`, so `result.fields` is derived from them instead of
@@ -715,9 +796,15 @@ pub(super) fn handle_research_writeback(
     });
     add_field_status_evidence(&mut projection_result, &request.field_status)?;
     let now = super::person_research_command::now_ms();
+    let previous_keys = previous_research_keys(&lead);
     let patch = outbound_lead_generation_research_outcome_patch(&lead, &projection_result, now);
     merge_json_object_values(&mut lead, &patch);
-    lead["field_status"] = serde_json::to_value(&request.field_status)?;
+    union_research_keys(&mut lead, &previous_keys);
+    let merged_field_status = merge_field_status(
+        lead.get("field_status"),
+        serde_json::to_value(&request.field_status)?,
+    );
+    lead["field_status"] = merged_field_status;
     if gap_task.is_some() {
         lead["gap_task_id"] = Value::String(request.gap_task_id.clone());
     }
@@ -2439,6 +2526,49 @@ mod tests {
         assert_eq!(status.sources[1].source_id, "impressum.example");
         assert_eq!(status.sources[2].source_id, "42");
         assert_eq!(status.reason, "7");
+    }
+
+    #[test]
+    fn follow_up_writeback_keeps_previous_field_status_and_unions_keys() {
+        let mut lead = serde_json::json!({
+            "field_status": {
+                "firma_name": {"status": "verified", "value": "Beispiel GmbH"},
+                "firma_domain": {"status": "verified", "value": "beispiel.de"},
+                "firma_email": {"status": "no_match", "reason": "keine Quelle"}
+            },
+            "payload": {
+                "researched_field_keys": ["firma_name", "firma_domain"],
+                "verified_field_keys": ["firma_name", "firma_domain"],
+                "unverified_field_keys": []
+            }
+        });
+        let previous = previous_research_keys(&lead);
+        // The patch of a one-field follow-up writeback names only that field.
+        lead["payload"]["researched_field_keys"] = serde_json::json!(["firma_email"]);
+        lead["payload"]["verified_field_keys"] = serde_json::json!([]);
+        lead["payload"]["unverified_field_keys"] = serde_json::json!(["firma_email"]);
+        union_research_keys(&mut lead, &previous);
+        assert_eq!(
+            lead["payload"]["researched_field_keys"],
+            serde_json::json!(["firma_name", "firma_domain", "firma_email"])
+        );
+        assert_eq!(
+            lead["payload"]["verified_field_keys"],
+            serde_json::json!(["firma_name", "firma_domain"])
+        );
+        assert_eq!(
+            lead["payload"]["unverified_field_keys"],
+            serde_json::json!(["firma_email"])
+        );
+
+        let merged = merge_field_status(
+            lead.get("field_status"),
+            serde_json::json!({"firma_email": {"status": "verified", "value": "info@beispiel.de"}}),
+        );
+        assert_eq!(merged["firma_name"]["status"], "verified");
+        assert_eq!(merged["firma_domain"]["value"], "beispiel.de");
+        assert_eq!(merged["firma_email"]["status"], "verified");
+        assert_eq!(merged.as_object().unwrap().len(), 3);
     }
 
     #[test]
