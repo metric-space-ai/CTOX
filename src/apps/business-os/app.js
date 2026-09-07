@@ -1,14 +1,14 @@
-import { CtoxResizer } from './shared/resizer.js?v=20260907-shell-v2-crew-home-v343';
-import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260907-shell-v2-crew-home-v343';
-import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260907-shell-v2-crew-home-v343';
-import { createAppActions } from './shared/app-actions.js?v=20260907-shell-v2-crew-home-v343';
+import { CtoxResizer } from './shared/resizer.js?v=20260907-shell-v2-crew-home-v344';
+import { collectionReadinessFromDiagnostics } from './shared/sync-contract.js?v=20260907-shell-v2-crew-home-v344';
+import { autoWirePaneGrammar } from './shared/pane-grammar.js?v=20260907-shell-v2-crew-home-v344';
+import { createAppActions } from './shared/app-actions.js?v=20260907-shell-v2-crew-home-v344';
 import {
   appLifecycleBadge,
   appLifecycleState,
   appReleaseProjection,
   canSeeModuleForAppVersion as lifecycleCanSeeModuleForAppVersion,
   isRuntimeInstalledModule,
-} from './shared/app-lifecycle.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/app-lifecycle.js?v=20260907-shell-v2-crew-home-v344';
 import {
   BusinessOsPermissions,
   businessActorFromSession,
@@ -16,20 +16,20 @@ import {
   canSelfExecuteBusinessData,
   canUseBusinessPermission,
   canViewBusinessModuleSource,
-} from './shared/permissions.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/permissions.js?v=20260907-shell-v2-crew-home-v344';
 import {
   applyWorkspaceBranding,
   brandingForPreferencePayload,
   WORKSPACE_BRANDING_COLLECTION,
   WORKSPACE_BRANDING_DOCUMENT_ID,
-} from './shared/branding.js?v=20260907-shell-v2-crew-home-v343';
-import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/branding.js?v=20260907-shell-v2-crew-home-v344';
+import { normalizeRole, roleCanManage, roleDescription, roleDisplayName } from './shared/roles.js?v=20260907-shell-v2-crew-home-v344';
 import {
   launchesInWindow,
   resolvePresentation,
   resolveShellWindowContract,
   usesLegacyWorkspace,
-} from './shared/presentation.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/presentation.js?v=20260907-shell-v2-crew-home-v344';
 import {
   buildLifecyclePermissionView,
   buildGlobalCtoxAgentScopeView,
@@ -40,9 +40,9 @@ import {
   renderModuleWhyDiagnosticsHtml,
   renderGlobalCtoxContextModeHtml,
   shouldRenderModuleSourceAction,
-} from './shared/shell-permissions-ui.js?v=20260907-shell-v2-crew-home-v343';
-import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260907-shell-v2-crew-home-v343';
-import { createDocumentsFacade } from './shared/documents.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/shell-permissions-ui.js?v=20260907-shell-v2-crew-home-v344';
+import { createShellChatCompositionController } from './shared/shell-chat-composition.js?v=20260907-shell-v2-crew-home-v344';
+import { createDocumentsFacade } from './shared/documents.js?v=20260907-shell-v2-crew-home-v344';
 import {
   CTOX_MAINTENANCE_MESSAGE,
   CTOX_MAINTENANCE_SYNC_MESSAGE,
@@ -50,16 +50,16 @@ import {
   maintenancePhaseLabel,
   maintenanceRequiredCollections,
   normalizeMaintenancePayload,
-} from './shared/maintenance-state.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/maintenance-state.js?v=20260907-shell-v2-crew-home-v344';
 import {
   buildWorkspaceSessionSnapshot,
   normalizeWorkspaceSessionSnapshot,
-} from './shared/workspace-session.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/workspace-session.js?v=20260907-shell-v2-crew-home-v344';
 import {
   decodeTaskbarPinCache,
   encodeTaskbarPinCache,
   resolveTaskbarPinState,
-} from './shared/taskbar-pins.js?v=20260907-shell-v2-crew-home-v343';
+} from './shared/taskbar-pins.js?v=20260907-shell-v2-crew-home-v344';
 import {
   applyWorkjetCategory,
   normalizeWorkjetCategory,
@@ -67,9 +67,9 @@ import {
   workjetCategoryForModule,
   workjetCategoryForTarget,
 } from './shared/workjet-theme.js?v=20260903-entertainment-import-v336';
-import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260907-shell-v2-crew-home-v343';
-import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260907-shell-v2-crew-home-v343';
-import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260907-shell-v2-crew-home-v343';
+import { operatorIconFor } from './shared/operator-icon-selection.js?v=20260907-shell-v2-crew-home-v344';
+import { resolveLauncherIcon } from './shared/launcher-icon.js?v=20260907-shell-v2-crew-home-v344';
+import { createShellGenerationReloadGuard } from './shared/shell-generation.js?v=20260907-shell-v2-crew-home-v344';
 
 const SESSION_TOKEN_KEY = 'ctox.businessOs.sessionToken';
 const AUTH_HEADER_KEY = 'ctox.businessOs.authHeader';
@@ -84,7 +84,7 @@ const WINDOW_GEOMETRY_KEY = 'ctox.businessOs.windowGeometry';
 const WORKSPACE_SESSION_KEY = 'ctox.businessOs.workspaceSession';
 const SHELL_COLUMN_LAYOUT_KEY_PREFIX = 'ctox.businessOs.shellColumnLayout.';
 const SHELL_MODULE_RESIZER_KEY_PREFIX = 'ctox.businessOs.moduleColumns.';
-const APP_BUILD = '20260907-shell-v2-crew-home-v343';
+const APP_BUILD = '20260907-shell-v2-crew-home-v344';
 const WORKJET_UI_CONTRACT_BUILD = '5173a1155a9a5f1f28ed43afcb004693dd95c073cabfae8157cd01c7e8830419';
 
 const nativeBusinessOsFetch = globalThis.fetch?.bind(globalThis);
@@ -6713,6 +6713,8 @@ const SETTINGS_DB_COLLECTIONS = [
 const BUSINESS_CHAT_DB_COLLECTIONS = [
   'business_chats',
   'business_commands',
+  // The crew pool in the bar: members, their expression, drag onto an app.
+  'ctox_crew_members',
   'ctox_queue_tasks',
   'desktop_file_chunks',
   'desktop_files',
@@ -9196,7 +9198,18 @@ function scheduleBusinessCompanions() {
       console.warn('[business-os] reporter surface lazy init failed', error);
     });
   loadBusinessChatModule()
-    .then(({ initBusinessChat }) => {
+    .then(async ({ initBusinessChat }) => {
+      // The crew bar is a shell surface: it needs the CTOX module's collections
+      // (crew members) registered before the first pool load, not only once the
+      // CTOX window has been opened.
+      const ctoxModule = state.modules.find((mod) => mod.id === 'ctox');
+      if (ctoxModule) {
+        try {
+          await registerModuleSchemas(ctoxModule);
+        } catch (error) {
+          console.warn('[business-os] crew schema registration for the chat bar failed', error);
+        }
+      }
       initBusinessChat({
         session: state.session,
         commandBus: createLiveCommandBusFacade(),

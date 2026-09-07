@@ -361,6 +361,25 @@ export function initBusinessChat({
       trackingWatch?.refresh?.({ schedule: true });
     },
   });
+  // The pool follows the crew collection, however late it becomes ready: the
+  // first load after readiness fills the bar, later changes re-render it.
+  let crewChangeSubscription = null;
+  const refreshCrewPool = () => loadCrewMembers({ state, db }).then((changed) => {
+    if (!crewChangeSubscription) {
+      try {
+        crewChangeSubscription = db?.raw?.ctox_crew_members?.$?.subscribe?.(() => {
+          loadCrewMembers({ state, db }).then((next) => {
+            if (next) renderChatRoot({ root, state, commandBus, db, getActiveModule });
+          }).catch(() => {});
+        }) || null;
+      } catch {}
+    }
+    if (changed) renderChatRoot({ root, state, commandBus, db, getActiveModule });
+  }).catch(() => {});
+  try {
+    syncFacade?.subscribeCollectionReadiness?.('ctox_crew_members', () => { refreshCrewPool(); });
+  } catch {}
+  refreshCrewPool();
 
   const handleExternalSubmit = async (event) => {
     const detail = event.detail || {};

@@ -1,6 +1,6 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { renderListOrState } from '../../shared/list-state.js';
-import { crewCreatureHtml, syncCrewProceduralMotion, crewMemberExpression, crewMemberExpressionTtlMs } from '../../shared/business-chat.js?v=20260907-shell-v2-crew-home-v343';
+import { crewCreatureHtml, syncCrewProceduralMotion, crewMemberExpression, crewMemberExpressionTtlMs } from '../../shared/business-chat.js?v=20260907-shell-v2-crew-home-v344';
 import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 import { workspaceDataState } from './data-state.js?v=20260906-data-state-v1';
 
@@ -20,7 +20,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260907-shell-v2-crew-home-v343';
+const CTOX_STYLE_BUILD = '20260907-shell-v2-crew-home-v344';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -1006,12 +1006,18 @@ function dataState(state) {
   } catch (failure) {
     error ||= failure?.message || String(failure);
   }
+  const tasks = state.model?.tasks || [];
+  // Once a read has completed and rows are on screen, a still catching-up
+  // replication is not "loading" any more: the footer would otherwise say
+  // "Wird geladen…" over a full task list for as long as the room syncs.
+  let readiness = taskSourceReadiness(state);
+  if (state.dataLoaded && tasks.length && readiness && readiness.state !== 'offline-pending') readiness = null;
   return workspaceDataState({
     error,
     available,
-    readiness: taskSourceReadiness(state),
+    readiness,
     loaded: state.dataLoaded,
-    tasks: state.model?.tasks || [],
+    tasks,
   });
 }
 
