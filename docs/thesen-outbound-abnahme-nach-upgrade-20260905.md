@@ -220,3 +220,13 @@ Upgrade 6 gestartet 08:35 UTC (main `304536098`). Abnahme danach: Reload → 21/
 | Cockpit-Ansicht | „Waiting in queue" bei terminal `failed` (Cereda, 4 Versuche, Handshake-Timeouts) — Live-Flow zeigt den Plan der Vorversuche (8/8, 79 %) neben einem geschönten Routingstatus. An Crew-Cockpit-Thread gemeldet. |
 
 Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
+
+## 07.09., 10:34–11:36 UTC: Upgrade 7 live, Auth-Assist belegt, Writeback-Formfehler, Upgrade 8
+
+| Messung | Wert |
+|---|---|
+| Upgrade 7 (Release branch-main-20260907T100418Z) | Wartung per Browser-Ack 10:37:54; Cockpit-Thread trotz PR #66 weiter 75–99 % (an Crew-Thread gemeldet); Kapazität 2 → 3, weiterhin 0 Handshake-Fehler. |
+| **Auth-Assist (Anbieter-Login) funktioniert** | `ctox business-os web-stack auth-assist-request --source-id dnbhoovers.com --task-id <geleaste Task>` → `ok:true`, Befehl `accepted`, Sitzung `browser_session_web_stack_auth_dnbhoovers_com_michael_welsch…`, Ziel `https://app.dnbhoovers.com/login`, Owner michael.welsch, erwartetes Secret `DNB_HOOVERS_BROWSER_LOGIN`, `trusted_local_intake:true`. Vor Upgrade 7 brach derselbe Aufruf mit RxDB DB6 ab. Offene Anmeldeanforderung liegt beim Eigentümer. |
+| Fortsetzung | Daemon legte heute 32 „Nachrecherche"-Folgeaufträge an; Destilla stieg damit von 11 auf 15 Felder. „Fortsetzen: …" nach Anmeldebestätigung laut Skill §8; freier Chat-Turn trägt den Writeback-Vertrag nicht. |
+| Stand 11:33 | Destilla 15, Richter 13, Additiv 13, Calvatis 9, BNT 1 Felder; 3 Worker, 17 wartend. **Bremse:** Formfehler im Writeback (ANGUS 25 Ablehnungen in 9 min: `result` fehlt, Listen als ""/Objekt, `item`-Hülle, Feldschlüssel oben). |
+| Fix `e582dd595` (Upgrade 8, 11:36) | Empfänger leitet `result.fields` aus verifizierten `field_status`-Einträgen ab, akzeptiert ""/Objekt/JSON-String als Liste (`sources`, `attempts`, `evidence`, `person_records`, `fields`); Werkzeugbeschreibung nennt das exakte Format und die typischen Fehler. 23 Tests. |
