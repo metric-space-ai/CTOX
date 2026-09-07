@@ -176,3 +176,18 @@ Der Browser des Eigentümers zeigte 17 seit 04.09. gelöschte Leads („Offen") 
 „synchronisiert 0/5": die Löschmarken kamen dort nie an. Der Neuaufbau (Löschen + Neuimport) und die
 Tombstone-Fixes aus main (`20199fe28`, `7a54790c0`, `fcce19763`, mit Upgrade 4) adressieren das;
 Nachweis steht aus, bis der Eigentümer neu lädt.
+
+### Sammellauf 07.09., 05:51–06:45 UTC (App 1.0.103, Release branch-main-20260907T045949Z)
+
+| Messung | Wert |
+|---|---|
+| Aufträge angelegt | 13 von 19 in 54 min — die App startet sequenziell, jeder Start hängt am Sellify-Vorabgleich (Bedarfsabfragen stallen, 120-s-Deckel) |
+| Worker parallel | 4 (Kapazität greift) |
+| **End-to-End-Nachweis** | Dr. Kurt Richter: `execute_writeback` 06:11:51 + 06:17:22 `completed`, Lead `needs_review`, **13 Felder**; Cereda 06:38:39 `completed`, **4 Felder** |
+| Writeback-Ablehnungen | 8, davon 6 „invalid payload" (Destilla 4×: verschachtelter `firma_land`-Schlüssel, `deny_unknown_fields`), 1 „non-verified field must not carry a populated value" — der Worker korrigiert nur, wenn die Ablehnung den Grund nennt → Fix `f3a2aa7fd` |
+| Terminal gescheitert durch Plan-Prüfungen | Carbosulf 05:50 („completed prefix"), AKEMI 06:16 („plan is incomplete 1/3"), CHEMOFAST 06:41 („exactly one in-progress step") → Fixes `92a84679b` (Normalisierung) + `80561cbc9` (Wiederholung statt Terminal) |
+| Technische Wiederholungen | 4× `stream disconnected before completion` (llm.ctox.dev), 1× `thread/start failed` (Aeroxon) — Backoff 60 s, `technical:worker-runtime-api-failure` |
+| Lokale Fehlstarts | Beiersdorf, BEWI RAW, BOOMEX u. a. zeitweise `failed` ohne Server-Auftrag — Submit im Browser lief in den Sync-Stall |
+
+Upgrade 5 gestartet 06:46 UTC (main `f3a2aa7fd`: Plan-Normalisierung, Wiederholungsklasse, Writeback-Fehlerdetail).
+Danach: App 1.0.104 ausliefern, offene Leads in kleinen Gruppen nachstarten, Feldtabelle messen.
