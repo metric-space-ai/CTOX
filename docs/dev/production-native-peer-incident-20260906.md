@@ -23,8 +23,24 @@ deleting; the initial four real-store tests did not exercise the subsequent
 schema-validating native replay. A follow-up now sanitizes this invalid byte
 field only for deleted file chunks, includes invalid historical tombstones in
 the audit, and adds a real native RxDB projection replay test. That follow-up's
-build and operational reapplication are pending at this checkpoint. No
-validator is weakened and no live document payload is rewritten.
+build and operational reapplication completed in a second guarded maintenance
+window at 2026-09-07T02:01:30Z. Its five real-store/native-replay tests and all
+429 RxDB crate tests passed. The exact second candidate digest was
+`fd3dad8f973626ad636d219109a5f5337e1152a5c708453b49aec7ccb8af5d17`.
+The second store backup is
+`/home/ctox/.local/state/ctox-incident-office-staging-v2-20260907`.
+After application all seven deleted chunks have string data, and a fresh audit
+reports zero candidates, including invalid historical tombstones. Service PID
+2717185 was active with NRestarts=0. No validator is weakened and no live
+document payload is rewritten.
+
+Six complementary required-field/schema helper tests also passed. The full
+JavaScript suite did **not** pass: 115 passed, four failed by timeout
+(cross-process wire seeding, demand-cache migration browser, initial-sync stale
+browser, multi-tab browser). These remain failures, not production acceptance.
+The own browser tab loaded beta16 and Harness after cleanup, but the new
+spreadsheet still showed an editor loading skeleton at the next visual check;
+no save/reopen success or boot percentile is claimed.
 
 A whole-store recursive marker audit also found fourteen active omitted
 `business_module_source_files` records: thirteen
