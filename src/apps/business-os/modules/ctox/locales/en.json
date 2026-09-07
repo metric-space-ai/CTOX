@@ -218,5 +218,6 @@
   "noLiveMetrics": "no live measurements",
   "noPlanYet": "no plan yet",
   "sourceUnavailable": "source not connected",
-  "entryOne": "entry"
+  "entryOne": "entry",
+  "notPermittedForRole": "not released for your role"
 }

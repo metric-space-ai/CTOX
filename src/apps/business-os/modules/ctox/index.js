@@ -93,6 +93,7 @@ const labels = {
     atHome: "zu Hause",
     restingAfterFailure: "erholt sich nach einem Fehlschlag",
     readingMemory: "liest sein Gedächtnis",
+    notPermittedForRole: "für deine Rolle nicht freigegeben",
     noLiveMetrics: "keine Live-Messwerte",
     noPlanYet: "noch kein Plan",
     sourceUnavailable: "Quelle nicht verbunden",
@@ -381,6 +382,7 @@ const labels = {
     atHome: "at home",
     restingAfterFailure: "recovering after a failure",
     readingMemory: "reading its memory",
+    notPermittedForRole: "not released for your role",
     noLiveMetrics: "no live measurements",
     noPlanYet: "no plan yet",
     sourceUnavailable: "source not connected",
@@ -1025,7 +1027,12 @@ function dataStatusMarkup(state) {
 
 function showDataError(state, error) {
   if (state.disposed) return;
-  state.dataError = error?.message || String(error);
+  const message = error?.message || String(error);
+  // A read the peer refuses is a role question, not a broken store: say so
+  // in the owner's words and keep the raw code in the tooltip.
+  state.dataError = /UNAUTHORIZED|not authorized/i.test(message)
+    ? `${labels[state.lang].notPermittedForRole} (${message.split(':')[0].trim()})`
+    : message;
   // Keep the last successful model, selection and task list when a read fails.
   if (state.model) render(state);
   else renderLoading(state);

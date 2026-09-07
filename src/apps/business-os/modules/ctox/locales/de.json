@@ -218,5 +218,6 @@
   "noLiveMetrics": "keine Live-Messwerte",
   "noPlanYet": "noch kein Plan",
   "sourceUnavailable": "Quelle nicht verbunden",
-  "entryOne": "Eintrag"
+  "entryOne": "Eintrag",
+  "notPermittedForRole": "für deine Rolle nicht freigegeben"
 }
