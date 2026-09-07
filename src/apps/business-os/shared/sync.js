@@ -22,8 +22,8 @@ import {
   collectionTopic,
   nativeRxdbPeerReady,
   normalizeCollectionReadinessState,
-} from './sync-contract.js?v=20260903-shell-v2-crew-bar-v338';
-import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260903-shell-v2-crew-bar-v338';
+} from './sync-contract.js?v=20260906-office-page-exit';
+import { getBusinessOsCapabilityToken } from './command-bus.js?v=20260906-office-page-exit';
 import { loadRxdbRuntime, RXDB_BUNDLE_URL } from './rxdb-runtime.js?v=20260906-office-page-exit';
 import { CTOX_COMMAND_LIFECYCLE_CAPABILITY } from './command-lifecycle.generated.js';
 

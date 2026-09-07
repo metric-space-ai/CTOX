@@ -72,6 +72,9 @@ jobs:
       - name: Guard visible harness layout and loaded document identity
         run: node src/apps/business-os/modules/ctox/tests/layout.browser.mjs
 
+      - name: Run Office bridge regressions
+        run: node --test src/apps/business-os/office-engine/office-engine.test.mjs src/apps/business-os/office-engine/office-commit-upload.test.mjs
+
       - name: Run focused shell artifact tests
         run: npm run test:shell-artifact --prefix src/apps/business-os
 
