@@ -2982,7 +2982,9 @@ fn outbound_queue_research_scraper_generation(
             prompt,
             thread_key: format!("business-os/outbound/research-adapter/{target_key}"),
             workspace_root: Some(root.display().to_string()),
-            priority: "high".to_string(),
+            // Adapter generation is background maintenance; it must not
+            // outrank the research that needs the adapter (thesen 07.09.2026).
+            priority: "low".to_string(),
             suggested_skill: Some("universal-scraping".to_string()),
             parent_message_key: None,
             extra_metadata: Some(serde_json::json!({
