@@ -626,6 +626,13 @@ fn union_research_keys(lead: &mut Value, previous: &BTreeMap<String, Vec<String>
     );
 }
 
+/// A follow-up writeback carries the sanitizer's filler entries
+/// (`unsupported`, "Vom Rueckschreiben nicht geliefert") for every requested
+/// field the worker did not deliver. Those fillers must never downgrade a
+/// status an earlier writeback established (07.09.2026: Aeroxon lost all
+/// fifteen `verified` entries to fillers, the gap closure then re-opened every
+/// field). An incoming `unsupported` without sources or attempts is only
+/// accepted for a field that has no status yet or is itself `unsupported`.
 fn merge_field_status(existing: Option<&Value>, incoming: Value) -> Value {
     let mut merged = existing
         .and_then(Value::as_object)
@@ -633,10 +640,43 @@ fn merge_field_status(existing: Option<&Value>, incoming: Value) -> Value {
         .unwrap_or_default();
     if let Some(incoming) = incoming.as_object() {
         for (field, status) in incoming {
+            if is_filler_field_status(status) {
+                let previous_is_informative = merged.get(field).is_some_and(|previous| {
+                    !previous
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unsupported")
+                        .trim()
+                        .eq_ignore_ascii_case("unsupported")
+                });
+                if previous_is_informative {
+                    continue;
+                }
+            }
             merged.insert(field.clone(), status.clone());
         }
     }
     Value::Object(merged)
+}
+
+fn is_filler_field_status(status: &Value) -> bool {
+    let unsupported = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("unsupported");
+    let no_sources = status
+        .get("sources")
+        .and_then(Value::as_array)
+        .map(|sources| sources.is_empty())
+        .unwrap_or(true);
+    let no_attempts = status
+        .get("attempts")
+        .and_then(Value::as_array)
+        .map(|attempts| attempts.is_empty())
+        .unwrap_or(true);
+    unsupported && no_sources && no_attempts
 }
 
 /// Workers regularly send `field_status` alone and forget `result` (or send
@@ -774,7 +814,20 @@ pub(super) fn handle_research_writeback(
     let mut request = request;
     derive_result_fields_from_field_status(&mut request);
     reject_evidence_free_writeback(&request)?;
-    let rejections = sanitize_research_writeback(&mut request, &requested_fields)?;
+    let delivered_fields = request
+        .field_status
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<String>>();
+    // "nicht geliefert" is not a defect: a follow-up writeback legitimately
+    // carries a subset of the requested fields. Workers read a list of 31
+    // rejections as a failed call and resend the same field over and over
+    // (07.09.2026: Aeroxon, seven identical one-field writebacks in five
+    // minutes), so undelivered fields are reported separately as `open_fields`.
+    let rejections = sanitize_research_writeback(&mut request, &requested_fields)?
+        .into_iter()
+        .filter(|entry| !entry.ends_with(": nicht geliefert"))
+        .collect::<Vec<String>>();
     validate_field_status_keys(&requested_fields, &request.field_status)?;
     validate_result_shape(&request.result, &requested_fields)?;
     validate_result_field_status_consistency(&request.result, &request.field_status)?;
@@ -805,6 +858,16 @@ pub(super) fn handle_research_writeback(
         serde_json::to_value(&request.field_status)?,
     );
     lead["field_status"] = merged_field_status;
+    let open_fields = requested_fields
+        .iter()
+        .filter(|field| {
+            lead["field_status"]
+                .get(field.as_str())
+                .map(is_filler_field_status)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<String>>();
     if gap_task.is_some() {
         lead["gap_task_id"] = Value::String(request.gap_task_id.clone());
     }
@@ -813,6 +876,7 @@ pub(super) fn handle_research_writeback(
     // Menschen - sonst haette die Rettung "abgeschlossen" gemeldet, obwohl
     // Felder fehlen.
     let needs_review = !rejections.is_empty()
+        || !open_fields.is_empty()
         || request
             .field_status
             .values()
@@ -836,10 +900,22 @@ pub(super) fn handle_research_writeback(
         "research_command_id": request.research_command_id,
         "gap_task_id": request.gap_task_id,
         "research_status": if needs_review { "needs_review" } else { "completed" },
-        "field_status": request.field_status,
+        "field_status": request
+            .field_status
+            .iter()
+            .filter(|(key, _)| delivered_fields.contains(key.as_str()))
+            .collect::<BTreeMap<_, _>>(),
+        "accepted_fields": delivered_fields.iter().cloned().collect::<Vec<String>>(),
+        "open_fields": open_fields,
         // Der Agent erfaehrt genau, was verworfen wurde, und kann im selben
         // Auftrag nachliefern statt die ganze Firma neu zu recherchieren.
         "rejections": rejections,
+        "summary": format!(
+            "{} Feld(er) übernommen, {} Beleg(e) verworfen, {} Feld(er) noch offen. Nicht gelieferte Felder sind keine Ablehnung: recherchiere sie und sende sie gesammelt in einem weiteren Aufruf; übernommene Felder nicht erneut senden.",
+            delivered_fields.len(),
+            rejections.len(),
+            open_fields.len()
+        ),
     }))
 }
 
@@ -2569,6 +2645,95 @@ mod tests {
         assert_eq!(merged["firma_domain"]["value"], "beispiel.de");
         assert_eq!(merged["firma_email"]["status"], "verified");
         assert_eq!(merged.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn filler_statuses_of_a_follow_up_do_not_downgrade_earlier_verified_fields() {
+        let previous = serde_json::json!({
+            "firma_name": {"status": "verified", "value": "Beispiel GmbH", "sources": [{"source_id": "official"}]},
+            "firma_domain": {"status": "no_match", "reason": "keine Quelle", "attempts": [{"source_id": "register"}]},
+            "firma_fax": {"status": "unsupported", "reason": "Vom Rueckschreiben nicht geliefert"}
+        });
+        // The sanitizer fills every requested-but-undelivered field with an
+        // evidence-free `unsupported` entry; only firma_email was delivered.
+        let incoming = serde_json::json!({
+            "firma_name": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"},
+            "firma_domain": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"},
+            "firma_fax": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"},
+            "firma_email": {"status": "verified", "value": "info@beispiel.de", "sources": [{"source_id": "official"}], "attempts": []},
+            "firma_telefon": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"}
+        });
+        let merged = merge_field_status(Some(&previous), incoming);
+        assert_eq!(merged["firma_name"]["status"], "verified");
+        assert_eq!(merged["firma_name"]["value"], "Beispiel GmbH");
+        assert_eq!(merged["firma_domain"]["status"], "no_match");
+        assert_eq!(merged["firma_email"]["status"], "verified");
+        // A field without an informative earlier status takes the filler.
+        assert_eq!(
+            merged["firma_fax"]["reason"],
+            "Vom Rueckschreiben nicht geliefert"
+        );
+        assert_eq!(merged["firma_telefon"]["status"], "unsupported");
+        // A documented `unsupported` (with attempts) is not a filler and wins.
+        let documented = serde_json::json!({
+            "firma_name": {"status": "unsupported", "attempts": [{"source_id": "official", "note": "Seite offline"}], "sources": []}
+        });
+        let merged = merge_field_status(Some(&merged), documented);
+        assert_eq!(merged["firma_name"]["status"], "unsupported");
+    }
+
+    #[test]
+    fn writeback_response_separates_open_fields_from_rejections() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let record_id = "lead-offene-felder";
+        let research_command_id = "research-offene-felder";
+        let (_, task) =
+            create_gap_fixture(temp.path(), research_command_id, record_id, "firma_domain")?;
+        let command = writeback_command(
+            record_id,
+            serde_json::json!({
+                "record_id": record_id,
+                "module": "outbound-lead-generation",
+                "research_command_id": research_command_id,
+                "gap_task_id": task.message_key,
+                "field_status": {
+                    "firma_domain": {
+                        "status": "verified",
+                        "value": "example.test",
+                        "sources": [
+                            {"source_id": "official", "url": "https://example.test/imprint", "quote": "example.test"},
+                            {"source_id": "register", "url": "https://register.test/example", "quote": "example.test"}
+                        ],
+                        "attempts": []
+                    }
+                },
+                "result": {"fields": {"firma_domain": {"value": "example.test"}}, "person_records": [], "evidence": []}
+            }),
+        );
+        let result = handle_research_writeback(temp.path(), &command)?;
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["accepted_fields"],
+            serde_json::json!(["firma_domain"])
+        );
+        assert_eq!(result["open_fields"], serde_json::json!([]));
+        let rejections = result["rejections"]
+            .as_array()
+            .context("rejections fehlen")?;
+        assert!(
+            !rejections.iter().any(|entry| entry
+                .as_str()
+                .is_some_and(|text| text.contains("nicht geliefert"))),
+            "undelivered fields must not be reported as rejections: {rejections:?}"
+        );
+        assert!(result["summary"]
+            .as_str()
+            .is_some_and(|text| text.contains("1 Feld(er) übernommen")));
+        assert_eq!(
+            result["field_status"].as_object().map(|map| map.len()),
+            Some(1)
+        );
+        Ok(())
     }
 
     #[test]
