@@ -73,7 +73,10 @@ jobs:
         run: node src/apps/business-os/modules/ctox/tests/layout.browser.mjs
 
       - name: Run Office bridge regressions
-        run: node --test src/apps/business-os/office-engine/office-engine.test.mjs src/apps/business-os/office-engine/office-commit-upload.test.mjs
+        run: node --test src/apps/business-os/office-engine/office-engine.test.mjs src/apps/business-os/office-engine/office-commit-upload.test.mjs src/apps/business-os/office-engine/save-lifecycle.test.mjs
+
+      - name: Guard mobile Office editor height
+        run: npm --prefix src/apps/business-os run qa:shell-office-height -- --output-dir "${RUNNER_TEMP}/ctox-shell-office-height"
 
       - name: Run focused shell artifact tests
         run: npm run test:shell-artifact --prefix src/apps/business-os

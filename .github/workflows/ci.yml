@@ -180,6 +180,10 @@ jobs:
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: npm --prefix src/apps/business-os exec playwright install --with-deps chromium
 
+      - name: Business OS Office mobile height
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: npm --prefix src/apps/business-os run qa:shell-office-height -- --output-dir "${RUNNER_TEMP}/ctox-shell-office-height"
+
       - name: Business OS JS tests
         if: matrix.target == 'x86_64-unknown-linux-gnu'
         run: |
