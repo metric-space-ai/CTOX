@@ -19322,6 +19322,15 @@ fn runtime_error_is_transient_api_failure(error: &str) -> bool {
         || normalized.contains("database is busy")
         || normalized.contains("sqlite_busy")
         || normalized.contains("sqlite locked")
+        // A worker turn that ended with an incomplete durable plan (or whose
+        // plan bookkeeping failed) has not produced a result, and the plan is
+        // durable: the next attempt continues it. The cooldown classifier has
+        // known this since 80561cbc9, but this gate did not, so the queue still
+        // terminalized such tasks on the first attempt (thesen 07.09.2026:
+        // CHEMOFAST, AKEMI, BÜFA, BNT each lost several runs to
+        // "task execution plan is incomplete (n/m steps completed)").
+        || normalized.contains("task execution plan is incomplete")
+        || normalized.contains("durable task progress failed")
         // gateway-1: managed-local-backend readiness failures (wrapped with the
         // "failed to ensure local chat backend before direct session" context)
         // are transient host-infra blockers. The cooldown gate above already
@@ -38409,6 +38418,24 @@ Use shell tools to create or update these files."
         assert!(worker_error_may_consume_business_os_app_validation_repair(
             "worker returned invalid application source",
         ));
+    }
+
+    #[test]
+    fn incomplete_durable_plan_keeps_queue_work_retryable() {
+        for error in [
+            "task execution plan is incomplete (2/12 steps completed)",
+            "durable task progress failed: an incomplete task execution plan must contain exactly one in-progress step",
+        ] {
+            assert_eq!(
+                turn_loop::hard_runtime_blocker_retry_cooldown_secs(error),
+                Some(60)
+            );
+            assert!(
+                runtime_error_is_transient_api_failure(error),
+                "{error} must hold the task for another attempt instead of failing it"
+            );
+            assert_eq!(failed_worker_route_status(false, false, true), "pending");
+        }
     }
 
     #[test]

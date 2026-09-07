@@ -207,3 +207,84 @@ Danach: App 1.0.104 ausliefern, offene Leads in kleinen Gruppen nachstarten, Fel
 | Meine Fixes für Upgrade 6 (`304536098`) | Cockpit-Pump: höchstens ein Refresh je Root alle 3 s (Wakes werden gebündelt). Writeback-Guard: belegfreie Writebacks (nichts verifiziert, keine Quelle, kein Versuch) werden mit erklärender Meldung abgewiesen; 2 Tests. |
 
 Upgrade 6 gestartet 08:35 UTC (main `304536098`). Abnahme danach: Reload → 21/21 Kollektionen in < 60 s; MCP-Handshake der Worker; Cockpit-Thread < 20 %; Nachstart aller unvollständigen Leads; Feldtabelle.
+
+## 07.09., 08:56–10:05 UTC: Upgrade 6 gemessen, Lauf über alle 19, Anbieter-Login-Pfad geprüft, Upgrade 7 gestartet
+
+| Messung | Wert |
+|---|---|
+| Upgrade 6 (Release branch-main-20260907T082637Z) | Wartungsfreigabe 09:00:00 per Browser-Ack (33 s); seit 08:56 **0** MCP-Handshake-Fehler bei Kapazität 2; Browser-Erstreplikation nach Reload 12/16 nach 2 min, Richter-Lead zeigt 13/32 (Codex-Sync-Fix PR #65 wirkt). Cockpit-Thread weiter 73–86 % → PR #66 (Ereignis-Cursor) mit Upgrade 7. |
+| App 1.0.105 | Vorabgleich-Antwort „wartet noch auf die Rückmeldung" gilt wie Timeout; vorher brachen Berg, Chemotechnik, Dreidoppel und ein 8er-Batch still ab. „Alle recherchieren (15)" legte danach alle offenen Aufträge an (19 in Queue um 09:46). |
+| Ergebnisse 09:56 | Richter 13, Additiv 13, Destilla 11, Calvatis 9 Felder; Cereda `needs_review` mit 0 (Neulauf eingereiht). Writeback-Ablehnungen jetzt mit Grund („expected a sequence": `sources` als String/Objekt → Fix `c66b2b8ad` akzeptiert alle drei Formen). |
+| Skill-/Prompt-Einhaltung (Schritte 0–4 aus `research_instructions`) | 1 Register ja (Northdata/Handelsregister; GF, Prokura, Status verifiziert), 2 Website ja (Impressum, Domain, E-Mail, Telefon), **3 Kennzahlen bei keinem Lead** (D&B Hoovers/Leadfeeder = Login-Quellen → `no_match`/`action_required`), 4 Personen: Additiv 2, Richter 1, Calvatis 0 trotz GF im Impressum (Verstoß), `person_email_validation` nirgends. Zwei-Quellen-Regel bis auf `person_titel`, `firma_prokura`, `person_geschlecht` eingehalten. |
+| **Anbieter anlegen/freischalten (Login-Quellen)** | Kette App → Secret `OUTBOUND_<QUELLE>_LOGIN` (`ctox.secret.put`) → `credential_secret_name` in `payload.source_policy` (belegt für 6 Quellen) → Worker `auth-assist-request` → Owner-Browser-Stream. **Bruch:** jeder CLI-Aufruf des Workers, der den RxDB-Store öffnet, scheitert seit 02.09. mit RxDB DB6 (`workjet_computers`-Schemadrift; Dienst überspringt optional, CLI-Pfad strikt) → nie eine Anmeldeanforderung. Fix `8de040615` (`register_collections_tolerant`), Upgrade 7. Nebenbefund: alle 14 Adapter `failed` („adapter reconciliation reply must be one strict JSON object"). |
+| Cockpit-Ansicht | „Waiting in queue" bei terminal `failed` (Cereda, 4 Versuche, Handshake-Timeouts) — Live-Flow zeigt den Plan der Vorversuche (8/8, 79 %) neben einem geschönten Routingstatus. An Crew-Cockpit-Thread gemeldet. |
+
+Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
+
+## 07.09., 10:34–11:36 UTC: Upgrade 7 live, Auth-Assist belegt, Writeback-Formfehler, Upgrade 8
+
+| Messung | Wert |
+|---|---|
+| Upgrade 7 (Release branch-main-20260907T100418Z) | Wartung per Browser-Ack 10:37:54; Cockpit-Thread trotz PR #66 weiter 75–99 % (an Crew-Thread gemeldet); Kapazität 2 → 3, weiterhin 0 Handshake-Fehler. |
+| **Auth-Assist (Anbieter-Login) funktioniert** | `ctox business-os web-stack auth-assist-request --source-id dnbhoovers.com --task-id <geleaste Task>` → `ok:true`, Befehl `accepted`, Sitzung `browser_session_web_stack_auth_dnbhoovers_com_michael_welsch…`, Ziel `https://app.dnbhoovers.com/login`, Owner michael.welsch, erwartetes Secret `DNB_HOOVERS_BROWSER_LOGIN`, `trusted_local_intake:true`. Vor Upgrade 7 brach derselbe Aufruf mit RxDB DB6 ab. Offene Anmeldeanforderung liegt beim Eigentümer. |
+| Fortsetzung | Daemon legte heute 32 „Nachrecherche"-Folgeaufträge an; Destilla stieg damit von 11 auf 15 Felder. „Fortsetzen: …" nach Anmeldebestätigung laut Skill §8; freier Chat-Turn trägt den Writeback-Vertrag nicht. |
+| Stand 11:33 | Destilla 15, Richter 13, Additiv 13, Calvatis 9, BNT 1 Felder; 3 Worker, 17 wartend. **Bremse:** Formfehler im Writeback (ANGUS 25 Ablehnungen in 9 min: `result` fehlt, Listen als ""/Objekt, `item`-Hülle, Feldschlüssel oben). |
+| Fix `e582dd595` (Upgrade 8, 11:36) | Empfänger leitet `result.fields` aus verifizierten `field_status`-Einträgen ab, akzeptiert ""/Objekt/JSON-String als Liste (`sources`, `attempts`, `evidence`, `person_records`, `fields`); Werkzeugbeschreibung nennt das exakte Format und die typischen Fehler. 23 Tests. |
+
+## 07.09., 12:05–13:40 UTC: Upgrade 8 und 9 (Writeback-Toleranz), Stand des Laufs
+
+| Messung | Wert |
+|---|---|
+| Upgrade 8 (Release branch-main-20260907T112714Z, 12:05) | Wartung per Grace-Pfad 12:07:20 (kein Client). Danach verbleibende Ablehnungen: „missing field `source_id`" 16, „invalid type: number, expected a string" 8 (in 1 h). Handshake-Fehler nur als Burst bei drei gleichzeitigen Worker-Starts (12:32–12:35) → Kapazität 3 → 2. |
+| Upgrade 9 (Release branch-main-20260907T124810Z, 13:17; `5b4ab72ff`: `source_id` aus Host/URL, Zahlen als Text) | Wartung per Grace-Pfad 13:27:55. **Seit 13:17: 6 Writebacks angenommen, 0 abgewiesen** (11:36–13:17: 20 angenommen, 50 abgewiesen). |
+| Kampagnenstart 13:28 („Alle recherchieren (10)") | alle 10 Aufträge in 10 min angelegt (App 1.0.105 + stabiler Sync). |
+| Stand 13:40 | 10 von 19 Leads mit Ergebnis, 96 Felder: Destilla 15, Aeroxon 15, Richter 13, Additiv 13, Chemotechnik 12, Dreidoppel 11, Calvatis 9, ANGUS 6, BNT 1, Carbosulf 1. Aeroxon vollständig regelkonform (Register, Impressum, 2 Personen mit LinkedIn, Mitarbeiter verifiziert). Kennzahlen (WZ/Umsatz/Mitarbeiter aus D&B Hoovers) weiterhin offen: Anmeldeanforderung liegt beim Eigentümer. |
+| Eigene Falle | Monitore 11:36–12:43 blind: `timeout` existiert auf macOS nicht (Memory `macos-kein-timeout`). |
+
+## 07.09., 13:40–14:10 UTC: Zusammenführungsfehler bei Folge-Writebacks, Upgrade 10
+
+| Messung | Wert |
+|---|---|
+| Stand 13:58 | 11 Leads mit Ergebnis (BEWI RAW 19, Destilla 15, Aeroxon 15, Richter 13, Additiv 13, Chemotechnik 12, Dreidoppel 11, Calvatis 9, BNT/Carbosulf/ANGUS 1). Seit Upgrade 9: 25 angenommene, 1 abgewiesene Writebacks (Feldschlüssel auf oberster Ebene). |
+| **Defekt: Folge-Writeback ersetzt statt zusammenzuführen** | ANGUS 13:58:44: ein Lückenschluss-Writeback mit **einem** Feld (`firma_name`) ersetzte `field_status` (verifiziert 6 → 1) und `payload.researched_field_keys` (→ `["firma_name"]`); `data` (6 Felder) und `contacts` (4 Personen) blieben. Ursache `handle_research_writeback`: `lead["field_status"] = request.field_status` und der Outcome-Patch setzt die Schlüssellisten nur aus dem aktuellen Ergebnis. |
+| Fix `2bfddd2fe` (Upgrade 10, 14:08) | `merge_field_status` (Feld für Feld, neuer Eintrag gewinnt) und `union_research_keys` (researched/verified/unverified vereinigt, verifiziert verlässt unverified). Test `follow_up_writeback_keeps_previous_field_status_and_unions_keys`. Bereits geschrumpfte Leads (ANGUS) füllen sich mit dem nächsten vollständigen Writeback wieder. |
+
+## 07.09., 14:45–17:05 UTC: Upgrade 10 gemessen, Füller-Status und Ablehnungs-Semantik, Upgrade 11 und 12
+
+| Messung | Wert |
+|---|---|
+| Upgrade 10 (Release branch-main-20260907T140503Z, `2bfddd2fe`) | Wartung per Grace-Pfad 14:45:17 freigegeben. Union der Schlüssel wirkt: Carbosulf 1 → 17 → 22, Aeroxon 15 → 16. |
+| **Defekt: Füller überschreiben `field_status`** | Der Sanitizer füllt jedes angeforderte, nicht gelieferte Feld mit `unsupported` („Vom Rueckschreiben nicht geliefert"). `merge_field_status` kopierte diese Füller über frühere `verified`-Einträge: Aeroxon 15:24 nach drei Ein-Feld-Writebacks **kein** Feld mehr verifiziert, `data.*` und `researched_field_keys` (15) unverändert. Sichtbar nur im Feldstatus, nicht in der Zählung. |
+| **Defekt: offene Felder als `rejections`** | Die Antwort listete die 31 nicht gelieferten Felder unter `rejections`; der Worker las das als Fehlschlag und schickte 15:24–15:28 sieben Mal dasselbe Feld `firma_name` (einmal `reason: "debug"`). |
+| Fix `4dc9a912d` (Upgrade 11, Release branch-main-20260907T153953Z, Wechsel 16:06, Wartung per Grace 16:20:00) | Füller landen nur auf Feldern ohne aussagekräftigen Status (`is_filler_field_status`). Antwort trennt `accepted_fields`, `open_fields` (aus dem zusammengeführten Lead-Status), `rejections` (nur Defekte) und `summary`; Tool-Beschreibung sagt dasselbe. Tests `filler_statuses_of_a_follow_up_do_not_downgrade_earlier_verified_fields`, `writeback_response_separates_open_fields_from_rejections`. |
+| **Defekt: Formvarianten kippen ganze Läufe** | Seit 14:45 zwölf Ablehnungen: 6× `missing field kind` (Attempts ohne `kind`), 3× `expected struct FieldStatus` (`""` oder Liste als Feldeintrag), `unknown field firma_fruehere_namen` / `person_records` (Einträge neben statt in `field_status`/`result`). |
+| Fix `a022b1e96` (Upgrade 12, Start 17:02) | `FieldAttempt` vollständig optional; `lenient_field_status` verwirft Nicht-Objekte, akzeptiert Listen mit `field`-Schlüssel und JSON-Strings; `hoist_top_level_field_entries` hebt Feldeinträge in `field_status` und `fields`/`person_records`/`evidence` in `result`. Tests (28 grün im Modul). |
+| Stand 16:56 | 15 von 19 mit Ergebnis: Carbosulf 22, DrinkStar 20, BEWI RAW 19, Aeroxon 16, Destilla 15, Berg 14, Richter 13, Dreidoppel 13, Chemotechnik 13, Additiv 13, **Beiersdorf 12 (completed)**, Calvatis 9, ANGUS 1, BNT 1, BOOMEX 1. Ohne: CHEMOFAST, BÜFA, AKEMI (Tasks terminal: Plan-unvollständig, kein Writeback-Beleg, MCP-Handshake), Cereda. |
+| Cereda | „Auswahl neu recherchieren" legt keinen Task an: App lehnt Sellify-bekannte Firma ab (contact_id 17625), nur Nachrecherche erlaubt. Nachrecherche 16:42 → `chat.task` 16:47:36 angenommen, App meldete trotzdem „nicht rechtzeitig an die Queue übergeben" (Daemon-Ack kam nach dem App-Timeout). |
+| Neustarts 16:56/16:58 | „Alle recherchieren (5)" und „Auswahl nachrecherchieren (3)" (ANGUS, BNT, BOOMEX) ausgelöst; App: „4 gestartet, 1 nicht gestartet". Serverseitige Bestätigung offen (siehe Folgeabschnitt). |
+| Tenant nicht erreichbar 16:23–16:40 | Alle SSH-Sitzungen der Control-Plane hingen 17 min und wurden 16:40:46 gleichzeitig freigegeben; parallel im Browser `masterWrite`/`masterChangesSince`-Timeouts. HTTP und Signaling antworteten. Ursache nicht gemessen (Last 2,8 danach). |
+| Worker-Enden 16:10–17:00 | 2× `database is locked` (Release-Wechsel), 3× Stream-Disconnect, 1× Plan unvollständig (4/6), 1× 1800-s-Timeout; alle mit Wiederholung. Keine MCP-Handshake-Fehler bei Kapazität 3. |
+| Lokale Falle | `cargo test` 45 min in Zustand `UN` auf `~/.cargo/.package-cache` bei IO-Sättigung (fremdes `rg`, Swap 5 GB); Neustart des Prozesses half. |
+
+## 07.09., 17:05–18:15 UTC: Upgrade 12 gemessen, Chat-Projektion als Ursache des Browser-Stalls, Upgrade 13
+
+| Messung | Wert |
+|---|---|
+| Upgrade 12 (Release branch-main-20260907T170121Z, `a022b1e96`), Wartung per Grace 17:41:18 | Seit 17:41 14 Writebacks, 13 angenommen. Beiersdorf 32 Felder in einem Aufruf (12 verifiziert, 20 no_match, 14 Belege verworfen), Cereda 31 Felder (8 verifiziert); Ein-Feld-Nachlieferungen ergänzen sauber. Eine Ablehnung: leerer Aufruf ohne `field_status`. |
+| Stand 17:52 | 16/19 mit Ergebnis: Carbosulf 22 (completed), DrinkStar 20, BEWI RAW 19, Aeroxon 16, Destilla 15, Berg 14, Richter/Dreidoppel/Chemotechnik/Additiv 13, Beiersdorf 12, Calvatis 9, BOOMEX 6, Cereda 4, ANGUS/BNT 1; CHEMOFAST/BÜFA/AKEMI 0 (Tasks terminal). |
+| **Browser-Pfad tot** | Nach Neuladen und IndexedDB-Wipe bleiben alle 16 Kollektionen in `initialReplicationState=pending/stalled` (restartCount 22), `lastLifecycleEvent`: „WebRTC native peer did not open for business_workspace_branding within 30000ms" (`peer_connect_timeout`), 766 Journal-Schreibungen (6 MB) anstehend. Nativer Peer meldet replicationUp/dataChannelOpen=true. Startklicks 16:56/16:58 kamen nie an. |
+| **Ursache: Chat-Projektion** | `[ctox cockpit phases]` 17:36–17:57: total 153–348 s je Runde, davon `project_chat_us` 190–345 s, alle anderen Phasen < 3 s. Dienst 5,3 GB RSS / 260 % CPU, Thread `cockpit-projections` 60 %, dreimal `database is locked`. `harness_cockpit_chat::project` lief je Runde über alle 173 Chat-Aufträge (170 terminal) inkl. `business_command_projection`, `load_queue_task`, Flow-Event- und LCM-Progress-Abfrage, bevor der Fingerprint griff. Die Einzelabfragen sind schnell (attempt_id 50 ms, Indizes vorhanden); die Summe je Auftrag liegt bei ~2 s. |
+| Fix `d729826b8` (Upgrade 13, Start 18:12) | `cockpit_chat_delivery.terminal` (ALTER TABLE, idempotent): Zustellung für Tasks mit terminalem Routing-Status markiert den Auftrag, spätere Runden überspringen ihn vor jeder Abfrage. Test `terminal_chats_are_delivered_once_and_skipped_afterwards`; Cockpit-Gruppe 35 grün. An Crew-Thread 01a07107 gemeldet (Nachrichten 01a07d06…, 01a07d07…, 01a07d0e…). Mit dabei `c4f34a277` (Feldwerte direkt in `result` → `result.fields`). |
+| Auth-Assist | Worker stellte ~18:00 „web stack auth assist request · handelsregister.de" (wartend, Owner-Browser). |
+| Lokale Falle | Test-Filter: Modulpfad ist `business_os::harness_cockpit::chat::tests`, nicht `harness_cockpit_chat`; Waiter auf `phase=completed` muss den Release-Namen prüfen, sonst matcht der Vorgänger. |
+
+## 07.09., 18:47–19:05 UTC: Upgrade 13 gemessen, Starts belegt, Retry-Lücke bei unvollständigem Plan, Upgrade 14
+
+| Messung | Wert |
+|---|---|
+| Upgrade 13 (Release branch-main-20260907T180804Z, `d729826b8`), Wartung per Grace 18:47:46 | Cockpit-Runden 1,5–2,6 s, `project_chat_us` 0,7–1,4 s (vorher 190–345 s); 169 Chats settled; Thread `cockpit-projections` 0 % CPU; Last 1,2. Browser-Erstreplikation nach Neuladen in 30 s (`business_commands` complete/connected). |
+| Starts 18:49–18:53 | „Alle recherchieren (2)" → CHEMOFAST (Lease 18:51:11), BÜFA (18:50:06); AKEMI per „Auswahl neu recherchieren (1)" (pending 18:55); ANGUS/BNT/BOOMEX per „Auswahl nachrecherchieren (3)" (alle drei pending bis 19:01). Alle serverseitig in `communication_routing_state` belegt. |
+| Stand 19:01 | 17/19 mit Ergebnis: BÜFA neu 16, Cereda 5 (completed); offen CHEMOFAST (0, terminal) und AKEMI (0, pending). |
+| **Defekt: unvollständiger Plan bleibt terminal** | CHEMOFAST 18:51:13–18:52:58: Worker endet „task execution plan is incomplete (2/12 steps completed)", Task sofort `failed` (attempt 1, failure_attempt_count 0, kein failure_class). Ursache: `runtime_error_is_transient_api_failure` (service.rs) hat eine eigene Substring-Liste; 80561cbc9 hatte nur den Cooldown-Klassifizierer erweitert. Betroffen heute: CHEMOFAST, AKEMI (0/9, 5/6), BÜFA (8/9), BNT (7/8, 4/7), Dreidoppel (5/6), DrinkStar (4/5). |
+| Fix `e3ab5c7b3` (Upgrade 14, Start 19:03) | Beide Marker passieren das Gate → Technik-Hold mit 5-Versuche-Budget, Plan wird fortgesetzt. Test `incomplete_durable_plan_keeps_queue_work_retryable`. |
+| Offen | CHEMOFAST nach Upgrade 14 neu starten; Auth-Assist handelsregister.de wartet auf Owner. |

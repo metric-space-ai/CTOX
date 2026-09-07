@@ -36,20 +36,170 @@ struct ResearchWritebackRequest {
     /// by the harness worker.
     #[serde(default)]
     gap_task_id: String,
+    #[serde(deserialize_with = "lenient_field_status")]
     field_status: BTreeMap<String, FieldStatus>,
+    #[serde(default)]
     result: ResearchWritebackResult,
+}
+
+/// Workers keep putting field entries next to `field_status` instead of
+/// inside it ("unknown field `firma_fruehere_namen`", 07.09.2026, several
+/// times). A top-level key that is not part of the envelope and carries an
+/// object with a `status` member is unambiguously a field entry, so it is
+/// moved into `field_status` instead of failing the run.
+fn hoist_top_level_field_entries(mut payload: Value) -> Value {
+    const ENVELOPE: [&str; 6] = [
+        "record_id",
+        "module",
+        "research_command_id",
+        "gap_task_id",
+        "field_status",
+        "result",
+    ];
+    let Some(object) = payload.as_object_mut() else {
+        return payload;
+    };
+    let stray: Vec<String> = object
+        .keys()
+        .filter(|key| !ENVELOPE.contains(&key.as_str()))
+        .filter(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_object)
+                .is_some_and(|entry| entry.contains_key("status"))
+        })
+        .cloned()
+        .collect();
+    // `result` members sent at the top level ("unknown field `person_records`",
+    // 07.09.2026) are moved into `result` the same way.
+    let mut result = match object.remove("result") {
+        Some(Value::Object(map)) => map,
+        _ => Map::new(),
+    };
+    let mut hoisted_result = false;
+    for key in ["fields", "person_records", "evidence"] {
+        if let Some(value) = object.remove(key) {
+            result.entry(key.to_string()).or_insert(value);
+            hoisted_result = true;
+        }
+    }
+    // Field values placed directly in `result` ("unknown field `person_vorname`,
+    // expected one of `fields`, ...", 07.09.2026) belong into `result.fields`.
+    let stray_result_keys: Vec<String> = result
+        .keys()
+        .filter(|key| !["fields", "person_records", "evidence"].contains(&key.as_str()))
+        .cloned()
+        .collect();
+    if !stray_result_keys.is_empty() {
+        let mut fields = match result.remove("fields") {
+            Some(Value::Object(map)) => map,
+            _ => Map::new(),
+        };
+        for key in stray_result_keys {
+            if let Some(value) = result.remove(&key) {
+                let entry = if value.is_object() {
+                    value
+                } else {
+                    serde_json::json!({ "value": value })
+                };
+                fields.entry(key).or_insert(entry);
+            }
+        }
+        result.insert("fields".to_string(), Value::Object(fields));
+        hoisted_result = true;
+    }
+    if hoisted_result || !result.is_empty() {
+        object.insert("result".to_string(), Value::Object(result));
+    }
+    if stray.is_empty() {
+        return payload;
+    }
+    let mut field_status = match object.remove("field_status") {
+        Some(Value::Object(map)) => map,
+        Some(Value::String(text)) => serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default(),
+        _ => Map::new(),
+    };
+    for key in stray {
+        if let Some(entry) = object.remove(&key) {
+            field_status.entry(key).or_insert(entry);
+        }
+    }
+    object.insert("field_status".to_string(), Value::Object(field_status));
+    payload
+}
+
+/// `field_status` must be an object keyed by field. Live runs also sent an
+/// empty string or a list where a field entry belongs (07.09.2026, three
+/// rejections "expected struct FieldStatus"), and once a list of entries
+/// carrying their own `field` key. Entries that are not objects are dropped
+/// (the field then shows up as open); a list of objects is keyed by its
+/// `field`/`key`/`name` member; a JSON string is parsed first.
+fn lenient_field_status<'de, D>(deserializer: D) -> Result<BTreeMap<String, FieldStatus>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let mut raw = Value::deserialize(deserializer)?;
+    if let Value::String(text) = &raw {
+        raw = serde_json::from_str(text).map_err(D::Error::custom)?;
+    }
+    let mut entries = BTreeMap::new();
+    match raw {
+        Value::Object(map) => {
+            for (field, status) in map {
+                if !status.is_object() {
+                    continue;
+                }
+                let parsed = serde_json::from_value::<FieldStatus>(status)
+                    .map_err(|error| D::Error::custom(format!("field_status.{field}: {error}")))?;
+                entries.insert(field, parsed);
+            }
+        }
+        Value::Array(list) => {
+            for item in list {
+                let Some(object) = item.as_object() else {
+                    continue;
+                };
+                let Some(field) = ["field", "key", "name", "field_key"]
+                    .iter()
+                    .find_map(|key| object.get(*key).and_then(Value::as_str))
+                    .map(str::to_string)
+                else {
+                    continue;
+                };
+                let mut status = object.clone();
+                for key in ["field", "key", "name", "field_key"] {
+                    status.remove(key);
+                }
+                let parsed = serde_json::from_value::<FieldStatus>(Value::Object(status))
+                    .map_err(|error| D::Error::custom(format!("field_status.{field}: {error}")))?;
+                entries.insert(field, parsed);
+            }
+        }
+        Value::Null => {}
+        other => {
+            return Err(D::Error::custom(format!(
+                "field_status must be an object keyed by field, got {other}"
+            )));
+        }
+    }
+    Ok(entries)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct FieldStatus {
+    #[serde(deserialize_with = "lenient_string")]
     status: String,
     #[serde(default)]
     value: Value,
     #[serde(default, deserialize_with = "lenient_sources")]
     sources: Vec<FieldSource>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_attempts")]
     attempts: Vec<FieldAttempt>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_string")]
     reason: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
@@ -100,6 +250,7 @@ where
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(from = "RawFieldSource")]
 struct FieldSource {
     source_id: String,
     #[serde(default)]
@@ -116,23 +267,183 @@ struct FieldSource {
     command_id: String,
 }
 
+/// What workers actually send for a source: `source_id` is often missing (only
+/// `url` or `host`/`domain` given), numbers appear where strings are expected
+/// (a quote that is a year, a numeric source id). All of that is unambiguous,
+/// so it is normalized here instead of rejecting the whole writeback
+/// (07.09.2026: 16 rejections "missing field `source_id`", 8 "expected a
+/// string" within one hour).
+#[derive(Debug, Clone, Deserialize)]
+struct RawFieldSource {
+    #[serde(default, deserialize_with = "lenient_string")]
+    source_id: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    host: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    domain: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    url: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    quote: String,
+    #[serde(default)]
+    person_key: Option<String>,
+    #[serde(default)]
+    requires_credential: bool,
+    #[serde(default, deserialize_with = "lenient_string")]
+    task_id: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    command_id: String,
+}
+
+impl From<RawFieldSource> for FieldSource {
+    fn from(raw: RawFieldSource) -> Self {
+        let mut source_id = raw.source_id.trim().to_string();
+        if source_id.is_empty() {
+            source_id = raw.host.trim().to_string();
+        }
+        if source_id.is_empty() {
+            source_id = raw.domain.trim().to_string();
+        }
+        if source_id.is_empty() {
+            source_id = host_of_url(&raw.url);
+        }
+        FieldSource {
+            source_id,
+            url: raw.url,
+            quote: raw.quote,
+            person_key: raw.person_key,
+            requires_credential: raw.requires_credential,
+            task_id: raw.task_id,
+            command_id: raw.command_id,
+        }
+    }
+}
+
+fn host_of_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let without_scheme = trimmed
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .unwrap_or(trimmed);
+    let host = without_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches("www.");
+    host.to_ascii_lowercase()
+}
+
+/// Strings that arrive as numbers or booleans are rendered; null becomes "".
+fn lenient_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Null => String::new(),
+        Value::String(text) => text,
+        Value::Number(number) => number.to_string(),
+        Value::Bool(flag) => flag.to_string(),
+        other => return Err(D::Error::custom(format!("expected a string, got {other}"))),
+    })
+}
+
+/// Attempts arrive with missing or oddly typed members ("missing field
+/// `kind`" rejected six writebacks for one lead on 07.09.2026 although every
+/// attempt carried a URL and a result). An attempt is documentation, not a
+/// gate, so every member is optional.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct FieldAttempt {
+    #[serde(default, deserialize_with = "lenient_string")]
     kind: String,
+    #[serde(default, deserialize_with = "lenient_string")]
     query_or_url: String,
+    #[serde(default)]
     result: Value,
+    #[serde(default, deserialize_with = "lenient_string")]
     artifact_path: String,
+    #[serde(default)]
     at: Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ResearchWritebackResult {
+    #[serde(default, deserialize_with = "lenient_object")]
     fields: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_values")]
     person_records: Vec<Value>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_values")]
     evidence: Vec<Value>,
+}
+
+/// Live workers send `evidence`/`person_records` as `""` or as one object;
+/// both are unambiguous (empty / one entry). A JSON string holding a list is
+/// parsed. A bare word is still an error.
+fn lenient_values<'de, D>(deserializer: D) -> Result<Vec<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    fn from_value<E: serde::de::Error>(value: Value) -> Result<Vec<Value>, E> {
+        match value {
+            Value::Null => Ok(Vec::new()),
+            Value::Array(items) => Ok(items),
+            Value::Object(_) => Ok(vec![value]),
+            Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let parsed: Value = serde_json::from_str(trimmed).map_err(|error| {
+                    E::custom(format!("expected a list of objects, not a string: {error}"))
+                })?;
+                if parsed.is_string() {
+                    return Err(E::custom("expected a list of objects, not a string"));
+                }
+                from_value(parsed)
+            }
+            other => Err(E::custom(format!(
+                "expected a list of objects, got {other}"
+            ))),
+        }
+    }
+    from_value(Value::deserialize(deserializer)?)
+}
+
+/// `result.fields` as `""`/null means "no fields"; a JSON string holding an
+/// object is parsed.
+fn lenient_object<'de, D>(deserializer: D) -> Result<Value, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    Ok(match Value::deserialize(deserializer)? {
+        Value::Null => Value::Object(Map::new()),
+        Value::String(text) if text.trim().is_empty() => Value::Object(Map::new()),
+        Value::String(text) => {
+            let parsed: Value = serde_json::from_str(text.trim()).map_err(|error| {
+                D::Error::custom(format!("expected an object, not a string: {error}"))
+            })?;
+            if !parsed.is_object() {
+                return Err(D::Error::custom("expected an object of field entries"));
+            }
+            parsed
+        }
+        other => other,
+    })
+}
+
+fn lenient_attempts<'de, D>(deserializer: D) -> Result<Vec<FieldAttempt>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let values = lenient_values(deserializer)?;
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value::<FieldAttempt>(value).map_err(D::Error::custom))
+        .collect()
 }
 
 pub(super) fn build_gap_closure_prompt(contract: &Value) -> anyhow::Result<String> {
@@ -404,6 +715,161 @@ pub(super) fn enqueue_gap_closure_if_needed(
     Ok(Some(task))
 }
 
+/// The previous `researched_field_keys` / `verified_field_keys` /
+/// `unverified_field_keys` of a lead, captured before a writeback patch.
+fn previous_research_keys(lead: &Value) -> BTreeMap<String, Vec<String>> {
+    [
+        "researched_field_keys",
+        "verified_field_keys",
+        "unverified_field_keys",
+    ]
+    .iter()
+    .map(|name| {
+        let keys = lead
+            .pointer(&format!("/payload/{name}"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        ((*name).to_string(), keys)
+    })
+    .collect()
+}
+
+/// A follow-up writeback (gap closure, continuation, a worker reporting the
+/// one field it worked) must not shrink what the lead already carries. On
+/// 07.09.2026 a one-field gap writeback replaced the lead's field status and
+/// its researched keys (6 verified fields → 1) while the data itself stayed.
+/// Statuses are merged per field (new entry wins for its own field), key lists
+/// are unioned, and a key that is now verified leaves the unverified list.
+fn union_research_keys(lead: &mut Value, previous: &BTreeMap<String, Vec<String>>) {
+    let Some(payload) = lead.get_mut("payload").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let mut union = |name: &str| -> Vec<String> {
+        let mut keys = previous.get(name).cloned().unwrap_or_default();
+        for key in payload
+            .get(name)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            if !keys.iter().any(|existing| existing == key) {
+                keys.push(key.to_string());
+            }
+        }
+        keys
+    };
+    let researched = union("researched_field_keys");
+    let verified = union("verified_field_keys");
+    let unverified = union("unverified_field_keys")
+        .into_iter()
+        .filter(|key| !verified.contains(key))
+        .collect::<Vec<_>>();
+    payload.insert(
+        "researched_field_keys".to_string(),
+        Value::Array(researched.into_iter().map(Value::String).collect()),
+    );
+    payload.insert(
+        "verified_field_keys".to_string(),
+        Value::Array(verified.into_iter().map(Value::String).collect()),
+    );
+    payload.insert(
+        "unverified_field_keys".to_string(),
+        Value::Array(unverified.into_iter().map(Value::String).collect()),
+    );
+}
+
+/// A follow-up writeback carries the sanitizer's filler entries
+/// (`unsupported`, "Vom Rueckschreiben nicht geliefert") for every requested
+/// field the worker did not deliver. Those fillers must never downgrade a
+/// status an earlier writeback established (07.09.2026: Aeroxon lost all
+/// fifteen `verified` entries to fillers, the gap closure then re-opened every
+/// field). An incoming `unsupported` without sources or attempts is only
+/// accepted for a field that has no status yet or is itself `unsupported`.
+fn merge_field_status(existing: Option<&Value>, incoming: Value) -> Value {
+    let mut merged = existing
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(incoming) = incoming.as_object() {
+        for (field, status) in incoming {
+            if is_filler_field_status(status) {
+                let previous_is_informative = merged.get(field).is_some_and(|previous| {
+                    !previous
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("unsupported")
+                        .trim()
+                        .eq_ignore_ascii_case("unsupported")
+                });
+                if previous_is_informative {
+                    continue;
+                }
+            }
+            merged.insert(field.clone(), status.clone());
+        }
+    }
+    Value::Object(merged)
+}
+
+fn is_filler_field_status(status: &Value) -> bool {
+    let unsupported = status
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("unsupported");
+    let no_sources = status
+        .get("sources")
+        .and_then(Value::as_array)
+        .map(|sources| sources.is_empty())
+        .unwrap_or(true);
+    let no_attempts = status
+        .get("attempts")
+        .and_then(Value::as_array)
+        .map(|attempts| attempts.is_empty())
+        .unwrap_or(true);
+    unsupported && no_sources && no_attempts
+}
+
+/// Workers regularly send `field_status` alone and forget `result` (or send
+/// `result.fields` empty). The verified values and their sources are already
+/// in `field_status`, so `result.fields` is derived from them instead of
+/// rejecting the run (07.09.2026: eighteen rejections in seven minutes for one
+/// lead, most of them "missing field `result`").
+fn derive_result_fields_from_field_status(request: &mut ResearchWritebackRequest) {
+    let empty = request
+        .result
+        .fields
+        .as_object()
+        .map(|fields| fields.is_empty())
+        .unwrap_or(true);
+    if !empty {
+        return;
+    }
+    let mut fields = Map::new();
+    for (key, status) in &request.field_status {
+        if !status.status.trim().eq_ignore_ascii_case("verified") || status.value.is_null() {
+            continue;
+        }
+        let mut entry = Map::new();
+        entry.insert("value".to_string(), status.value.clone());
+        entry.insert(
+            "sources".to_string(),
+            serde_json::to_value(&status.sources).unwrap_or(Value::Array(Vec::new())),
+        );
+        if let Some(person_key) = status.extra.get("person_key") {
+            entry.insert("person_key".to_string(), person_key.clone());
+        }
+        fields.insert(key.clone(), Value::Object(entry));
+    }
+    request.result.fields = Value::Object(fields);
+}
+
 /// A writeback in which nothing is verified and no field carries a single
 /// source or documented attempt is not a research result. It happened on
 /// 07.09.2026 when a worker attempt resumed after a service restart without
@@ -433,10 +899,10 @@ pub(super) fn handle_research_writeback(
     // The worker only ever sees this message. Without the serde detail it
     // resent the same malformed payload four times on 07.09.2026 (a stray
     // `firma_land` key nested inside another field's status object).
-    let request: ResearchWritebackRequest = serde_json::from_value(command.payload.clone())
-        .map_err(|error| {
-            anyhow::anyhow!("invalid outbound.lead.research_writeback payload: {error}")
-        })?;
+    let request: ResearchWritebackRequest =
+        serde_json::from_value(hoist_top_level_field_entries(command.payload.clone())).map_err(
+            |error| anyhow::anyhow!("invalid outbound.lead.research_writeback payload: {error}"),
+        )?;
     anyhow::ensure!(
         request.module == "outbound-lead-generation" && command.module == request.module,
         "research writeback module must be outbound-lead-generation"
@@ -503,8 +969,22 @@ pub(super) fn handle_research_writeback(
     // Erst retten, dann pruefen: Einzelverstoesse duerfen die Arbeit einer
     // ganzen Firma nicht mehr vernichten (Befund 03.09.2026, 14 von 19).
     let mut request = request;
+    derive_result_fields_from_field_status(&mut request);
     reject_evidence_free_writeback(&request)?;
-    let rejections = sanitize_research_writeback(&mut request, &requested_fields)?;
+    let delivered_fields = request
+        .field_status
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<String>>();
+    // "nicht geliefert" is not a defect: a follow-up writeback legitimately
+    // carries a subset of the requested fields. Workers read a list of 31
+    // rejections as a failed call and resend the same field over and over
+    // (07.09.2026: Aeroxon, seven identical one-field writebacks in five
+    // minutes), so undelivered fields are reported separately as `open_fields`.
+    let rejections = sanitize_research_writeback(&mut request, &requested_fields)?
+        .into_iter()
+        .filter(|entry| !entry.ends_with(": nicht geliefert"))
+        .collect::<Vec<String>>();
     validate_field_status_keys(&requested_fields, &request.field_status)?;
     validate_result_shape(&request.result, &requested_fields)?;
     validate_result_field_status_consistency(&request.result, &request.field_status)?;
@@ -526,9 +1006,25 @@ pub(super) fn handle_research_writeback(
     });
     add_field_status_evidence(&mut projection_result, &request.field_status)?;
     let now = super::person_research_command::now_ms();
+    let previous_keys = previous_research_keys(&lead);
     let patch = outbound_lead_generation_research_outcome_patch(&lead, &projection_result, now);
     merge_json_object_values(&mut lead, &patch);
-    lead["field_status"] = serde_json::to_value(&request.field_status)?;
+    union_research_keys(&mut lead, &previous_keys);
+    let merged_field_status = merge_field_status(
+        lead.get("field_status"),
+        serde_json::to_value(&request.field_status)?,
+    );
+    lead["field_status"] = merged_field_status;
+    let open_fields = requested_fields
+        .iter()
+        .filter(|field| {
+            lead["field_status"]
+                .get(field.as_str())
+                .map(is_filler_field_status)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<String>>();
     if gap_task.is_some() {
         lead["gap_task_id"] = Value::String(request.gap_task_id.clone());
     }
@@ -537,6 +1033,7 @@ pub(super) fn handle_research_writeback(
     // Menschen - sonst haette die Rettung "abgeschlossen" gemeldet, obwohl
     // Felder fehlen.
     let needs_review = !rejections.is_empty()
+        || !open_fields.is_empty()
         || request
             .field_status
             .values()
@@ -560,10 +1057,22 @@ pub(super) fn handle_research_writeback(
         "research_command_id": request.research_command_id,
         "gap_task_id": request.gap_task_id,
         "research_status": if needs_review { "needs_review" } else { "completed" },
-        "field_status": request.field_status,
+        "field_status": request
+            .field_status
+            .iter()
+            .filter(|(key, _)| delivered_fields.contains(key.as_str()))
+            .collect::<BTreeMap<_, _>>(),
+        "accepted_fields": delivered_fields.iter().cloned().collect::<Vec<String>>(),
+        "open_fields": open_fields,
         // Der Agent erfaehrt genau, was verworfen wurde, und kann im selben
         // Auftrag nachliefern statt die ganze Firma neu zu recherchieren.
         "rejections": rejections,
+        "summary": format!(
+            "{} Feld(er) übernommen, {} Beleg(e) verworfen, {} Feld(er) noch offen. Nicht gelieferte Felder sind keine Ablehnung: recherchiere sie und sende sie gesammelt in einem weiteren Aufruf; übernommene Felder nicht erneut senden.",
+            delivered_fields.len(),
+            rejections.len(),
+            open_fields.len()
+        ),
     }))
 }
 
@@ -2196,6 +2705,278 @@ mod tests {
             "status": "verified", "value": "x", "sources": "northdata"
         }));
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn writeback_without_result_derives_result_fields_from_verified_status() {
+        let mut request: ResearchWritebackRequest = serde_json::from_value(serde_json::json!({
+            "record_id": "lead_x", "module": "outbound-lead-generation",
+            "research_command_id": "leadgen-lead-research-x",
+            "field_status": {
+                "firma_name": {"status": "verified", "value": "Beispiel GmbH",
+                    "sources": [{"source_id": "a.de", "url": "https://a.de/", "quote": "Beispiel GmbH"},
+                                {"source_id": "b.de", "url": "https://b.de/", "quote": "Beispiel GmbH"}]},
+                "firma_domain": {"status": "no_match", "reason": "nicht gefunden", "sources": "", "attempts": ""}
+            }
+        }))
+        .expect("missing result and empty-string lists are tolerated");
+        derive_result_fields_from_field_status(&mut request);
+        let fields = request.result.fields.as_object().unwrap();
+        assert_eq!(fields.len(), 1);
+        assert_eq!(fields["firma_name"]["value"], "Beispiel GmbH");
+        assert_eq!(fields["firma_name"]["sources"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn result_lists_accept_empty_string_and_single_object() {
+        let result: ResearchWritebackResult = serde_json::from_value(serde_json::json!({
+            "fields": "", "person_records": {"person_key": "p1", "person_nachname": "Muster"}, "evidence": ""
+        }))
+        .unwrap();
+        assert!(result.fields.as_object().unwrap().is_empty());
+        assert_eq!(result.person_records.len(), 1);
+        assert!(result.evidence.is_empty());
+        assert!(serde_json::from_value::<ResearchWritebackResult>(
+            serde_json::json!({"fields": {}, "evidence": "northdata"})
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn field_sources_derive_source_id_and_render_numbers() {
+        let status: FieldStatus = serde_json::from_value(serde_json::json!({
+            "status": "verified", "value": "x",
+            "sources": [
+                {"url": "https://www.northdata.de/Firma", "quote": 2024},
+                {"host": "impressum.example", "url": "https://impressum.example/i", "quote": "x"},
+                {"source_id": 42, "url": "https://a.de/", "quote": "x"}
+            ],
+            "reason": 7
+        }))
+        .unwrap();
+        assert_eq!(status.sources[0].source_id, "northdata.de");
+        assert_eq!(status.sources[0].quote, "2024");
+        assert_eq!(status.sources[1].source_id, "impressum.example");
+        assert_eq!(status.sources[2].source_id, "42");
+        assert_eq!(status.reason, "7");
+    }
+
+    #[test]
+    fn follow_up_writeback_keeps_previous_field_status_and_unions_keys() {
+        let mut lead = serde_json::json!({
+            "field_status": {
+                "firma_name": {"status": "verified", "value": "Beispiel GmbH"},
+                "firma_domain": {"status": "verified", "value": "beispiel.de"},
+                "firma_email": {"status": "no_match", "reason": "keine Quelle"}
+            },
+            "payload": {
+                "researched_field_keys": ["firma_name", "firma_domain"],
+                "verified_field_keys": ["firma_name", "firma_domain"],
+                "unverified_field_keys": []
+            }
+        });
+        let previous = previous_research_keys(&lead);
+        // The patch of a one-field follow-up writeback names only that field.
+        lead["payload"]["researched_field_keys"] = serde_json::json!(["firma_email"]);
+        lead["payload"]["verified_field_keys"] = serde_json::json!([]);
+        lead["payload"]["unverified_field_keys"] = serde_json::json!(["firma_email"]);
+        union_research_keys(&mut lead, &previous);
+        assert_eq!(
+            lead["payload"]["researched_field_keys"],
+            serde_json::json!(["firma_name", "firma_domain", "firma_email"])
+        );
+        assert_eq!(
+            lead["payload"]["verified_field_keys"],
+            serde_json::json!(["firma_name", "firma_domain"])
+        );
+        assert_eq!(
+            lead["payload"]["unverified_field_keys"],
+            serde_json::json!(["firma_email"])
+        );
+
+        let merged = merge_field_status(
+            lead.get("field_status"),
+            serde_json::json!({"firma_email": {"status": "verified", "value": "info@beispiel.de"}}),
+        );
+        assert_eq!(merged["firma_name"]["status"], "verified");
+        assert_eq!(merged["firma_domain"]["value"], "beispiel.de");
+        assert_eq!(merged["firma_email"]["status"], "verified");
+        assert_eq!(merged.as_object().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn filler_statuses_of_a_follow_up_do_not_downgrade_earlier_verified_fields() {
+        let previous = serde_json::json!({
+            "firma_name": {"status": "verified", "value": "Beispiel GmbH", "sources": [{"source_id": "official"}]},
+            "firma_domain": {"status": "no_match", "reason": "keine Quelle", "attempts": [{"source_id": "register"}]},
+            "firma_fax": {"status": "unsupported", "reason": "Vom Rueckschreiben nicht geliefert"}
+        });
+        // The sanitizer fills every requested-but-undelivered field with an
+        // evidence-free `unsupported` entry; only firma_email was delivered.
+        let incoming = serde_json::json!({
+            "firma_name": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"},
+            "firma_domain": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"},
+            "firma_fax": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"},
+            "firma_email": {"status": "verified", "value": "info@beispiel.de", "sources": [{"source_id": "official"}], "attempts": []},
+            "firma_telefon": {"status": "unsupported", "value": null, "sources": [], "attempts": [], "reason": "Vom Rueckschreiben nicht geliefert"}
+        });
+        let merged = merge_field_status(Some(&previous), incoming);
+        assert_eq!(merged["firma_name"]["status"], "verified");
+        assert_eq!(merged["firma_name"]["value"], "Beispiel GmbH");
+        assert_eq!(merged["firma_domain"]["status"], "no_match");
+        assert_eq!(merged["firma_email"]["status"], "verified");
+        // A field without an informative earlier status takes the filler.
+        assert_eq!(
+            merged["firma_fax"]["reason"],
+            "Vom Rueckschreiben nicht geliefert"
+        );
+        assert_eq!(merged["firma_telefon"]["status"], "unsupported");
+        // A documented `unsupported` (with attempts) is not a filler and wins.
+        let documented = serde_json::json!({
+            "firma_name": {"status": "unsupported", "attempts": [{"source_id": "official", "note": "Seite offline"}], "sources": []}
+        });
+        let merged = merge_field_status(Some(&merged), documented);
+        assert_eq!(merged["firma_name"]["status"], "unsupported");
+    }
+
+    #[test]
+    fn writeback_response_separates_open_fields_from_rejections() -> anyhow::Result<()> {
+        let temp = tempfile::tempdir()?;
+        let record_id = "lead-offene-felder";
+        let research_command_id = "research-offene-felder";
+        let (_, task) =
+            create_gap_fixture(temp.path(), research_command_id, record_id, "firma_domain")?;
+        let command = writeback_command(
+            record_id,
+            serde_json::json!({
+                "record_id": record_id,
+                "module": "outbound-lead-generation",
+                "research_command_id": research_command_id,
+                "gap_task_id": task.message_key,
+                "field_status": {
+                    "firma_domain": {
+                        "status": "verified",
+                        "value": "example.test",
+                        "sources": [
+                            {"source_id": "official", "url": "https://example.test/imprint", "quote": "example.test"},
+                            {"source_id": "register", "url": "https://register.test/example", "quote": "example.test"}
+                        ],
+                        "attempts": []
+                    }
+                },
+                "result": {"fields": {"firma_domain": {"value": "example.test"}}, "person_records": [], "evidence": []}
+            }),
+        );
+        let result = handle_research_writeback(temp.path(), &command)?;
+        assert_eq!(result["ok"], true);
+        assert_eq!(
+            result["accepted_fields"],
+            serde_json::json!(["firma_domain"])
+        );
+        assert_eq!(result["open_fields"], serde_json::json!([]));
+        let rejections = result["rejections"]
+            .as_array()
+            .context("rejections fehlen")?;
+        assert!(
+            !rejections.iter().any(|entry| entry
+                .as_str()
+                .is_some_and(|text| text.contains("nicht geliefert"))),
+            "undelivered fields must not be reported as rejections: {rejections:?}"
+        );
+        assert!(result["summary"]
+            .as_str()
+            .is_some_and(|text| text.contains("1 Feld(er) übernommen")));
+        assert_eq!(
+            result["field_status"].as_object().map(|map| map.len()),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn field_status_drops_non_object_entries_and_accepts_attempts_without_kind() {
+        let request: ResearchWritebackRequest = serde_json::from_value(serde_json::json!({
+            "record_id": "lead-x",
+            "module": "outbound-lead-generation",
+            "research_command_id": "research-x",
+            "field_status": {
+                "firma_name": {
+                    "status": "verified",
+                    "value": "Beispiel GmbH",
+                    "sources": {"item": [{"source_id": "official", "url": "https://beispiel.de/impressum"}]},
+                    "attempts": {"item": [{"query_or_url": "https://beispiel.de/impressum", "result": "Found"}]}
+                },
+                "firma_fax": "",
+                "firma_email": ["nicht", "objekt"],
+                "firma_telefon": null
+            }
+        }))
+        .expect("non-object entries are dropped, attempts without kind accepted");
+        assert_eq!(request.field_status.len(), 1);
+        assert_eq!(request.field_status["firma_name"].attempts.len(), 1);
+        assert_eq!(request.field_status["firma_name"].attempts[0].kind, "");
+
+        let listed: ResearchWritebackRequest = serde_json::from_value(serde_json::json!({
+            "record_id": "lead-x",
+            "module": "outbound-lead-generation",
+            "research_command_id": "research-x",
+            "field_status": [
+                {"field": "firma_domain", "status": "verified", "value": "beispiel.de", "sources": []},
+                {"status": "verified", "value": "ohne Schluessel"}
+            ]
+        }))
+        .expect("a list of entries keyed by `field` is accepted");
+        assert_eq!(listed.field_status.len(), 1);
+        assert_eq!(listed.field_status["firma_domain"].status, "verified");
+    }
+
+    #[test]
+    fn top_level_field_entries_are_hoisted_into_field_status() {
+        let payload = serde_json::json!({
+            "record_id": "lead-x",
+            "module": "outbound-lead-generation",
+            "research_command_id": "research-x",
+            "field_status": {"firma_name": {"status": "verified", "value": "Beispiel GmbH"}},
+            "firma_fruehere_namen": {"status": "no_match", "reason": "keine", "attempts": []},
+            "person_records": [{"person_key": "p1", "name": "Erika Muster"}]
+        });
+        let request: ResearchWritebackRequest =
+            serde_json::from_value(hoist_top_level_field_entries(payload.clone()))
+                .expect("stray field entry is hoisted, not rejected");
+        assert_eq!(request.field_status.len(), 2);
+        assert_eq!(
+            request.field_status["firma_fruehere_namen"].status,
+            "no_match"
+        );
+        assert_eq!(request.result.person_records.len(), 1);
+
+        let stray_in_result: ResearchWritebackRequest = serde_json::from_value(
+            hoist_top_level_field_entries(serde_json::json!({
+                "record_id": "lead-x",
+                "module": "outbound-lead-generation",
+                "research_command_id": "research-x",
+                "field_status": {"person_vorname": {"status": "verified", "value": "Erika"}},
+                "result": {"person_vorname": "Erika", "fields": {"firma_name": {"value": "Beispiel GmbH"}}}
+            })),
+        )
+        .expect("a field value placed directly in result moves into result.fields");
+        assert_eq!(
+            stray_in_result.result.fields["person_vorname"]["value"],
+            "Erika"
+        );
+        assert_eq!(
+            stray_in_result.result.fields["firma_name"]["value"],
+            "Beispiel GmbH"
+        );
+        // A stray non-field key still fails the envelope check (deny_unknown_fields).
+        let mut with_note = payload;
+        with_note["note"] = serde_json::json!("kein Feld");
+        assert!(
+            serde_json::from_value::<ResearchWritebackRequest>(hoist_top_level_field_entries(
+                with_note
+            ))
+            .is_err()
+        );
     }
 
     #[test]
