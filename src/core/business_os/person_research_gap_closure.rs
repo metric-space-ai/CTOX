@@ -45,7 +45,7 @@ struct FieldStatus {
     status: String,
     #[serde(default)]
     value: Value,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_sources")]
     sources: Vec<FieldSource>,
     #[serde(default)]
     attempts: Vec<FieldAttempt>,
@@ -53,6 +53,50 @@ struct FieldStatus {
     reason: String,
     #[serde(flatten)]
     extra: BTreeMap<String, Value>,
+}
+
+/// Workers hand `sources` over as a list, but live runs also sent one source as
+/// a bare object and, on 07.09.2026, the whole list as a JSON string (three
+/// rejections in a row for one lead, "expected a sequence"). The meaning is
+/// unambiguous in all three shapes, so accept them instead of losing the run.
+fn lenient_sources<'de, D>(deserializer: D) -> Result<Vec<FieldSource>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    fn from_value<E: serde::de::Error>(value: Value) -> Result<Vec<FieldSource>, E> {
+        match value {
+            Value::Null => Ok(Vec::new()),
+            Value::Array(items) => items
+                .into_iter()
+                .map(|item| serde_json::from_value::<FieldSource>(item).map_err(E::custom))
+                .collect(),
+            Value::Object(_) => Ok(vec![
+                serde_json::from_value::<FieldSource>(value).map_err(E::custom)?
+            ]),
+            Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let parsed: Value = serde_json::from_str(trimmed).map_err(|error| {
+                    E::custom(format!(
+                        "sources must be a list of source objects, not a string: {error}"
+                    ))
+                })?;
+                if parsed.is_string() {
+                    return Err(E::custom(
+                        "sources must be a list of source objects, not a string",
+                    ));
+                }
+                from_value(parsed)
+            }
+            other => Err(E::custom(format!(
+                "sources must be a list of source objects, got {other}"
+            ))),
+        }
+    }
+    from_value(Value::deserialize(deserializer)?)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -2125,6 +2169,33 @@ mod tests {
                 evidence: Vec::new(),
             },
         }
+    }
+
+    #[test]
+    fn field_status_sources_accept_list_object_and_json_string() {
+        let list: FieldStatus = serde_json::from_value(serde_json::json!({
+            "status": "verified", "value": "x",
+            "sources": [{"source_id": "a.de", "url": "https://a.de/", "quote": "x"}]
+        }))
+        .unwrap();
+        assert_eq!(list.sources.len(), 1);
+        let object: FieldStatus = serde_json::from_value(serde_json::json!({
+            "status": "verified", "value": "x",
+            "sources": {"source_id": "a.de", "url": "https://a.de/", "quote": "x"}
+        }))
+        .unwrap();
+        assert_eq!(object.sources.len(), 1);
+        let text: FieldStatus = serde_json::from_value(serde_json::json!({
+            "status": "verified", "value": "x",
+            "sources": "[{\"source_id\":\"a.de\",\"url\":\"https://a.de/\",\"quote\":\"x\"},{\"source_id\":\"b.de\",\"url\":\"https://b.de/\",\"quote\":\"y\"}]"
+        }))
+        .unwrap();
+        assert_eq!(text.sources.len(), 2);
+        assert_eq!(text.sources[1].source_id, "b.de");
+        let bad = serde_json::from_value::<FieldStatus>(serde_json::json!({
+            "status": "verified", "value": "x", "sources": "northdata"
+        }));
+        assert!(bad.is_err());
     }
 
     #[test]
