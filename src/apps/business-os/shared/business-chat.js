@@ -65,7 +65,8 @@ async function loadCrewMembers({ state, db }) {
     const before = JSON.stringify(state.crewMembers || []);
     state.crewMembers = members;
     return before !== JSON.stringify(members);
-  } catch {
+  } catch (error) {
+    console.warn?.('[business-chat] crew pool load failed', error);
     return false;
   }
 }
@@ -223,6 +224,8 @@ export function initBusinessChat({
   root.className = 'ctox-chat-root';
   root.dataset.ctoxChatRoot = 'true';
   root.__ctoxChatSync = syncFacade || null;
+  // Diagnostic handle: the bar's state (crew pool, chats) for a browser probe.
+  root.__ctoxChatState = state;
   root.__ctoxChatOnTrackingStateChanged = null;
   document.body.append(root);
 
@@ -379,7 +382,16 @@ export function initBusinessChat({
   try {
     syncFacade?.subscribeCollectionReadiness?.('ctox_crew_members', () => { refreshCrewPool(); });
   } catch {}
-  refreshCrewPool();
+  // Bounded start-up retries: the collection registers and fills after the
+  // bar exists; a handful of widening attempts, then readiness/changes only.
+  const crewPoolRetryDelays = [2000, 5000, 10000, 20000, 40000];
+  const retryCrewPool = (attempt = 0) => {
+    if ((state.crewMembers || []).length || attempt >= crewPoolRetryDelays.length) return;
+    window.setTimeout(() => {
+      refreshCrewPool().then(() => retryCrewPool(attempt + 1));
+    }, crewPoolRetryDelays[attempt]);
+  };
+  refreshCrewPool().then(() => retryCrewPool(0));
 
   const handleExternalSubmit = async (event) => {
     const detail = event.detail || {};
