@@ -5921,6 +5921,55 @@ fn adapter_reconciliation_keeps_one_open_task_per_configuration() -> Result<()> 
             .any(|line| line.contains("idx_active_adapter_reconciliation")),
         "{plan:?}"
     );
+    let replay = claim_business_command_with_queue(
+        root.path(),
+        claim("adapter-duplicate-0", "v1"),
+        request("adapter-duplicate-0"),
+    )?;
+    assert_eq!(
+        replay.task.route_status, "cancelled",
+        "idempotent replay must not revive duplicate work"
+    );
+    let mut other_actor = claim("adapter-other-actor", "v1");
+    other_actor.intent["native_authorization"] = json!({"actor":{"user_id":"other"}});
+    let other = claim_business_command_with_queue(
+        root.path(),
+        other_actor,
+        request("adapter-other-actor"),
+    )?;
+    assert_eq!(
+        other.task.route_status, "pending",
+        "different authority must not share work"
+    );
+    let mut other_context = claim("adapter-other-context", "v1");
+    other_context.intent["client_context"] = json!({"source":"other-surface"});
+    let other = claim_business_command_with_queue(
+        root.path(),
+        other_context,
+        request("adapter-other-context"),
+    )?;
+    assert_eq!(
+        other.task.route_status, "pending",
+        "different audited context must not share work"
+    );
+    transition_business_command_for_task(
+        root.path(),
+        &first.task.message_key,
+        "cancelled",
+        None,
+        None,
+        None,
+        "fixture cancels original",
+    )?;
+    let fresh = claim_business_command_with_queue(
+        root.path(),
+        claim("adapter-after-terminal", "v1"),
+        request("adapter-after-terminal"),
+    )?;
+    assert_eq!(
+        fresh.task.route_status, "pending",
+        "a completed reconciliation must not suppress future work"
+    );
     Ok(())
 }
 

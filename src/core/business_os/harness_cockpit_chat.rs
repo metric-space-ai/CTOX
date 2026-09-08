@@ -121,6 +121,16 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
         )
         .optional()?
         .unwrap_or_default();
+    // A queued chat can precede the first LCM turn. Missing optional evidence
+    // is empty progress; observing it must never initialize or scan LCM.
+    let has_plans: bool = core.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_execution_plan_revisions')",
+        [], |row| row.get(0),
+    )?;
+    let has_flow: bool = core.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='ctox_harness_flow_events')",
+        [], |row| row.get(0),
+    )?;
     let started = std::time::Instant::now();
     // A durable round-robin cursor prevents a busy/failed early chat from
     // starving later chats. At most 32 candidates, and 250 ms between items;
@@ -198,16 +208,31 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
                 continue;
             };
             let task_id = task_id.as_str();
-            let run_id:Option<String>=core.query_row("SELECT json_extract(metadata_json,'$.attempt_id') FROM ctox_harness_flow_events WHERE message_key=?1 AND json_extract(metadata_json,'$.attempt_id') IS NOT NULL ORDER BY created_at DESC LIMIT 1",[task_id],|row|row.get(0)).optional()?;
-            let plan_stamp: Option<(i64, i64)> = core
-                .query_row(
+            let run_id: Option<String> = if has_flow {
+                core.query_row(
+                    "SELECT json_extract(metadata_json,'$.attempt_id')
+                     FROM ctox_harness_flow_events
+                     WHERE message_key=?1 AND json_extract(metadata_json,'$.attempt_id') IS NOT NULL
+                     ORDER BY created_at DESC LIMIT 1",
+                    [task_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+            } else {
+                None
+            };
+            let plan_stamp: Option<(i64, i64)> = if has_plans {
+                core.query_row(
                     "SELECT revision,updated_at_ms FROM task_execution_plan_revisions
-                 WHERE task_id=?1 AND (?2 IS NULL OR attempt_id=?2)
-                 ORDER BY revision DESC LIMIT 1",
+                     WHERE task_id=?1 AND (?2 IS NULL OR attempt_id=?2)
+                     ORDER BY revision DESC LIMIT 1",
                     params![task_id, run_id],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
-                .optional()?;
+                .optional()?
+            } else {
+                None
+            };
             let source_fingerprint = channels::stable_digest(&serde_json::to_string(&json!([
                 task_id,
                 execution_phase,
@@ -272,7 +297,7 @@ pub(super) fn project(root: &Path, core: &Connection) -> Result<()> {
                 }
                 additions.push(("status", message));
             }
-            {
+            if has_plans {
                 // Replay every retained revision, not just the latest coalesced snapshot.
                 // Forty is the chat's own message cap; older status messages cannot survive it.
                 let mut plans = core.prepare("SELECT revision,steps_json FROM (SELECT revision,steps_json FROM task_execution_plan_revisions WHERE task_id=?1 AND (?2 IS NULL OR attempt_id=?2) ORDER BY revision DESC LIMIT 40) ORDER BY revision")?;

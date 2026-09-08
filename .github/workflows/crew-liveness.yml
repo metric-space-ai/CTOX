@@ -39,6 +39,7 @@ jobs:
       - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
         with:
           key: crew-liveness
+          cache-on-failure: 'true'
       - name: Native dependencies
         run: |
           sudo apt-get update
@@ -51,7 +52,7 @@ jobs:
       - name: Admission and projection regressions
         run: |
           cargo test --locked --bin ctox queue_capacity_tests -- --test-threads=1
-          cargo test --locked --bin ctox adapter_reconciliation_keeps_one_open_task_per_configuration -- --test-threads=1
+          cargo test --locked --bin ctox adapter_reconciliation -- --test-threads=1
           cargo test --locked --bin ctox business_os::harness_cockpit::chat::tests -- --test-threads=1
           cargo test --locked --bin ctox background_projection_releases_writer_between_pages -- --test-threads=1
           cargo test --locked --bin ctox sync_ticket_state -- --test-threads=1

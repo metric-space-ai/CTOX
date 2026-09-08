@@ -71,6 +71,9 @@ fn lease_business_queue_capacity(
     let tasks = channels::list_queue_tasks(root, &["pending".to_string()], 128)?;
     let mut admitted = Vec::new();
     let mut shared = lock_shared_state(state);
+    if !shared.busy {
+        shared.serial_prompt_starting = false;
+    }
     if shared.app_recovery_active
         || shared.durable_queue_lease_in_progress
         || runtime_blocker_backoff_remaining_secs(&shared).is_some()
@@ -85,8 +88,9 @@ fn lease_business_queue_capacity(
         .keys()
         .filter(|key| shared.active_worker_lease_keys.contains(*key))
         .count();
-    let serial_slots =
-        shared.worker_active_count.saturating_sub(active_chats) + shared.pending_prompts.len();
+    let serial_slots = shared.worker_active_count.saturating_sub(active_chats)
+        + shared.pending_prompts.len()
+        + usize::from(shared.serial_prompt_starting);
     let serial_slots = serial_slots.max(usize::from(
         shared.busy && shared.parallel_queue_jobs.is_empty(),
     ));
@@ -150,6 +154,63 @@ fn lease_business_queue_capacity(
 #[cfg(test)]
 mod queue_capacity_tests {
     use super::*;
+
+    #[test]
+    fn serial_start_reservation_survives_parallel_worker_startup() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        runtime_env::set_runtime_env_value(root.path(), "queue.worker_capacity", "3")?;
+        for index in 0..4 {
+            channels::create_queue_task(
+                root.path(),
+                channels::QueueTaskCreateRequest {
+                    title: format!("startup {index}"),
+                    prompt: "Read the fixture".into(),
+                    thread_key: format!("startup/{index}"),
+                    workspace_root: None,
+                    priority: "normal".into(),
+                    suggested_skill: None,
+                    parent_message_key: None,
+                    extra_metadata: Some(
+                        serde_json::json!({"business_os_command_type":"business_os.chat.task"}),
+                    ),
+                },
+            )?;
+        }
+        let state = Arc::new(Mutex::new(SharedState {
+            busy: true,
+            serial_prompt_starting: true,
+            ..SharedState::default()
+        }));
+        let jobs = lease_business_queue_capacity(root.path(), &state)?;
+        assert_eq!(jobs.len(), 2);
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.worker_active_count = 1;
+            shared
+                .active_worker_lease_keys
+                .insert(jobs[0].leased_message_keys[0].clone());
+        }
+        assert!(
+            lease_business_queue_capacity(root.path(), &state)?.is_empty(),
+            "starting one chat must not erase the serial startup reservation"
+        );
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.serial_prompt_starting = false;
+            shared.worker_active_count = 2;
+        }
+        assert!(
+            lease_business_queue_capacity(root.path(), &state)?.is_empty(),
+            "serial registration replaces its reservation without changing occupied capacity"
+        );
+        lock_shared_state(&state).worker_active_count = 1;
+        assert_eq!(
+            lease_business_queue_capacity(root.path(), &state)?.len(),
+            1,
+            "serial completion frees precisely one slot"
+        );
+        Ok(())
+    }
 
     #[test]
     fn serial_worker_leaves_free_slots_for_isolated_chats() -> Result<()> {

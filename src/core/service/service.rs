@@ -957,6 +957,7 @@ impl Default for WorkerSessionSlot {
 struct SharedState {
     busy: bool,
     worker_active_count: usize,
+    serial_prompt_starting: bool,
     worker_phase: Option<String>,
     app_recovery_active: bool,
     app_recovery_started_epoch_secs: Option<u64>,
@@ -983,6 +984,7 @@ impl Default for SharedState {
         Self {
             busy: false,
             worker_active_count: 0,
+            serial_prompt_starting: false,
             worker_phase: None,
             app_recovery_active: false,
             app_recovery_started_epoch_secs: None,
@@ -3819,6 +3821,7 @@ fn handle_service_ipc_request(
                     true
                 } else {
                     shared.busy = true;
+                    shared.serial_prompt_starting = true;
                     shared.current_goal_preview = Some(preview_text(&prompt));
                     shared.active_source_label = Some("tui".to_string());
                     shared.last_error = None;
@@ -4166,6 +4169,7 @@ fn handle_request(
                     true
                 } else {
                     shared.busy = true;
+                    shared.serial_prompt_starting = true;
                     shared.current_goal_preview = Some(preview_text(&prompt));
                     shared.active_source_label = Some("tui".to_string());
                     shared.last_error = None;
@@ -5216,6 +5220,14 @@ impl PromptWorkerActivity {
     fn start(root: &Path, state: &Arc<Mutex<SharedState>>, job: &QueuedPrompt) -> Self {
         {
             let mut shared = lock_shared_state(state);
+            let parallel_reserved = queue_job_has_independent_business_session(job)
+                && job
+                    .leased_message_keys
+                    .iter()
+                    .all(|key| shared.parallel_queue_jobs.contains_key(key));
+            if !parallel_reserved {
+                shared.serial_prompt_starting = false;
+            }
             if queue_job_has_independent_business_session(job) {
                 for key in &job.leased_message_keys {
                     shared.parallel_queue_jobs.insert(key.clone(), job.clone());
@@ -17415,6 +17427,7 @@ fn activate_prompt_dispatch_locked(shared: &mut SharedState, prompt: &QueuedProm
         &prompt.leased_ticket_event_keys,
     );
     shared.busy = true;
+    shared.serial_prompt_starting = true;
     shared.current_goal_preview = Some(prompt.preview.clone());
     shared.active_source_label = Some(prompt.source_label.clone());
     shared.last_error = None;
@@ -17554,6 +17567,7 @@ fn maybe_start_next_queued_prompt_locked(
     }
     let queued = shared.pending_prompts.pop_front()?;
     shared.busy = true;
+    shared.serial_prompt_starting = true;
     shared.current_goal_preview = Some(queued.preview.clone());
     shared.active_source_label = Some(queued.source_label.clone());
     shared.last_error = None;

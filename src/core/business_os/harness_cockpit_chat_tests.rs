@@ -77,11 +77,11 @@ fn projection_does_not_read_worker_messages_or_initialize_lcm() -> Result<()> {
     // must have exactly the same cost/behavior as an absent history.
     core.execute_batch(
         "ALTER TABLE communication_messages RENAME TO hidden_communication_messages;
-        ALTER TABLE messages RENAME TO hidden_lcm_messages;
         CREATE VIEW communication_messages AS SELECT * FROM missing_transcript_source;
         CREATE VIEW messages AS SELECT * FROM missing_lcm_source;",
     )?;
     project(root.path(), &core)?;
+    assert!(!core.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='task_execution_plan_revisions')", [], |row| row.get::<_, bool>(0))?, "projection must not initialize worker history");
     let business = store::open_store(root.path())?;
     assert_eq!(
         business.query_row(
@@ -148,6 +148,11 @@ fn retry_wait_delivers_interim_without_closing_gates_or_replaying_trimmed_status
         core.execute("UPDATE communication_routing_state SET route_status='pending',hold_reason='Transient fixture',retry_not_before='2099-01-01T00:00:00Z' WHERE message_key=?1",[task_id])?;
         core.execute("UPDATE business_command_aggregates SET execution_phase='retry_wait' WHERE command_id='cockpit-chat'",[])?;
         project(root.path(), &core)?;
+        // Plan evidence belongs to worker initialization, never to projection.
+        let _lcm = crate::lcm::LcmEngine::open(
+            &crate::paths::core_db(root.path()),
+            crate::lcm::LcmConfig::default(),
+        )?;
         for revision in [1, 2] {
             core.execute("INSERT INTO task_execution_plan_revisions(work_key,revision,task_id,command_id,attempt_id,plan_signature,steps_json,phase,completed_steps,total_steps,percent,review_status,created_at_ms,updated_at_ms) VALUES('fixture-work',?1,?2,'cockpit-chat','fixture-attempt',?3,?4,'working',0,1,0,'pending',?1,?1)",params![revision,task_id,format!("revision-{revision}"),json!([{"label":format!("Fixture step {revision}"),"status":"in_progress"}]).to_string()])?;
         }
