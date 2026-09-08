@@ -326,7 +326,8 @@ The full native RxDB suite then passed 431 tests with zero ignored tests
 It reported an unused remove_peer_presence helper: complete peer removal had
 duplicated its operation inline. The shared teardown now calls that helper
 with a borrowed peer name; the separate presence tests stay unchanged.
-Strict RxDB clippy is being run for this final deduplication.
+Strict RxDB clippy with all targets and -D warnings passed after using
+is_multiple_of in the ACK test fixture; no diagnostic was disabled.
 
 The JavaScript suite returned 119 passed, one failed, zero skipped. The command
 consumer inventory subprocess exceeded its unchanged 180-second limit.

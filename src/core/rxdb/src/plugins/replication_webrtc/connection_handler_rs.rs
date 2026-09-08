@@ -4693,7 +4693,7 @@ mod tests {
                     Some("chunk") => {
                         let seq = frame["seq"].as_u64().unwrap() as usize;
                         let total = self.totals.lock()[id];
-                        if (seq + 1) % FRAME_ACK_WINDOW == 0 || seq + 1 == total {
+                        if (seq + 1).is_multiple_of(FRAME_ACK_WINDOW) || seq + 1 == total {
                             self.handler
                                 .handle_transport_frame(
                                     &self.peer,
