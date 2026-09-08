@@ -438,7 +438,7 @@ async fn exercise_worker_session(reconnect: Option<u64>) {
                 }
             )
             .await,
-            SyncIpcResult::Unavailable { .. }
+            SyncIpcResult::Rejected { .. }
         ));
         // A replayed admission is historical. Reusing the same read request ID
         // must still return the current tombstone over the worker's DataChannel.

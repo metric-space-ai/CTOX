@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
@@ -41,7 +41,7 @@ const snake = (name) => name.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
 const pascal = (name) => name[0].toUpperCase() + name.slice(1);
 let rust = header + 'use serde::{Deserialize, Serialize};\n';
 let ts = header + 'export const CTOX_SYNC_CONTRACT_VERSION = 1 as const;\n';
-let schemas = header + 'import * as Schema from "effect/Schema";\n';
+let schemas = header + 'import * as Schema from "effect/Schema";\nimport type * as Contract from "./ctox-sync.generated.ts";\n';
 for (const [name, value] of Object.entries(fixture.constants ?? {})) {
   if (!/^[A-Z][A-Z0-9_]+$/.test(name) || !Number.isSafeInteger(value) || value < 0 || value > 4294967295) throw new Error(`Invalid wire constant ${name}`);
   rust += `pub const ${name}: u32 = ${value};\n`;
@@ -84,7 +84,7 @@ for (const [name, variants] of Object.entries(unions)) {
   const schemaVariants = [];
   for (const [variant, fields] of Object.entries(variants)) {
     rust += `    ${pascal(variant)} {\n${rustFields(fields, '        ').replaceAll('pub ', '')}    },\n`;
-    tsVariants.push(`{ readonly type: ${JSON.stringify(variant)}; ${Object.entries(fields).map(([field, value]) => `readonly ${field}: ${type(value, 'ts')}`).join('; ')} }`);
+    tsVariants.push(`{ readonly type: ${JSON.stringify(variant)}; ${Object.entries(fields).map(([field, value]) => `readonly ${field}${value.startsWith('optional:') ? '?' : ''}: ${type(value, 'ts')}`).join('; ')} }`);
     schemaVariants.push(`Schema.Struct({ type: Schema.Literal(${JSON.stringify(variant)}),\n${schemaFields(fields)}\n})`);
   }
   rust += '}\n'; ts += `\nexport type ${name} =\n  ${tsVariants.join(' |\n  ')};\n`;
@@ -97,7 +97,8 @@ function emit(name, visiting = new Set()) {
   if (visiting.has(name)) throw new Error(`Recursive wire schema requires an explicit contract change: ${name}`);
   const next = new Set([...visiting, name]);
   for (const dependency of dependencies.get(name)) emit(dependency, next);
-  schemas += '\n' + schemaOutputs.get(name); emitted.add(name);
+  schemas += '\n' + schemaOutputs.get(name).replace(/;\n$/, ` satisfies Schema.Schema<Contract.${name}>;\n`);
+  emitted.add(name);
 }
 for (const name of known) emit(name);
 rust += `\nfn deserialize_wire_u64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
@@ -120,8 +121,18 @@ const workjetIndex = process.argv.indexOf('--workjet-root');
 if (workjetIndex >= 0) {
   const workjet = process.argv[workjetIndex + 1];
   if (!workjet || workjet.startsWith('--')) throw new Error('--workjet-root requires a path');
-  outputs.push([resolve(workjet,'packages/contracts/src/ctoxSync.generated.ts'),ts]);
-  outputs.push([resolve(workjet,'packages/contracts/src/ctoxSync.schema.generated.ts'),schemas]);
+  // Compare consumer files in the same format used by Workjet's pinned toolchain.
+  // Formatting happens in memory for both generation and --check; check never writes.
+  const formatter = resolve(workjet, 'packages/contracts/node_modules/vite-plus/bin/vp');
+  if (!existsSync(formatter)) {
+    throw new Error('Install the pinned Workjet contracts dependencies before generating or checking its contracts');
+  }
+  const format = (path, content) => [path, execFileSync(process.execPath, [
+    formatter, 'fmt', '--stdin-filepath', path,
+  ], { input: content, encoding: 'utf8', cwd: resolve(workjet) })];
+  outputs.push(format(resolve(workjet, 'packages/contracts/src/ctoxSync.generated.ts'), ts));
+  outputs.push(format(resolve(workjet, 'packages/contracts/src/ctoxSync.schema.generated.ts'),
+    schemas.replace('from "./ctox-sync.generated.ts"', 'from "./ctoxSync.generated.ts"')));
 }
 for (const [path, content] of outputs) {
   if (process.argv.includes('--check')) {

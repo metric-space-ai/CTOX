@@ -1255,8 +1255,28 @@ async fn additional_worker_requires_committed_membership_but_never_gets_a_vote()
         )
         .await
         .is_err());
+    // A pinned revoked worker gets a quorum-confirmed denial, never a job.
+    assert!(matches!(
+        transport
+            .exchange(&c.peers[&leader], validate.clone())
+            .await
+            .unwrap(),
+        Reply::Validate(Err(
+            ctox_sync::authority::network::AuthorityFailure::Rejected { .. }
+        ))
+    ));
+    assert!(c.nodes[&leader]
+        .handle(&c.peers[&1].identity, validate.clone())
+        .await
+        .is_err());
     assert!(transport
-        .exchange(&c.peers[&leader], validate.clone())
+        .exchange(
+            &c.peers[&leader],
+            packet(Rpc::Validate {
+                job_id: "job".into(),
+                ownership: ownership(1, 5),
+            })
+        )
         .await
         .is_err());
     assert!(transport.exchange(&c.peers[&leader], create).await.is_err());
@@ -1283,15 +1303,32 @@ async fn additional_worker_requires_committed_membership_but_never_gets_a_vote()
         .wait_for_leader(Duration::from_secs(10))
         .await
         .unwrap();
-    assert!(transport
-        .exchange(&c.peers[&leader], validate)
-        .await
-        .is_err());
+    assert!(matches!(
+        transport
+            .exchange(&c.peers[&leader], validate.clone())
+            .await
+            .unwrap(),
+        Reply::Validate(Err(
+            ctox_sync::authority::network::AuthorityFailure::Rejected { .. }
+        ))
+    ));
     let reopened = SqliteStore::open(&c.root.path().join(format!("{leader}.sqlite"))).unwrap();
     assert_eq!(
         c.nodes[&leader].worker_membership(4).await.unwrap(),
         Some(revoked.clone())
     );
+    // The same durable tombstone cannot claim a confirmed denial without quorum.
+    c.bus.isolated.write().unwrap().insert(leader);
+    assert!(matches!(
+        c.nodes[&leader]
+            .handle(&revoked.identity, validate)
+            .await
+            .unwrap(),
+        Reply::Validate(Err(
+            ctox_sync::authority::network::AuthorityFailure::Unavailable { .. }
+                | ctox_sync::authority::network::AuthorityFailure::NotLeader { .. }
+        ))
+    ));
     assert_eq!(reopened.worker(4).await.unwrap(), Some(revoked));
     c.close().await;
 }
