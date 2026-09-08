@@ -126,6 +126,29 @@ check is red; the consumer does not modify the generated files. Full current
 host execution, browser interoperability, performance and tenant acceptance
 remain outstanding.
 
+## Verified paired native run
+
+[Run 34192513718](https://github.com/metric-space-ai/ctox/actions/runs/34192513718)
+at CTOX `44947cb1d87562a3d63f63a91480ab124eb526fc` with Workjet
+`1bdf07370f990aff025374627adc217fc2de2509` completed successfully on Linux and
+macOS: the full native Sync suite, native RxDB suite, Sync clippy and six
+Workjet socket tests all passed. Linux logs record 74 Sync tests (including
+14 real WebRTC scenarios), 431 RxDB tests and no ignored tests. The WebRTC
+executable took 27.07 seconds; this is a suite duration, not a failover or
+command-latency percentile.
+
+The final Workjet lint corrections use namespace imports and the Effect test
+runtime with HostProcessPlatform. Commit
+`1ce94412210fc036db589d96a6d2a8632881ef7e` is pushed to Workjet PR #32.
+Its six local socket tests and focused lint pass; local Node was 26.6.0,
+whereas CI pins the required 24.13.1. CTOX now pins this final source revision
+for a fresh combined run. The previous successful run must not be described
+as having tested that newer revision.
+
+Both PRs remain drafts; no main merge, tenant upgrade or source cleanup is
+claimed. The full-host four-process acceptance, current browser/native
+acceptance and the specified performance budgets still require proof.
+
 ## Obsolete remote compiler output removed
 
 On 2026-09-08 at 04:41 UTC, removed only the old isolated test directory
