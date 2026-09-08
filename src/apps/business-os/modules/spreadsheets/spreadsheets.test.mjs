@@ -19,6 +19,50 @@ const { __spreadsheetsTestHooks: hooks } = await import(
   `data:text/javascript;base64,${Buffer.from(bundledSource).toString('base64')}`
 );
 
+for (const format of ['csv', 'unsupported']) {
+  test(`spreadsheet ${format} editor failure never advertises saved metadata as a loaded file`, async t => {
+    t.mock.method(console, 'error', () => {});
+    const label = { textContent: '' };
+    const badge = { hidden: false, classList: { toggle() {} }, querySelector: () => label };
+    const head = {
+      querySelector: selector => selector === '[data-spreadsheets-dirty-indicator]' ? badge : null,
+      querySelectorAll: () => [],
+    };
+    let canvas;
+    const shell = {
+      replaceChildren(_head, next) { canvas = next; },
+      querySelector: selector => selector === '[data-spreadsheets-canvas]' ? canvas : null,
+    };
+    const previousDocument = Object.getOwnPropertyDescriptor(globalThis, 'document');
+    Object.defineProperty(globalThis, 'document', { configurable: true, value: {
+      createElement: () => ({ isConnected: true, setAttribute() {} }),
+    } });
+    t.after(() => {
+      if (previousDocument) Object.defineProperty(globalThis, 'document', previousDocument);
+      else delete globalThis.document;
+    });
+    const state = {
+      disposed: false, selectedId: 'sheet', selectedVersion: { id: 'version' },
+      versionLoad: { selection: 'sheet', versionId: 'version', status: 'ready' },
+      spreadsheets: [{ id: 'sheet', title: 'Test', filename: `test.${format}`, current_version_id: 'version' }],
+      officeEngine: 'unavailable-test-engine', t: (_key, fallback) => fallback,
+      ctx: { host: { isConnected: true, querySelector(selector) {
+        if (selector === '[data-spreadsheets-editor]') return shell;
+        if (selector === 'template[data-spreadsheets-head="editor"]') {
+          return { content: { cloneNode: () => head } };
+        }
+        return null;
+      } } },
+    };
+    const pending = hooks.renderCenter(state);
+    assert.equal(badge.hidden, true, 'status stays hidden while opening');
+    await pending;
+    assert.match(canvas.innerHTML, /spreadsheets-error/);
+    assert.equal(badge.hidden, true, 'failure cannot show the saved badge');
+    assert.equal(state.editorHandle, null);
+  });
+}
+
 test('spreadsheet chunk refresh does not re-query the file library or runbooks', async () => {
   const queried = [];
   const state = { spreadsheets: [], selectedId: '', ctx: {

@@ -1509,8 +1509,9 @@ async function renderCenter(state) {
   }
   const badge = head.querySelector('[data-spreadsheets-dirty-indicator]');
   if (badge) {
-    // A save status is meaningful only after a version has actually loaded.
-    badge.hidden = !state.selectedVersion || Boolean(load && load.status !== 'ready');
+    // Metadata readiness is not editor readiness: opening the source blob can
+    // still fail. Never advertise a saved spreadsheet before editor.open succeeds.
+    badge.hidden = true;
     badge.classList.toggle('is-dirty', state.dirty);
     badge.classList.toggle('is-saving', state.saving);
     badge.querySelector('[data-spreadsheets-dirty-label]').textContent = saveLabel;
@@ -1559,7 +1560,11 @@ async function renderCenter(state) {
     return;
   }
   try {
-    await mountCtoxSpreadsheets(state, canvas, record, state.selectedVersion);
+    const mounted = await mountCtoxSpreadsheets(state, canvas, record, state.selectedVersion);
+    if (badge && mounted && state.editorHandle === mounted
+      && !state.disposed && canvas.isConnected && state.selectedId === record.id) {
+      badge.hidden = false;
+    }
   } catch (error) {
     if (canvas.isConnected && state.selectedId === record.id) {
       console.error('[spreadsheets] editor open failed', error);
