@@ -13612,13 +13612,35 @@ fn primary_text_for(kind: OfficeKind, bytes: &[u8]) -> anyhow::Result<String> {
     let mut values = Vec::new();
     match kind {
         OfficeKind::Document => {
-            for node in document.descendants().filter(|node| node.is_element()) {
-                if node.tag_name().name() == "t" {
-                    if let Some(text) = node.text().filter(|value| !value.is_empty()) {
-                        values.push(text);
+            // A run is a formatting boundary, not a line boundary. Preserve
+            // the document's explicit breaks and paragraph structure instead.
+            let mut text = String::new();
+            let mut pending = vec![(document.root(), false)];
+            while let Some((node, closing)) = pending.pop() {
+                if closing {
+                    if node.is_element() && node.tag_name().name() == "p" {
+                        text.push('\n');
+                    }
+                    continue;
+                }
+                if node.is_element() {
+                    match node.tag_name().name() {
+                        "t" => text.push_str(node.text().unwrap_or_default()),
+                        "tab" => text.push('\t'),
+                        "br" | "cr" => text.push('\n'),
+                        _ => {}
                     }
                 }
+                pending.push((node, true));
+                let children: Vec<_> = node.children().collect();
+                for child in children.into_iter().rev() {
+                    pending.push((child, false));
+                }
             }
+            if text.ends_with('\n') {
+                text.pop();
+            }
+            return Ok(text);
         }
         OfficeKind::Spreadsheet => {
             for node in document.descendants().filter(|node| node.is_element()) {
@@ -13640,6 +13662,24 @@ mod tests {
     use std::{fs, path::Path};
     use zip::result::ZipError;
     use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn primary_text_document_preserves_paragraphs_not_formatting_runs() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t xml:space="preserve">Office CLI Word </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>verified</w:t></w:r><w:r><w:t xml:space="preserve"> 20260908</w:t></w:r></w:p><w:p><w:r><w:t>Second paragraph</w:t></w:r></w:p></w:body></w:document>"#;
+        assert_eq!(
+            primary_text_for(OfficeKind::Document, xml).unwrap(),
+            "Office CLI Word verified 20260908\nSecond paragraph"
+        );
+    }
+
+    #[test]
+    fn primary_text_document_preserves_explicit_breaks_tabs_and_blank_paragraphs() {
+        let xml = br#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>Before</w:t><w:tab/><w:t>tab</w:t><w:br/><w:t>line</w:t><w:cr/><w:t>return</w:t></w:r></w:p><w:p/><w:p><w:r><w:t>After</w:t></w:r></w:p></w:body></w:document>"#;
+        assert_eq!(
+            primary_text_for(OfficeKind::Document, xml).unwrap(),
+            "Before\ttab\nline\nreturn\n\nAfter"
+        );
+    }
 
     fn office_fixture(relative: &str) -> std::path::PathBuf {
         let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));

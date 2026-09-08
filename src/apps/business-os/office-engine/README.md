@@ -92,6 +92,12 @@ node src/apps/business-os/office-engine/shell-integration.browser.mjs
 The lab prepares its DOCX/XLSX fixtures using the native CLI. Screenshots and
 native roundtrip artifacts are written to `output/playwright/office-integration/`.
 
+Native document inspection (`ctox office read document INPUT`) preserves
+paragraph boundaries, explicit line breaks, tabs, and blank paragraphs in
+`primary_text`. Formatting runs inside a paragraph are concatenated, not
+reported as separate lines. Reading does not mutate the source package or
+write back to a Business OS record.
+
 To materialize the reviewed source closure from already checked-out pinned
 repositories:
 
