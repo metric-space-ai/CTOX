@@ -1316,6 +1316,13 @@ fn native_peer_performance_snapshot() -> Value {
             "business_commands": BUSINESS_COMMANDS_LOOP_METRICS.snapshot(),
             "browser_runtime": BROWSER_RUNTIME_LOOP_METRICS.snapshot(),
         },
+        "source_jobs": {
+            "runtime_settings": {
+                "in_flight": super::rxdb_peer_projections::runtime_settings_source::SOURCE_IN_FLIGHT
+                    .load(Ordering::Relaxed),
+                "work": super::rxdb_peer_projections::runtime_settings_source::SOURCE_METRICS.snapshot(),
+            },
+        },
         "file_fetch": DEMAND_FILE_FETCH_METRICS.snapshot(),
         "browser_live": browser_live_metrics_snapshot(),
         "auxiliary_requests": auxiliary_request_metrics_snapshot(),
@@ -4539,9 +4546,16 @@ pub(super) async fn sync_runtime_settings_with_database(
     database: &Arc<RxDatabase>,
 ) -> anyhow::Result<usize> {
     let root = root.to_path_buf();
-    let mut document = tokio::task::spawn_blocking(move || store::runtime_settings_for_rxdb(&root))
+    let document = tokio::task::spawn_blocking(move || store::runtime_settings_for_rxdb(&root))
         .await
         .context("join native runtime settings projection load")??;
+    project_runtime_settings_document(database, document).await
+}
+
+pub(super) async fn project_runtime_settings_document(
+    database: &Arc<RxDatabase>,
+    mut document: Value,
+) -> anyhow::Result<usize> {
     if let Some(object) = document.as_object_mut() {
         object.remove("_rev");
         object.remove("_meta");

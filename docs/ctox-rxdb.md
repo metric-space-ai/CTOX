@@ -749,10 +749,23 @@ not hold the cross-loop lock while loading runtime, user, channel, or catalog da
 budget for record reconciliation slices. A single oversized document is allowed;
 a database operation is never cancelled after starting a write. Cursors advance
 only after successful pages, and incomplete slices retain their source stamp.
-The budget is checked between pages, so a slow individual source query or commit
-can still exceed it; `performance.loops` continues reporting the full measured
-tick duration, including source loading and lock waits. Tenant acceptance must
-measure these actual times, rather than infer a hard deadline from page size.
+The record budget is checked between pages, so a slow individual query or
+commit can still exceed it. Loop counters report actual elapsed tick duration;
+tenant acceptance must measure these times, not infer a deadline from page size.
+
+The runtime-settings controller starts at most one background source job at a
+time and polls completion every 250 ms (typed `source_poll_interval`). The job
+owns source SQLite/provider reads and has no RxDB handle or writer lock.
+The controller publishes only completed results and commits the source stamp
+captured before loading, so changes during a slow probe remain pending.
+A stopped controller cannot publish a late source result.
+
+`performance.source_jobs.runtime_settings.in_flight` and `work` report the
+outstanding count and full source-job durations, including queue wait. These
+jobs can take several seconds without occupying a peer tick. In
+`performance.loops.runtime_settings`, zero-row polls mean no publication on
+that tick, not that the source worker is idle. Source timing is retained
+separately rather than clipped or erased.
 
 ## 8. Failure & recovery semantics
 

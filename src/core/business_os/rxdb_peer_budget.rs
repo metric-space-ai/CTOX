@@ -11,6 +11,7 @@ pub(in crate::business_os) struct PeerProjectionBudget {
     pub documents_per_page: usize,
     pub bytes_per_page: usize,
     pub slice_duration: Duration,
+    pub source_poll_interval: Duration,
 }
 
 impl PeerProjectionBudget {
@@ -18,6 +19,7 @@ impl PeerProjectionBudget {
         documents_per_page: 16,
         bytes_per_page: 256 * 1024,
         slice_duration: Duration::from_millis(500),
+        source_poll_interval: Duration::from_millis(250),
     };
 
     pub fn page_is_full(self, documents: usize, bytes: usize) -> bool {

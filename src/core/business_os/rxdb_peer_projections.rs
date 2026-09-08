@@ -10,7 +10,7 @@ use super::rxdb_peer::{
     runtime_settings_projection_stamp, sync_business_users_with_database,
     sync_channel_state_with_database, sync_knowledge_tables_with_database,
     sync_module_catalog_with_database, sync_projection_if_changed_with_strategy,
-    sync_runtime_settings_with_database, sync_ticket_state_with_database,
+    sync_ticket_state_with_database,
     sync_workspace_branding_with_database, ticket_state_source_stamp,
     update_projection_idle_rounds, upsert_business_record_projection_tombstone,
     workspace_branding_projection_stamp, BackgroundProjectionLoopConfig, NativePeerLoopMetrics,
@@ -22,6 +22,8 @@ use super::rxdb_peer::{
 #[path = "rxdb_peer_budget.rs"]
 pub(super) mod budget;
 use budget::PeerProjectionBudget;
+#[path = "rxdb_peer_runtime_settings.rs"]
+pub(super) mod runtime_settings_source;
 
 use rxdb::rx_collection::RxCollection;
 use rxdb::rx_database::RxDatabase;
@@ -209,22 +211,7 @@ pub(super) async fn sync_runtime_settings_background_loop(
     database: Arc<RxDatabase>,
     _database_write_lock: Arc<AsyncMutex<()>>,
 ) {
-    let stamp_root = root.clone();
-    run_background_projection_loop(
-        RUNTIME_SETTINGS_PROJECTION_LOOP,
-        move || {
-            let root = stamp_root.clone();
-            async move { runtime_settings_projection_stamp(&root).await }
-        },
-        move || {
-            let root = root.clone();
-            let database = Arc::clone(&database);
-            async move {
-                sync_runtime_settings_with_database(&root, &database).await
-            }
-        },
-    )
-    .await;
+    runtime_settings_source::run(root, database).await;
 }
 
 pub(super) async fn sync_workspace_branding_background_loop(
