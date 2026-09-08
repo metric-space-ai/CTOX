@@ -158,6 +158,55 @@ mod queue_capacity_tests {
     use super::*;
 
     #[test]
+    fn finished_chat_cannot_dispatch_buffered_work_over_a_live_serial_worker() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        let task = channels::create_queue_task(
+            root.path(),
+            channels::QueueTaskCreateRequest {
+                title: "buffered serial successor".into(),
+                prompt: "Read the fixture".into(),
+                thread_key: "serial/successor".into(),
+                workspace_root: None,
+                priority: "normal".into(),
+                suggested_skill: None,
+                parent_message_key: None,
+                extra_metadata: None,
+            },
+        )?;
+        let job = queued_prompt_from_queue_task(task);
+        // Chat finalization clears busy before the other worker's registration
+        // drains. Neither direct intake nor buffered dispatch may trust busy alone.
+        let mut shared = SharedState {
+            busy: false,
+            worker_active_count: 1,
+            pending_prompts: VecDeque::from([job.clone()]),
+            ..SharedState::default()
+        };
+        assert!(serial_prompt_admission_is_busy(&shared));
+        assert!(maybe_start_next_queued_prompt_locked(root.path(), &mut shared).is_none());
+        assert_eq!(shared.pending_prompts.len(), 1);
+
+        shared.worker_active_count = 0;
+        shared
+            .parallel_queue_jobs
+            .insert("unstarted-chat".into(), job);
+        assert!(maybe_start_next_queued_prompt_locked(root.path(), &mut shared).is_none());
+        shared.parallel_queue_jobs.clear();
+        shared.serial_prompt_starting = true;
+        assert!(maybe_start_next_queued_prompt_locked(root.path(), &mut shared).is_none());
+
+        shared.serial_prompt_starting = false;
+        assert!(!serial_prompt_admission_is_busy(&shared));
+        let next = maybe_start_next_queued_prompt_locked(root.path(), &mut shared)
+            .expect("worker cleanup makes the buffered successor dispatchable");
+        assert_eq!(next.thread_key.as_deref(), Some("serial/successor"));
+        assert!(shared.pending_prompts.is_empty());
+        assert!(shared.serial_prompt_starting);
+        assert!(serial_prompt_admission_is_busy(&shared));
+        Ok(())
+    }
+
+    #[test]
     fn serial_start_reservation_survives_parallel_worker_startup() -> Result<()> {
         let root = tempfile::tempdir()?;
         runtime_env::set_runtime_env_value(root.path(), "queue.worker_capacity", "3")?;

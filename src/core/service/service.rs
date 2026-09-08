@@ -3787,7 +3787,9 @@ fn handle_service_ipc_request(
                         format!("Queued prompt outside working hours (queue #{pending}): {reason}"),
                     );
                     true
-                } else if shared.busy || runtime_blocker_backoff_remaining_secs(&shared).is_some() {
+                } else if serial_prompt_admission_is_busy(&shared)
+                    || runtime_blocker_backoff_remaining_secs(&shared).is_some()
+                {
                     insert_pending_prompt_ordered(
                         &mut shared.pending_prompts,
                         QueuedPrompt {
@@ -4135,7 +4137,9 @@ fn handle_request(
                         format!("Queued prompt outside working hours (queue #{pending}): {reason}"),
                     );
                     true
-                } else if shared.busy || runtime_blocker_backoff_remaining_secs(&shared).is_some() {
+                } else if serial_prompt_admission_is_busy(&shared)
+                    || runtime_blocker_backoff_remaining_secs(&shared).is_some()
+                {
                     insert_pending_prompt_ordered(
                         &mut shared.pending_prompts,
                         QueuedPrompt {
@@ -17552,10 +17556,23 @@ fn decorate_service_event_with_skill(event: &str, suggested_skill: Option<&str>)
     format!("{event} [skill {skill}]")
 }
 
+fn serial_prompt_admission_is_busy(shared: &SharedState) -> bool {
+    shared.busy
+        || shared.worker_active_count > 0
+        || shared.serial_prompt_starting
+        || !shared.parallel_queue_jobs.is_empty()
+}
+
 fn maybe_start_next_queued_prompt_locked(
     root: &Path,
     shared: &mut SharedState,
 ) -> Option<QueuedPrompt> {
+    // A finishing chat may clear the display's busy flag while another worker
+    // still owns a serial context. Buffered serial work waits for actual worker
+    // cleanup; the idle dispatcher starts it after the registrations drain.
+    if serial_prompt_admission_is_busy(shared) {
+        return None;
+    }
     if let Some(reason) = crate::service::working_hours::hold_reason(root) {
         if !shared.pending_prompts.is_empty() {
             push_event_locked(

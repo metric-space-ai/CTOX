@@ -425,7 +425,10 @@ inflight cache merely because an unrelated worker is busy.
 A serial worker consumes one capacity slot instead of blocking every isolated
 chat. A buffered serial backlog reserves one serial slot rather than consuming
 one slot per waiting job; unstarted chat reservations each consume a slot.
-Active thread identities remain exclusive across both admission paths. App recovery,
+Active thread identities remain exclusive across both admission paths. Direct and
+buffered serial prompts wait for worker registrations and startup reservations
+to drain, even when another worker's finalization has cleared the UI busy flag.
+The normal idle dispatcher then starts the next buffered prompt. App recovery,
 lease acquisition, pause, working hours, and runtime-blocker gates still apply.
 
 Adapter reconciliation admission coalesces an identical configuration while an

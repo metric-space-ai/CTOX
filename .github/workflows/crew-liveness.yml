@@ -53,7 +53,7 @@ jobs:
       - name: Admission and projection regressions
         run: |
           failed=0
-          for filter in queue_capacity_tests crew:: adapter_reconciliation business_os::harness_cockpit::chat::tests background_projection_releases_writer_between_pages sync_ticket_state sync_knowledge_tables; do
+          for filter in queue_capacity_tests crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests background_projection_releases_writer_between_pages sync_ticket_state sync_knowledge_tables; do
             cargo test --locked --bin ctox "$filter" -- --test-threads=1 || failed=1
           done
           exit "$failed"
@@ -76,7 +76,7 @@ jobs:
           git fetch --no-tags origin 8e6f132a82549be9235dd433fc9bd28d5ae868e6
           git checkout --detach 8e6f132a82549be9235dd433fc9bd28d5ae868e6
           failed=0
-          for filter in crew:: adapter_reconciliation business_os::harness_cockpit::chat::tests sync_ticket_state sync_knowledge_tables; do
+          for filter in crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests sync_ticket_state sync_knowledge_tables; do
             status=0
             cargo test --locked --bin ctox "$filter" -- --test-threads=1 || status=$?
             echo "Baseline 8e6f132a8: $filter exit=$status"
