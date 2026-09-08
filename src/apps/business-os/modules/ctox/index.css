@@ -398,7 +398,7 @@
 }
 
 .ctox-task-meta > span + span::before {
-  content: "· ";
+  content: "\00B7 ";
   color: color-mix(in srgb, var(--muted) 60%, transparent);
 }
 
@@ -472,13 +472,15 @@
 .ctox-task-card.has-member .ctox-task-selector {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);
-  grid-template-areas: "portrait title" "portrait meta" "bar bar";
+  grid-template-areas: "portrait title" "portrait meta" "reason reason" "bar bar";
   column-gap: var(--space-2);
   align-items: center;
 }
 .ctox-task-card.has-member .ctox-task-portrait { grid-area: portrait; width: 28px; height: 28px; }
 .ctox-task-card.has-member .ctox-task-selector > strong { grid-area: title; }
 .ctox-task-card.has-member .ctox-task-selector > .ctox-task-meta { grid-area: meta; }
+.ctox-task-card.has-member .ctox-task-selector > .ctox-task-reason { grid-area: reason; }
+.ctox-task-card .ctox-task-selector > .ctox-task-reason { margin-top: 2px; }
 .ctox-task-card.has-member .ctox-task-selector > .ctox-task-pipeline { grid-area: bar; margin-top: var(--space-1); }
 
 .ctox-task-pipeline .is-complete i {
