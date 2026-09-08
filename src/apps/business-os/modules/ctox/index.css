@@ -58,7 +58,7 @@
 /* Give every rendered section a track; the canvas must remain usable even
    when metrics, progress and timeline consume the rest of a short window. */
 .ctox-harness-main {
-  grid-template-rows: auto auto auto minmax(240px, 1fr) auto auto;
+  grid-template-rows: auto auto auto auto minmax(240px, 1fr) auto auto;
   overflow: auto;
 }
 
@@ -75,9 +75,10 @@
 .ctox-harness-main > .ctox-pane-header { grid-row: 1; }
 .ctox-harness-main > .ctox-metrics-strip { grid-row: 2; }
 .ctox-harness-main > .ctox-execution-progress { grid-row: 3; }
-.ctox-harness-main > .ctox-flow-well { grid-row: 4; }
-.ctox-harness-main > .ctox-timeline-panel { grid-row: 5; }
-.ctox-harness-main > .ctox-harness-footer { grid-row: 6; }
+.ctox-harness-main > .ctox-crew-strip { grid-row: 4; }
+.ctox-harness-main > .ctox-flow-well { grid-row: 5; }
+.ctox-harness-main > .ctox-timeline-panel { grid-row: 6; }
+.ctox-harness-main > .ctox-harness-footer { grid-row: 7; }
 
 /* Anonymous loading silhouette; never a generated or invented Crew member. */
 .ctox-data-placeholder { width: 56px; height: 56px; color: var(--muted); }
@@ -1501,6 +1502,53 @@
 
 /* Crew at home (slice 4): the members as the existing map creatures, resting
    side by side while nothing runs. Same shell as on the map, only larger. */
+/* The crew during work: one quiet row, same creatures, same drawer on click. */
+.ctox-crew-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-height: 34px;
+  padding: 2px var(--space-3);
+  border-bottom: 1px solid var(--line);
+}
+.ctox-crew-strip-member {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 6px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+.ctox-crew-strip-member:hover,
+.ctox-crew-strip-member:focus-visible {
+  border-color: var(--line);
+  background: var(--kit-hover, color-mix(in srgb, var(--text) 5%, transparent));
+  outline: none;
+}
+.ctox-crew-strip-member:focus-visible {
+  box-shadow: var(--focus-ring, 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent));
+}
+.ctox-crew-strip-creature { width: 24px; height: 24px; flex: 0 0 24px; }
+.ctox-crew-strip-member strong { font-size: var(--fs-meta, 12px); font-weight: 640; line-height: 1.2; }
+.ctox-crew-strip-member small {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctox-crew-strip-member.is-on_duty strong { color: var(--accent); }
+@container business-app-window (max-width: 720px) {
+  .ctox-crew-strip-member small { display: none; }
+}
+
 .ctox-crew-home {
   display: grid;
   place-items: center;

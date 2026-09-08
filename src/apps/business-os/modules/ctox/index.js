@@ -1,6 +1,6 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { renderListOrState } from '../../shared/list-state.js';
-import { crewCreatureHtml, syncCrewProceduralMotion, crewMemberExpression, crewMemberExpressionTtlMs } from '../../shared/business-chat.js?v=20260907-shell-v2-crew-home-v347';
+import { crewCreatureHtml, syncCrewProceduralMotion, crewMemberExpression, crewMemberExpressionTtlMs } from '../../shared/business-chat.js?v=20260908-shell-v2-crew-home-v348';
 import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 import { workspaceDataState } from './data-state.js?v=20260906-data-state-v1';
 
@@ -20,7 +20,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260907-shell-v2-crew-home-v347';
+const CTOX_STYLE_BUILD = '20260908-shell-v2-crew-home-v348';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -2318,6 +2318,7 @@ function renderMain(state) {
     </header>
     ${metricsStripMarkup(metrics, elapsedSeconds, live, state)}
     ${executionProgressBar(metrics, state)}
+    ${shouldShowCrewHome(state) ? '' : crewStripMarkup(state)}
     ${shouldShowCrewHome(state) ? crewHomeMarkup(state) : stateInWorkspace ? emptyWorkspaceMarkup(state) : `<div class="ctox-canvas-container ctox-flow-well">
       <div class="ctox-flow-toolbar" aria-label="${escapeAttr(t.flowControls)}" data-flow-control>
         <button type="button" class="ctox-pane-icon" data-zoom="-" aria-label="${escapeAttr(t.zoomOut)}" title="${escapeAttr(t.zoomOut)}" ${state.zoom <= MIN_ZOOM ? 'disabled' : ''}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 12h14"/></svg></button>
@@ -5003,6 +5004,26 @@ function memberCreatureHtml(member, state, taskState = memberCreatureState(membe
   }, taskState, 'map');
 }
 
+// While work runs, the rest of the crew stays in view as one quiet row under
+// the metrics (Review-Befund B7): creature, name, what each one does now.
+function crewStripMarkup(state) {
+  const t = labels[state.lang];
+  const members = (state.crewMembers || []).filter((member) => !member.archived);
+  if (!members.length) return '';
+  const items = members.map((member) => {
+    const line = memberStateLine(member, state);
+    const stateClass = String(member.state || 'home').replace(/[^a-z_]/g, '');
+    return `
+      <button type="button" class="ctox-crew-strip-member is-${escapeAttr(stateClass)}" data-crew-member-id="${escapeAttr(member.id)}"
+        aria-label="${escapeAttr(`${member.name}: ${line}`)}" title="${escapeAttr(`${member.name} · ${line}`)}">
+        <span class="ctox-flow-creature-shell ctox-crew-strip-creature">${memberCreatureHtml(member, state)}</span>
+        <strong>${escapeHtml(member.name)}</strong>
+        <small>${escapeHtml(line)}</small>
+      </button>`;
+  }).join('');
+  return `<section class="ctox-crew-strip" aria-label="${escapeAttr(t.crewHome)}">${items}</section>`;
+}
+
 function crewHomeMarkup(state) {
   const t = labels[state.lang];
   const members = (state.crewMembers || []).filter((member) => !member.archived);
@@ -6610,6 +6631,7 @@ export const __ctoxTestHooks = {
   taskSelectionSentence,
   memberIdentity,
   memberCreatureState,
+  crewStripMarkup,
   shouldShowCrewHome,
   taskCrewMember,
   aggregateRunMetrics,
