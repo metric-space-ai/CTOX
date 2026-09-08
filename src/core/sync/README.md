@@ -64,8 +64,12 @@ deployable replacement daemon. Business records still replicate through RxDB.
   voting membership. Their public keys and never-reused node IDs persist in
   state-machine snapshots. Only configured voters can admit/revoke; additional
   workers may propose execution commands and validate their own ownership, but
-  cannot issue Raft RPCs. Validation rechecks active membership after the quorum
-  read. Native private IPC exposes these commands with distinct worker receipts;
+  cannot issue Raft RPCs. Pinned revoked workers can still request validation of
+  their own ownership. The quorum read precedes the active-membership check:
+  revocation returns a typed denial, while an isolated voter cannot claim a
+  confirmed decision from its cached tombstone. Unknown identities, validation
+  for another executor and proposals from revoked workers remain rejected at
+  admission. Native private IPC exposes these commands with distinct worker receipts;
   replayed admission cannot reactivate a revoked entry. Product invitation,
   administrator authorization and remote key-possession proof remain host work.
 - `authority/client.rs`: nonvoting `WorkerAuthorityClient` implements the same

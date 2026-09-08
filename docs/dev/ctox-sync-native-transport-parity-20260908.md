@@ -144,8 +144,12 @@ whereas CI pins the required 24.13.1. CTOX now pins this final source revision
 for a fresh combined run. The previous successful run must not be described
 as having tested that newer revision.
 
-Both PRs remain drafts; no main merge, tenant upgrade or source cleanup is
-claimed. The full-host four-process acceptance, current browser/native
+At that paired run both PRs remained drafts. Workjet PR #32 was subsequently
+merged at 2026-09-08T08:10:30Z after every Workjet CI job passed. Main commit
+1a81eabec00fa262c36d72970376f2d09da6a48f has a tree identical to tested
+cd0b8f47e511eea9c789c9c6981d25c64f1ab999 (git diff exits 0) and is now the
+CTOX CI pin. CTOX PR #69 remains a draft. No tenant upgrade or source cleanup
+was performed. The full-host four-process acceptance, current browser/native
 acceptance and the specified performance budgets still require proof.
 
 
@@ -176,7 +180,34 @@ The Native Sync workflow now includes strict cross-repository generation checks
 and a separate Linux job that builds the complete CTOX binary, including the
 embedded sidecar, then executes host_cli_acceptance with four real host processes.
 It retains source revision, binary SHA-256 and the acceptance JSON, not private
-fixture stores. This new job has not yet produced a passing result.
+fixture stores. Run 34200458404 built the full binary successfully but failed its final revoked-worker
+assertion. The acceptance reached admission, validation, reconnect and restart;
+no successful acceptance JSON or performance result was emitted. Actual built
+Git merge revision: 3f666f36f775288ebc7a39dfd676ae1b7cec52f2; binary SHA-256:
+939bc1e86f9a2e258e5d3dfe7bd74544d57f470d0f68b78d46eef1eed2ea9b30.
+
+The voter rejects a revoked worker's validation at the transport admission gate,
+before its quorum-confirmed validation handler can return a typed rejection.
+The client therefore reports an unconfirmed transport outcome after retrying all
+three voters. This is a denial classification defect; no post-revocation
+authorization was observed. The four-process assertion remains unchanged.
+
+The focused signed-authority regression failed against the unchanged node at
+authority_cluster.rs:1260 with the same admission error (3.15 seconds test time;
+10m56s local rebuild under load). The correction permits only a pinned worker's
+own status query through admission, then uses the existing quorum and active
+membership checks. No additional RPC, string-based error classification or
+fallback was added. Proposal and Raft admission stay closed to revoked workers.
+The cluster checks now require typed rejection before and after restart, deny
+forged identities and another executor's ownership, and ensure an isolated
+voter cannot answer definitively from its persisted tombstone. The real WebRTC
+check likewise requires Rejected rather than the previous Unavailable. Positive
+verification of this correction is pending.
+
+Workjet run 34199994655 is now entirely successful at cd0b8f47e, including Test,
+Release Smoke, Mobile Native Static Analysis and Check. Native Linux job
+101977812776 also passed the new generation gate, full suites, clippy and socket
+tests. macOS job 101977813150 was queued at observation.
 
 The existing host fixture now records twenty warm linearizable authority checks
 (all samples plus nearest-rank p50/p95), four-host provisioning, worker reconnect

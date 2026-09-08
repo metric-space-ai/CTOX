@@ -54,7 +54,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: metric-space-ai/workjet
-          ref: cd0b8f47e511eea9c789c9c6981d25c64f1ab999
+          ref: 1a81eabec00fa262c36d72970376f2d09da6a48f
           path: workjet
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
