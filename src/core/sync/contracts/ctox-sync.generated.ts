@@ -151,7 +151,7 @@ export type SyncHostMember =
   { readonly type: "worker"; readonly member: WorkerMembership };
 
 export type AuthorityFailure =
-  { readonly type: "notLeader"; readonly leader: number | null } |
+  { readonly type: "notLeader"; readonly leader?: number | null } |
   { readonly type: "unavailable"; readonly reason: string } |
   { readonly type: "rejected"; readonly reason: string };
 
@@ -167,7 +167,7 @@ export type SyncIpcOperation =
   { readonly type: "stop"; readonly jobId: string; readonly ownership: ExecutionOwnership };
 
 export type SyncIpcResult =
-  { readonly type: "workerMembership"; readonly nodeId: number; readonly worker: WorkerMembership | null } |
+  { readonly type: "workerMembership"; readonly nodeId: number; readonly worker?: WorkerMembership | null } |
   { readonly type: "workerApplied"; readonly worker: WorkerMembership } |
   { readonly type: "workerReplayed"; readonly worker: WorkerMembership } |
   { readonly type: "ready"; readonly nodeId: number; readonly scopeId: string; readonly protocolVersion: number } |

@@ -120,11 +120,10 @@ Workjet checkout. CTOX CI now pins this actual consumer revision and also runs
 its focused socket tests. Native RxDB and lint continue after a failed Sync
 test, provided formatting passed, so one failure cannot hide the other gates.
 
-The generated Workjet files carry the same fixture hash as CTOX, but strict
-generator comparison reports formatting drift in the TypeScript output. That
-check is red; the consumer does not modify the generated files. Full current
-host execution, browser interoperability, performance and tenant acceptance
-remain outstanding.
+The first strict comparison found formatting drift in Workjet's generated
+TypeScript. The paired generator correction below now resolves this drift.
+Full current host execution, browser interoperability, performance and tenant
+acceptance remain outstanding.
 
 ## Verified paired native run
 
@@ -148,6 +147,44 @@ as having tested that newer revision.
 Both PRs remain drafts; no main merge, tenant upgrade or source cleanup is
 claimed. The full-host four-process acceptance, current browser/native
 acceptance and the specified performance budgets still require proof.
+
+
+## Generated contract correction and full host gate
+
+The Workjet CI typecheck exposed an actual generator defect: optional fields
+in tagged unions were emitted as required TypeScript keys while Effect schemas
+already used optionalKey. Both generated outputs now represent the same existing
+wire contract. Each schema uses satisfies Schema.Schema<Contract.Type> so
+incompatible schema/type output fails consumer typechecking. No cast, relaxed
+schema, fixture change or Rust wire change is involved.
+
+Workjet output is formatted in memory using its pinned vite-plus executable,
+both when generating and checking. Strict --check remains read-only and compares
+all five outputs. The contracts-only TypeScript check, five-output comparison,
+host contract shape assertions, generated-file formatting and six local socket
+tests pass. Workjet correction commit cd0b8f47e511eea9c789c9c6981d25c64f1ab999 is pushed
+in PR #32 and pinned by CTOX CI. Full Workjet CI on that revision is still
+required. The scratch worktree is retained; no unique source was deleted.
+
+The subsequent paired native run
+[34193660757](https://github.com/metric-space-ai/ctox/actions/runs/34193660757)
+passed on Linux and macOS at CTOX 4e0a96160edff1d63a78ad36ef7fe5cc45b7f9bc
+and Workjet 1ce94412210fc036db589d96a6d2a8632881ef7e. This confirms the consumer
+lint changes, but predates the generated contract correction.
+
+The Native Sync workflow now includes strict cross-repository generation checks
+and a separate Linux job that builds the complete CTOX binary, including the
+embedded sidecar, then executes host_cli_acceptance with four real host processes.
+It retains source revision, binary SHA-256 and the acceptance JSON, not private
+fixture stores. This new job has not yet produced a passing result.
+
+The existing host fixture now records twenty warm linearizable authority checks
+(all samples plus nearest-rank p50/p95), four-host provisioning, worker reconnect
+and worker restart separately. Its topology is localhost with three voters and
+one worker, with one job in the control stores. The CI binary is a dev build with
+debug information disabled. These measurements do not evaluate the Business OS
+command-p50 or collection-boot budgets, WAN behavior, harness portability or
+Desktop/Mobile onboarding. Existing deadlines and assertions remain unchanged.
 
 ## Obsolete remote compiler output removed
 

@@ -54,7 +54,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
         with:
           repository: metric-space-ai/workjet
-          ref: 1ce94412210fc036db589d96a6d2a8632881ef7e
+          ref: cd0b8f47e511eea9c789c9c6981d25c64f1ab999
           path: workjet
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
         with:
@@ -79,6 +79,10 @@ jobs:
         run: |
           cargo fmt --check --manifest-path src/core/sync/Cargo.toml
           cargo fmt --check --manifest-path src/core/rxdb/Cargo.toml
+      - name: Verify generated Rust and Workjet contracts
+        run: |
+          node src/core/sync/tools/generate-contracts.mjs --check --workjet-root ../workjet
+          node src/core/sync/tools/assert-host-contracts.mjs ../workjet
       - name: Native authority, lifecycle and real WebRTC scenarios
         run: cargo test --locked --no-fail-fast --manifest-path src/core/sync/Cargo.toml --features webrtc
       - name: Native RxDB tests with production ICE patch
@@ -91,3 +95,53 @@ jobs:
         if: ${{ !cancelled() && steps.format.outcome == 'success' }}
         working-directory: workjet/apps/server
         run: npm exec --yes --package=pnpm@11.10.0 -- pnpm exec vp test run src/workjet/sync/WorkjetSyncIpc.test.ts
+
+  full-host-acceptance:
+    name: Full CTOX host acceptance (Linux)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - name: Configure disposable build and evidence storage
+        shell: bash
+        run: |
+          printf 'CARGO_TARGET_DIR=%s/ctox-full-host-target\nTMPDIR=%s\n' "$RUNNER_TEMP" "$RUNNER_TEMP" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/ctox-host-proof" "$RUNNER_TEMP/ctox-host-fixtures"
+          df -h "$RUNNER_TEMP"
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: ./.github/actions/build-pi-sidecar
+      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88
+        with:
+          toolchain: '1.93.0'
+      - name: Install native host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
+      - uses: Swatinem/rust-cache@42dc69e1aa15d09112580998cf2ef0119e2e91ae
+        with:
+          key: full-ctox-host-dev-no-debug
+          workspaces: |
+            . -> ${{ runner.temp }}/ctox-full-host-target
+            src/core/sync -> ${{ runner.temp }}/ctox-full-host-target
+      - name: Build the complete CTOX binary from the checked-out source
+        run: |
+          cargo build --locked --bin ctox
+          git rev-parse HEAD > "$RUNNER_TEMP/ctox-host-proof/source-revision.txt"
+          sha256sum "$CARGO_TARGET_DIR/debug/ctox" > "$RUNNER_TEMP/ctox-host-proof/binary.sha256"
+      - name: Four real host processes, recovery and control latency
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo run --locked --manifest-path src/core/sync/Cargo.toml --features webrtc --example host_cli_acceptance -- \
+            "$CARGO_TARGET_DIR/debug/ctox" "$RUNNER_TEMP/ctox-host-fixtures" \
+            | tee "$RUNNER_TEMP/ctox-host-proof/acceptance.json"
+      - name: Retain host proof and binary provenance
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ctox-native-full-host-proof
+          path: ${{ runner.temp }}/ctox-host-proof/
+          if-no-files-found: ignore
