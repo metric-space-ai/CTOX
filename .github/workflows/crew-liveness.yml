@@ -44,7 +44,7 @@ jobs:
       - name: Native dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
+          sudo apt-get install -y libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3 ripgrep
           df -h /
       - name: Check and compile regression tests
         id: compile
