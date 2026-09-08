@@ -1,6 +1,41 @@
 # Native transport validation parity — 2026-09-08
 
-Status: dependency correction under validation; no production acceptance or tenant deployment.
+Status: native Linux/macOS and four-host control acceptance passed at
+`0f02369137449fb4d7e9e6a3fe2ae1609c366f39` in
+[run 34222083233](https://github.com/metric-space-ai/ctox/actions/runs/34222083233).
+This is not product acceptance or a tenant deployment. The new browser-suite
+CI coverage and bundle-guard correction below still require their own complete
+run. Earlier sections retain the chronological evidence and failed attempts.
+
+## Current browser verification correction
+
+The bundle reproducibility guard previously exited successfully when npx,
+the pinned builder download or the build itself failed. The canonical suite
+captures successful output, so this internal SKIPPED was reported as PASS.
+Builder failure now throws and cleans scratch data; source/bundle drift also
+uses the cleanup path. A subprocess regression launches the actual guard with
+no builder on PATH: it failed against the old source (exit 0 instead of 1) and
+passes after correction. This is a negative verification-path test, not a
+completed real bundle rebuild.
+
+Native Sync CI now runs the complete JS/browser suite on Linux with a freshly
+built Rust wire daemon. It preserves source/binary provenance and the suite
+result without removing any existing app or platform gate. Local full runs
+remain red: 119/120 with an inventory timeout, then 117/120 with wire seed,
+file ready and multi-tab timeouts. Focused unchanged wire and file checks pass
+under Node 24.13.1; the full result must not be inferred from those passes.
+Further local broad testing is deferred while the shared resource gate rejects
+the overloaded host. No timeout was relaxed.
+
+The four-host artifact for run 34222083233 was read directly: actual built
+merge `eb5e060be9d28cb7bf5abccd0dd5cf8089de63ab`, binary SHA256
+`faed38976a4c7ef61a2ea33086dfc28d11cd408ccadf075ad73cdc57656d9b47`.
+Its unchanged JSON is retained in
+[`evidence/ctox-sync-full-host-34222083233.json`](evidence/ctox-sync-full-host-34222083233.json).
+One localhost fixture, three voters and one worker: provisioning 5722.821 ms,
+reconnect 1017.135 ms, restart 1743.377 ms; 20 warm authority validations have
+p50 10.389 ms and p95 11.452 ms. The artifact explicitly records
+`codingHarnessExecuted: false` and `businessCommandBudgetEvaluated: false`.
 
 Durability: branch `codex/native-transport-parity`, source commit
 `a0e8e59d8f3844ec8f3bfe94b974eec1b8b5093a`, pushed and verified in draft

@@ -11,7 +11,10 @@ on:
       - 'src/core/sync_host/**'
       - 'src/core/sync_host.rs'
       - 'src/core/rxdb/**'
-      - 'src/apps/business-os/rxdb/tests/native-transport-parity-smoke.mjs'
+      - 'src/apps/business-os/rxdb/**'
+      - 'src/apps/business-os/shared/**'
+      - 'src/apps/business-os/package.json'
+      - 'src/apps/business-os/package-lock.json'
   push:
     branches: [main]
     paths:
@@ -22,7 +25,10 @@ on:
       - 'src/core/sync_host/**'
       - 'src/core/sync_host.rs'
       - 'src/core/rxdb/**'
-      - 'src/apps/business-os/rxdb/tests/native-transport-parity-smoke.mjs'
+      - 'src/apps/business-os/rxdb/**'
+      - 'src/apps/business-os/shared/**'
+      - 'src/apps/business-os/package.json'
+      - 'src/apps/business-os/package-lock.json'
 
 permissions:
   contents: read
@@ -41,6 +47,8 @@ jobs:
         working-directory: ctox
     env:
       CARGO_TERM_COLOR: always
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/ctox-browser-chromium
+      npm_config_cache: ${{ runner.temp }}/ctox-browser-npm
     steps:
       - name: Configure disposable build storage
         shell: bash
@@ -95,6 +103,37 @@ jobs:
         if: ${{ !cancelled() && steps.format.outcome == 'success' }}
         working-directory: workjet/apps/server
         run: npm exec --yes --package=pnpm@11.10.0 -- pnpm exec vp test run src/workjet/sync/WorkjetSyncIpc.test.ts
+      - name: Install the pinned Business OS browser test runtime
+        id: browser-dependencies
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && steps.format.outcome == 'success' }}
+        run: |
+          npm --prefix src/apps/business-os ci
+          npm --prefix src/apps/business-os exec playwright install --with-deps chromium
+      - name: Build the native query and file wire fixture
+        id: wire-fixture
+        if: ${{ !cancelled() && steps.browser-dependencies.outcome == 'success' }}
+        run: |
+          cargo build --locked --manifest-path src/core/rxdb/Cargo.toml --example v15_wire_daemon
+          mkdir -p runtime/build "$RUNNER_TEMP/ctox-browser-proof"
+          ln -s "$CARGO_TARGET_DIR" runtime/build/cargo-target
+          git rev-parse HEAD > "$RUNNER_TEMP/ctox-browser-proof/source-revision.txt"
+          sha256sum "$CARGO_TARGET_DIR/debug/examples/v15_wire_daemon" > "$RUNNER_TEMP/ctox-browser-proof/wire-daemon.sha256"
+      - name: Complete JavaScript and browser contracts with native wire coverage
+        if: ${{ !cancelled() && steps.wire-fixture.outcome == 'success' }}
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -o pipefail
+          COMMAND_PLANE_BASELINE_PATH="$RUNNER_TEMP/ctox-browser-proof/command-plane-observability.json" \
+            node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon \
+            | tee "$RUNNER_TEMP/ctox-browser-proof/suite.log"
+      - name: Retain browser contract evidence
+        if: ${{ !cancelled() && matrix.os == 'ubuntu-22.04' && steps.wire-fixture.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: ctox-native-browser-contract-proof
+          path: ${{ runner.temp }}/ctox-browser-proof/
+          if-no-files-found: error
 
   full-host-acceptance:
     name: Full CTOX host acceptance (Linux)

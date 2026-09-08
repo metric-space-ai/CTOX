@@ -1197,11 +1197,20 @@ own node process (tests mutate globals), prints a pass/fail table, exits
 non-zero on failure. Its header states the policy: *a red test is a finding,
 not noise — never delete or weaken a test to make the suite pass.*
 
+The Native Sync workflow also runs this complete suite on Linux with its
+freshly built native wire daemon and the package-lock-pinned Chromium test
+runtime. The daemon is required; this run cannot skip the cross-process tests.
+It retains the source revision, daemon SHA256 and suite log independently of
+the general app checks, which remain required. The retained command-plane
+observability JSON uses a synthetic collection adapter; it does not prove the
+Business OS command p50 or critical-collection boot p95 budgets.
+
 | Test | One line |
 |---|---|
 | `active-collections-catchup-smoke` | **Regression:** a collection transitioning inactive→active triggers one catch-up pull through the real shared-peer registry wiring (§8.1 gating invariant). |
 | `advanced-status-bridge-smoke` | V1.5 → `business-os-advanced-status-v1` envelope mapping. |
-| `bundle-reproducible-smoke` | **Guard:** dist must be byte-reproducible from src with the pinned esbuild (skips loudly offline; CI enforces). |
+| `bundle-reproducible-smoke` | **Guard:** dist must be byte-reproducible from src with the pinned esbuild. Missing tooling, download/build failures and drift fail verification, including offline runs. |
+| `bundle-guard-failure-smoke` | **Regression:** launches the actual bundle guard without a builder and requires failure plus scratch cleanup, preventing an unperformed rebuild from being counted as PASS. |
 | `checkpoint-age-diagnostics-smoke` | Per-collection checkpoint staleness: lwt recorded on transport activity (max across peers), `pull/pushCheckpointAgeMs` derived at snapshot time — no idle timers. |
 | `checkpoint-contract-smoke` | **Guard:** checkpoint wire shape (status fields, epoch derivation, validity-key v1/v2 formats) matches the `webrtc-checkpoint-contract.json` fixture; drives the real validity-key code through the replication harness. |
 | `command-bus-projection-smoke` | **Regression:** queue commands wait for the task projection; control commands' terminal `completed` ack without `task_id` is success; `failed` rejects. |
