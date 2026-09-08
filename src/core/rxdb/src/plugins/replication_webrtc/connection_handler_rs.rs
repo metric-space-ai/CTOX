@@ -3364,6 +3364,18 @@ fn install_data_channel(
         let mut peers = handler.peers.lock();
         if let Some(entry) = peers.get_mut(&remote_peer_id) {
             if entry.generation == generation {
+                // A channel has exactly one event consumer per connection lifetime.
+                // webrtc 0.20.0-alpha.1 also announces a locally created channel
+                // through on_data_channel with a second, already-closed receiver.
+                // Keep the original handle: polling the duplicate would immediately
+                // retire this otherwise live connection on stream EOF.
+                if entry
+                    .data_channel
+                    .as_ref()
+                    .is_some_and(|installed| installed.id() == data_channel.id())
+                {
+                    return;
+                }
                 entry.data_channel = Some(Arc::clone(&data_channel));
             } else {
                 return;

@@ -75,15 +75,36 @@ All runs use locked dependencies and keep the existing test deadlines.
 For PR #69 at `3432b3488`, the existing Desktop macOS job stops at npm audit
 (`@xmldom/xmldom`, `fast-uri`). The x86_64 Linux CLI job stops before compilation
 at the platform-freeze guard (`modules/explorer/index.js` contextmenu handler).
-Job IDs: `101935097745`, `101935097780`, run `34186266711`. These unchanged app
+Job IDs: `101935097745`, `101935097780`, run `34186266711`. These unchanged app paths are outside this dependency correction; no guard is bypassed.
 
-The workflow now prepares both repositories as siblings, including the actual
-Workjet consumer at immutable revision `ca7dd885f3615ff31b18eb6ffb6c7c58c45ceaf3`.
-Node 24.13.1 and pnpm 11.10.0 match that revision's declared engines and package
-manager. Dependencies are installed with the frozen Workjet lockfile and no
-lifecycle scripts. The existing IPC assertions remain unchanged. Cargo uses
-`--no-fail-fast` to collect all test-executable failures instead of hiding the
-WebRTC result behind the first failing test executable.
+Run 34189662536 at `3ac60bffe` exposed two independent failures on Linux and
+macOS. The sibling Workjet checkout exists, but pinned revision
+`ca7dd885f3615ff31b18eb6ffb6c7c58c45ceaf3` does not contain
+`WorkjetSyncIpc.ts`: that file and its generated contracts remain untracked in
+the local Workjet checkout. My claim that this pin supplied the actual consumer
+was incorrect. The consumer must be reviewed, committed and pinned before this
+cross-repository test is reproducible. Its assertion remains enabled and red.
+
+With `--no-fail-fast`, both platforms additionally ran the real WebRTC suite:
+4 passed and 10 failed. Peers advertise signaling admission and asymmetric open
+channels but cannot confirm execution authority. This reproduces independently
+of the overloaded local machine.
+
+## Duplicate local-channel announcement correction
+
+The pinned webrtc 0.20.0-alpha.1 driver invokes `on_data_channel` on locally
+created channels too. It supplies a new handle whose event sender is discarded
+because the original handle already owns that channel ID. CTOX previously
+installed this duplicate, and its immediate event-stream EOF retired the live
+connection generation. The newer dependency used by historical standalone
+tests fixes that upstream behavior, explaining why those tests hid this defect.
+
+Make registration idempotent for the same data-channel ID within the current
+connection generation. Preserve the original event consumer and teardown owner.
+Retain the production dependency and ICE patch; do not upgrade the transport
+stack or relax authority deadlines as a workaround. The existing failing
+native WebRTC scenarios are the negative control; post-correction acceptance
+is pending. This is not yet a tenant-deployment or performance claim.
 
 ## Obsolete remote compiler output removed
 
@@ -100,4 +121,3 @@ cargo-target were retained. The removed build was disposable and its correction
 and evidence are already in main via PR #65. No service was stopped, restarted
 or upgraded; the Office worker owns the Welsch cutover. The remote receipt is
 `/home/ctox/.cache/ctox/file-preservation-fbeca32b7/cleanup-native-parity-20260908.json`.
-paths are outside this dependency correction; no guard is bypassed.
