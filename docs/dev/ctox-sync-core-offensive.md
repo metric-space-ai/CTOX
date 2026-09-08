@@ -7,6 +7,14 @@ noch aktiv. Ihre Entfernung gehört ausdrücklich zur Abnahme.
 
 ## Aktueller Abnahmestand
 
+Nachtrag 2026-09-08: Die unten protokollierten grünen Standalone-Sync-Tests
+verwendeten WebRTC 0.20.5, während das CTOX-Binary 0.20.0-alpha.1 mit lokalem
+ICE-Patch verwendete. Auch den separaten RxDB-Tests fehlte dieser Patch.
+Die Ergebnisse bleiben historische Einzelbefunde, belegen aber keine Abnahme
+des ausgelieferten Transports. Die Angleichung und erneute Prüfung sind in
+[Native transport parity](ctox-sync-native-transport-parity-20260908.md)
+dokumentiert. Die Vier-Prozess-Abnahme bleibt bis zum erfolgreichen Gegenbeleg rot.
+
 Die separate Abnahme mit vier echten CTOX-Prozessen ist **rot**. Mit privaten
 IPC-Verzeichnissen starten alle vier Hosts und beantworten die lokale
 Identitätsprüfung. Die Signalisierungsdiagnose weist sechs Angebote, sechs
