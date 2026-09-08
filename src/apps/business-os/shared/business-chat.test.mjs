@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import {
   __businessChatTestInternals,
   chatAgentScopeViewFromMeta,
+  crewAppPresenceFromTasks,
   renderChatAgentScopeHtml,
 } from './business-chat.js';
 
@@ -2917,4 +2918,25 @@ test('Web Research oeffnet den Chat und dispatcht nicht direkt', () => {
   const fallbackIndex = runBody.indexOf('} else {');
   assert.ok(dispatchIndex > fallbackIndex && fallbackIndex >= 0,
     'commandBus.dispatch darf nur im Rueckfallzweig stehen');
+});
+
+test('crew app presence maps active queue tasks to their app by member', () => {
+  const members = [
+    { id: 'm1', name: 'Pico', shape: 'round', color: '#e0a458', state: 'on_duty' },
+    { id: 'm2', name: 'Nia', shape: 'tall', color: '#5aa9e6', state: 'home' },
+  ];
+  const tasks = [
+    { id: 't1', status: 'running', module: 'documents', crew_member_id: 'm1' },
+    { id: 't2', status: 'leased', source_module: 'documents', crew_member_id: 'm1' }, // same member twice → once
+    { id: 't3', status: 'review', module: 'tickets', crew_member_id: 'm2' },
+    { id: 't4', status: 'succeeded', module: 'tickets', crew_member_id: 'm1' }, // finished → no presence
+    { id: 't5', status: 'running', module: 'tickets', crew_member_id: 'ghost' }, // unknown member → skipped
+    { id: 't6', status: 'running', crew_member_id: 'm2' }, // no module → skipped
+  ];
+  const presence = crewAppPresenceFromTasks(tasks, members);
+  assert.deepEqual([...presence.keys()].sort(), ['documents', 'tickets']);
+  assert.deepEqual(presence.get('documents').map((entry) => entry.member.id), ['m1']);
+  assert.deepEqual(presence.get('tickets').map((entry) => entry.member.id), ['m2']);
+  assert.equal(crewAppPresenceFromTasks([], members).size, 0);
+  assert.equal(crewAppPresenceFromTasks(tasks, []).size, 0);
 });

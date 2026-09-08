@@ -240,6 +240,33 @@ try {
     expect(m.dockLabel === 'Crew', `crew navigation label must remain visible, got ${m.dockLabel}`);
   });
 
+  await scenario(page, 'crew-presence-on-app-window-and-desktop-icon', {
+    count: 1,
+    activeIndex: 0,
+    crewMembers: 3,
+    appPresence: true,
+    queueTasks: [
+      { id: 'task_doc_1', status: 'running', module: 'documents', crew_member_id: 'member_0', updated_at_ms: Date.now() },
+      { id: 'task_doc_2', status: 'leased', module: 'documents', crew_member_id: 'member_1', updated_at_ms: Date.now() - 1000 },
+      { id: 'task_ctox_done', status: 'succeeded', module: 'ctox', crew_member_id: 'member_2', updated_at_ms: Date.now() - 2000 },
+    ],
+  }, async () => {
+    const after = await page.evaluate(async () => {
+      await window.chatHarness.waitFor(() => document.querySelectorAll('[data-crew-presence]').length >= 2);
+      await window.chatHarness.waitForPaint();
+      return window.chatHarness.collect();
+    });
+    results.push({ scenario: 'crew-presence-after-load', metrics: after });
+    await page.screenshot({ path: path.join(outputDir, 'crew-presence.png'), clip: { x: 280, y: 100, width: 900, height: 400 } });
+    const byHost = Object.fromEntries((after.appPresence || []).map((entry) => [entry.host, entry]));
+    expect(byHost['window:module:documents']?.creatures === 2, `documents window icon must carry both working members, got ${JSON.stringify(byHost['window:module:documents'])}`);
+    expect(byHost['desktop:documents']?.creatures === 2, `documents desktop icon must carry both working members, got ${JSON.stringify(byHost['desktop:documents'])}`);
+    expect(/Pico, Nia arbeiten hier/.test(byHost['window:module:documents']?.title || ''), `presence hint must name the members, got ${byHost['window:module:documents']?.title}`);
+    expect(byHost['window:module:ctox']?.creatures === 0, `finished tasks must not show presence, got ${JSON.stringify(byHost['window:module:ctox'])}`);
+    expect(byHost['desktop:ctox']?.creatures === 0, `finished tasks must not show desktop presence, got ${JSON.stringify(byHost['desktop:ctox'])}`);
+    expect((after.appPresence || []).every((entry) => entry.inside), `presence badges must stay inside their icon, got ${JSON.stringify(after.appPresence)}`);
+  });
+
   await scenario(page, 'inactive-window-minimizes-with-one-click', { count: 3, activeIndex: 1 }, async () => {
     const after = await page.evaluate(async () => {
       const button = document.querySelector('.ctox-chat-window[data-chat-id="chat_0"] [data-chat-minimize]');
@@ -744,6 +771,12 @@ function harnessHtml() {
         window._ctoxChatSchedulerInterval = null;
       }
       document.body.innerHTML = '<main class="harness-app">' + ['Tickets', 'Conversations', 'Notizen', 'Documents', 'Knowledge', 'Kunden', 'App Store', 'Source Editor'].map((name) => '<div class="harness-module">' + name + '</div>').join('') + '</main>';
+      if (options.appPresence) {
+        // Shell stand-ins: a v2 window per app plus the desktop icon grid,
+        // shaped like window-manager.js / app.js render them.
+        document.body.insertAdjacentHTML('beforeend', ['documents', 'ctox'].map((id) => '<div class="shell-window" data-owner-id="module:' + id + '" style="position:absolute;top:120px;left:' + (id === 'ctox' ? 700 : 300) + 'px;width:320px;height:200px;border:1px solid #333"><div class="shell-window-v2-icon" style="position:absolute;top:0;left:0;width:44px;height:44px;overflow:hidden;background:#222"><span data-window-app-label>' + id[0].toUpperCase() + '</span></div></div>').join('')
+          + '<div data-desktop-icons style="position:absolute;top:400px;left:900px;display:flex;gap:24px">' + ['documents', 'ctox'].map((id) => '<button class="desktop-icon" data-target="' + id + '"><span class="desktop-icon-glyph" style="display:block;width:56px;height:56px;border-radius:14px;background:#2a2a2a"></span><span class="desktop-icon-label">' + id + '</span></button>').join('') + '</div>');
+      }
       localStorage.clear();
       sessionStorage.clear();
       chatCollectionSubscribers = new Set();
@@ -771,7 +804,7 @@ function harnessHtml() {
       initBusinessChat({
         session: { authenticated: true, user: { id: owner, name: 'Harness User' } },
         commandBus: makeCommandBus(options),
-        db: makeDb(chats, options.dbDelay || 0, Boolean(options.dbTransientError), Boolean(options.dbDeleteError), Number(options.crewMembers) || 0),
+        db: makeDb(chats, options.dbDelay || 0, Boolean(options.dbTransientError), Boolean(options.dbDeleteError), Number(options.crewMembers) || 0, Array.isArray(options.queueTasks) ? options.queueTasks : []),
         getActiveModule: () => ({ id: 'ctox', name: 'CTOX' }),
       });
       await waitFor(() => document.querySelector('[data-chat-dock]'));
@@ -913,7 +946,7 @@ function harnessHtml() {
       }));
     }
 
-    function makeDb(chats, delayMs, transientError, deleteError, crewMemberCount = 0) {
+    function makeDb(chats, delayMs, transientError, deleteError, crewMemberCount = 0, queueTasks = []) {
       const store = new Map(chats.map((chat) => [chat.id, structuredClone(chat)]));
       const crewMembers = makeCrewMembers(crewMemberCount);
       const delay = () => new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -948,7 +981,10 @@ function harnessHtml() {
             insert: async (doc) => { await maybeThrow(); store.set(doc.id, structuredClone(doc)); return docFor(doc.id); },
           },
           business_commands: { $: { subscribe: () => ({ unsubscribe() {} }) } },
-          ctox_queue_tasks: { $: { subscribe: () => ({ unsubscribe() {} }) } },
+          ctox_queue_tasks: {
+            $: { subscribe: () => ({ unsubscribe() {} }) },
+            find: () => ({ exec: async () => { await maybeThrow(); return queueTasks.map((task) => ({ toJSON: () => structuredClone(task) })); } }),
+          },
           ctox_crew_members: {
             $: { subscribe: () => ({ unsubscribe() {} }) },
             find: () => ({ exec: async () => { await maybeThrow(); return crewMembers.map((member) => ({ toJSON: () => structuredClone(member) })); } }),
@@ -1033,6 +1069,12 @@ function harnessHtml() {
         stripWidth: Math.round(strip?.getBoundingClientRect().width || 0),
         stripRight: Math.round(strip?.getBoundingClientRect().right || 0),
         fabMemberCount: document.querySelectorAll('.ctox-chat-fab-creatures.is-members .ctox-chat-crew-slot').length,
+        appPresence: Array.from(document.querySelectorAll('.shell-window-v2-icon, .desktop-icon-glyph')).map((host) => ({
+          host: host.classList.contains('desktop-icon-glyph') ? 'desktop:' + host.closest('.desktop-icon')?.dataset.target : 'window:' + host.closest('.shell-window')?.dataset.ownerId,
+          creatures: host.querySelectorAll('[data-crew-presence] .ctox-crew-creature').length,
+          title: host.querySelector('[data-crew-presence]')?.getAttribute('title') || '',
+          inside: (() => { const badge = host.querySelector('[data-crew-presence]'); if (!badge) return true; const a = host.getBoundingClientRect(); const b = badge.getBoundingClientRect(); return b.left >= a.left - 0.5 && b.right <= a.right + 0.5 && b.top >= a.top - 0.5 && b.bottom <= a.bottom + 0.5; })(),
+        })),
         windowCreatureCount: document.querySelectorAll('.ctox-chat-window .ctox-crew-creature').length,
         dockCreatureCount: document.querySelectorAll('.ctox-chat-chip .ctox-crew-creature').length,
         progressCardCount: document.querySelectorAll('.ctox-chat-delegation-card .ctox-progress-visual').length,

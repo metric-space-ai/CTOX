@@ -102,6 +102,157 @@ function crewPoolSignature(state) {
   return (state?.crewMembers || []).map((member) => `${member.id}:${crewMemberExpression(member, now)}`).join('|');
 }
 
+// ---- Crew presence on the apps -------------------------------------------
+// A member working an app task is visible on that app: in the corner of the
+// window icon and on the desktop icon. Source is the queue (task module +
+// member), never a guess from the UI.
+export const CREW_APP_PRESENCE_STATUSES = new Set(['running', 'leased', 'review', 'drafting']);
+export const CREW_APP_PRESENCE_LIMIT = 2;
+const CREW_APP_PRESENCE_TASK_LIMIT = 200;
+
+export function crewAppPresenceFromTasks(tasks, members) {
+  const byId = new Map((members || []).map((member) => [member.id, member]));
+  const presence = new Map();
+  for (const task of Array.isArray(tasks) ? tasks : []) {
+    const status = String(task?.status || '').trim().toLowerCase();
+    if (!CREW_APP_PRESENCE_STATUSES.has(status)) continue;
+    const memberId = String(task?.crew_member_id || '').trim();
+    const member = memberId ? byId.get(memberId) : null;
+    if (!member) continue;
+    const moduleId = String(task?.module || task?.source_module || '').trim();
+    if (!moduleId) continue;
+    const entries = presence.get(moduleId) || [];
+    if (entries.some((entry) => entry.member.id === member.id)) continue;
+    entries.push({ member, task });
+    presence.set(moduleId, entries);
+  }
+  return presence;
+}
+
+function crewAppPresenceSignature(entries, nowMs = Date.now()) {
+  return entries.map((entry) => `${entry.member.id}:${crewMemberExpression(entry.member, nowMs)}`).join('|');
+}
+
+function crewAppPresenceHtml(entries) {
+  const german = chatUiIsGerman();
+  const shown = entries.slice(0, CREW_APP_PRESENCE_LIMIT);
+  const names = entries.map((entry) => entry.member.name).join(', ');
+  const title = german
+    ? `${names} ${entries.length === 1 ? 'arbeitet' : 'arbeiten'} hier`
+    : `${names} ${entries.length === 1 ? 'is' : 'are'} working here`;
+  const more = entries.length > shown.length ? `<b>+${entries.length - shown.length}</b>` : '';
+  return `<span class="ctox-crew-app-presence" data-crew-presence data-crew-presence-signature="${escapeAttr(crewAppPresenceSignature(entries))}" title="${escapeAttr(title)}" aria-label="${escapeAttr(title)}">${shown.map((entry) => crewMemberCreatureHtml(entry.member, 'badge')).join('')}${more}</span>`;
+}
+
+function crewAppPresenceHosts() {
+  const hosts = [];
+  const appIdOf = (value) => String(value || '').trim().replace(/^(desktop-app|module):/, '');
+  document.querySelectorAll('.shell-window[data-owner-id] .shell-window-v2-icon').forEach((icon) => {
+    const appId = appIdOf(icon.closest('.shell-window')?.dataset.ownerId);
+    if (appId) hosts.push({ host: icon, appId });
+  });
+  document.querySelectorAll('.desktop-icon[data-target] .desktop-icon-glyph').forEach((glyph) => {
+    const appId = appIdOf(glyph.closest('.desktop-icon')?.dataset.target);
+    if (appId) hosts.push({ host: glyph, appId });
+  });
+  return hosts;
+}
+
+export function applyCrewAppPresence(presence) {
+  for (const { host, appId } of crewAppPresenceHosts()) {
+    const entries = presence.get(appId) || [];
+    const existing = host.querySelector(':scope > [data-crew-presence]');
+    if (!entries.length) {
+      existing?.remove();
+      host.classList.remove('has-crew-presence');
+      continue;
+    }
+    const signature = crewAppPresenceSignature(entries);
+    if (existing && existing.dataset.crewPresenceSignature === signature) continue;
+    existing?.remove();
+    host.insertAdjacentHTML('beforeend', crewAppPresenceHtml(entries));
+    host.classList.add('has-crew-presence');
+  }
+}
+
+async function loadCrewAppTasks(db) {
+  const collection = db?.raw?.ctox_queue_tasks;
+  if (!collection || typeof collection.find !== 'function') return [];
+  try {
+    const docs = await collection.find({
+      selector: { updated_at_ms: { $gt: 0 } },
+      sort: [{ updated_at_ms: 'desc' }],
+      limit: CREW_APP_PRESENCE_TASK_LIMIT,
+    }).exec();
+    return (Array.isArray(docs) ? docs : []).map((doc) => doc?.toJSON?.() || doc).filter(Boolean);
+  } catch (error) {
+    console.warn?.('[business-chat] crew app presence load failed', error);
+    return [];
+  }
+}
+
+// Presence follows the queue, the crew, opened windows and the desktop grid.
+function wireCrewAppPresence({ state, db, syncFacade }) {
+  let tasks = [];
+  let reloadTimer = null;
+  let expressionTimer = null;
+  let busWired = false;
+  let desktopObserver = null;
+  let desktopObserverTarget = null;
+  const subscriptions = [];
+  const apply = () => {
+    const members = state.crewMembers || [];
+    applyCrewAppPresence(crewAppPresenceFromTasks(tasks, members));
+    // Expressions decay (reading -> running, learning -> idle); re-draw when
+    // the earliest one ends so the badge does not freeze mid-expression.
+    if (expressionTimer) window.clearTimeout(expressionTimer);
+    const ttl = members.reduce((min, member) => {
+      const next = crewMemberExpressionTtlMs(member);
+      return next > 0 ? Math.min(min, next) : min;
+    }, Infinity);
+    expressionTimer = Number.isFinite(ttl) ? window.setTimeout(() => { expressionTimer = null; apply(); }, ttl + 50) : null;
+    wireLate();
+  };
+  const reload = () => loadCrewAppTasks(db).then((next) => { tasks = next; apply(); }).catch(() => {});
+  const scheduleReload = () => {
+    if (reloadTimer) return;
+    reloadTimer = window.setTimeout(() => { reloadTimer = null; reload(); }, 400);
+  };
+  const wireLate = () => {
+    if (!busWired) {
+      const bus = window.CTOX_BUSINESS_OS_APP?.eventBus;
+      if (bus && typeof bus.on === 'function') {
+        busWired = true;
+        bus.on('window:opened', () => apply());
+      }
+    }
+    const container = document.querySelector('[data-desktop-icons]');
+    if (container && desktopObserverTarget !== container && typeof MutationObserver === 'function') {
+      desktopObserver?.disconnect?.();
+      desktopObserverTarget = container;
+      desktopObserver = new MutationObserver(() => { queueMicrotask(apply); });
+      desktopObserver.observe(container, { childList: true });
+    }
+  };
+  try { subscriptions.push(db?.raw?.ctox_queue_tasks?.$?.subscribe?.(scheduleReload) || null); } catch {}
+  try {
+    subscriptions.push(db?.raw?.ctox_crew_members?.$?.subscribe?.(() => {
+      loadCrewMembers({ state, db }).then(apply).catch(() => {});
+    }) || null);
+  } catch {}
+  try {
+    syncFacade?.subscribeCollectionReadiness?.('ctox_queue_tasks', () => { reload(); });
+    syncFacade?.subscribeCollectionReadiness?.('ctox_crew_members', () => { reload(); });
+  } catch {}
+  reload();
+  return () => {
+    subscriptions.forEach((subscription) => subscription?.unsubscribe?.());
+    if (reloadTimer) window.clearTimeout(reloadTimer);
+    if (expressionTimer) window.clearTimeout(expressionTimer);
+    desktopObserver?.disconnect?.();
+  };
+}
+
 function crewMemberCreatureHtml(member, placement = 'fab') {
   return crewCreatureHtml({ crewKey: member.id, crewIdentity: { name: member.name, shape: member.shape, color: member.color } }, crewMemberExpression(member), placement);
 }
@@ -398,6 +549,8 @@ export function initBusinessChat({
     }, crewPoolRetryDelays[attempt]);
   };
   refreshCrewPool().then(() => retryCrewPool(0));
+  const cleanupCrewAppPresence = wireCrewAppPresence({ state, db, syncFacade });
+  root.__ctoxCrewAppPresenceCleanup = cleanupCrewAppPresence;
 
   const handleExternalSubmit = async (event) => {
     const detail = event.detail || {};
@@ -649,6 +802,7 @@ export function initBusinessChat({
   trackingWatch.refresh({ schedule: true });
 
   root.__ctoxChatCleanup = () => {
+    root.__ctoxCrewAppPresenceCleanup?.();
     root.removeEventListener('click', handleRootClick, true);
     window.removeEventListener('ctox-business-os-chat-submit', handleExternalSubmit);
     window.removeEventListener(CHAT_OPEN_EVENT, handleExternalOpen);
@@ -7883,6 +8037,36 @@ function installChatStyles() {
     }
     .ctox-chat-fab-creatures.is-members .ctox-crew-creature {
       margin-left: 0;
+    }
+    /* A member at work on an app: small portrait in the corner of the window
+       icon and on the desktop icon. Pure presence, no text. */
+    .ctox-crew-app-presence {
+      position: absolute;
+      right: 1px;
+      bottom: 1px;
+      z-index: 3;
+      display: inline-flex;
+      align-items: center;
+      pointer-events: none;
+    }
+    .ctox-crew-app-presence .ctox-crew-creature.is-badge {
+      width: 18px;
+      height: 18px;
+      flex: 0 0 18px;
+      margin-left: -7px;
+      filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.45));
+    }
+    .ctox-crew-app-presence .ctox-crew-creature.is-badge:first-child {
+      margin-left: 0;
+    }
+    .ctox-crew-app-presence b {
+      margin-left: 1px;
+      font: 700 9px/1 var(--font-family, system-ui, sans-serif);
+      color: var(--text);
+      text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+    }
+    .desktop-icon-glyph.has-crew-presence {
+      position: relative;
     }
     /* Crew pool: the members, ready to be picked up and dropped on an app. */
     .ctox-chat-crew-pool {
