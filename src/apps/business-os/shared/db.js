@@ -1,4 +1,4 @@
-import { loadRxdbRuntime } from './rxdb-runtime.js?v=20260908-shell-v2-crew-home-v351';
+import { loadRxdbRuntime } from './rxdb-runtime.js?v=20260908-shell-v2-crew-home-v352';
 
 const CTOX_RXDB_RUNTIME = Object.freeze({
   name: 'ctox-rxdb-js',

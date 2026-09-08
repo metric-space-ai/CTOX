@@ -240,6 +240,13 @@ try {
     expect(m.dockLabel === 'Crew', `crew navigation label must remain visible, got ${m.dockLabel}`);
   });
 
+  await viewportScenario(page, 'carousel-fan-stays-on-stage-with-left-active-chip', { width: 1000, height: 820 }, { count: 3, activeIndex: 0 }, async (m) => {
+    expect(!m.stageClasses.includes('is-side-by-side'), `three 460px windows in a 1000px stage must fan out, got ${m.stageClasses}`);
+    expect(m.windowCount === 3, `all three windows must render, got ${m.windowCount}`);
+    expect(m.windowMinLeft >= m.stageLeft - 0.5, `the fan must not hang off the left stage edge: min left ${m.windowMinLeft} < stage ${m.stageLeft} (${m.windowRects.join(' | ')})`);
+    expect(m.windowMaxRight <= m.stageRight + 0.5, `the fan must not hang off the right stage edge: max right ${m.windowMaxRight} > stage ${m.stageRight}`);
+  });
+
   await scenario(page, 'crew-presence-on-app-window-and-desktop-icon', {
     count: 1,
     activeIndex: 0,
@@ -605,7 +612,8 @@ try {
 
 async function scenario(page, name, seedOptions, assertions) {
   await page.goto(url, { waitUntil: 'load' });
-  await page.waitForFunction(() => window.chatHarness?.seed, null, { timeout: 2500 });
+  // Page load, not an assertion: a busy host may need seconds to serve the module.
+  await page.waitForFunction(() => window.chatHarness?.seed, null, { timeout: 20000 });
   await page.evaluate(async (options) => {
     await window.chatHarness.seed(options);
   }, seedOptions);
@@ -1065,6 +1073,10 @@ function harnessHtml() {
         chipCount: document.querySelectorAll('[data-chat-focus]').length,
         windowCount: document.querySelectorAll('.ctox-chat-window').length,
         windowRects: windowRects.map((r) => Math.round(r.left) + '+' + Math.round(r.width)),
+        windowMinLeft: windowRects.length ? Math.round(Math.min(...windowRects.map((r) => r.left))) : 0,
+        windowMaxRight: windowRects.length ? Math.round(Math.max(...windowRects.map((r) => r.right))) : 0,
+        stageLeft: Math.round(stageInner?.getBoundingClientRect().left || 0),
+        stageRight: Math.round(stageInner?.getBoundingClientRect().right || 0),
         windowOverlap: windowRects.slice(1).reduce((worst, rect, index) => Math.max(worst, Math.round(windowRects[index].right - rect.left)), 0),
         stripWidth: Math.round(strip?.getBoundingClientRect().width || 0),
         stripRight: Math.round(strip?.getBoundingClientRect().right || 0),

@@ -1032,8 +1032,21 @@ function alignChatWindows(root) {
     const active = positions[activeIndex];
     const activeLeft = clampChatWindowLeft(active.preferredLeft, active.width, layoutFrame);
 
+    // The active window stays under its chip; the neighbours fan out with the
+    // regular step only as far as the stage allows on their side, otherwise
+    // they stack more densely. With the active chip at the far left the left
+    // neighbours used to hang off the stage (welsch 08.09.: left -154px).
+    const leftRoom = Math.max(0, activeLeft - layoutFrame.left);
+    const rightRoom = Math.max(0, layoutFrame.right - (activeLeft + active.width));
+    const leftCount = activeIndex;
+    const rightCount = positions.length - 1 - activeIndex;
+    const leftStep = leftCount > 0 ? Math.min(carouselStep, leftRoom / leftCount) : 0;
+    const rightStep = rightCount > 0 ? Math.min(carouselStep, rightRoom / rightCount) : 0;
     positions.forEach((item, index) => {
-      item.left = activeLeft + (index - activeIndex) * carouselStep;
+      const distance = index - activeIndex;
+      item.left = distance < 0
+        ? activeLeft + distance * leftStep
+        : activeLeft + distance * rightStep;
     });
   }
 
