@@ -6353,6 +6353,34 @@ pub fn record_command(
     }
     let queue_task =
         create_ctox_queue_task(root, &command_id, &command, native_authorization.as_ref())?;
+    if let Some(task) = queue_task
+        .as_ref()
+        .filter(|task| task.route_status == "cancelled")
+    {
+        // Atomic admission can supersede a duplicate adapter reconciliation.
+        // Preserve that terminal decision instead of overwriting it with the
+        // compatibility path's usual accepted/queued projection.
+        let projection = channels::business_command_projection(root, &command_id)?;
+        conn.execute(
+            "INSERT INTO business_commands(command_id,module,command_type,record_id,status,payload_json,client_context_json,observed_at_ms)
+             VALUES(?1,?2,?3,?4,'cancelled',?5,?6,?7)
+             ON CONFLICT(command_id) DO UPDATE SET status='cancelled'",
+            params![command_id,command.module,command.command_type,command.record_id,
+                serde_json::to_string(&command.payload)?,serde_json::to_string(&command.client_context)?,observed_at_ms],
+        )?;
+        persist_business_command_lifecycle_projection(root, &projection)?;
+        return Ok(CommandAccepted {
+            ok: true,
+            command_id,
+            status: "cancelled",
+            execution_mode: "queue",
+            task_id: Some(task.message_key.clone()),
+            execution_task_id: Some(task.message_key.clone()),
+            task_status: Some("cancelled".into()),
+            result: projection.get("result").cloned(),
+            ..CommandAccepted::default()
+        });
+    }
     let inbound_channel = command_inbound_channel(&command);
     let chat_id = if is_business_chat_command(&command) {
         Some(materialize_pending_business_chat(

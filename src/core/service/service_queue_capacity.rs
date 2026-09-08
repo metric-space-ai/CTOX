@@ -73,23 +73,41 @@ fn lease_business_queue_capacity(
     let mut shared = lock_shared_state(state);
     if shared.app_recovery_active
         || shared.durable_queue_lease_in_progress
-        || !shared.pending_prompts.is_empty()
         || runtime_blocker_backoff_remaining_secs(&shared).is_some()
-        || shared.worker_active_count > shared.parallel_queue_jobs.len()
-        || (shared.busy && shared.parallel_queue_jobs.is_empty())
     {
         return Ok(admitted);
     }
+    // Isolated chat sessions do not use the serial worker's context. Count its
+    // slot instead of vetoing the entire pool. Reserved chats count before
+    // PromptWorkerActivity::start, so startup cannot overbook capacity.
+    let active_chats = shared
+        .parallel_queue_jobs
+        .keys()
+        .filter(|key| shared.active_worker_lease_keys.contains(*key))
+        .count();
+    let serial_slots =
+        shared.worker_active_count.saturating_sub(active_chats) + shared.pending_prompts.len();
+    let serial_slots = serial_slots.max(usize::from(
+        shared.busy && shared.parallel_queue_jobs.is_empty(),
+    ));
     for task in tasks {
-        if shared.parallel_queue_jobs.len() >= capacity.max_workers {
+        if serial_slots + shared.parallel_queue_jobs.len() >= capacity.max_workers {
             break;
         }
         let candidate = queued_prompt_from_queue_task(task);
         if !queue_job_has_independent_business_session(&candidate)
             || queued_prompt_is_synthetic_e2e_bench_leftover(&candidate)
+            || candidate
+                .thread_key
+                .as_ref()
+                .is_some_and(|key| shared.active_worker_threads.contains_key(key))
             || shared
                 .parallel_queue_jobs
                 .values()
+                .any(|job| job.thread_key == candidate.thread_key)
+            || shared
+                .pending_prompts
+                .iter()
                 .any(|job| job.thread_key == candidate.thread_key)
         {
             continue;
@@ -132,6 +150,60 @@ fn lease_business_queue_capacity(
 #[cfg(test)]
 mod queue_capacity_tests {
     use super::*;
+
+    #[test]
+    fn serial_worker_leaves_free_slots_for_isolated_chats() -> Result<()> {
+        let root = tempfile::tempdir()?;
+        runtime_env::set_runtime_env_value(root.path(), "queue.worker_capacity", "3")?;
+        for index in 0..6 {
+            channels::create_queue_task(
+                root.path(),
+                channels::QueueTaskCreateRequest {
+                    title: format!("research {index}"),
+                    prompt: "Read the supplied lead".into(),
+                    thread_key: format!("research/{}", index / 2),
+                    workspace_root: None,
+                    priority: "normal".into(),
+                    suggested_skill: None,
+                    parent_message_key: None,
+                    extra_metadata: Some(
+                        serde_json::json!({"business_os_command_type":"business_os.chat.task"}),
+                    ),
+                },
+            )?;
+        }
+        let state = Arc::new(Mutex::new(SharedState {
+            busy: true,
+            worker_active_count: 1,
+            active_worker_threads: BTreeMap::from([("research/0".into(), 1)]),
+            ..SharedState::default()
+        }));
+        let jobs = lease_business_queue_capacity(root.path(), &state)?;
+        assert_eq!(
+            jobs.len(),
+            2,
+            "one serial worker consumes one of three slots"
+        );
+        assert_ne!(jobs[0].thread_key, jobs[1].thread_key);
+        assert!(
+            jobs.iter()
+                .all(|job| job.thread_key.as_deref() != Some("research/0")),
+            "serial context must retain exclusive ownership of its thread"
+        );
+        assert!(
+            lease_business_queue_capacity(root.path(), &state)?.is_empty(),
+            "unstarted reservations still consume capacity"
+        );
+        {
+            let mut shared = lock_shared_state(&state);
+            shared.worker_active_count = 3;
+            shared
+                .active_worker_lease_keys
+                .extend(jobs.iter().map(|job| job.leased_message_keys[0].clone()));
+        }
+        assert!(lease_business_queue_capacity(root.path(), &state)?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn incident_capacity_leases_four_of_five_waiting_independent_tasks() -> Result<()> {

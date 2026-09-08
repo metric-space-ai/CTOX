@@ -966,6 +966,7 @@ struct SharedState {
     // Only a live PromptWorkerActivity owns these keys. Routing cache entries
     // alone do not prove that a worker still exists.
     active_worker_lease_keys: HashSet<String>,
+    active_worker_threads: BTreeMap<String, usize>,
     parallel_queue_jobs: BTreeMap<String, QueuedPrompt>,
     current_goal_preview: Option<String>,
     active_source_label: Option<String>,
@@ -989,6 +990,7 @@ impl Default for SharedState {
             pending_prompts: VecDeque::new(),
             leased_message_keys_inflight: HashSet::new(),
             active_worker_lease_keys: HashSet::new(),
+            active_worker_threads: BTreeMap::new(),
             parallel_queue_jobs: BTreeMap::new(),
             current_goal_preview: None,
             active_source_label: None,
@@ -5034,6 +5036,7 @@ struct PromptWorkerActivity {
     root: std::path::PathBuf,
     state: Arc<Mutex<SharedState>>,
     source_label: String,
+    thread_key: Option<String>,
     leased_message_keys: Vec<String>,
     leased_ticket_event_keys: Vec<String>,
     leases_released: bool,
@@ -5219,6 +5222,9 @@ impl PromptWorkerActivity {
                 }
             }
             shared.worker_active_count = shared.worker_active_count.saturating_add(1);
+            if let Some(key) = &job.thread_key {
+                *shared.active_worker_threads.entry(key.clone()).or_default() += 1;
+            }
             shared
                 .active_worker_lease_keys
                 .extend(job.leased_message_keys.iter().cloned());
@@ -5285,6 +5291,7 @@ impl PromptWorkerActivity {
             root: root.to_path_buf(),
             state: state.clone(),
             source_label: job.source_label.clone(),
+            thread_key: job.thread_key.clone(),
             leased_message_keys: job.leased_message_keys.clone(),
             leased_ticket_event_keys: job.leased_ticket_event_keys.clone(),
             leases_released: false,
@@ -5320,6 +5327,14 @@ impl Drop for PromptWorkerActivity {
         }
         let (leaked_message_keys, leaked_ticket_event_keys) = {
             let mut shared = lock_shared_state(&self.state);
+            if let Some(key) = &self.thread_key {
+                if let Some(count) = shared.active_worker_threads.get_mut(key) {
+                    *count = count.saturating_sub(1);
+                    if *count == 0 {
+                        shared.active_worker_threads.remove(key);
+                    }
+                }
+            }
             for key in self
                 .leased_message_keys
                 .iter()
