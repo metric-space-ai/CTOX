@@ -6351,6 +6351,15 @@ pub fn record_command(
     )? {
         return Ok(completed);
     }
+    if let Some(completed) = maybe_complete_duplicate_adapter_reconciliation(
+        root,
+        &conn,
+        &command_id,
+        &command,
+        observed_at_ms,
+    )? {
+        return Ok(completed);
+    }
     let queue_task =
         create_ctox_queue_task(root, &command_id, &command, native_authorization.as_ref())?;
     if let Some(task) = queue_task
@@ -6621,6 +6630,66 @@ fn maybe_complete_documents_chat_markdown_edit_immediately(
     if completed.task_id.is_none() {
         completed.task_id = Some(command_id.to_string());
         completed.task_status = Some("completed".to_string());
+    }
+    Ok(Some(completed))
+}
+
+pub(super) const OUTBOUND_ADAPTER_RECONCILIATION_THREAD_PREFIX: &str =
+    "business-os/outbound-lead-generation/adapter-reconciliation/";
+
+/// One open adapter reconciliation is enough: every research start in the
+/// Outbound app submits another one, and each run occupies the harness for
+/// six to seven minutes (thesen 07.09.2026: three back-to-back runs plus their
+/// scrape repairs held four customer research tasks for half an hour). A
+/// second request while one is pending or leased completes immediately and
+/// points at the run that is already doing the work.
+fn maybe_complete_duplicate_adapter_reconciliation(
+    root: &Path,
+    conn: &Connection,
+    command_id: &str,
+    command: &BusinessCommand,
+    observed_at_ms: i64,
+) -> anyhow::Result<Option<CommandAccepted>> {
+    if !super::store_outbound_commands::is_outbound_adapter_reconciliation_command(command) {
+        return Ok(None);
+    }
+    let open =
+        channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 512)?;
+    let Some(running) = open.into_iter().find(|task| {
+        task.thread_key
+            .starts_with(OUTBOUND_ADAPTER_RECONCILIATION_THREAD_PREFIX)
+    }) else {
+        return Ok(None);
+    };
+    let payload_json = serde_json::to_string(&command.payload)?;
+    let context_json = serde_json::to_string(&command.client_context)?;
+    conn.execute(
+        "INSERT INTO business_commands
+            (command_id, module, command_type, record_id, status, payload_json, client_context_json, observed_at_ms)
+         VALUES (?1, ?2, ?3, ?4, 'accepted', ?5, ?6, ?7)
+         ON CONFLICT(command_id) DO UPDATE SET
+            status = 'accepted',
+            payload_json = excluded.payload_json,
+            client_context_json = excluded.client_context_json,
+            observed_at_ms = excluded.observed_at_ms",
+        params![
+            command_id,
+            command.module.clone(),
+            command.command_type.clone(),
+            command.record_id.clone(),
+            payload_json,
+            context_json,
+            observed_at_ms
+        ],
+    )?;
+    let reply = format!(
+        "Ein Adapter-Abgleich läuft bereits ({}, Status {}). Dieser Aufruf wurde damit zusammengeführt; ein zweiter Lauf wird nicht gestartet.",
+        running.message_key, running.route_status
+    );
+    let mut completed = process_business_chat_reply(root, conn, command_id, command, None, &reply)?;
+    if completed.task_id.is_none() {
+        completed.task_id = Some(running.message_key.clone());
+        completed.task_status = Some(running.route_status.clone());
     }
     Ok(Some(completed))
 }
@@ -28175,6 +28244,61 @@ pub(super) mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(stored_count, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn second_adapter_reconciliation_completes_against_the_open_run() -> anyhow::Result<()> {
+        let temp = tempdir()?;
+        let root = temp.path();
+        let reconcile = |id: &str, digest: &str| {
+            serde_json::json!({
+                "id": id,
+                "command_id": id,
+                "module": "outbound-lead-generation",
+                "command_type": "outbound.research.adapters.reconcile",
+                "record_id": "research_policy",
+                "payload": {
+                    "title": "Recherche-Adapter abgleichen",
+                    "priority": "low",
+                    "instruction": "Gleiche die Adapter ab.",
+                    "prompt": "Gleiche die Adapter ab.",
+                    "user_message": format!("Adapter-Abgleich {digest}"),
+                    "thread_key": format!("business-os/outbound-lead-generation/adapter-reconciliation/{digest}"),
+                    "configuration_digest": digest,
+                    "policy_id": "research_policy",
+                    "response_channel": "business_os_chat"
+                },
+                "client_context": {
+                    "source": "business-os-chat",
+                    "source_module": "outbound-lead-generation",
+                    "module": "outbound-lead-generation"
+                }
+            })
+        };
+        let first = accept_rxdb_business_command(root, reconcile("cmd_reconcile_1", "sha256:a"))?;
+        let first_task = first
+            .get("task_id")
+            .and_then(Value::as_str)
+            .expect("first reconciliation is queued")
+            .to_string();
+        let open_before =
+            channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 64)?;
+        assert_eq!(open_before.len(), 1);
+
+        let second = accept_rxdb_business_command(root, reconcile("cmd_reconcile_2", "sha256:b"))?;
+        assert_eq!(
+            second.get("status").and_then(Value::as_str),
+            Some("completed"),
+            "a second reconciliation while one is open completes immediately: {second}"
+        );
+        assert_eq!(
+            second.get("task_id").and_then(Value::as_str),
+            Some(first_task.as_str())
+        );
+        let open_after =
+            channels::list_queue_tasks(root, &["pending".to_string(), "leased".to_string()], 64)?;
+        assert_eq!(open_after.len(), 1, "no second queue task is created");
         Ok(())
     }
 
