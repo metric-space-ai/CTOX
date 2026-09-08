@@ -1457,6 +1457,25 @@ were not executed. No payload content is logged. The three-second per-root
 interval bounds these lines; the minute counters distinguish publications and
 incoming wakes from actual passes.
 
+Chat delivery keeps the terminal-settle receipt and a durable command-ID cursor.
+Each page reads at most 32 candidates plus one continuation sentinel; a 250 ms
+budget is checked between candidates and continuations obey the pump throttle.
+This is a cooperative budget, not a hard SQL execution deadline. Source hashes
+cover lifecycle/result fields and the newest retained plan revision. Unchanged
+chats skip rendering and message reads. The projection reads minimal routing,
+aggregate, flow and plan evidence through its existing core connection; it does
+not initialize LCM or load worker transcripts. Native partial indexes bound the
+candidate seek and retained terminal-command lookup. Receipt hashes advance only
+after delivery, so a failed write remains retryable.
+
+Native ticket and knowledge first projections load their source snapshots on
+blocking tasks without holding the cross-loop writer lock. Publication releases
+the shared native writer lock between pages of up to 16 documents and roughly
+256 KiB (one oversized document may exceed that byte target), then yields to
+waiting intake/replication writers. Unchanged rows retain their revisions. This
+bounds lock ownership by work units; it does not impose a wall-clock deadline
+on a single storage operation or cancel partially published pages.
+
 Run-to-flow correlated lookups must seek `idx_cockpit_flow_attempt`. JSON
 expressions have no SQLite affinity; comparing one directly with the outer
 TEXT `f.attempt_id` can disable that index and scan the ledger for every run.
