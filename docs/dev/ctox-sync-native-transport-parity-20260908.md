@@ -52,3 +52,18 @@ acceptance test.
   subsequent real-process diagnosis must be recorded before acceptance.
 
 No customer data, runtime configuration, shell slot or tenant release was changed.
+
+## Continuous verification
+
+The existing workflows did not invoke the standalone Sync crate. Add a focused
+`Native Sync` workflow on Linux and macOS: compare the 17 transport packages,
+check formatting, run the full Sync suite with WebRTC, run native RxDB with the
+production ICE patch, and lint all Sync targets. It supplements the existing
+app/CLI gates; it does not replace the separate four-process host acceptance.
+All runs use locked dependencies and keep the existing test deadlines.
+
+For PR #69 at `3432b3488`, the existing Desktop macOS job stops at npm audit
+(`@xmldom/xmldom`, `fast-uri`). The x86_64 Linux CLI job stops before compilation
+at the platform-freeze guard (`modules/explorer/index.js` contextmenu handler).
+Job IDs: `101935097745`, `101935097780`, run `34186266711`. These unchanged app
+paths are outside this dependency correction; no guard is bypassed.
