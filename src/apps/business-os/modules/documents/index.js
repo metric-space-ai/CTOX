@@ -3,7 +3,7 @@ import { loadModuleMessages } from '../../shared/i18n.js';
 import { preserveScrollDuring } from '../../shared/stable-dom.js';
 import { createCoalescedRefresh } from '../../office-engine/src/coalesced-refresh.mjs';
 import { autoWirePaneGrammar } from '../../shared/pane-grammar.js';
-import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260816-browser-sync-guards-v141';
+import { createBusinessOsOfficeBridge } from '../../office-engine/src/business-os-bridge.mjs?v=20260908-office-source-upload-v1';
 
 const DOCX_MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
 const MARKDOWN_MIME = 'text/markdown';
@@ -4196,22 +4196,13 @@ async function exportSelectedDocument(state, requestedFilename = '') {
 
 async function saveBlobChunks(ctx, input) {
   requireDocumentPersistence(ctx);
-  const base64 = uint8ToBase64(input.bytes);
-  const total = Math.ceil(base64.length / CHUNK_SIZE) || 1;
-  const now = Date.now();
-  const docs = Array.from({ length: total }, (_, idx) => ({
-    id: `${input.blobId}_${idx}`,
-    blob_id: input.blobId,
-    document_id: input.documentId,
-    version_id: input.versionId,
-    idx,
-    total,
-    mime_type: input.mimeType,
-    encoding: 'base64',
-    data: base64.slice(idx * CHUNK_SIZE, (idx + 1) * CHUNK_SIZE),
-    created_at_ms: now,
-  }));
-  await writeCollectionDocuments(documentCollection(ctx, 'document_blob_chunks'), docs);
+  await createBusinessOsOfficeBridge(ctx, 'document').stageSourceBlob({
+    recordId: input.documentId,
+    versionId: input.versionId,
+    blobId: input.blobId,
+    mimeType: input.mimeType,
+    bytes: input.bytes,
+  });
 }
 
 async function writeCollectionDocuments(collection, docs) {

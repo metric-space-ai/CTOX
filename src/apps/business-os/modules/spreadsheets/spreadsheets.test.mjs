@@ -487,11 +487,19 @@ test('CSV serialization quotes only when required, preserving numeric round-trip
 
 test('spreadsheet blob chunks are persisted with one bulk write', async () => {
   const bulkWrites = [];
+  let acknowledged = false;
   const blobChunks = {
-    bulkUpsert: async (docs) => { bulkWrites.push(docs); },
+    bulkUpsert: async (docs) => {
+      bulkWrites.push(docs);
+      return docs.map(row => ({ toJSON: () => ({ ...row, _meta: { lwt: Date.now() } }) }));
+    },
     insert: async () => { throw new Error('spreadsheet_blob_chunks insert must not run per chunk'); },
   };
   const ctx = {
+    sync: { async leaseCollection() { return { bridge: { state: {
+      async waitForOpenPeerId() { return 'native'; },
+      async pushDocumentsToPeer(_peer, rows) { assert.equal(rows.length, bulkWrites[0].length); acknowledged = true; },
+    } }, async release() {} }; } },
     db: {
       collection(name) {
         if (name === 'spreadsheet_blob_chunks') return blobChunks;
@@ -512,6 +520,7 @@ test('spreadsheet blob chunks are persisted with one bulk write', async () => {
 
   assert.equal(bulkWrites.length, 1, 'blob chunks are written through one bulkUpsert call');
   assert.ok(bulkWrites[0].length > 1, 'test payload spans multiple chunk documents');
+  assert.equal(acknowledged, true, 'source bytes are acknowledged before exposing references');
 });
 
 test('empty spreadsheet explorer shows syncing only while the collection is unready', () => {
