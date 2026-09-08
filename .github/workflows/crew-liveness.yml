@@ -82,7 +82,7 @@ jobs:
           ln -s "$CARGO_TARGET_DIR" runtime/build/cargo-target
           npm ci --ignore-scripts --prefix src/apps/business-os
           npm audit --audit-level=low --prefix src/apps/business-os
-          npm --prefix src/apps/business-os exec playwright install --with-deps chromium
+          npm --prefix src/apps/business-os exec -- playwright install --with-deps chromium
           node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon
       - name: Measure existing regression filters on campaign base
         if: ${{ always() && steps.compile.outcome == 'success' && github.head_ref == 'codex/crew-open-items' }}
