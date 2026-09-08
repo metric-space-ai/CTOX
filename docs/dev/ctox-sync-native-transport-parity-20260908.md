@@ -48,6 +48,9 @@ acceptance test.
 - Cargo metadata resolves offline for aarch64-apple-darwin with the native
   WebRTC feature enabled. Unfiltered offline metadata first failed because an
   uncached Android-only package was requested; no download was attempted.
+- Browser-runtime suite: 120 passed, zero failed, zero skipped. This includes
+  the new parity guard. The existing wire-daemon fixture was available; this
+  run is not a newly built full CTOX host or product-performance acceptance.
 - The production-graph Sync suite is being rebuilt and rerun. Its result and
   subsequent real-process diagnosis must be recorded before acceptance.
 
