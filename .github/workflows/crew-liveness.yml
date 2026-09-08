@@ -17,7 +17,8 @@ permissions:
 
 concurrency:
   group: crew-liveness-${{ github.ref }}
-  cancel-in-progress: true
+  # Preserve baseline evidence and the compiled cache while a follow-up waits.
+  cancel-in-progress: false
 
 jobs:
   regression:
