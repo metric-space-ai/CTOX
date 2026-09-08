@@ -59,6 +59,12 @@ two-row geometry. Small windows expose the library as a dismissible drawer.
 There is no permanent Runbook column. Creating a blank file is a direct action,
 independent of research prompts or automation.
 
+Source creation and import acquire a chunk lease and wait for the native peer
+to acknowledge the exact persisted source rows before publishing version and
+file references. Source chunks reserve room for base64 and metadata within the
+wire budget. A local write alone is not a successful upload; transport or
+permission failures must reject creation rather than expose an unreadable file.
+
 The capsule forwards a validated subset of the live Shell palette and theme to
 both isolated editor frames. The frames use locally generated HTML rather than
 navigating to a tenant HTML response that may deny framing. No document data
