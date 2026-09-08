@@ -1010,14 +1010,15 @@ async function loadSelectedVersion(state) {
     : '';
   const targetVersionId = requestedVersionId || record.current_version_id;
   const readLocalVersion = async (timeoutMs = 4500) => {
-    let localDoc = targetVersionId
-      ? await withDocumentVersionTimeout(
+    // A missing named head/history entry is a synchronization gap, not
+    // permission to open another version or move the authoritative head.
+    if (targetVersionId) {
+      return await withDocumentVersionTimeout(
         documentCollection(state.ctx, 'document_versions').findOne(targetVersionId).exec(),
         timeoutMs,
         `Version ${targetVersionId} konnte nicht geladen werden.`,
-      )
-      : null;
-    if (localDoc) return localDoc;
+      );
+    }
     const fallback = await withDocumentVersionTimeout(
       documentCollection(state.ctx, 'document_versions').find({
         selector: { document_id: record.id },
@@ -1033,14 +1034,6 @@ async function loadSelectedVersion(state) {
     readLocalVersion,
     () => awaitDocumentVersionReplication(replication, state.ctx),
   );
-  if (!canApply()) return null;
-  if (doc && !requestedVersionId && doc.toJSON().id !== targetVersionId) {
-    const versionJson = doc.toJSON();
-    const recordDoc = await documentCollection(state.ctx, 'documents').findOne(record.id).exec();
-    if (!canApply()) return null;
-    await recordDoc?.incrementalPatch({ current_version_id: versionJson.id });
-    record.current_version_id = versionJson.id;
-  }
   if (!canApply()) return null;
   state.selectedVersion = doc?.toJSON() || null;
   state.dirty = false;
@@ -3739,13 +3732,9 @@ async function mountCtoxDocuments(state, host, record, version, renderSerial, re
   let handle;
   const isActive = () => handle && state.editorHandle === handle
     && state.selectedId === record.id && isCurrentEditorRender(state, renderSerial);
-  const removeDirtyListener = editor.on('dirty', async () => {
+  const removeDirtyListener = editor.on('dirty', () => {
     if (!isActive()) return;
-    handle.activity += 1;
-    state.dirty = true;
-    state.needsFinalSave = true;
-    await markRecordDraft(state, record);
-    if (isActive()) scheduleCtoxDocumentsDraftSave(state, record);
+    markCtoxDocumentsDraft(state, record, handle);
   });
   const removeSavingListener = editor.on('saving', () => {
     if (!isActive()) return;
@@ -3836,6 +3825,18 @@ function ctoxDocumentsPermissions(ctx) {
     && ctx.permissions?.canWriteCollection?.('document_versions') !== false
     && ctx.permissions?.canWriteCollection?.('document_blob_chunks') !== false;
   return { read: true, write: canWrite, export: true, comment: canWrite, review: canWrite };
+}
+
+function markCtoxDocumentsDraft(state, record, handle) {
+  handle.activity += 1;
+  state.dirty = true;
+  state.needsFinalSave = true;
+  // The native commit persists Draft and advances the version atomically.
+  // A browser status patch would replicate the entire possibly stale record
+  // and can send its old current_version_id after a newer commit succeeds.
+  record.status = 'Draft';
+  record.updated_at_ms = Date.now();
+  scheduleCtoxDocumentsDraftSave(state, record);
 }
 
 function scheduleCtoxDocumentsDraftSave(state, record) {
@@ -4602,6 +4603,8 @@ function ensureSuperDocStyles() {
 }
 
 export const __documentsTestHooks = {
+  loadSelectedVersion,
+  markCtoxDocumentsDraft,
   wireLocalRealtime,
   refreshDocumentsFromLocal,
   refreshKnowledge,
