@@ -3389,7 +3389,6 @@ fn install_data_channel(
     let message_subject = handler.message_subject.clone();
     let response_subject = handler.response_subject.clone();
     let connect_subject = handler.connect_subject.clone();
-    let disconnect_subject = handler.disconnect_subject.clone();
     let error_subject = handler.error_subject.clone();
     let handler_for_task = Arc::clone(&handler);
     let data_channel_for_task = Arc::clone(&data_channel);
@@ -3590,9 +3589,8 @@ fn install_data_channel(
                 _ => {}
             }
         }
-        // Channel ended: release any sender parked on backpressure and drop the
-        // per-peer signal so it cannot leak across reconnects.
-        backpressure_for_task.clear_high();
+        // Channel ended: retire the whole connection so discovery can build a
+        // fresh route instead of reusing a closed peer connection.
         if let Some(presence_changed) = finish_data_channel_generation(
             &handler_for_task,
             &peer_for_task,
@@ -3605,7 +3603,6 @@ fn install_data_channel(
                     handler_presence.broadcast_presence().await;
                 });
             }
-            disconnect_subject.next(WebRTCRsConnection::new(peer_for_task.clone(), generation));
         }
     });
 
@@ -3620,7 +3617,7 @@ fn install_data_channel(
     }
 }
 
-/// Retire local channel state atomically with connection replacement.
+/// Retire the connection atomically with connection replacement.
 /// Both OnClose and stream EOF use this path; retired tasks cannot clear successors.
 fn finish_data_channel_generation(
     handler: &WebRTCRsConnectionHandler,
@@ -3628,22 +3625,12 @@ fn finish_data_channel_generation(
     generation: u64,
     backpressure: &Arc<PeerBackpressure>,
 ) -> Option<bool> {
-    let _lifecycle = handler.peer_lifecycle.lock();
-    let mut peers = handler.peers.lock();
-    let entry = peers.get_mut(peer)?;
-    if entry.generation != generation {
+    // A retired task may still have senders waiting on its own signal.
+    backpressure.clear_high();
+    if !remove_peer_inner(handler, peer, PeerRemoval::Generation(generation), None) {
         return None;
     }
-    entry.data_channel_open = false;
-    let presence_changed = handler.remove_peer_presence(peer);
-    let mut signals = handler.backpressure.lock();
-    if signals
-        .get(peer)
-        .is_some_and(|current| Arc::ptr_eq(current, backpressure))
-    {
-        signals.remove(peer);
-    }
-    Some(presence_changed)
+    Some(handler.presence_dirty.load(Ordering::SeqCst))
 }
 
 fn superseded_send_queue_error(peer: &str) -> RxError {
@@ -5933,6 +5920,17 @@ mod tests {
         assert!(handler.connection_for_peer(&route).is_none());
         assert!(!handler.backpressure.lock().contains_key(&route));
         assert!(!handler.presence.lock().contains_key(&route));
+        assert!(
+            !handler.peers.lock().contains_key(&route),
+            "a terminated channel must not remain a cached native connection"
+        );
+        assert!(
+            handler
+                .ensure_peer_connection(route.clone(), true)
+                .await
+                .is_err(),
+            "without signaling, a fresh connection must fail instead of returning the closed peer"
+        );
         handler.close().await.unwrap();
     }
 

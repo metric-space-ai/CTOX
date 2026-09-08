@@ -248,7 +248,10 @@ command or collection-boot acceptance, WAN results, production-load percentiles,
 automatic harness failover or UI onboarding.
 
 The new Linux native job 101990269150 passed all its gates. macOS job
-101990269060 remained queued at observation. General CTOX CI at this revision
+101990269060 subsequently failed at 09:22:30 UTC: 13/14 WebRTC scenarios passed,
+but voter_reconnect_uses_pinned_key_to_restore_quorum_and_worker_routes timed
+out admitting the renewed voter route at webrtc_authority.rs:383. This is an
+open native acceptance failure. General CTOX CI at this revision
 still stops independently: Desktop Linux job 101990268333 fails npm audit for
 xmldom and fast-uri; CLI x86_64 Linux job 101990268429 fails the platform-freeze
 guard on modules/explorer/index.js. No guard was skipped and no Office source
@@ -269,3 +272,29 @@ cargo-target were retained. The removed build was disposable and its correction
 and evidence are already in main via PR #65. No service was stopped, restarted
 or upgraded; the Office worker owns the Welsch cutover. The remote receipt is
 `/home/ctox/.cache/ctox/file-preservation-fbeca32b7/cleanup-native-parity-20260908.json`.
+
+## Closed native connection retained after channel termination
+
+Following the macOS reconnect failure, strengthen the existing generation-race
+test to require removal of the current PeerEntry and a fresh connection attempt.
+The unchanged implementation fails deterministically with
+"a terminated channel must not remain a cached native connection" (one failed
+test, 0.05 seconds after compilation). Separately, the unchanged real reconnect
+scenario passed once locally in 19.46 seconds; that does not erase the CI failure.
+
+The terminal channel path previously set data_channel_open to false but kept
+the PeerEntry and its PeerConnection. Native discovery sees no open route and
+retries, but ensure_peer_connection returns that same closed cached connection.
+Route initiation therefore cannot make progress after this termination order.
+
+On channel OnClose or event-stream EOF, use the existing generation-checked
+full peer teardown. It removes the peer, queues, transfer state and authorization
+state, releases blocked senders, closes the transport and emits one disconnect
+event. Remove the terminal path's duplicate disconnect emission. Delayed cleanup
+from an old generation still cannot remove a replacement.
+
+This closes a demonstrated reconnect defect, but its sufficiency for the
+intermittent macOS CI failure remains under validation. The corrected focused
+test and browser-runtime suite were still running when this source revision
+was prepared. Native WebRTC, full RxDB and clean Linux/macOS CI must pass before
+acceptance; no timeout or existing safety assertion was weakened.
