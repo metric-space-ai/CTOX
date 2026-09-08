@@ -103,8 +103,28 @@ Make registration idempotent for the same data-channel ID within the current
 connection generation. Preserve the original event consumer and teardown owner.
 Retain the production dependency and ICE patch; do not upgrade the transport
 stack or relax authority deadlines as a workaround. The existing failing
-native WebRTC scenarios are the negative control; post-correction acceptance
-is pending. This is not yet a tenant-deployment or performance claim.
+native WebRTC scenarios are the negative control. At `4308df4e1`, run
+34191792796 reports 13/14 passing on both Linux and macOS (previously 4/14).
+The remaining failure, and the one authority_cluster failure on each platform,
+are Node ERR_MODULE_NOT_FOUND for the missing Workjet consumer; no native
+quorum scenario remains red in this CI comparison.
+
+The missing consumer is now isolated from the dirty Workjet checkout, based on
+remote main `ee3a8c92e`, committed and pushed as
+`1bdf07370f990aff025374627adc217fc2de2509` in draft
+[Workjet PR #32](https://github.com/metric-space-ai/workjet/pull/32).
+Its scratch worktree is
+`/Volumes/tmp/worktrees/workjet/codex-sync-ipc-consumer`; it remains present
+while verification runs. No source changes were made to the dirty canonical
+Workjet checkout. CTOX CI now pins this actual consumer revision and also runs
+its focused socket tests. Native RxDB and lint continue after a failed Sync
+test, provided formatting passed, so one failure cannot hide the other gates.
+
+The generated Workjet files carry the same fixture hash as CTOX, but strict
+generator comparison reports formatting drift in the TypeScript output. That
+check is red; the consumer does not modify the generated files. Full current
+host execution, browser interoperability, performance and tenant acceptance
+remain outstanding.
 
 ## Obsolete remote compiler output removed
 
