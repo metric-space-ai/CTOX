@@ -912,7 +912,8 @@ const BUSINESS_RECORD_PROJECTION_ERROR_BACKOFF_MAX_SECS: u64 = 5 * 60;
 // the daemon's other periodic safety work.
 const BUSINESS_RECORD_PROJECTION_PARTIAL_SYNC_INTERVAL_SECS: u64 = 300;
 const BUSINESS_RECORD_PROJECTION_SYNC_LIMIT: usize = 25;
-const BUSINESS_RECORD_PROJECTION_PAGE_SIZE: usize = 25;
+const BUSINESS_RECORD_PROJECTION_PAGE_SIZE: usize =
+    super::rxdb_peer_projections::budget::PeerProjectionBudget::DEFAULT.documents_per_page;
 pub(super) const BUSINESS_RECORD_PROJECTION_WRITE_BATCH_SIZE: usize = 250;
 // The RxDB store is durable, so the browser can immediately read the previous
 // projections after reconnect. Starting every reconciliation loop at once
@@ -4494,23 +4495,18 @@ pub(super) async fn sync_business_users_with_database(
         .cloned()
         .unwrap_or_default();
 
-    // Acquire write lock specifically for database writes
-    let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
     let users = database
         .collection("business_users")
         .context("business_users collection is not registered")?;
-    let mut count = 0usize;
-    for mut document in documents {
+    let documents = documents.into_iter().map(|mut document| {
         if let Some(object) = document.as_object_mut() {
-            object.remove("_rev");
-            object.remove("_meta");
             object.insert("is_deleted".to_string(), Value::Bool(false));
         }
-        if incremental_upsert_projection_if_changed(&users, document, "business user").await? {
-            count += 1;
-        }
-    }
-    Ok(count)
+        document
+    }).collect();
+    super::rxdb_peer_projections::upsert_background_projection_pages(
+        &users, "business_users", documents,
+    ).await
 }
 
 async fn sync_business_users_with_database_if_changed(
@@ -5154,6 +5150,8 @@ async fn sync_business_record_projections_slice_with_database(
     chat_tracking_repair_stamp: &mut Option<ChatTrackingRepairProjectionStamp>,
     document_budget: Option<usize>,
 ) -> anyhow::Result<(usize, bool)> {
+    let slice_started = Instant::now();
+    let budget = super::rxdb_peer_projections::budget::PeerProjectionBudget::DEFAULT;
     let mut count = sync_knowledge_catalog_with_database(root, database).await?;
     let support_intake_root = root.to_path_buf();
     let support_intake_since_ms = *since_by_collection
@@ -5261,6 +5259,13 @@ async fn sync_business_record_projections_slice_with_database(
 
     let mut projected_documents = 0usize;
     while *next_collection_index < collections.len() {
+        // Always make at least one page/collection of progress, even if the
+        // source preparation exceeded the budget. Preserve the unfinished
+        // cursor and captured source stamp for the next reconciliation slice.
+        if projected_documents > 0 && document_budget.is_some()
+            && budget.slice_expired(slice_started.elapsed()) {
+            return Ok((count, false));
+        }
         let collection_name = collections[*next_collection_index].clone();
         let mut since_ms = *since_by_collection.get(&collection_name).unwrap_or(&0);
         let mut after_record_id = after_record_id_by_collection
@@ -5289,10 +5294,8 @@ async fn sync_business_record_projections_slice_with_database(
             continue;
         }
         loop {
-            // Keep the cross-loop lock bounded to one small page. Holding it
-            // while comparing every Business OS record blocked command
-            // ingestion and browser writes for minutes on a large store.
-            let _database_guard = database_write_lock.lock().await;
+            // Source SQLite work uses its own connection. Never hold the
+            // cross-loop writer while opening/loading that source page.
             let pull_root = root.clone();
             let pull_collection = collection_name.clone();
             let pull_after_record_id = after_record_id.clone();
@@ -5347,6 +5350,7 @@ async fn sync_business_record_projections_slice_with_database(
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
+            let _database_guard = database_write_lock.lock().await;
             let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
             count += bulk_upsert_business_record_projection_documents(
                 &collection,
@@ -5375,7 +5379,8 @@ async fn sync_business_record_projections_slice_with_database(
                 *next_collection_index = next_collection_index.saturating_add(1);
                 break;
             }
-            if document_budget.is_some_and(|budget| projected_documents >= budget) {
+            if document_budget.is_some_and(|limit| projected_documents >= limit)
+                || (document_budget.is_some() && budget.slice_expired(slice_started.elapsed())) {
                 return Ok((count, false));
             }
             tokio::task::yield_now().await;
@@ -6625,8 +6630,6 @@ pub(super) async fn sync_channel_state_with_database(
         .await
         .context("join native channel state projection load")??;
 
-    // Acquire write lock specifically for database writes
-    let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
     let accounts = database
         .collection("communication_accounts")
         .context("communication_accounts collection is not registered")?;
@@ -6654,6 +6657,7 @@ pub(super) async fn sync_channel_state_with_database(
             object.insert("is_deleted".to_string(), Value::Bool(false));
             object.insert("_deleted".to_string(), Value::Bool(false));
         }
+        let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
         if incremental_upsert_projection_if_changed(&accounts, document, "communication account")
             .await?
         {
@@ -6705,6 +6709,7 @@ pub(super) async fn sync_channel_state_with_database(
             object.insert("deleted_at_ms".to_string(), Value::from(now as u64));
             object.insert("updated_at_ms".to_string(), Value::from(now as u64));
         }
+        let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
         accounts
             .incremental_upsert(document)
             .await
@@ -6717,6 +6722,7 @@ pub(super) async fn sync_channel_state_with_database(
             object.remove("_rev");
             object.remove("_meta");
         }
+        let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
         if incremental_upsert_projection_if_changed(
             &pairing_states,
             document,
@@ -9710,6 +9716,8 @@ pub(in crate::business_os) mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_RXDB_DATABASE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    include!("rxdb_peer_startup_tests.rs");
 
     #[test]
     fn projection_union_types_preserve_values_and_use_valid_repair_defaults() {

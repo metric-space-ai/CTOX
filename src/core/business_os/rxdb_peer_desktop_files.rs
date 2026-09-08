@@ -705,8 +705,8 @@ pub(super) async fn sync_desktop_file_scan_with_database(
     let mut seen_file_ids = HashSet::with_capacity(scan.candidates.len());
     let mut indexed = 0usize;
 
-    // Acquire write lock specifically for the DB write iteration
-    let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
+    // One file generation stays serialized with materialization; the whole
+    // scan must not monopolize the writer while inspecting unrelated files.
     for candidate in scan.candidates {
         let path = candidate.path;
         let metadata = match fs::metadata(&path) {
@@ -721,6 +721,7 @@ pub(super) async fn sync_desktop_file_scan_with_database(
         let file_id = desktop_file_id(&path);
         let (folder_components, virtual_path) =
             desktop_file_virtual_location(&candidate.scan_root, &path);
+        let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
         let parent_id =
             ensure_ctox_desktop_folder_path(database, now_ms(), &folder_components).await?;
         if let Err(err) = upsert_desktop_file_with_parent(
@@ -742,8 +743,11 @@ pub(super) async fn sync_desktop_file_scan_with_database(
         }
         seen_file_ids.insert(file_id);
         indexed += 1;
+        drop(_write_guard);
+        tokio::task::yield_now().await;
     }
     if may_mark_missing {
+        let _write_guard = NATIVE_RXDB_WRITE_LOCK.lock().await;
         mark_missing_scanned_desktop_files(root, database, &scan.scan_roots, &seen_file_ids)
             .await?;
     }

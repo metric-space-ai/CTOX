@@ -258,7 +258,7 @@ fn desktop_file_scan_root_paths(scan_roots: &[DesktopFileScanRoot]) -> Vec<PathB
 pub(super) async fn sync_desktop_file_index_background_loop(
     root: PathBuf,
     database: Arc<RxDatabase>,
-    database_write_lock: Arc<AsyncMutex<()>>,
+    _database_write_lock: Arc<AsyncMutex<()>>,
 ) {
     let mut last_maintenance_at = SystemTime::UNIX_EPOCH;
     let mut last_projection_stamp: Option<DesktopFileIndexProjectionStamp> = None;
@@ -346,7 +346,6 @@ pub(super) async fn sync_desktop_file_index_background_loop(
                 return Ok(0);
             }
             let projection_stamp = scan.stamp.clone();
-            let _guard = database_write_lock.lock().await;
             let indexed = sync_desktop_file_scan_with_database(&root, &database, scan).await?;
             last_projection_stamp = Some(projection_stamp);
             dirty_scan_roots = false;

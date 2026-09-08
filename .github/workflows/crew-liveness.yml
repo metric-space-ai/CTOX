@@ -6,6 +6,7 @@ on:
     paths:
       - 'src/core/business_os/harness_cockpit_chat*'
       - 'src/core/business_os/rxdb_peer*'
+      - 'src/core/business_os/desktop_files.rs'
       - 'src/core/service/service_queue_capacity.rs'
       - 'src/core/mission/channels/command_saga.rs'
       - 'src/core/mission/channels/outbound_review.rs'
@@ -64,7 +65,7 @@ jobs:
           export CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE"
           export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/debug/deps:$(rustc --print target-libdir)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           failed=0
-          for filter in queue_capacity_tests crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests background_projection_releases_writer_between_pages sync_ticket_state sync_knowledge_tables; do
+          for filter in peer_startup rxdb_peer_projections::budget queue_capacity_tests crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests background_projection_releases_writer_between_pages sync_business_record_projections sync_business_users sync_runtime_settings sync_channel_state sync_ticket_state sync_knowledge_tables; do
             "$CREW_TEST_BINARY" "$filter" --test-threads=1 || failed=1
           done
           exit "$failed"

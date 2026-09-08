@@ -19,6 +19,10 @@ use super::rxdb_peer::{
     MODULE_CATALOG_PROJECTION_LOOP, NATIVE_RXDB_WRITE_LOCK, RUNTIME_SETTINGS_PROJECTION_LOOP,
     TICKET_STATE_PROJECTION_LOOP, WORKSPACE_BRANDING_PROJECTION_LOOP,
 };
+#[path = "rxdb_peer_budget.rs"]
+pub(super) mod budget;
+use budget::PeerProjectionBudget;
+
 use rxdb::rx_collection::RxCollection;
 use rxdb::rx_database::RxDatabase;
 use serde_json::Value;
@@ -157,7 +161,7 @@ async fn run_background_projection_loop<
 pub(super) async fn sync_channel_state_background_loop(
     root: PathBuf,
     database: Arc<RxDatabase>,
-    database_write_lock: Arc<AsyncMutex<()>>,
+    _database_write_lock: Arc<AsyncMutex<()>>,
 ) {
     let stamp_root = root.clone();
     run_background_projection_loop(
@@ -169,9 +173,7 @@ pub(super) async fn sync_channel_state_background_loop(
         move || {
             let root = root.clone();
             let database = Arc::clone(&database);
-            let database_write_lock = Arc::clone(&database_write_lock);
             async move {
-                let _guard = database_write_lock.lock().await;
                 sync_channel_state_with_database(&root, &database).await
             }
         },
@@ -182,7 +184,7 @@ pub(super) async fn sync_channel_state_background_loop(
 pub(super) async fn sync_business_users_background_loop(
     root: PathBuf,
     database: Arc<RxDatabase>,
-    database_write_lock: Arc<AsyncMutex<()>>,
+    _database_write_lock: Arc<AsyncMutex<()>>,
 ) {
     let stamp_root = root.clone();
     run_background_projection_loop(
@@ -194,9 +196,7 @@ pub(super) async fn sync_business_users_background_loop(
         move || {
             let root = root.clone();
             let database = Arc::clone(&database);
-            let database_write_lock = Arc::clone(&database_write_lock);
             async move {
-                let _guard = database_write_lock.lock().await;
                 sync_business_users_with_database(&root, &database).await
             }
         },
@@ -207,7 +207,7 @@ pub(super) async fn sync_business_users_background_loop(
 pub(super) async fn sync_runtime_settings_background_loop(
     root: PathBuf,
     database: Arc<RxDatabase>,
-    database_write_lock: Arc<AsyncMutex<()>>,
+    _database_write_lock: Arc<AsyncMutex<()>>,
 ) {
     let stamp_root = root.clone();
     run_background_projection_loop(
@@ -219,9 +219,7 @@ pub(super) async fn sync_runtime_settings_background_loop(
         move || {
             let root = root.clone();
             let database = Arc::clone(&database);
-            let database_write_lock = Arc::clone(&database_write_lock);
             async move {
-                let _guard = database_write_lock.lock().await;
                 sync_runtime_settings_with_database(&root, &database).await
             }
         },
@@ -232,7 +230,7 @@ pub(super) async fn sync_runtime_settings_background_loop(
 pub(super) async fn sync_workspace_branding_background_loop(
     root: PathBuf,
     database: Arc<RxDatabase>,
-    database_write_lock: Arc<AsyncMutex<()>>,
+    _database_write_lock: Arc<AsyncMutex<()>>,
 ) {
     let stamp_root = root.clone();
     run_background_projection_loop(
@@ -244,9 +242,7 @@ pub(super) async fn sync_workspace_branding_background_loop(
         move || {
             let root = root.clone();
             let database = Arc::clone(&database);
-            let database_write_lock = Arc::clone(&database_write_lock);
             async move {
-                let _guard = database_write_lock.lock().await;
                 sync_workspace_branding_with_database(&root, &database).await
             }
         },
@@ -257,7 +253,7 @@ pub(super) async fn sync_workspace_branding_background_loop(
 pub(super) async fn sync_module_catalog_background_loop(
     root: PathBuf,
     database: Arc<RxDatabase>,
-    database_write_lock: Arc<AsyncMutex<()>>,
+    _database_write_lock: Arc<AsyncMutex<()>>,
 ) {
     let stamp_root = root.clone();
     run_background_projection_loop(
@@ -269,9 +265,7 @@ pub(super) async fn sync_module_catalog_background_loop(
         move || {
             let root = root.clone();
             let database = Arc::clone(&database);
-            let database_write_lock = Arc::clone(&database_write_lock);
             async move {
-                let _guard = database_write_lock.lock().await;
                 sync_module_catalog_with_database(&root, &database).await
             }
         },
@@ -338,7 +332,7 @@ pub(super) async fn upsert_background_projection_pages(
     while documents.peek().is_some() {
         let mut page = Vec::new();
         let mut bytes = 0;
-        while page.len() < 16 && (page.is_empty() || bytes < 256 * 1024) {
+        while !PeerProjectionBudget::DEFAULT.page_is_full(page.len(), bytes) {
             let Some(document) = documents.next() else {
                 break;
             };

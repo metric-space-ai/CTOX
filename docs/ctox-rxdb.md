@@ -736,6 +736,24 @@ by `checkpoint-contract-smoke.mjs`, which drives the real
 
 ---
 
+### Native peer reconciliation budgets
+
+Peer reconciliation must load source SQLite/Parquet data without the shared
+RxDB writer lock. The users/tickets/knowledge writers use count- and byte-bounded
+pages; desktop indexing releases its writer after each file generation, retaining
+serialization with explicit file materialization. Unrelated projection loops do
+not hold the cross-loop lock while loading runtime, user, channel, or catalog data.
+
+`rxdb_peer_projections::budget::PeerProjectionBudget` supplies the typed defaults:
+16 documents and approximately 256 KiB per writer page, with a 500 ms cooperative
+budget for record reconciliation slices. A single oversized document is allowed;
+a database operation is never cancelled after starting a write. Cursors advance
+only after successful pages, and incomplete slices retain their source stamp.
+The budget is checked between pages, so a slow individual source query or commit
+can still exceed it; `performance.loops` continues reporting the full measured
+tick duration, including source loading and lock waits. Tenant acceptance must
+measure these actual times, rather than infer a hard deadline from page size.
+
 ## 8. Failure & recovery semantics
 
 | Failure | Mechanism | Where |
