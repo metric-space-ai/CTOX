@@ -5902,6 +5902,7 @@ function installChatStyles() {
       animation: ctoxCrewOops 860ms cubic-bezier(.22,.75,.35,1) 1 both;
     }
     /* Reading: the body leans in a little, the lowered eyes scan the page. */
+    .ctox-chat-crew-slot { touch-action: none; }
     .ctox-crew-eyes-review,
     .ctox-crew-eyes-reading,
     .ctox-crew-eyes-learning {

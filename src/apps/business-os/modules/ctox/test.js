@@ -30,6 +30,7 @@ const {
   memoryEntries,
   taskSelectionSentence,
   memberCreatureState,
+  crewStripMarkup,
   memberIdentity,
   shouldShowCrewHome,
   taskCrewMember,
@@ -1117,6 +1118,13 @@ test('Crew at home shows every active member with its state, only while nothing 
   const reading = crewHomeMarkup({ ...state, crewMembers: [{ ...crewFixture[0], last_memory_read_at_ms: now - 1000 }] });
   assert.match(reading, /aria-label="Milo: liest sein Gedächtnis"/);
   assert.match(reading, /is-reading[\s\S]*?ctox-crew-eyes-reading/);
+  // During work the crew stays visible as one row (Review B7): every member,
+  // the same drawer hook, the on-duty one carries its task.
+  const strip = crewStripMarkup({ ...state, model: { ...state.model, liveWork: true } });
+  assert.equal((strip.match(/data-crew-member-id=/g) || []).length, 3);
+  assert.match(strip, /class="ctox-crew-strip"/);
+  assert.match(strip, /Milo: Recherche Kunde X/);
+  assert.equal(crewStripMarkup({ ...state, crewMembers: [] }), '');
   const learning = crewHomeMarkup({ ...state, crewMembers: [{ ...crewFixture[1], last_learning_at_ms: now - 1000 }] });
   assert.match(learning, /aria-label="Nori: lernt aus dem Einsatz"/);
   assert.match(learning, /is-learning[\s\S]*?ctox-crew-eyes-learning/);

@@ -22826,9 +22826,17 @@ pub(super) fn clamp_projected_document_to_wire_budget(
     };
     // Largest field first: trimming one huge `result` usually suffices, and
     // trimming the fewest fields keeps the most information on the wire.
+    // The module catalog is the shell's routing contract: its `modules` list is
+    // the last field to go, after marketplace, templates, governance and
+    // version states — dropping `modules` first left browsers with a stale
+    // module list (07.09.2026: the CTOX module lost its crew collections).
+    let catalog_table = table.starts_with("ctox_business_os__business_module_catalog__v");
     let mut candidates: Vec<(String, usize)> = object
         .iter()
         .filter(|(key, _)| !WIRE_BUDGET_PROTECTED_FIELDS.contains(&key.as_str()))
+        .filter(|(key, _)| {
+            !(catalog_table && matches!(key.as_str(), "modules" | "allowed_module_ids"))
+        })
         .map(|(key, value)| {
             (
                 key.clone(),
@@ -22840,6 +22848,18 @@ pub(super) fn clamp_projected_document_to_wire_budget(
 
     let mut remaining = total;
     let mut trimmed: Vec<String> = Vec::new();
+    if catalog_table {
+        // Only when everything else is gone may the module list itself be cut.
+        let others: usize = candidates.iter().map(|(_, bytes)| bytes).sum();
+        if total.saturating_sub(others) > MAX_PROJECTED_DOCUMENT_BYTES {
+            if let Some(modules) = object.get("modules") {
+                let bytes = serde_json::to_vec(modules)
+                    .map(|raw| raw.len())
+                    .unwrap_or(0);
+                candidates.push(("modules".to_owned(), bytes));
+            }
+        }
+    }
     for (key, bytes) in candidates {
         if remaining <= MAX_PROJECTED_DOCUMENT_BYTES {
             break;
