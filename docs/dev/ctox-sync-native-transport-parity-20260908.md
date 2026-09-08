@@ -201,8 +201,9 @@ fallback was added. Proposal and Raft admission stay closed to revoked workers.
 The cluster checks now require typed rejection before and after restart, deny
 forged identities and another executor's ownership, and ensure an isolated
 voter cannot answer definitively from its persisted tombstone. The real WebRTC
-check likewise requires Rejected rather than the previous Unavailable. Positive
-verification of this correction is pending.
+check likewise requires Rejected rather than the previous Unavailable. The focused correction then passed locally (1/1, 3.84 seconds), including
+quorum loss and restart. The complete native Linux job and four-process host
+acceptance also passed on the corrected source as recorded below.
 
 Workjet run 34199994655 is now entirely successful at cd0b8f47e, including Test,
 Release Smoke, Mobile Native Static Analysis and Check. Native Linux job
@@ -216,6 +217,42 @@ one worker, with one job in the control stores. The CI binary is a dev build wit
 debug information disabled. These measurements do not evaluate the Business OS
 command-p50 or collection-boot budgets, WAN behavior, harness portability or
 Desktop/Mobile onboarding. Existing deadlines and assertions remain unchanged.
+
+## Successful full host acceptance and measured scope
+
+[Run 34204358510](https://github.com/metric-space-ai/ctox/actions/runs/34204358510)
+passed its full-host job 101990269298 with the unchanged four-process assertion.
+Source branch commit: 1def1fe35ed1f6d9961df26a340d3e7b15c6a211.
+Actual built PR merge revision: 23fee627c6171811a4394bde6af4a51be72d871c.
+Binary SHA-256: 71a06e0f5a906c0b0ec4dba7ac5993668b9c077f7b60337438df70a97919be89.
+Workjet consumer: merged main 1a81eabec00fa262c36d72970376f2d09da6a48f.
+
+The [unaltered acceptance JSON](evidence/ctox-sync-full-host-34204358510.json)
+is preserved in this repository. Original GitHub artifact: 10047656615,
+ctox-native-full-host-proof. It proves legacy secret migration, imported
+Workjet identity, local listener status and exclusivity, confirmed membership,
+worker reconnect, worker restart and revoked-worker denial using four complete
+CTOX processes over real localhost WebRTC. No coding harness was executed.
+
+| Measurement | Result |
+| --- | ---: |
+| Four-host provisioning and initial quorum | 5668.996 ms |
+| Warm authority validation p50, 20 samples | 7.675 ms |
+| Warm authority validation p95, 20 samples | 8.589 ms |
+| Worker reconnect through renewed authorization | 1013.468 ms |
+| Worker restart through renewed authorization | 1732.232 ms |
+
+Topology: three voters plus one worker, one job, dev build without debug info,
+all on one Linux runner. These are control-plane observations, not Business OS
+command or collection-boot acceptance, WAN results, production-load percentiles,
+automatic harness failover or UI onboarding.
+
+The new Linux native job 101990269150 passed all its gates. macOS job
+101990269060 remained queued at observation. General CTOX CI at this revision
+still stops independently: Desktop Linux job 101990268333 fails npm audit for
+xmldom and fast-uri; CLI x86_64 Linux job 101990268429 fails the platform-freeze
+guard on modules/explorer/index.js. No guard was skipped and no Office source
+was edited. These failures still block a complete CTOX PR acceptance.
 
 ## Obsolete remote compiler output removed
 
