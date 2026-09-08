@@ -423,8 +423,9 @@ reserved before thread startup and released through worker cleanup or lease
 expiry. The orphan sweep protects live worker registrations, never the entire
 inflight cache merely because an unrelated worker is busy.
 A serial worker consumes one capacity slot instead of blocking every isolated
-chat. Buffered jobs and unstarted chat reservations also consume slots; active
-thread identities remain exclusive across both admission paths. App recovery,
+chat. A buffered serial backlog reserves one serial slot rather than consuming
+one slot per waiting job; unstarted chat reservations each consume a slot.
+Active thread identities remain exclusive across both admission paths. App recovery,
 lease acquisition, pause, working hours, and runtime-blocker gates still apply.
 
 Adapter reconciliation admission coalesces an identical configuration while an

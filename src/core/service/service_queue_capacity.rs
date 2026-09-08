@@ -88,9 +88,11 @@ fn lease_business_queue_capacity(
         .keys()
         .filter(|key| shared.active_worker_lease_keys.contains(*key))
         .count();
-    let serial_slots = shared.worker_active_count.saturating_sub(active_chats)
-        + shared.pending_prompts.len()
-        + usize::from(shared.serial_prompt_starting);
+    let serial_slots = shared
+        .worker_active_count
+        .saturating_sub(active_chats)
+        .saturating_add(usize::from(shared.serial_prompt_starting))
+        .max(usize::from(!shared.pending_prompts.is_empty()));
     let serial_slots = serial_slots.max(usize::from(
         shared.busy && shared.parallel_queue_jobs.is_empty(),
     ));
@@ -239,6 +241,24 @@ mod queue_capacity_tests {
             active_worker_threads: BTreeMap::from([("research/0".into(), 1)]),
             ..SharedState::default()
         }));
+        for index in 0..4 {
+            let task = channels::create_queue_task(
+                root.path(),
+                channels::QueueTaskCreateRequest {
+                    title: format!("buffered serial {index}"),
+                    prompt: "Reconcile the fixture".into(),
+                    thread_key: format!("buffered/{index}"),
+                    workspace_root: None,
+                    priority: "normal".into(),
+                    suggested_skill: None,
+                    parent_message_key: None,
+                    extra_metadata: None,
+                },
+            )?;
+            lock_shared_state(&state)
+                .pending_prompts
+                .push_back(queued_prompt_from_queue_task(task));
+        }
         let jobs = lease_business_queue_capacity(root.path(), &state)?;
         assert_eq!(
             jobs.len(),

@@ -46,22 +46,40 @@ jobs:
           sudo apt-get install -y libssl-dev libfontconfig1-dev pkg-config libdbus-1-dev sqlite3
           df -h /
       - name: Check and compile regression tests
+        id: compile
         run: |
           cargo check --locked --bin ctox
           cargo test --locked --bin ctox --no-run
       - name: Admission and projection regressions
         run: |
-          cargo test --locked --bin ctox queue_capacity_tests -- --test-threads=1
-          cargo test --locked --bin ctox adapter_reconciliation -- --test-threads=1
-          cargo test --locked --bin ctox business_os::harness_cockpit::chat::tests -- --test-threads=1
-          cargo test --locked --bin ctox background_projection_releases_writer_between_pages -- --test-threads=1
-          cargo test --locked --bin ctox sync_ticket_state -- --test-threads=1
-          cargo test --locked --bin ctox sync_knowledge_tables -- --test-threads=1
+          failed=0
+          for filter in queue_capacity_tests crew:: adapter_reconciliation business_os::harness_cockpit::chat::tests background_projection_releases_writer_between_pages sync_ticket_state sync_knowledge_tables; do
+            cargo test --locked --bin ctox "$filter" -- --test-threads=1 || failed=1
+          done
+          exit "$failed"
       - name: Clippy
+        if: ${{ always() && steps.compile.outcome == 'success' }}
         run: cargo clippy --locked --bin ctox --tests
       - name: Native RxDB suite
+        if: ${{ always() && steps.compile.outcome == 'success' }}
         run: cargo test --locked --manifest-path src/core/rxdb/Cargo.toml -- --test-threads=1
       - name: Browser wire contract and JS suite
+        if: ${{ always() && steps.compile.outcome == 'success' }}
         run: |
           cargo build --locked --manifest-path src/core/rxdb/Cargo.toml --example v15_wire_daemon
           node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon --wire-daemon "$CARGO_TARGET_DIR/debug/examples/v15_wire_daemon"
+      - name: Measure existing regression filters on campaign base
+        if: ${{ always() && steps.compile.outcome == 'success' && github.head_ref == 'codex/crew-open-items' }}
+        run: |
+          CREW_TEST_HEAD=$(git rev-parse HEAD)
+          trap 'git checkout --detach "$CREW_TEST_HEAD"' EXIT
+          git fetch --no-tags origin 8e6f132a82549be9235dd433fc9bd28d5ae868e6
+          git checkout --detach 8e6f132a82549be9235dd433fc9bd28d5ae868e6
+          failed=0
+          for filter in crew:: adapter_reconciliation business_os::harness_cockpit::chat::tests sync_ticket_state sync_knowledge_tables; do
+            status=0
+            cargo test --locked --bin ctox "$filter" -- --test-threads=1 || status=$?
+            echo "Baseline 8e6f132a8: $filter exit=$status"
+            if [ "$status" -ne 0 ]; then failed=1; fi
+          done
+          exit "$failed"
