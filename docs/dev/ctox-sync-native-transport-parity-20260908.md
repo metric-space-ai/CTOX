@@ -51,8 +51,15 @@ acceptance test.
 - Browser-runtime suite: 120 passed, zero failed, zero skipped. This includes
   the new parity guard. The existing wire-daemon fixture was available; this
   run is not a newly built full CTOX host or product-performance acceptance.
-- The production-graph Sync suite is being rebuilt and rerun. Its result and
-  subsequent real-process diagnosis must be recorded before acceptance.
+- Local production-graph build completed in 50m04s under heavy machine load.
+  Unit tests: 19 passed. Authority cluster: 1 passed, 10 failed, mostly on
+  confirmation deadlines; recorded RPC delays reached over one second. This is
+  a red result, not a production-performance acceptance. Cargo stopped before
+  the WebRTC test executable.
+- Clean Linux/macOS CI run 34186877185 compiled the production graph. On each
+  platform 19 unit tests and 10 of 11 authority-cluster tests passed. The actual
+  Workjet IPC consumer test failed because its required sibling checkout was
+  absent. No WebRTC result can be inferred from these early exits.
 
 No customer data, runtime configuration, shell slot or tenant release was changed.
 
@@ -69,4 +76,28 @@ For PR #69 at `3432b3488`, the existing Desktop macOS job stops at npm audit
 (`@xmldom/xmldom`, `fast-uri`). The x86_64 Linux CLI job stops before compilation
 at the platform-freeze guard (`modules/explorer/index.js` contextmenu handler).
 Job IDs: `101935097745`, `101935097780`, run `34186266711`. These unchanged app
+
+The workflow now prepares both repositories as siblings, including the actual
+Workjet consumer at immutable revision `ca7dd885f3615ff31b18eb6ffb6c7c58c45ceaf3`.
+Node 24.13.1 and pnpm 11.10.0 match that revision's declared engines and package
+manager. Dependencies are installed with the frozen Workjet lockfile and no
+lifecycle scripts. The existing IPC assertions remain unchanged. Cargo uses
+`--no-fail-fast` to collect all test-executable failures instead of hiding the
+WebRTC result behind the first failing test executable.
+
+## Obsolete remote compiler output removed
+
+On 2026-09-08 at 04:41 UTC, removed only the old isolated test directory
+`/home/ctox/.cache/ctox/file-preservation-fbeca32b7/cargo-target` on Welsch.
+Allocated size: 28,723,452 KiB. Free filesystem space afterwards: 37,873,111,040
+bytes. A privileged /proc audit immediately before removal found no compiler,
+open file, working directory, executable or mapped-file reference to that
+exact target; no process was unreadable in that audit. The earlier unprivileged
+audit was insufficient and did not authorize deletion.
+
+All source snapshots, fixture databases, reports and release-target outside
+cargo-target were retained. The removed build was disposable and its correction
+and evidence are already in main via PR #65. No service was stopped, restarted
+or upgraded; the Office worker owns the Welsch cutover. The remote receipt is
+`/home/ctox/.cache/ctox/file-preservation-fbeca32b7/cleanup-native-parity-20260908.json`.
 paths are outside this dependency correction; no guard is bypassed.
