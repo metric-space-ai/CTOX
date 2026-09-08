@@ -2200,7 +2200,7 @@ impl WebRTCRsConnectionHandler {
     /// Remove ONE peer's presence (channel close / peer removal). Returns
     /// whether it had visible entries, i.e. whether the remaining peers need
     /// a broadcast to drop its hints.
-    fn remove_peer_presence(&self, peer: &WebRTCRsPeer) -> bool {
+    fn remove_peer_presence(&self, peer: &str) -> bool {
         self.presence
             .lock()
             .remove(peer)
@@ -3715,12 +3715,7 @@ fn remove_peer_inner(
         // register. Otherwise delayed teardown from the old connection can
         // erase the new generation's capability token or send state.
         handler.active_collections.lock().remove(peer);
-        if handler
-            .presence
-            .lock()
-            .remove(peer)
-            .is_some_and(|report| !report.entries.is_empty())
-        {
+        if handler.remove_peer_presence(peer) {
             handler.presence_dirty.store(true, Ordering::SeqCst);
         }
         handler.peer_capability_tokens.lock().remove(peer);

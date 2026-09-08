@@ -298,3 +298,39 @@ intermittent macOS CI failure remains under validation. The corrected focused
 test and browser-runtime suite were still running when this source revision
 was prepared. Native WebRTC, full RxDB and clean Linux/macOS CI must pass before
 acceptance; no timeout or existing safety assertion was weakened.
+
+## Validation of the terminal-channel correction
+
+At source f1bf5096f792ab1ffccab4c6df920771f01a7912,
+[run 34216347377](https://github.com/metric-space-ai/ctox/actions/runs/34216347377)
+passed Linux native job 102028880567 and full-host job 102028881007.
+macOS job 102028880778 was still queued at observation; its reconnect acceptance
+must not be inferred from Linux results.
+
+The full-host job built PR merge revision
+4f0b89bb06fc35566f2bc1c22c1c4cc5a38a0127; binary SHA-256:
+ea19539f80d8d8b60df73daf57f98589de10964a6dc6e22528c0a18c98252a65.
+The [unaltered acceptance JSON](evidence/ctox-sync-full-host-34216347377.json)
+proves four complete native host processes, confirmed membership, migrated and
+imported keys, listener exclusivity, worker reconnect/restart and revocation.
+
+Measurements on one Linux runner (dev binary, three voters, one worker, one job):
+four-host provisioning 5598.458ms; worker reconnect 1017.021ms; worker restart
+1732.033ms; twenty warm authority validations p50 8.980ms, p95 10.872ms.
+All samples are retained. No coding harness ran, and no Business OS command/boot,
+WAN, large-session or UI performance acceptance follows from these numbers.
+
+Locally, the corrected deterministic regression passed (1/1, 1.29s).
+The full native RxDB suite then passed 431 tests with zero ignored tests
+(394 unit tests, 31 conformance tests and six further integration checks).
+It reported an unused remove_peer_presence helper: complete peer removal had
+duplicated its operation inline. The shared teardown now calls that helper
+with a borrowed peer name; the separate presence tests stay unchanged.
+Strict RxDB clippy is being run for this final deduplication.
+
+The JavaScript suite returned 119 passed, one failed, zero skipped. The command
+consumer inventory subprocess exceeded its unchanged 180-second limit.
+Running that same guard separately with the same timeout passed in 26,995ms,
+reporting 42 dispatch consumers, 17 projection readers, zero legacy projection
+waiters and zero direct intent writers. The overall suite remains unaccepted
+until a complete run passes; the isolated pass does not replace that result.
