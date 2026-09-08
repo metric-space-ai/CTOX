@@ -71,9 +71,6 @@ fn lease_business_queue_capacity(
     let tasks = channels::list_queue_tasks(root, &["pending".to_string()], 128)?;
     let mut admitted = Vec::new();
     let mut shared = lock_shared_state(state);
-    if !shared.busy {
-        shared.serial_prompt_starting = false;
-    }
     if shared.app_recovery_active
         || shared.durable_queue_lease_in_progress
         || runtime_blocker_backoff_remaining_secs(&shared).is_some()
@@ -237,6 +234,8 @@ mod queue_capacity_tests {
         {
             let mut shared = lock_shared_state(&state);
             shared.worker_active_count = 1;
+            // An unrelated completion may clear busy during serial startup.
+            shared.busy = false;
             shared
                 .active_worker_lease_keys
                 .insert(jobs[0].leased_message_keys[0].clone());
