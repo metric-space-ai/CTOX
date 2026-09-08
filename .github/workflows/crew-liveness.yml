@@ -50,12 +50,22 @@ jobs:
         id: compile
         run: |
           cargo check --locked --bin ctox
-          cargo test --locked --bin ctox --no-run
+          cargo test --locked --bin ctox --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/crew-head-tests.jsonl"
+          CREW_TEST_BINARY=$(python3 -c '
+          import json, sys
+          rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+          paths = {r["executable"] for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == "ctox" and r.get("profile", {}).get("test") and r.get("executable")}
+          assert len(paths) == 1, f"Expected exactly one CTOX test binary, found {paths}"
+          print(paths.pop())
+          ' "$RUNNER_TEMP/crew-head-tests.jsonl")
+          echo "CREW_TEST_BINARY=$CREW_TEST_BINARY" >> "$GITHUB_ENV"
       - name: Admission and projection regressions
         run: |
+          export CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE"
+          export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/debug/deps:$(rustc --print target-libdir)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           failed=0
           for filter in queue_capacity_tests crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests background_projection_releases_writer_between_pages sync_ticket_state sync_knowledge_tables; do
-            cargo test --locked --bin ctox "$filter" -- --test-threads=1 || failed=1
+            "$CREW_TEST_BINARY" "$filter" --test-threads=1 || failed=1
           done
           exit "$failed"
       - name: Clippy
@@ -70,6 +80,9 @@ jobs:
           cargo build --locked --manifest-path src/core/rxdb/Cargo.toml --example v15_wire_daemon
           mkdir -p runtime/build
           ln -s "$CARGO_TARGET_DIR" runtime/build/cargo-target
+          npm ci --ignore-scripts --prefix src/apps/business-os
+          npm audit --audit-level=low --prefix src/apps/business-os
+          npm --prefix src/apps/business-os exec playwright install --with-deps chromium
           node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon
       - name: Measure existing regression filters on campaign base
         if: ${{ always() && steps.compile.outcome == 'success' && github.head_ref == 'codex/crew-open-items' }}
@@ -78,10 +91,20 @@ jobs:
           trap 'git checkout --detach "$CREW_TEST_HEAD"' EXIT
           git fetch --no-tags origin 8e6f132a82549be9235dd433fc9bd28d5ae868e6
           git checkout --detach 8e6f132a82549be9235dd433fc9bd28d5ae868e6
+          cargo test --locked --bin ctox --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/crew-base-tests.jsonl"
+          CREW_BASE_TEST_BINARY=$(python3 -c '
+          import json, sys
+          rows = [json.loads(line) for line in open(sys.argv[1]) if line.strip()]
+          paths = {r["executable"] for r in rows if r.get("reason") == "compiler-artifact" and r.get("target", {}).get("name") == "ctox" and r.get("profile", {}).get("test") and r.get("executable")}
+          assert len(paths) == 1, f"Expected exactly one CTOX test binary, found {paths}"
+          print(paths.pop())
+          ' "$RUNNER_TEMP/crew-base-tests.jsonl")
+          export CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE"
+          export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/debug/deps:$(rustc --print target-libdir)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           failed=0
           for filter in crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests sync_ticket_state sync_knowledge_tables; do
             status=0
-            cargo test --locked --bin ctox "$filter" -- --test-threads=1 || status=$?
+            "$CREW_BASE_TEST_BINARY" "$filter" --test-threads=1 || status=$?
             echo "Baseline 8e6f132a8: $filter exit=$status"
             if [ "$status" -ne 0 ]; then failed=1; fi
           done
