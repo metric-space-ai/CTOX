@@ -71,7 +71,11 @@ use crate::inference::runtime_state;
 use crate::inference::supervisor;
 
 const DEFAULT_RUNTIME_ROOT: &str = "runtime/scraping";
-const DEFAULT_QUEUE_PRIORITY: &str = "high";
+// Scrape repairs are maintenance behind the work that triggered them. At
+// "high" ten repair tasks spawned by one adapter reconciliation held four
+// customer research tasks (priority normal) for half an hour (thesen,
+// 07.09.2026), so repairs queue below normal work.
+const DEFAULT_QUEUE_PRIORITY: &str = "low";
 const DEFAULT_REPAIR_SKILL: &str = "universal-scraping";
 const DEFAULT_ENRICHMENT_MAX_RECORDS: usize = 50;
 const MIN_TEMPLATE_TARGETS: i64 = 2;

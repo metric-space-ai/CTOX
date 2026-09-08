@@ -288,3 +288,34 @@ Upgrade 7 gestartet 10:05 UTC (main `8de040615`).
 | **Defekt: unvollständiger Plan bleibt terminal** | CHEMOFAST 18:51:13–18:52:58: Worker endet „task execution plan is incomplete (2/12 steps completed)", Task sofort `failed` (attempt 1, failure_attempt_count 0, kein failure_class). Ursache: `runtime_error_is_transient_api_failure` (service.rs) hat eine eigene Substring-Liste; 80561cbc9 hatte nur den Cooldown-Klassifizierer erweitert. Betroffen heute: CHEMOFAST, AKEMI (0/9, 5/6), BÜFA (8/9), BNT (7/8, 4/7), Dreidoppel (5/6), DrinkStar (4/5). |
 | Fix `e3ab5c7b3` (Upgrade 14, Start 19:03) | Beide Marker passieren das Gate → Technik-Hold mit 5-Versuche-Budget, Plan wird fortgesetzt. Test `incomplete_durable_plan_keeps_queue_work_retryable`. |
 | Offen | CHEMOFAST nach Upgrade 14 neu starten; Auth-Assist handelsregister.de wartet auf Owner. |
+
+## 07.09., 19:43–20:30 UTC: Upgrade 14 live, 18/19, Queue durch Adapter-Abgleich verstopft
+
+| Messung | Wert |
+|---|---|
+| Upgrade 14 (Release branch-main-20260907T190322Z, `e3ab5c7b3`), Wartung per Grace 19:43:14 | Technik-Holds (`failure_class=technical`) statt terminaler Fehler bei „plan is incomplete" — an Cereda (7 Versuche), AKEMI, Adapter-Abgleich sichtbar. |
+| Stand 19:44 | 18/19 mit Ergebnis: ANGUS 1 → 17, BNT 1 → 13, BOOMEX 6 → 14 (completed), BÜFA 21, AKEMI 9. Nur CHEMOFAST 0. |
+| CHEMOFAST-Neustart | 19:45 „Auswahl neu recherchieren (1)": App meldete „CTOX konnte den Task nicht an die Queue übergeben" (business-chat.js: `submitChatMessage` ohne Queue-Annahme), zweiter Klick 19:49; `chat.task` 19:54:20 angenommen, Task pending. Browser-Journal stieg auf 1220 anstehende Schreibungen; Peer-Schleifen nach Dienstneustart (ticket_state 113 s, knowledge_tables 106 s, business_records max 122 s, desktop_file_index max 92 s, business_commands Ø 1 s/Tick) blockieren den Datenkanal minutenlang → an Crew-Thread gemeldet (01a07d6d…). |
+| **Queue verstopft** | 19:56–20:28 lief nur „Recherche-Adapter abgleichen" (urgent, von jedem Recherche-Start neu eingereiht, je 6–7 min, mit Retry nach Plan-Fehler) und erzeugte zehn „repair scrape target …" (high). Die Nachrecherchen (normal) warteten 30 min ohne Hold. Kapazität 3 half nicht: nur zwei Leases gleichzeitig beobachtet. Gemeldet an Crew-Thread (01a07d81…; Queue-Thread 01a07015 ist archiviert). |
+| Gegenmaßnahme 20:29 | `ctox queue reprioritize`: CHEMOFAST/ANGUS/AKEMI → urgent, elf Adapter-/Scraper-Tasks → low. |
+| Offen | Adapterabgleich dedupen und von der chat.task-Parallelität entkoppeln; `cmd_cred_*` „database is locked" (10× in 13 min); Auth-Assist handelsregister.de wartet auf Owner. |
+
+## 07.09., 20:36 UTC: 19 von 19 mit Ergebnis
+
+| Messung | Wert |
+|---|---|
+| Nach Reprioritisierung 20:29 | CHEMOFAST geleast 20:30:35, um 20:36 bereits 11 Felder; ANGUS/AKEMI-Nachrecherchen beendet (17 / 9 Felder, unverändert). |
+| Feldtabelle 20:36 (recherchierte Felder) | Carbosulf 22 (completed), BÜFA 21, DrinkStar 20, BEWI RAW 19, ANGUS 17, Aeroxon 16, Destilla 15, Berg 14, BOOMEX 14 (completed), BNT 13, Richter 13, Dreidoppel 13, Chemotechnik 13, Additiv 13, Beiersdorf 12, CHEMOFAST 11, Calvatis 9, AKEMI 9, Cereda 5 (completed). Summe 269 Felder, Ø 14,2 von 32. |
+| Bewertung | Alle 19 haben Ergebnisse; keine Firma vollständig. Umsatz/Mitarbeiter/WZ hängen an Login-Quellen (D&B Hoovers, handelsregister.de: Auth-Assist-Anfragen offen). |
+| Stand 21:12 | 276 Felder über 19 Leads (Cereda 5 → 12). Laufend: Nachrecherche CHEMOFAST (Lease 21:06), Cereda-Wiederholung 21:22 (Technik-Hold), Adapter-Abgleich, Auth-Assist handelsregister.de (geleast, wartet auf Owner-Login). |
+
+## 07.09., 21:40–22:00 UTC: Nacharbeit an den offenen Punkten
+
+| Punkt | Stand |
+|---|---|
+| Adapter-Abgleich verdrängt Recherchen | App 1.0.106 live (21:46): `outbound.research.adapters.reconcile` mit Priorität `low` statt `urgent`. Daemon `d890ca4df` (nächstes Upgrade): Scrape-Reparaturen und Adapter-Erzeugung `low` statt `high`. Dedupe im Daemon bleibt offen (Crew-Thread 01a07d81…). |
+| 30-Minuten-Session-Limit | `CTOX_CHAT_TURN_TIMEOUT_SECS=1800` in ctox-runtime.sqlite3 (Operator-Einstellung, TUI-Auswahl bis 3600). Nicht geändert: der Shell-Drawer „Runtime" lud den Laufzeitstatus nicht („Runtime nicht geladen", Provider/Modell leer); „Übernehmen" hätte die leere Provider-/Modellwahl mitgeschrieben. Kein CLI-Pfad für einen einzelnen Wert. Owner kann es in der TUI setzen; Timeout-Fortsetzungen existieren (`maybe_enqueue_timeout_continuation`). |
+| `database is locked` | busy_timeout ist bereits 30 s (`persistence::sqlite_busy_timeout_duration`); die Sperren kommen von langen Schreibtransaktionen der Peer-Schleifen (ticket_state/knowledge/business_records je ~110 s nach Neustart). Ursache liegt im Peer, gemeldet (01a07d6d…). |
+| Live-Flow zeigt „Queued" für terminal Fehlgeschlagene | Auf main bevorzugt `routingProblemStatus` (modules/ctox/index.js) den Routing-Status `failed` vor der Phase; der auf thesen aktive Shell-Slot ist älter. Wird mit dem nächsten Shell-Release aus main verifiziert, nicht heute. |
+| Tests | `cargo test -p ctox --bin ctox -- capabilities::scrape store_outbound_commands`: 99 grün, 3 rot — dieselben 3 sind auf unverändertem origin/main rot (adapter_reconciliation_projects_typed_result_without_secrets, …_rejects_invalid_batch_before_any_write, embed_texts_via_local_socket_uses_internal_embedding_contract). Vorbestand, nicht meine Änderung. |
+| Endstand 22:06 UTC | 287 Felder über 19 Leads (CHEMOFAST 11 → 16, Cereda 18). Nachrecherche CHEMOFAST läuft weiter; Queue danach: Adapter-Abgleich (low), Auth-Assist handelsregister.de (wartet auf Owner), Scraper-Reparaturen (low). |
