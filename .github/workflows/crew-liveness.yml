@@ -85,13 +85,35 @@ jobs:
           npm audit --audit-level=low --prefix src/apps/business-os
           npm --prefix src/apps/business-os exec -- playwright install --with-deps chromium
           node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon
+      - name: Build native peer candidate for tenant measurement
+        id: peer_candidate
+        if: ${{ always() && steps.compile.outcome == 'success' && github.head_ref == 'codex/peer-startup-liveness' }}
+        run: |
+          cargo build --locked --bin ctox
+          mkdir -p "$RUNNER_TEMP/peer-candidate"
+          cp "$CARGO_TARGET_DIR/debug/ctox" "$RUNNER_TEMP/peer-candidate/ctox-real"
+          git rev-parse HEAD > "$RUNNER_TEMP/peer-candidate/source-commit.txt"
+          ldd "$CARGO_TARGET_DIR/debug/ctox" > "$RUNNER_TEMP/peer-candidate/shared-libraries.txt"
+          cd "$RUNNER_TEMP/peer-candidate"
+          sha256sum ctox-real > SHA256SUMS
+      - name: Retain native peer candidate
+        if: ${{ always() && steps.peer_candidate.outcome == 'success' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: peer-startup-candidate-${{ github.event.pull_request.head.sha || github.sha }}
+          path: ${{ runner.temp }}/peer-candidate/
+          retention-days: 7
       - name: Measure existing regression filters on campaign base
-        if: ${{ always() && steps.compile.outcome == 'success' && github.head_ref == 'codex/crew-open-items' }}
+        if: ${{ always() && steps.compile.outcome == 'success' && (github.head_ref == 'codex/crew-open-items' || github.head_ref == 'codex/peer-startup-liveness') }}
         run: |
           CREW_TEST_HEAD=$(git rev-parse HEAD)
           trap 'git checkout --detach "$CREW_TEST_HEAD"' EXIT
-          git fetch --no-tags origin 8e6f132a82549be9235dd433fc9bd28d5ae868e6
-          git checkout --detach 8e6f132a82549be9235dd433fc9bd28d5ae868e6
+          CREW_BASE_SHA=8e6f132a82549be9235dd433fc9bd28d5ae868e6
+          if [ "$GITHUB_HEAD_REF" = "codex/peer-startup-liveness" ]; then
+            CREW_BASE_SHA=ebe57e602976f5b79315e2e4941a1680081c9f66
+          fi
+          git fetch --no-tags origin "$CREW_BASE_SHA"
+          git checkout --detach "$CREW_BASE_SHA"
           cargo test --locked --bin ctox --no-run --message-format=json-render-diagnostics > "$RUNNER_TEMP/crew-base-tests.jsonl"
           CREW_BASE_TEST_BINARY=$(python3 -c '
           import json, sys
@@ -103,14 +125,14 @@ jobs:
           export CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE"
           export LD_LIBRARY_PATH="$CARGO_TARGET_DIR/debug/deps:$(rustc --print target-libdir)${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           failed=0
-          for filter in crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests sync_ticket_state sync_knowledge_tables; do
+          for filter in crew:: queued_prompt adapter_reconciliation business_os::harness_cockpit::chat::tests sync_business_record_projections sync_business_users sync_runtime_settings sync_channel_state sync_ticket_state sync_knowledge_tables; do
             status=0
             "$CREW_BASE_TEST_BINARY" "$filter" --test-threads=1 || status=$?
-            echo "Baseline 8e6f132a8: $filter exit=$status"
+            echo "Baseline $CREW_BASE_SHA: $filter exit=$status"
             if [ "$status" -ne 0 ]; then failed=1; fi
           done
           status=0
           node src/apps/business-os/rxdb/tests/run-all.mjs --require-wire-daemon || status=$?
-          echo "Baseline 8e6f132a8: JS/wire exit=$status"
+          echo "Baseline $CREW_BASE_SHA: JS/wire exit=$status"
           if [ "$status" -ne 0 ]; then failed=1; fi
           exit "$failed"

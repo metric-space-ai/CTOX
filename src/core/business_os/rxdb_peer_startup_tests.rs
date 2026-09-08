@@ -14,7 +14,7 @@ async fn peer_startup_runtime_projection_does_not_wait_for_unrelated_source_lock
     let database = open_test_database(path).await?;
     let creators = collection_creators()
         .into_iter()
-        .filter(|(name, _)| name == "business_runtime_settings")
+        .filter(|(name, _)| name == "ctox_runtime_settings")
         .collect();
     database
         .add_collections(creators)
@@ -27,7 +27,7 @@ async fn peer_startup_runtime_projection_does_not_wait_for_unrelated_source_lock
         Arc::clone(&database),
         Arc::clone(&lock),
     ));
-    let collection = database.collection("business_runtime_settings").unwrap();
+    let collection = database.collection("ctox_runtime_settings").unwrap();
     let observed = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             let documents = collection
