@@ -1,6 +1,12 @@
 # Native transport validation parity — 2026-09-08
 
-Status: dependency correction in progress; no production acceptance or tenant deployment.
+Status: dependency correction under validation; no production acceptance or tenant deployment.
+
+Durability: branch `codex/native-transport-parity`, source commit
+`a0e8e59d8f3844ec8f3bfe94b974eec1b8b5093a`, pushed and verified in draft
+[PR #69](https://github.com/metric-space-ai/ctox/pull/69).
+The existing durable checkout remains in use; no worktree or build cleanup has
+been performed while validation is running.
 
 ## Finding
 
