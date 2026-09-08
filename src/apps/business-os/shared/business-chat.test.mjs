@@ -53,7 +53,9 @@ test('tracked crew messages expose a compact task id that deep-links to CTOX', (
   globalThis.document = previousDocument;
   assert.match(html, /data-track-task/);
   assert.match(html, new RegExp(`data-task-id="${taskId}"`));
-  assert.match(html, /<code>…567890abcdef<\/code>/);
+  // The id stays in the tooltip; the bar shows only the link icon (Owner 08.09.).
+  assert.match(html, /title="[^"]*567890abcdef/);
+  assert.match(html, /<code class="ctox-chat-track-id">…567890abcdef<\/code>/);
   assert.match(html, new RegExp(`aria-label="[^"]+${taskId}`));
 });
 

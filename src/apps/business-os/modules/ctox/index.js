@@ -1,6 +1,6 @@
 import { showBusinessAlert, showBusinessConfirm } from '../../shared/dialogs.js?v=20260816-browser-sync-guards-v141';
 import { renderListOrState } from '../../shared/list-state.js';
-import { crewCreatureHtml, syncCrewProceduralMotion, crewMemberExpression, crewMemberExpressionTtlMs } from '../../shared/business-chat.js?v=20260908-shell-v2-crew-home-v348';
+import { crewCreatureHtml, syncCrewProceduralMotion, crewMemberExpression, crewMemberExpressionTtlMs } from '../../shared/business-chat.js?v=20260908-shell-v2-crew-home-v349';
 import { canUseBusinessPermission, BusinessOsPermissions } from '../../shared/permissions.js?v=20260816-browser-sync-guards-v141';
 import { workspaceDataState } from './data-state.js?v=20260906-data-state-v1';
 
@@ -20,7 +20,7 @@ const HARNESS_ACTIVE_STATUSES = new Set(['running', 'leased', 'review', 'draftin
 const HARNESS_TERMINAL_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy', 'handled', 'cancelled', 'failed', 'blocked']);
 const HARNESS_SUCCESS_STATUSES = new Set(['completed', 'done', 'sent', 'approved', 'healthy']);
 const HARNESS_PROBLEM_TERMINAL_STATUSES = new Set(['handled', 'cancelled', 'failed', 'blocked']);
-const CTOX_STYLE_BUILD = '20260908-shell-v2-crew-home-v348';
+const CTOX_STYLE_BUILD = '20260908-shell-v2-crew-home-v349';
 // Replicated collections whose rows feed the task list (via
 // mergeBundleWithCommands). The data-driven empty branch is gated on their
 // combined readiness so an initial sync never reads as "no work".
@@ -93,6 +93,10 @@ const labels = {
     atHome: "zu Hause",
     restingAfterFailure: "erholt sich nach einem Fehlschlag",
     readingMemory: "liest sein Gedächtnis",
+    memoryLinePlaceholder: "Ein Satz je Zeile: was dieses Wesen sicher weiß.",
+    outcomeExecutionError: "Fehler bei der Ausführung",
+    outcomeCompleted: "erledigt",
+    outcomeReviewRejected: "Review abgelehnt",
     notPermittedForRole: "für deine Rolle nicht freigegeben",
     noLiveMetrics: "keine Live-Messwerte",
     noPlanYet: "noch kein Plan",
@@ -382,6 +386,10 @@ const labels = {
     atHome: "at home",
     restingAfterFailure: "recovering after a failure",
     readingMemory: "reading its memory",
+    memoryLinePlaceholder: "One sentence per line: what this member knows for sure.",
+    outcomeExecutionError: "execution error",
+    outcomeCompleted: "done",
+    outcomeReviewRejected: "review rejected",
     notPermittedForRole: "not released for your role",
     noLiveMetrics: "no live measurements",
     noPlanYet: "no plan yet",
@@ -1734,16 +1742,22 @@ function taskCardMarkup(task, state) {
   const status = displayStatus(task.routeStatus || task.status, state.lang);
   const changed = formatShortTimestamp(task.updatedAt || task.createdAt || task.timestamp);
   const problem = ['blocked', 'failed', 'cancelled'].includes(normalizeCommandStatus(task.routeStatus || task.status));
-  const detail = [source, changed].filter(Boolean)
-    .map((value) => `<span>${escapeHtml(value)}</span>`).join('');
   const reason = taskReasonText(task, state);
+  // The card says who and how, not why: the member's creature carries the
+  // state, the reason lives in the tooltip and the drawer (Owner 08.09.).
+  const member = taskCrewMember(task, state);
+  const crewStatus = taskCrewStatus(task);
+  const portrait = member
+    ? `<span class="ctox-flow-creature-shell ctox-task-portrait" title="${escapeAttr(member.name)}">${memberCreatureHtml(member, state, crewStatus === 'running' ? 'running' : crewStatus === 'failed' ? 'failed' : memberCreatureState(member))}</span>`
+    : '';
+  const tooltip = [status, source, changed, reason].filter(Boolean).join(' · ');
   return `
-    <article class="ctox-list-item ctox-task-card ${selected ? 'is-selected' : ''} ${pinned ? 'is-pinned' : ''}"
+    <article class="ctox-list-item ctox-task-card ${selected ? 'is-selected' : ''} ${pinned ? 'is-pinned' : ''} ${member ? 'has-member' : ''}"
       data-task-id="${escapeAttr(task.id)}" data-context-record-id="${escapeAttr(task.id)}" data-context-record-type="ctox_task" data-context-label="${escapeAttr(title)}">
-      <button type="button" class="ctox-task-selector" data-select-task-id="${escapeAttr(task.id)}" aria-label="${escapeAttr(`${t.openTaskDetail}: ${title}`)}">
+      <button type="button" class="ctox-task-selector" data-select-task-id="${escapeAttr(task.id)}" aria-label="${escapeAttr(`${t.openTaskDetail}: ${title}`)}" title="${escapeAttr(tooltip)}">
+        ${portrait}
         <strong>${escapeHtml(title)}</strong>
-        <small class="ctox-task-meta">${status ? `<span class="ctox-task-meta-status ${problem ? 'is-problem' : ''}">${escapeHtml(status)}</span>` : ''}${detail}</small>
-        ${reason ? `<small class="ctox-task-reason ${problem ? 'is-problem' : ''}" title="${escapeAttr(reason)}">${escapeHtml(reason)}</small>` : ''}
+        <small class="ctox-task-meta">${status ? `<span class="ctox-task-meta-status ${problem ? 'is-problem' : ''}">${escapeHtml(status)}</span>` : ''}${changed ? `<span>${escapeHtml(changed)}</span>` : ''}</small>
         ${taskPipelineMarkup(task, state)}
       </button>
       <div class="ctox-task-actions">
@@ -3323,7 +3337,22 @@ function syncDetailDrawer(state) {
   }
   if (state.detailDrawer.type === 'member') {
     const member = crewMemberById(state, state.detailDrawer.memberId);
-    if (member && !drawerIsBusy()) state.ctx.openLeftDrawer(crewMemberDrawer(member, state));
+    if (!member || drawerIsBusy()) return;
+    // Rebuild the drawer only when its facts changed; a rebuild resets the
+    // scroll position, so keep it across the swap.
+    const data = state.memberDrawerData?.memberId === member.id ? state.memberDrawerData : null;
+    const signature = JSON.stringify([member.id, member.updated_at_ms, member.state, memberCreatureState(member), data?.runs?.length || 0, data?.runs?.[0]?.finished_at_ms || 0]);
+    if (state.memberDrawerSignature === signature) return;
+    state.memberDrawerSignature = signature;
+    const previous = document.querySelector('.ctox-member-drawer');
+    const scroller = previous ? scrollParentOf(previous) : null;
+    const scrollTop = scroller?.scrollTop || 0;
+    state.ctx.openLeftDrawer(crewMemberDrawer(member, state));
+    if (scrollTop) {
+      const next = document.querySelector('.ctox-member-drawer');
+      const nextScroller = next ? scrollParentOf(next) : null;
+      if (nextScroller) nextScroller.scrollTop = scrollTop;
+    }
     return;
   }
   if (state.detailDrawer.type === 'node') {
@@ -3331,6 +3360,16 @@ function syncDetailDrawer(state) {
       || state.model?.timeline?.[clampIndex(state.selectedStepIndex, state.model.timeline.length)];
     if (node) state.ctx.openLeftDrawer(flowNodeDrawer(node, getSelectedTask(state), state));
   }
+}
+
+function scrollParentOf(node) {
+  let current = node;
+  while (current && current !== document.body) {
+    const overflow = getComputedStyle(current).overflowY;
+    if ((overflow === 'auto' || overflow === 'scroll') && current.scrollHeight > current.clientHeight) return current;
+    current = current.parentElement;
+  }
+  return null;
 }
 
 function closeDetailDrawer(state) {
@@ -5017,8 +5056,6 @@ function crewStripMarkup(state) {
       <button type="button" class="ctox-crew-strip-member is-${escapeAttr(stateClass)}" data-crew-member-id="${escapeAttr(member.id)}"
         aria-label="${escapeAttr(`${member.name}: ${line}`)}" title="${escapeAttr(`${member.name} · ${line}`)}">
         <span class="ctox-flow-creature-shell ctox-crew-strip-creature">${memberCreatureHtml(member, state)}</span>
-        <strong>${escapeHtml(member.name)}</strong>
-        <small>${escapeHtml(line)}</small>
       </button>`;
   }).join('');
   return `<section class="ctox-crew-strip" aria-label="${escapeAttr(t.crewHome)}">${items}</section>`;
@@ -5050,9 +5087,12 @@ function crewHomeMarkup(state) {
     </section>`;
 }
 
+// The home is the idle view: no live work AND no task chosen. A chosen task
+// always gets the map with its creature on the station it stands at.
 function shouldShowCrewHome(state) {
   const members = (state.crewMembers || []).filter((member) => !member.archived);
   if (!members.length) return false;
+  if (state.selectedTaskId) return false;
   return !state.model?.liveWork;
 }
 
@@ -5182,6 +5222,7 @@ function openCrewMemberDrawer(state, memberId) {
   const member = crewMemberById(state, memberId);
   if (!member) return;
   state.detailDrawer = { type: 'member', memberId };
+  state.memberDrawerSignature = '';
   state.memberDrawerData = state.memberDrawerData?.memberId === memberId ? state.memberDrawerData : { memberId, runs: null };
   state.ctx.openLeftDrawer(crewMemberDrawer(member, state));
   void loadLocalRunsForMember(state.ctx, memberId).catch(() => []).then((runs) => {
@@ -5294,14 +5335,15 @@ function memberMemoryMarkup(member, state) {
       <p>${escapeHtml(entry.text)}${entry.more ? ` <span class="ctox-memory-consequence">${escapeHtml(entry.more)}</span>` : ''}</p>
       ${entry.tag ? `<small>${escapeHtml(entry.tag)}</small>` : ''}
     </li>`).join('');
+  // The owner edits statements, one per line; the document syntax stays ours.
   const document = (kind, title, items, raw) => `
     <section class="ctox-card ctox-memory-doc" data-memory-kind="${kind}">
-      <header>${escapeHtml(title)}${editable ? `<button type="button" class="ctox-pane-icon" data-memory-edit="${kind}" aria-label="${escapeAttr(t.editMemory)}" title="${escapeAttr(t.editMemory)}">${actionIcon(state, 'edit')}</button>` : ''}</header>
+      <header>${escapeHtml(title)}${editable && kind === 'anchors' ? `<button type="button" class="ctox-pane-icon" data-memory-edit="${kind}" aria-label="${escapeAttr(t.editMemory)}" title="${escapeAttr(t.editMemory)}">${actionIcon(state, 'edit')}</button>` : ''}</header>
       <div class="ctox-card-body">
-        ${items ? `<ul class="ctox-memory-entries" data-memory-view>${items}</ul>` : `<p data-memory-view>${escapeHtml(t.memoryEmpty)}</p>`}
-        ${editable ? `
+        ${items ? `<ul class="ctox-memory-entries" data-memory-view>${items}</ul>` : `<p class="ctox-memory-empty" data-memory-view>${escapeHtml(t.memoryEmpty)}</p>`}
+        ${editable && kind === 'anchors' ? `
           <form class="ctox-memory-editor" data-memory-form="${kind}" hidden>
-            <textarea class="ctox-textarea" name="body" rows="10" spellcheck="false">${escapeHtml(raw || '')}</textarea>
+            <textarea class="ctox-textarea" name="body" rows="6" spellcheck="false" placeholder="${escapeAttr(t.memoryLinePlaceholder)}">${escapeHtml(anchors.map((entry) => entry.text).join('\n'))}</textarea>
             <div class="ctox-task-edit-actions">
               <button type="submit" class="ctox-button is-primary">${escapeHtml(t.saveMemory)}</button>
               <button type="button" class="ctox-button" data-memory-cancel>${escapeHtml(t.cancelEdit)}</button>
@@ -5332,6 +5374,28 @@ async function saveMemberMemory(state, member, kind, body, statusNode) {
     if (statusNode) statusNode.textContent = humanTaskActionError(error, t);
     return false;
   }
+}
+
+// Statements typed by the owner become owner-confirmed anchors in the
+// document syntax the harness reads (see memoryEntries); existing entries keep
+// their ids and types when their statement is unchanged.
+function anchorsDocumentFromLines(text, previousDocument) {
+  const previous = memoryEntries(previousDocument, 'anchor_id', 'anchor_type', 'statement');
+  const now = new Date().toISOString();
+  const lines = String(text || '').split('\n').map((line) => line.trim()).filter(Boolean);
+  const entries = lines.map((statement, index) => {
+    const known = previous.find((entry) => entry.text === statement);
+    return [
+      `anchor_id: ${known?.id || `owner_${Date.now().toString(36)}_${index + 1}`}`,
+      `anchor_type: ${known?.tag || 'owner_confirmed'}`,
+      `statement: ${statement}`,
+      'source_class: owner',
+      `source_ref: ${known?.source || 'owner'}`,
+      `observed_at: ${now}`,
+      'confidence: high',
+    ].join('\n');
+  });
+  return `# CONTINUITY ANCHORS\n\n## Entries\n${entries.join('\n\n')}\n`;
 }
 
 // Confirming a hypothesis rewrites only that entry's type in the document.
@@ -5376,8 +5440,9 @@ function wireMemberMemory(state, member, body) {
       event.preventDefault();
       const kind = form.dataset.memoryForm;
       const text = String(new FormData(form).get('body') || '').trim();
-      if (!text) return;
-      const ok = await saveMemberMemory(state, member, kind, text, form.querySelector('[data-memory-status]'));
+      const body = kind === 'anchors' ? anchorsDocumentFromLines(text, member.memory?.anchors) : text;
+      if (!body) return;
+      const ok = await saveMemberMemory(state, member, kind, body, form.querySelector('[data-memory-status]'));
       if (ok) body.dataset.dirty = '0';
     });
   });
@@ -5392,6 +5457,21 @@ function wireMemberMemory(state, member, body) {
   });
 }
 
+// Run outcomes in the owner's words.
+function displayRunOutcome(value, state) {
+  const t = labels[state.lang];
+  const key = String(value || '').toLowerCase().replace(/[^a-z]/g, '');
+  const map = {
+    executionerror: t.outcomeExecutionError,
+    error: t.outcomeExecutionError,
+    failed: t.failedWord,
+    completed: t.outcomeCompleted,
+    success: t.outcomeCompleted,
+    reviewrejected: t.outcomeReviewRejected,
+  };
+  return map[key] || displayStatus(value, state.lang);
+}
+
 function memberTimesheetMarkup(member, state) {
   const t = labels[state.lang];
   const data = state.memberDrawerData?.memberId === member.id ? state.memberDrawerData : null;
@@ -5401,7 +5481,7 @@ function memberTimesheetMarkup(member, state) {
     const task = taskByNativeId(state, run.task_id);
     const title = task ? taskDisplayTitle(task, state) : String(run.task_id || '');
     const when = formatShortTimestamp(run.finished_at_ms || run.started_at_ms || run.updated_at_ms);
-    const outcome = displayStatus(run.agent_outcome || run.status || '', state.lang);
+    const outcome = displayRunOutcome(run.agent_outcome || run.status || '', state);
     const facts = [
       formatDurationShort(run.metrics?.elapsed_ms, state.lang),
       hasFiniteValue(run.metrics?.input_tokens) ? `${formatMetricValue(Number(run.metrics.input_tokens) + (Number(run.metrics?.output_tokens) || 0), 'tokens', state.lang)} ${t.tokensWord}` : '',
@@ -5675,7 +5755,6 @@ function harnessStatusText(state) {
   if (Number(h.blocked_count) > 0) counts.push(`${h.blocked_count} ${t.countBlocked}`);
   if (counts.length) bits.push(counts.join(' · '));
   if (h.pressure_active) bits.push(t.pressureActive);
-  if (h.last_error) bits.push(String(h.last_error).slice(0, 80));
   return bits.join(' · ');
 }
 
@@ -5906,10 +5985,8 @@ function metricsLabel(node, lang) {
   return `${formatTokenCount(node.inputTokens)}/${formatTokenCount(node.outputTokens)} tokens (${toolLabel}, ${node.seconds}s)`;
 }
 
-function stepMetaLabel(step, state) {
-  const t = labels[state.lang] || labels.de;
-  const timestamp = formatShortTimestamp(step?.timestamp);
-  return timestamp || t.notLogged;
+function stepMetaLabel(step) {
+  return formatShortTimestamp(step?.timestamp) || '';
 }
 
 // The ticker exists only to advance a clock that is already anchored to a real
@@ -6396,7 +6473,8 @@ function itemSummary(item) {
 }
 
 function formatShortTimestamp(value) {
-  const parsed = Date.parse(value);
+  if (value === null || value === undefined || value === '') return '';
+  const parsed = typeof value === 'number' ? value : (/^\d{12,}$/.test(String(value)) ? Number(value) : Date.parse(value));
   if (!Number.isFinite(parsed)) return value || '';
   return new Intl.DateTimeFormat('de-DE', { day: '2-digit', hour: '2-digit', minute: '2-digit', month: '2-digit' }).format(new Date(parsed));
 }

@@ -457,6 +457,29 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* The four stage words under every card were the loudest repeated text on
+   the page (Owner 08.09.). The bar keeps its colour, the words stay for
+   screen readers and the tooltip. */
+.ctox-task-card .ctox-task-pipeline em {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+.ctox-task-card .ctox-task-pipeline > span { gap: 0; }
+.ctox-task-card.has-member .ctox-task-selector {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  grid-template-areas: "portrait title" "portrait meta" "bar bar";
+  column-gap: var(--space-2);
+  align-items: center;
+}
+.ctox-task-card.has-member .ctox-task-portrait { grid-area: portrait; width: 28px; height: 28px; }
+.ctox-task-card.has-member .ctox-task-selector > strong { grid-area: title; }
+.ctox-task-card.has-member .ctox-task-selector > .ctox-task-meta { grid-area: meta; }
+.ctox-task-card.has-member .ctox-task-selector > .ctox-task-pipeline { grid-area: bar; margin-top: var(--space-1); }
 
 .ctox-task-pipeline .is-complete i {
   background: color-mix(in srgb, var(--success) 72%, var(--line));
@@ -1488,10 +1511,14 @@
 /* custom: live status strip — flex layout around the kit callout */
 .ctox-task-status-strip {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: var(--space-3);
+  gap: var(--space-2) var(--space-3);
 }
+.ctox-task-status-strip .ctox-task-reason-line { flex: 1 1 100%; margin: 0; }
+.ctox-task-status-strip .ctox-button,
+.ctox-task-status-strip .ctox-task-member { flex: 0 0 auto; white-space: nowrap; }
 
 .ctox-task-status-strip > div {
   display: flex;
@@ -1533,21 +1560,8 @@
 .ctox-crew-strip-member:focus-visible {
   box-shadow: var(--focus-ring, 0 0 0 2px color-mix(in srgb, var(--accent) 60%, transparent));
 }
-.ctox-crew-strip-creature { width: 24px; height: 24px; flex: 0 0 24px; }
-.ctox-crew-strip-member strong { font-size: var(--fs-meta, 12px); font-weight: 640; line-height: 1.2; }
-.ctox-crew-strip-member small {
-  max-width: 180px;
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 11px;
-  line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.ctox-crew-strip-member.is-on_duty strong { color: var(--accent); }
-@container business-app-window (max-width: 720px) {
-  .ctox-crew-strip-member small { display: none; }
-}
+.ctox-crew-strip-creature { width: 26px; height: 26px; flex: 0 0 26px; }
+.ctox-crew-strip-member.is-on_duty { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
 
 .ctox-crew-home {
   display: grid;
@@ -1866,6 +1880,7 @@
   gap: 8px;
   margin-top: 8px;
 }
+.ctox-memory-editor[hidden] { display: none; }
 .ctox-memory-editor textarea {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 12px;

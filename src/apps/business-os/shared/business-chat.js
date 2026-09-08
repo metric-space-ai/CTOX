@@ -810,7 +810,12 @@ function alignChatWindows(root) {
   windows.forEach((win) => {
     const chatId = win.dataset.chatId;
     const chip = strip.querySelector(`[data-chat-focus="${chatId}"]`);
-    const winWidth = win.getBoundingClientRect().width
+    // Layout width, not the transformed rect: inactive windows sit at
+    // scale(0.8) in the carousel, and the first side-by-side pass runs before
+    // that transform is dropped. Measuring the scaled rect let three windows
+    // overlap by ~50px while the stage still claimed side-by-side.
+    const winWidth = win.offsetWidth
+      || win.getBoundingClientRect().width
       || (win.classList.contains('is-maximized') ? 560 : 460);
     let preferredLeft = 8;
 
@@ -1419,7 +1424,6 @@ function renderChatRoot({ root, state, commandBus, db, getActiveModule }) {
         </button>
       </div>
 
-      ${!dockCollapsed && (state.crewMembers || []).length ? `<div class="ctox-chat-crew-pool" data-crew-pool aria-label="${chatUiIsGerman() ? 'Crew: auf eine App ziehen' : 'Crew: drag onto an app'}">${state.crewMembers.map((member) => crewPoolSlotHtml(member, 'fab')).join('')}</div>` : ''}
       ${!dockCollapsed ? `
         ${showChatNav ? `<button class="ctox-chat-nav" type="button" data-chat-prev aria-label="${chatUiIsGerman() ? 'Vorheriges Wesen' : 'Previous crew member'}">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
@@ -3591,7 +3595,21 @@ function trackButtonLabel(message) {
   return de ? 'Fortschritt ansehen' : 'View progress';
 }
 
+// Harness status lines arrive as "<Satz>: technical:worker-runtime-api-failure — 2026-09-08T04:37:18Z".
+// The bar shows the sentence and a short reason in words plus the clock time.
+function humanizeHarnessLine(text) {
+  const match = String(text || '').match(/^(.*?):\s*([a-z_]+):([a-z0-9_-]+)\s*[—-]\s*(\d{4}-\d{2}-\d{2}T[\d:.]+(?:Z|[+-]\d{2}:\d{2})?)\s*$/i);
+  if (!match) return text;
+  const [, sentence, klass, code, iso] = match;
+  const when = new Date(iso);
+  const clock = Number.isFinite(when.getTime()) ? when.toLocaleTimeString(chatUiIsGerman() ? 'de-DE' : 'en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+  const reason = { technical: chatUiIsGerman() ? 'technischer Grund' : 'technical reason', review: 'Review', policy: chatUiIsGerman() ? 'Regel' : 'policy' }[klass] || klass;
+  const detail = code.replace(/[-_]+/g, ' ').replace(/\b(worker|api)\b/gi, (w) => w.toUpperCase());
+  return `${sentence} · ${reason}: ${detail}${clock ? ` · ${clock}` : ''}`;
+}
+
 function formatChatBodyHtml(rawText) {
+  rawText = humanizeHarnessLine(rawText);
   const text = String(rawText || '');
   return text
     .split(/(```[\s\S]*?```)/g)
@@ -3623,7 +3641,7 @@ function messageMarkup(message) {
   const trackId = message.taskId || message.commandId;
   const visibleTrackId = compactTrackingId(trackId);
   const tracking = message.trackable === false ? '' : (message.commandId || message.taskId)
-    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}" aria-label="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7"></path><path d="M10 14 21 3"></path><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path></svg><code>${escapeHtml(visibleTrackId)}</code></button>`
+    ? `<button class="ctox-chat-track" type="button" data-track-task data-task-id="${escapeAttr(message.taskId || '')}" data-command-id="${escapeAttr(message.commandId || '')}" data-task-status="${escapeAttr(message.status || '')}" title="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}" aria-label="${escapeAttr(`${trackButtonLabel(message)} · ${trackId}`)}"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 3h7v7"></path><path d="M10 14 21 3"></path><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"></path></svg><code class="ctox-chat-track-id">${escapeHtml(visibleTrackId)}</code></button>`
     : '';
   const rawText = String(message.text || '');
   const promptIsLong = message.role === 'user'
@@ -5083,6 +5101,7 @@ function installChatStyles() {
       pointer-events: none;
       grid-row: 2;
       display: grid;
+      box-sizing: border-box;
       grid-template-columns: 88px var(--ctox-date-pill-width) 34px;
       align-items: center;
       gap: var(--space-2);
@@ -8174,9 +8193,15 @@ function installChatStyles() {
       cursor: pointer;
     }
     .ctox-chat-track code {
-      color: currentColor;
-      font: 700 9px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      letter-spacing: .015em;
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      margin: -1px;
+      padding: 0;
+      overflow: hidden;
+      clip: rect(0 0 0 0);
+      white-space: nowrap;
+      border: 0;
     }
     .ctox-chat-track:hover,
     .ctox-chat-track:focus-visible {
