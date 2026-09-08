@@ -98,6 +98,11 @@ paragraph boundaries, explicit line breaks, tabs, and blank paragraphs in
 reported as separate lines. Reading does not mutate the source package or
 write back to a Business OS record.
 
+DOCX export also accepts first content in paragraphs that retain empty or
+formatting-only runs from an earlier save. Those templates are preserved,
+including across repeated saves; fields, comments, bookmarks, and existing
+text are not discarded to resolve a run-count mismatch.
+
 To materialize the reviewed source closure from already checked-out pinned
 repositories:
 
